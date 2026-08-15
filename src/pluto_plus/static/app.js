@@ -218,6 +218,7 @@ function clearRadio() {
   ui["stop-scan"].disabled = true;
   ui["recover-radio"].disabled = true;
   ui["run-doctor"].disabled = true;
+  setText(ui["run-doctor"], "Run doctor");
   ui["prepare-doctor-fix"].disabled = true;
   renderSettingsList(ui["requested-settings"], null);
   renderSettingsList(ui["actual-settings"], null);
@@ -256,15 +257,24 @@ function renderSnapshot(snapshot, populateForm = true) {
   ui["run-doctor"].disabled = false;
 }
 
-function renderDoctor(report) {
+function renderDoctor(report, reveal = false) {
   state.doctorReport = report;
-  setText(ui["doctor-health"], report.healthy ? "Canonical" : "Attention required");
+  const attentionCount = report.findings.filter((finding) => finding.status !== "pass").length;
+  const checkedAt = new Date(report.checked_at);
+  const checkedLabel = Number.isNaN(checkedAt.getTime()) ? "just now" : checkedAt.toLocaleTimeString();
+  setText(
+    ui["doctor-health"],
+    report.healthy ? `Canonical · ${checkedLabel}` : `${attentionCount} items need attention · ${checkedLabel}`,
+  );
   ui["doctor-health"].className = report.healthy ? "deferred-badge doctor-pass" : "deferred-badge doctor-warn";
   const policy = report.canonical_policy;
   setText(ui["doctor-profile"], policy.profile_id);
   setText(ui["doctor-release"], policy.release_tag);
   setText(ui["doctor-sha"], policy.asset_sha256);
-  const findings = report.findings.map((finding) => {
+  const statusOrder = { fail: 0, warn: 1, unknown: 2, pass: 3 };
+  const findings = [...report.findings]
+    .sort((left, right) => statusOrder[left.status] - statusOrder[right.status])
+    .map((finding) => {
     const item = makeElement("article", undefined, `doctor-finding doctor-${finding.status}`);
     const heading = makeElement("h3", `${finding.status.toUpperCase()} · ${finding.summary}`);
     const code = makeElement("p", finding.code, "hint mono");
@@ -277,25 +287,28 @@ function renderDoctor(report) {
       item.append(repair);
     }
     return item;
-  });
+    });
   ui["doctor-findings"].replaceChildren(...findings);
   ui["prepare-doctor-fix"].disabled = !report.findings.some(
     (finding) => finding.remediation?.remediation_id === "flash_canonical_firmware_mtd3",
   );
+  if (reveal) ui["doctor-findings"].scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-async function runDoctor() {
+async function runDoctor(reveal = false) {
   if (!state.snapshot) return;
   ui["run-doctor"].disabled = true;
+  setText(ui["run-doctor"], "Checking…");
   setText(ui["doctor-health"], "Checking…");
   try {
     const report = await apiRequest(`${radioPath(state.snapshot.identity.radio_id)}/doctor`);
-    renderDoctor(report);
+    renderDoctor(report, reveal);
   } catch (error) {
     setText(ui["doctor-health"], `Failed · ${describeError(error)}`);
     toast(describeError(error), true);
   } finally {
     ui["run-doctor"].disabled = !state.snapshot;
+    setText(ui["run-doctor"], state.doctorReport ? "Run again" : "Run doctor");
   }
 }
 
@@ -1063,7 +1076,7 @@ function installEventHandlers() {
   ui["firmware-mode"].addEventListener("change", updateFirmwareEnabled);
   ui["firmware-form"].addEventListener("submit", planFirmware);
   ui["execute-firmware"].addEventListener("click", executeFirmware);
-  ui["run-doctor"].addEventListener("click", runDoctor);
+  ui["run-doctor"].addEventListener("click", () => runDoctor(true));
   ui["prepare-doctor-fix"].addEventListener("click", prepareDoctorFix);
   window.addEventListener("beforeunload", disconnectWaterfall);
 }

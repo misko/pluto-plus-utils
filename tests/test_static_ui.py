@@ -204,6 +204,9 @@ def test_doctor_is_read_only_and_routes_repairs_into_guarded_firmware_plan() -> 
     assert 'ui["firmware-mode"].value = "volatile_dfu"' in javascript
     assert "flash_canonical_firmware_mtd3" in javascript
     assert '"/doctor/firmware-plans"' in javascript
+    assert 'setText(ui["run-doctor"], "Checking…")' in javascript
+    assert 'statusOrder = { fail: 0, warn: 1, unknown: 2, pass: 3 }' in javascript
+    assert 'ui["doctor-findings"].scrollIntoView' in javascript
 
 
 def test_css_has_responsive_and_reduced_motion_layouts() -> None:
