@@ -280,6 +280,7 @@
         <div class="actions">
           <button id="run-doctor" class="button primary" type="button" disabled>Run doctor</button>
           <button id="prepare-doctor-fix" class="button secondary" type="button" disabled>Prepare firmware repair</button>
+          <button id="prepare-setup-fix" class="button danger" type="button" disabled>Prepare setup repair</button>
         </div>
         <dl class="radio-facts">
           <div><dt>Profile</dt><dd id="doctor-profile">—</dd></div>
@@ -289,13 +290,44 @@
         <div id="doctor-findings" class="doctor-findings" aria-live="polite">
           <p class="hint">Select a radio and run the doctor.</p>
         </div>
-        <p class="hint">Setup and flashing are separate guarded operations. Persistent AD9361/2R2T provisioning is documented but remains disabled until a dedicated exact-radio helper is configured.</p>
+        <p class="hint">Setup and flashing are separate guarded operations. Doctor never changes a radio; each repair requires its own authenticated, short-lived plan.</p>
+      </section>
+
+      <section class="panel setup-panel" aria-labelledby="setup-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">08 / Setup</p>
+            <h2 id="setup-heading">Persistent AD9361/2R2T provisioning</h2>
+          </div>
+          <span id="setup-availability" class="deferred-badge">Checking helper</span>
+        </div>
+        <p>This operation is limited to the immutable canonical tuple. It first verifies the selected serial, USB path, QSPI image, pinned SSH host key, and transmit-safe state. Execution backs up the complete environment, mutes TX, changes only mismatching canonical fields, reboots, and re-attests the same radio.</p>
+        <div class="setup-warning" role="note">
+          <strong>Transmit safety is mandatory.</strong> Both TX gains, buffers, scan elements, DDS scales, and DDS sources must read back in the fail-closed state before any environment write.
+        </div>
+        <div class="control-grid">
+          <div>
+            <label for="setup-admin-token">Admin bearer token</label>
+            <input id="setup-admin-token" type="password" autocomplete="off" spellcheck="false" aria-describedby="setup-token-help">
+            <p id="setup-token-help" class="hint">Held only in this input. It is never saved or displayed in plan output.</p>
+          </div>
+          <div>
+            <label for="setup-confirm-serial">Type <span class="mono">PROVISION &lt;serial&gt;</span> to execute</label>
+            <input id="setup-confirm-serial" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <pre id="setup-plan-output" tabindex="0">No setup plan created.</pre>
+        <div class="actions align-end">
+          <button id="reconcile-setup" class="button secondary" type="button" disabled>Run read-only reconcile</button>
+          <button id="execute-setup" class="button danger" type="button" disabled>Provision exact radio</button>
+        </div>
+        <p id="setup-result" class="hint" role="status">Run doctor, then prepare a setup repair for an eligible selected radio.</p>
       </section>
 
       <section class="panel firmware-panel" aria-labelledby="firmware-heading">
         <div class="panel-heading">
           <div>
-            <p class="section-number">08 / Firmware</p>
+            <p class="section-number">09 / Firmware</p>
             <h2 id="firmware-heading">Firmware operations</h2>
           </div>
           <span id="firmware-availability" class="deferred-badge">Checking helper</span>

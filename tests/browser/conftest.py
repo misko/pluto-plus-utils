@@ -112,7 +112,7 @@ def fake_daemon_origin(tmp_path: Path) -> Iterator[str]:
 
     service = PlutoService(
         tmp_path / "state",
-        (FakeRadioDevice(serial="fake-001", realtime=True),),
+        (FakeRadioDevice(serial="fake-001", realtime=True, firmware_capable=True),),
     )
     port = _unused_loopback_port()
     origin = f"http://127.0.0.1:{port}"

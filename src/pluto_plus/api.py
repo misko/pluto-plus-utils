@@ -14,6 +14,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pluto_plus import __version__
+from pluto_plus.admin import (
+    AdminAuthenticationError,
+    AdminMutationPolicy,
+    AdminPolicyUnavailableError,
+    AdminSecureTransportRequiredError,
+    admin_transport_is_secure,
+)
 from pluto_plus.errors import (
     AnalyzerNotFoundError,
     ArtifactNotFoundError,
@@ -47,6 +54,15 @@ from pluto_plus.models import (
     StreamRequest,
 )
 from pluto_plus.service import PlutoService
+from pluto_plus.setup import (
+    SetupAuthorizationError,
+    SetupError,
+    SetupExecutionError,
+    SetupPlanNotFoundError,
+    SetupPreconditionError,
+    SetupReceiptNotFoundError,
+    SetupUnavailableError,
+)
 
 API_PREFIX = "/api/v1"
 
@@ -62,6 +78,7 @@ def create_app(
     service: PlutoService,
     *,
     static_directory: str | Path | None = None,
+    admin_policy: AdminMutationPolicy | None = None,
 ) -> FastAPI:
     """Build a daemon app around an already-composed service.
 
@@ -82,6 +99,38 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.pluto_service = service
+
+    def require_admin(request: Request, *, mutation: bool) -> None:
+        if not _admin_transport_secure(request):
+            raise AdminSecureTransportRequiredError(
+                "privileged operations require HTTPS or a loopback/Unix-socket connection"
+            )
+        if admin_policy is None:
+            raise AdminPolicyUnavailableError(
+                "privileged HTTP operations require explicit admin authentication"
+            )
+        browser_request = mutation and any(
+            header in request.headers
+            for header in ("sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest")
+        )
+        admin_policy.authorize(
+            authorization=request.headers.get("authorization"),
+            origin=request.headers.get("origin"),
+            browser_request=browser_request,
+        )
+
+    def _admin_transport_secure(request: Request) -> bool:
+        server = request.scope.get("server")
+        server_host = (
+            str(server[0])
+            if isinstance(server, (tuple, list)) and server
+            else None
+        )
+        return admin_transport_is_secure(
+            scheme=request.url.scheme,
+            client_host=None if request.client is None else request.client.host,
+            server_host=server_host,
+        )
 
     @app.exception_handler(RadioNotFoundError)
     async def radio_not_found(_request: Request, error: RadioNotFoundError) -> JSONResponse:
@@ -132,9 +181,7 @@ def create_app(
         return _error("firmware_authorization_failed", str(error), status.HTTP_403_FORBIDDEN)
 
     @app.exception_handler(FirmwareExecutionError)
-    async def firmware_execution(
-        _request: Request, error: FirmwareExecutionError
-    ) -> JSONResponse:
+    async def firmware_execution(_request: Request, error: FirmwareExecutionError) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
@@ -153,6 +200,81 @@ def create_app(
             str(error),
             status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
+
+    @app.exception_handler(AdminPolicyUnavailableError)
+    async def admin_unavailable(
+        _request: Request, error: AdminPolicyUnavailableError
+    ) -> JSONResponse:
+        return _error(
+            "admin_authentication_unavailable",
+            str(error),
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    @app.exception_handler(AdminAuthenticationError)
+    async def admin_authentication(
+        _request: Request, error: AdminAuthenticationError
+    ) -> JSONResponse:
+        return _error("admin_authentication_failed", str(error), status.HTTP_403_FORBIDDEN)
+
+    @app.exception_handler(AdminSecureTransportRequiredError)
+    async def admin_secure_transport_required(
+        _request: Request, error: AdminSecureTransportRequiredError
+    ) -> JSONResponse:
+        return _error(
+            "admin_secure_transport_required",
+            str(error),
+            status.HTTP_426_UPGRADE_REQUIRED,
+        )
+
+    @app.exception_handler(SetupUnavailableError)
+    async def setup_unavailable(_request: Request, error: SetupUnavailableError) -> JSONResponse:
+        return _error("setup_unavailable", str(error), status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    @app.exception_handler(SetupAuthorizationError)
+    async def setup_authorization(
+        _request: Request, error: SetupAuthorizationError
+    ) -> JSONResponse:
+        return _error("setup_authorization_failed", str(error), status.HTTP_403_FORBIDDEN)
+
+    @app.exception_handler(SetupPlanNotFoundError)
+    async def setup_plan_not_found(
+        _request: Request, error: SetupPlanNotFoundError
+    ) -> JSONResponse:
+        return _error("setup_plan_not_found", str(error), status.HTTP_404_NOT_FOUND)
+
+    @app.exception_handler(SetupReceiptNotFoundError)
+    async def setup_receipt_not_found(
+        _request: Request, error: SetupReceiptNotFoundError
+    ) -> JSONResponse:
+        return _error("setup_receipt_not_found", str(error), status.HTTP_404_NOT_FOUND)
+
+    @app.exception_handler(SetupPreconditionError)
+    async def setup_precondition(_request: Request, error: SetupPreconditionError) -> JSONResponse:
+        return _error("setup_precondition_failed", str(error), status.HTTP_409_CONFLICT)
+
+    @app.exception_handler(SetupExecutionError)
+    async def setup_execution(_request: Request, error: SetupExecutionError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "error": {"code": "setup_execution_failed", "message": str(error)},
+                "receipt": {
+                    "receipt_id": error.receipt.receipt_id,
+                    "success": error.receipt.success,
+                    "outcome": error.receipt.outcome,
+                    "failure_phase": error.receipt.failure_phase,
+                    "completed_phases": error.receipt.completed_phases,
+                    "backup_path": error.receipt.backup_path,
+                    "backup_sha256": error.receipt.backup_sha256,
+                    "reconciliation_required": error.receipt.reconciliation_required,
+                },
+            },
+        )
+
+    @app.exception_handler(SetupError)
+    async def setup_error(_request: Request, error: SetupError) -> JSONResponse:
+        return _error("setup_failed", str(error), status.HTTP_422_UNPROCESSABLE_CONTENT)
 
     router = APIRouter(prefix=API_PREFIX)
 
@@ -180,6 +302,55 @@ def create_app(
     @router.get("/radios/{radio_id}/doctor", response_model=DoctorReport)
     def doctor_radio(radio_id: str) -> Any:
         return service.doctor(radio_id)
+
+    @router.get("/setup")
+    def setup_status(request: Request) -> dict[str, object]:
+        setup = service.setup_status()
+        helper_available = bool(setup["helper_available"])
+        return {
+            **setup,
+            "admin_authentication_configured": admin_policy is not None,
+            "secure_transport": _admin_transport_secure(request),
+            "available": (
+                helper_available and admin_policy is not None and _admin_transport_secure(request)
+            ),
+            "transport_guidance": "Use HTTPS or an SSH tunnel to loopback for privileged actions.",
+            "allowed_origins": (
+                [] if admin_policy is None else sorted(admin_policy.allowed_origins)
+            ),
+        }
+
+    @router.post(
+        "/radios/{radio_id}/doctor/setup-plans",
+        status_code=status.HTTP_201_CREATED,
+        response_model=None,
+    )
+    def create_canonical_setup_plan(radio_id: str, request: Request) -> Any:
+        require_admin(request, mutation=True)
+        return service.create_canonical_setup_plan(radio_id)
+
+    @router.post(
+        "/setup/executions",
+        status_code=status.HTTP_201_CREATED,
+        response_model=None,
+    )
+    def execute_setup_plan(payload: FirmwareExecuteRequest, request: Request) -> Any:
+        require_admin(request, mutation=True)
+        return service.execute_setup_plan(payload.plan_id, payload.confirmation_token)
+
+    @router.get("/setup/receipts", response_model=None)
+    def list_setup_receipts(request: Request) -> Any:
+        require_admin(request, mutation=False)
+        return service.list_setup_receipts()
+
+    @router.post(
+        "/setup/receipts/{receipt_id}/reconcile",
+        status_code=status.HTTP_201_CREATED,
+        response_model=None,
+    )
+    def reconcile_setup_receipt(receipt_id: str, request: Request) -> Any:
+        require_admin(request, mutation=True)
+        return service.reconcile_setup_receipt(receipt_id)
 
     @router.get("/radios/{radio_id}/settings", response_model=RadioSnapshot)
     def get_settings(radio_id: str) -> RadioSnapshot:
@@ -293,8 +464,19 @@ def create_app(
             return _error("analysis_not_found", str(error), status.HTTP_404_NOT_FOUND)
 
     @router.get("/firmware")
-    def firmware_status() -> dict[str, object]:
-        return service.firmware_status()
+    def firmware_status(request: Request) -> dict[str, object]:
+        firmware = service.firmware_status()
+        helper_available = bool(firmware["available"])
+        return {
+            **firmware,
+            "helper_available": helper_available,
+            "admin_authentication_configured": admin_policy is not None,
+            "secure_transport": _admin_transport_secure(request),
+            "available": (
+                helper_available and admin_policy is not None and _admin_transport_secure(request)
+            ),
+            "transport_guidance": "Use HTTPS or an SSH tunnel to loopback for privileged actions.",
+        }
 
     @router.post(
         "/firmware/images",
@@ -305,6 +487,7 @@ def create_app(
         request: Request,
         filename: str = Query(..., min_length=1, max_length=255),
     ) -> FirmwareImageSummary | JSONResponse:
+        require_admin(request, mutation=True)
         maximum = 128 * 1024 * 1024
         payload = bytearray()
         async for chunk in request.stream():
@@ -333,22 +516,21 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
         response_model=None,
     )
-    def create_firmware_plan(
-        radio_id: str, request: FirmwarePlanRequest
-    ) -> Any:
+    def create_firmware_plan(radio_id: str, payload: FirmwarePlanRequest, request: Request) -> Any:
+        require_admin(request, mutation=True)
         try:
-            mode = FirmwareMode(request.mode)
+            mode = FirmwareMode(payload.mode)
         except ValueError:
             return _error(
                 "invalid_firmware_mode",
-                f"unsupported firmware mode: {request.mode}",
+                f"unsupported firmware mode: {payload.mode}",
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
             )
         return service.create_firmware_plan(
             radio_id,
-            request.image_id,
+            payload.image_id,
             mode,
-            expected_firmware_version=request.expected_firmware_version,
+            expected_firmware_version=payload.expected_firmware_version,
         )
 
     @router.post(
@@ -357,25 +539,27 @@ def create_app(
         response_model=None,
     )
     def create_canonical_firmware_plan(
-        radio_id: str, request: FirmwarePlanRequest
+        radio_id: str, payload: FirmwarePlanRequest, request: Request
     ) -> Any:
+        require_admin(request, mutation=True)
         try:
-            mode = FirmwareMode(request.mode)
+            mode = FirmwareMode(payload.mode)
         except ValueError:
             return _error(
                 "invalid_firmware_mode",
-                f"unsupported firmware mode: {request.mode}",
+                f"unsupported firmware mode: {payload.mode}",
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
             )
-        return service.create_canonical_firmware_plan(radio_id, request.image_id, mode)
+        return service.create_canonical_firmware_plan(radio_id, payload.image_id, mode)
 
     @router.post(
         "/firmware/executions",
         status_code=status.HTTP_201_CREATED,
         response_model=None,
     )
-    def execute_firmware_plan(request: FirmwareExecuteRequest) -> Any:
-        return service.execute_firmware_plan(request.plan_id, request.confirmation_token)
+    def execute_firmware_plan(payload: FirmwareExecuteRequest, request: Request) -> Any:
+        require_admin(request, mutation=True)
+        return service.execute_firmware_plan(payload.plan_id, payload.confirmation_token)
 
     @router.get("/firmware/receipts", response_model=None)
     def list_firmware_receipts() -> Any:

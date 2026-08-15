@@ -38,6 +38,10 @@ def api_transport(
             return httpx.Response(200, json=[{"image_id": "image-1"}])
         if request.method == "GET" and path.endswith("/firmware/receipts"):
             return httpx.Response(200, json=[{"receipt_id": "receipt-1"}])
+        if request.method == "GET" and path.endswith("/setup"):
+            return httpx.Response(200, json={"available": True})
+        if request.method == "GET" and path.endswith("/setup/receipts"):
+            return httpx.Response(200, json=[{"receipt_id": "setup-receipt-1"}])
         if request.method == "GET" and path.endswith("/doctor"):
             return httpx.Response(200, json={"radio_id": "fake-001", "healthy": False})
         if request.method == "GET" and "/radios/" in path:
@@ -64,6 +68,10 @@ def api_transport(
             return httpx.Response(201, json={"plan": {"plan_id": "plan-1"}})
         if request.method == "POST" and path.endswith("/firmware/executions"):
             return httpx.Response(201, json={"receipt_id": "receipt-1"})
+        if request.method == "POST" and path.endswith("/doctor/setup-plans"):
+            return httpx.Response(201, json={"plan": {"plan_id": "setup-plan-1"}})
+        if request.method == "POST" and path.endswith("/setup/executions"):
+            return httpx.Response(201, json={"receipt_id": "setup-receipt-1"})
         return httpx.Response(404, json={"error": {"code": "not_found", "message": path}})
 
     monkeypatch.setattr(
@@ -110,6 +118,40 @@ def test_endpoint_option_and_environment_are_forwarded(monkeypatch: pytest.Monke
     result = runner.invoke(app, ["radio", "list"])
     assert result.exit_code == 0, result.output
     assert endpoints[-1] == "http://environment-host:9001"
+
+
+def test_admin_token_file_is_forwarded_only_as_bearer_header(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    token = "cli-admin-token-with-at-least-32-characters"
+    token_file = tmp_path / "admin.token"
+    token_file.write_text(token + "\n")
+    token_file.chmod(0o600)
+    requests: list[httpx.Request] = []
+
+    def make_client(endpoint: str, *, admin_token: str | None = None) -> httpx.Client:
+        assert endpoint == "http://127.0.0.1:8765"
+        headers = {} if admin_token is None else {"Authorization": f"Bearer {admin_token}"}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"available": False})
+
+        return httpx.Client(
+            base_url="http://test/api/v1/",
+            headers=headers,
+            transport=httpx.MockTransport(handle),
+        )
+
+    monkeypatch.setattr(ApiClient, "_new_client", staticmethod(make_client))
+    result = runner.invoke(
+        app,
+        ["--admin-token-file", str(token_file), "setup", "status"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert requests[0].headers["authorization"] == f"Bearer {token}"
+    assert token not in result.output
 
 
 def test_normal_and_unix_endpoint_construction(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -223,6 +265,20 @@ def test_settings_set_fetches_revision_and_sends_only_requested_fields(api_trans
         ),
         (["firmware", "receipt-list"], "GET", "/api/v1/firmware/receipts", None),
         (["doctor", "fake-001"], "GET", "/api/v1/radios/fake-001/doctor", None),
+        (["setup", "status"], "GET", "/api/v1/setup", None),
+        (
+            ["setup", "plan", "fake-001"],
+            "POST",
+            "/api/v1/radios/fake-001/doctor/setup-plans",
+            {},
+        ),
+        (
+            ["setup", "execute", "setup-plan-1", "--token", "secret"],
+            "POST",
+            "/api/v1/setup/executions",
+            {"plan_id": "setup-plan-1", "confirmation_token": "secret"},
+        ),
+        (["setup", "receipt-list"], "GET", "/api/v1/setup/receipts", None),
     ],
 )
 def test_command_routes(
@@ -385,6 +441,71 @@ def test_serve_can_bind_unix_socket(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert "host" not in observed and "port" not in observed
 
 
+def test_serve_refuses_partial_or_unauthenticated_setup_configuration(
+    tmp_path: Path,
+) -> None:
+    partial = runner.invoke(
+        app,
+        [
+            "serve",
+            "--state-root",
+            str(tmp_path / "partial"),
+            "--fake-radio",
+            "sim-a",
+            "--setup-serial",
+            "sim-a",
+        ],
+    )
+    assert partial.exit_code == 2
+    assert json.loads(partial.stderr)["error"]["code"] == "canonical_setup_not_enabled"
+
+    incomplete = runner.invoke(
+        app,
+        [
+            "serve",
+            "--state-root",
+            str(tmp_path / "incomplete"),
+            "--fake-radio",
+            "sim-a",
+            "--enable-canonical-setup",
+        ],
+    )
+    assert incomplete.exit_code == 2
+    assert json.loads(incomplete.stderr)["error"]["code"] == "incomplete_canonical_setup"
+
+    password_file = tmp_path / "password"
+    known_hosts_file = tmp_path / "known_hosts"
+    password_file.write_text("analog\n")
+    known_hosts_file.write_text("192.168.2.1 ssh-ed25519 AAAATEST\n")
+    password_file.chmod(0o600)
+    known_hosts_file.chmod(0o600)
+    unauthenticated = runner.invoke(
+        app,
+        [
+            "serve",
+            "--state-root",
+            str(tmp_path / "unauthenticated"),
+            "--fake-radio",
+            "sim-a",
+            "--enable-canonical-setup",
+            "--setup-serial",
+            "sim-a",
+            "--setup-usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--setup-usb-interface",
+            "usb0",
+            "--setup-usb-host",
+            "192.168.2.1",
+            "--setup-password-file",
+            str(password_file),
+            "--setup-known-hosts-file",
+            str(known_hosts_file),
+        ],
+    )
+    assert unauthenticated.exit_code == 2
+    assert json.loads(unauthenticated.stderr)["error"]["code"] == "admin_authentication_unavailable"
+
+
 def test_direct_ip_targets_are_explicitly_host_and_serial_bound() -> None:
     devices = _direct_ip_devices(["192.0.2.10,SERIAL_A"])
 
@@ -412,9 +533,7 @@ def test_direct_usb_targets_are_exactly_serial_bound() -> None:
 
 
 def test_standard_iio_ip_targets_support_observed_or_pinned_serials() -> None:
-    devices = _iio_ip_devices(
-        ["192.168.1.15", "192.168.1.20,1040005e0b100007100010000bf33a5d4d"]
-    )
+    devices = _iio_ip_devices(["192.168.1.15", "192.168.1.20,1040005e0b100007100010000bf33a5d4d"])
 
     assert [device.identity.radio_id for device in devices] == [
         "192.168.1.15",

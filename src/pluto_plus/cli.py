@@ -8,6 +8,7 @@ import stat
 import sys
 from dataclasses import dataclass
 from importlib import import_module
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
@@ -28,6 +29,9 @@ job_app = typer.Typer(no_args_is_help=True, help="Inspect stream and capture job
 artifact_app = typer.Typer(no_args_is_help=True, help="Inspect captured artifacts.")
 scan_app = typer.Typer(no_args_is_help=True, help="Run exclusive frequency scans.")
 firmware_app = typer.Typer(no_args_is_help=True, help="Plan and execute guarded firmware updates.")
+setup_app = typer.Typer(
+    no_args_is_help=True, help="Plan and execute guarded canonical AD9361/2R2T setup."
+)
 
 app.add_typer(radio_app, name="radio")
 radio_app.add_typer(settings_app, name="settings")
@@ -37,30 +41,40 @@ app.add_typer(job_app, name="job")
 app.add_typer(artifact_app, name="artifact")
 app.add_typer(scan_app, name="scan")
 app.add_typer(firmware_app, name="firmware")
+app.add_typer(setup_app, name="setup")
 
 
 @dataclass
 class _Context:
     endpoint: str
+    admin_token: str | None = None
     client: ApiClient | None = None
 
 
 class ApiClient:
     """Small synchronous client for the versioned plutod HTTP API."""
 
-    def __init__(self, endpoint: str) -> None:
-        self._client = self._new_client(endpoint)
+    def __init__(self, endpoint: str, *, admin_token: str | None = None) -> None:
+        self._client = (
+            self._new_client(endpoint)
+            if admin_token is None
+            else self._new_client(endpoint, admin_token=admin_token)
+        )
 
     @staticmethod
-    def _new_client(endpoint: str) -> httpx.Client:
+    def _new_client(endpoint: str, *, admin_token: str | None = None) -> httpx.Client:
         endpoint = endpoint.strip().rstrip("/")
+        headers = {} if admin_token is None else {"Authorization": f"Bearer {admin_token}"}
         if endpoint.startswith("unix://"):
             socket_path = endpoint.removeprefix("unix://")
             if not socket_path.startswith("/"):
                 _fail("invalid_endpoint", "Unix socket endpoint must use an absolute path", 2)
             transport = httpx.HTTPTransport(uds=socket_path)
             return httpx.Client(
-                base_url=f"http://plutod/{API_PREFIX}/", transport=transport, timeout=30
+                base_url=f"http://plutod/{API_PREFIX}/",
+                transport=transport,
+                timeout=30,
+                headers=headers,
             )
 
         parsed = urlsplit(endpoint)
@@ -70,12 +84,25 @@ class ApiClient:
                 "endpoint must be an HTTP(S) URL or unix:///absolute/path.sock",
                 2,
             )
+        if admin_token is not None and parsed.scheme == "http":
+            hostname = parsed.hostname or ""
+            try:
+                loopback = ip_address(hostname).is_loopback
+            except ValueError:
+                loopback = hostname.lower() == "localhost"
+            if not loopback:
+                _fail(
+                    "admin_secure_transport_required",
+                    "refusing to send an admin bearer token over non-loopback HTTP; "
+                    "use HTTPS, an SSH tunnel, or a Unix socket",
+                    2,
+                )
         base_url = (
             endpoint
             if parsed.path.rstrip("/").endswith(f"/{API_PREFIX}")
             else (f"{endpoint}/{API_PREFIX}")
         )
-        return httpx.Client(base_url=f"{base_url}/", timeout=30)
+        return httpx.Client(base_url=f"{base_url}/", timeout=30, headers=headers)
 
     def close(self) -> None:
         self._client.close()
@@ -129,15 +156,26 @@ def main(
         envvar="PLUTO_ENDPOINT",
         help="plutod origin or unix:///absolute/path.sock.",
     ),
+    admin_token_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--admin-token-file",
+        envvar="PLUTO_ADMIN_TOKEN_FILE",
+        help="Private file containing the bearer token for privileged API calls.",
+    ),
 ) -> None:
     """Control Pluto+ radios through a single owning daemon."""
-    ctx.obj = _Context(endpoint=endpoint)
+    ctx.obj = _Context(
+        endpoint=endpoint,
+        admin_token=(
+            None if admin_token_file is None else _read_admin_token_file(admin_token_file)
+        ),
+    )
 
 
 def _api(ctx: typer.Context) -> ApiClient:
     state = ctx.ensure_object(_Context)
     if state.client is None:
-        state.client = ApiClient(state.endpoint)
+        state.client = ApiClient(state.endpoint, admin_token=state.admin_token)
         ctx.call_on_close(state.client.close)
     return state.client
 
@@ -149,6 +187,66 @@ def _emit(payload: Any) -> None:
 def _fail(code: str, message: str, exit_code: int) -> NoReturn:
     typer.echo(json.dumps({"error": {"code": code, "message": message}}, sort_keys=True), err=True)
     raise typer.Exit(exit_code)
+
+
+def _read_admin_token_file(path: Path) -> str:
+    token = _read_private_text_file(path, label="admin token")
+    if len(token) < 32 or any(character.isspace() for character in token):
+        _fail(
+            "invalid_admin_token_file",
+            "admin token must contain at least 32 non-space characters",
+            2,
+        )
+    return token
+
+
+def _read_private_text_file(path: Path, *, label: str) -> str:
+    encoded = _read_private_file_bytes(path, label=label, maximum_bytes=4096)
+    try:
+        value = encoded.decode("utf-8").rstrip("\r\n")
+    except UnicodeDecodeError:
+        _fail("invalid_private_file", f"{label} must be UTF-8", 2)
+    if not value or "\x00" in value or "\n" in value or "\r" in value:
+        _fail("invalid_private_file", f"{label} must contain one non-empty line", 2)
+    return value
+
+
+def _read_private_file_bytes(path: Path, *, label: str, maximum_bytes: int) -> bytes:
+    if not path.is_absolute():
+        _fail("invalid_private_file", f"{label} file must be an absolute path", 2)
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        _fail("invalid_private_file", str(error), 2)
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+        _fail("invalid_private_file", f"{label} file must be a regular file", 2)
+    if metadata.st_mode & 0o077:
+        _fail(
+            "invalid_private_file",
+            f"{label} file must not be accessible by group or other users",
+            2,
+        )
+    try:
+        encoded = path.read_bytes()
+    except OSError as error:
+        _fail("invalid_private_file", str(error), 2)
+    if not encoded or len(encoded) > maximum_bytes:
+        _fail("invalid_private_file", f"{label} file is empty or too large", 2)
+    return encoded
+
+
+def _private_usb_host(value: str) -> str:
+    try:
+        address = ip_address(value)
+    except ValueError:
+        _fail("invalid_setup_host", "setup USB host must be a literal IP address", 2)
+    if address.is_global or address.is_loopback or address.is_multicast or address.is_unspecified:
+        _fail(
+            "invalid_setup_host",
+            "setup USB host must be a private or link-local unicast address",
+            2,
+        )
+    return str(address)
 
 
 @radio_app.command("list")
@@ -387,7 +485,8 @@ def firmware_inspect(ctx: typer.Context, radio_id: str = typer.Argument(...)) ->
 
 @firmware_app.command("upload")
 def firmware_upload(
-    ctx: typer.Context, image: Path = typer.Argument(...),  # noqa: B008
+    ctx: typer.Context,
+    image: Path = typer.Argument(...),  # noqa: B008
 ) -> None:
     """Upload a DFU or firmware-only FRM into content-addressed staging."""
     if not image.is_file():
@@ -452,6 +551,53 @@ def firmware_execute(
 def firmware_receipt_list(ctx: typer.Context) -> None:
     """List receipts for authorized firmware attempts in this daemon lifetime."""
     _emit(_api(ctx).request("GET", "firmware/receipts"))
+
+
+@setup_app.command("status")
+def setup_status(ctx: typer.Context) -> None:
+    """Show whether guarded canonical setup is explicitly available."""
+
+    _emit(_api(ctx).request("GET", "setup"))
+
+
+@setup_app.command("plan")
+def setup_plan(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> None:
+    """Create an expiring identity/environment-bound canonical setup plan."""
+
+    _emit(
+        _api(ctx).request(
+            "POST",
+            f"radios/{radio_id}/doctor/setup-plans",
+            json_body={},
+        )
+    )
+
+
+@setup_app.command("execute")
+def setup_execute(
+    ctx: typer.Context,
+    plan_id: str = typer.Argument(...),
+    confirmation_token: str = typer.Option(..., "--token", prompt=True, hide_input=True),
+) -> None:
+    """Consume a setup plan token and execute its immutable changes once."""
+
+    _emit(
+        _api(ctx).request(
+            "POST",
+            "setup/executions",
+            json_body={
+                "plan_id": plan_id,
+                "confirmation_token": confirmation_token,
+            },
+        )
+    )
+
+
+@setup_app.command("receipt-list")
+def setup_receipt_list(ctx: typer.Context) -> None:
+    """List durable canonical-setup receipts."""
+
+    _emit(_api(ctx).request("GET", "setup/receipts"))
 
 
 @app.command("analyze")
@@ -524,9 +670,7 @@ def _direct_usb_devices(serials: list[str]) -> tuple[Any, ...]:
                 2,
             )
         control = IioRadioDevice("usb:", serial=serial, radio_id=serial)
-        devices.append(
-            DirectUsbRadioDevice(control, DirectUsbTransport(serial=serial))
-        )
+        devices.append(DirectUsbRadioDevice(control, DirectUsbTransport(serial=serial)))
     return tuple(devices)
 
 
@@ -588,6 +732,49 @@ def serve(
         "--firmware-helper-socket",
         help="Protected absolute Unix socket for the site-specific privileged helper.",
     ),
+    admin_token_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--admin-token-file",
+        help="Private bearer-token file required before privileged HTTP routes are usable.",
+    ),
+    admin_allowed_origin: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--admin-allowed-origin",
+        help="Exact browser origin allowed to call privileged routes (repeatable).",
+    ),
+    enable_canonical_setup: bool = typer.Option(
+        False,
+        "--enable-canonical-setup",
+        help="Explicitly enable one exact-radio AD9361/2R2T setup executor.",
+    ),
+    setup_serial: str | None = typer.Option(
+        None, "--setup-serial", help="Exact serial of the sole setup target."
+    ),
+    setup_usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--setup-usb-sysfs-path",
+        help="Exact direct USB sysfs node of the sole setup target.",
+    ),
+    setup_usb_interface: str | None = typer.Option(
+        None,
+        "--setup-usb-interface",
+        help="USB network interface physically below the selected sysfs node.",
+    ),
+    setup_usb_host: str | None = typer.Option(
+        None,
+        "--setup-usb-host",
+        help="Literal private/link-local Pluto USB SSH address.",
+    ),
+    setup_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--setup-password-file",
+        help="Private mode-0600 file containing the selected radio root password.",
+    ),
+    setup_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--setup-known-hosts-file",
+        help="Private mode-0600 file pinning the selected radio SSH host key.",
+    ),
     log_level: str = typer.Option("info", "--log-level"),
 ) -> None:
     """Run plutod with fake radios and/or lazily discovered hardware."""
@@ -597,6 +784,25 @@ def serve(
     from pluto_plus.api import create_app
     from pluto_plus.hardware.fake import FakeRadioDevice
     from pluto_plus.service import PlutoService
+
+    admin_policy = None
+    allowed_origins = admin_allowed_origin or []
+    if admin_token_file is None and allowed_origins:
+        _fail(
+            "admin_authentication_unavailable",
+            "--admin-allowed-origin requires --admin-token-file",
+            2,
+        )
+    if admin_token_file is not None:
+        from pluto_plus.admin import AdminMutationPolicy
+
+        try:
+            admin_policy = AdminMutationPolicy(
+                token=_read_admin_token_file(admin_token_file),
+                allowed_origins=allowed_origins,
+            )
+        except ValueError as error:
+            _fail("invalid_admin_authentication", str(error), 2)
 
     direct_specifications = direct_ip or []
     direct_usb_serials = direct_usb or []
@@ -623,6 +829,109 @@ def serve(
         devices.extend(_discover_production_devices())
     if not devices:
         _fail("no_radios", "no fake radios requested and no hardware radios discovered", 2)
+
+    setup_manager = None
+    setup_options = {
+        "--setup-serial": setup_serial,
+        "--setup-usb-sysfs-path": setup_usb_sysfs_path,
+        "--setup-usb-interface": setup_usb_interface,
+        "--setup-usb-host": setup_usb_host,
+        "--setup-password-file": setup_password_file,
+        "--setup-known-hosts-file": setup_known_hosts_file,
+    }
+    if not enable_canonical_setup and any(value is not None for value in setup_options.values()):
+        _fail(
+            "canonical_setup_not_enabled",
+            "setup target options require explicit --enable-canonical-setup",
+            2,
+        )
+    if enable_canonical_setup:
+        missing = [name for name, value in setup_options.items() if value is None]
+        if missing:
+            _fail(
+                "incomplete_canonical_setup",
+                f"canonical setup is missing required options: {', '.join(missing)}",
+                2,
+            )
+        if admin_policy is None:
+            _fail(
+                "admin_authentication_unavailable",
+                "canonical setup requires --admin-token-file",
+                2,
+            )
+        from pluto_plus.doctor import CANONICAL_POLICY
+        from pluto_plus.setup import CanonicalSetupManager, SetupIdentity
+        from pluto_plus.setup_helper import (
+            BoundSshTransport,
+            FixedSshSetupExecutor,
+            SetupHelperError,
+            remote_ssh_available,
+            validate_bound_interface,
+        )
+
+        selected_serial = cast(str, setup_serial)
+        selected_sysfs = cast(Path, setup_usb_sysfs_path)
+        selected_interface = cast(str, setup_usb_interface)
+        selected_host = _private_usb_host(cast(str, setup_usb_host))
+        selected_password_file = cast(Path, setup_password_file)
+        selected_known_hosts_file = cast(Path, setup_known_hosts_file)
+        if not selected_sysfs.is_absolute() or selected_sysfs.parent != Path(
+            "/sys/bus/usb/devices"
+        ):
+            _fail(
+                "invalid_setup_usb_path",
+                "--setup-usb-sysfs-path must name one direct USB sysfs device",
+                2,
+            )
+        matches = [
+            device.identity
+            for device in devices
+            if device.identity.serial == selected_serial
+        ]
+        if len(matches) != 1:
+            _fail(
+                "setup_identity_unavailable",
+                "setup target serial must match exactly one configured managed radio",
+                2,
+            )
+        try:
+            validate_bound_interface(selected_interface, str(selected_sysfs))
+        except ValueError as error:
+            _fail("invalid_setup_usb_interface", str(error), 2)
+        except SetupHelperError as error:
+            _fail("setup_usb_interface_unavailable", str(error), 2)
+        if not remote_ssh_available():
+            _fail("setup_ssh_unavailable", "OpenSSH client is unavailable", 2)
+        _read_private_file_bytes(
+            selected_known_hosts_file,
+            label="setup known-hosts",
+            maximum_bytes=1024 * 1024,
+        )
+        try:
+            identity = SetupIdentity(
+                serial=selected_serial,
+                usb_sysfs_path=str(selected_sysfs),
+                observed_firmware=CANONICAL_POLICY.device_firmware,
+            )
+            executor = FixedSshSetupExecutor(
+                identity=identity,
+                transport=BoundSshTransport(
+                    host=selected_host,
+                    interface=selected_interface,
+                    password=_read_private_text_file(
+                        selected_password_file, label="setup password"
+                    ),
+                    known_hosts_file=selected_known_hosts_file,
+                ),
+                state_root=state_root.absolute(),
+            )
+        except ValueError as error:
+            _fail("invalid_canonical_setup", str(error), 2)
+        setup_manager = CanonicalSetupManager(
+            receipt_directory=(state_root / "setup" / "receipts").absolute(),
+            inspector=executor.inspect,
+            executor=executor,
+        )
 
     firmware_manager = None
     if firmware_helper_socket is not None:
@@ -676,8 +985,9 @@ def serve(
         state_root=state_root,
         devices=tuple(devices),
         firmware_manager=firmware_manager,
+        setup_manager=setup_manager,
     )
-    api = create_app(service)
+    api = create_app(service, admin_policy=admin_policy)
     try:
         if uds is not None:
             if not uds.is_absolute():

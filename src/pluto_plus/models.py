@@ -312,6 +312,8 @@ class FirmwarePolicy(ApiModel):
     asset_sha256: str
     release_url: str
     source_commit: str
+    fit_body_sha256: str
+    fit_body_size: int = Field(gt=0)
     hardware_qualified: bool
     published_at: datetime
 

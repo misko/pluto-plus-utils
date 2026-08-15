@@ -63,18 +63,20 @@ The 2026-08-15 read-only inspection correlated `.15` as follows:
 | Network endpoint | `192.168.1.15` |
 | Hardware serial | `104000b29905000e17000800065934759d` |
 | USB attachment | yes, Gauss sysfs device `3-8` (`0456:b673`) |
-| Board report | `Analog Devices PlutoSDR Rev.C (Z7010-AD9363A)` |
+| Board report | `Analog Devices PlutoSDR Rev.C`; live PHY now `ad9361` |
 | Active firmware | canonical metadata-v5 |
-| Live PHY model | `ad9363a` — not canonical |
+| Live PHY model | `ad9361` — canonical after guarded setup on 2026-08-15 |
 | Metadata capability | present |
 | Dual-RX scan layout | voltage0..3 present |
-| Persistent U-Boot tuple | unknown; credential-free SSH was correctly refused |
-| QSPI cold-boot provenance | unknown |
+| Persistent U-Boot tuple | all four canonical values verified after reboot |
+| QSPI image | exact metadata-v5 FIT body SHA-256 verified in `mtd3` |
+| QSPI cold-boot provenance | still unknown until a full removal of power |
 
-Therefore `.15` must **not** be reflashed merely because its live PHY says AD9363A:
-its active firmware is already the selected release. The next safe action is to read
-and, if necessary, provision the persistent AD9361/2R2T tuple. Firmware and setup are
-separate changes.
+`.15` was not reflashed: its active and persistent firmware bytes already matched the
+selected release. The authenticated Web setup flow backed up the environment, applied
+the fail-closed TX mute, wrote only the three missing values, and rebooted. The exact
+serial/path, live AD9361 PHY, voltage0..3 layout, metadata capability, and a paired
+two-receiver Web preview now pass. A physical cold boot remains a separate checkpoint.
 
 ## Canonical AD9361/2R2T setup
 
@@ -91,7 +93,7 @@ A safe provisioner must perform this entire transaction:
 
 1. Require an explicit dry run and exactly one selected USB serial/sysfs path.
 2. Verify the live board is Pluto+ Rev.C and the network `hw_serial` equals the USB serial.
-3. Refuse setup while a volatile direct/RAM firmware is active or boot provenance is unknown.
+3. Require the approved active firmware and independently hash the approved FIT bytes in QSPI.
 4. Back up `/opt/VERSIONS` and the complete output of `fw_printenv`.
 5. Change only mismatching fields, preferably with one `fw_setenv -s` batch.
 6. Sync and reboot; reacquire the same serial and physical path.
@@ -99,11 +101,33 @@ A safe provisioner must perform this entire transaction:
 8. Require scan elements 0–3 and take a paired two-receiver sample.
 9. Keep DDS/TX buffers disabled and set/read back TX1 and TX2 attenuation to the safe minimum.
 
-Pluto+ Utils currently reports this repair but does not execute it. The existing Rover
-wrapper is count-scoped, not selected-serial scoped, and its baseline allowlist is stale;
-wrapping it in a web button would be unsafe. A future helper action must bind the plan to
-the serial, resolved sysfs path, current firmware, complete environment backup digest,
-and exact four-field patch.
+Pluto+ Utils implements this as a separate setup plan, not as a generic remote shell or
+firmware upload. The daemon must be explicitly composed with one exact serial, sysfs path,
+USB network interface, private USB address, private password file, and pinned SSH host-key
+file. Plans bind the current environment digest and contain only mismatching values from
+the immutable tuple. Browser setup and firmware POSTs additionally require an admin bearer
+token and an exact allowed Origin; the token is held only in the password input.
+Bearer credentials are never permitted on non-loopback plaintext HTTP: use HTTPS, a
+Unix socket, or connect to the daemon's loopback listener through an SSH tunnel. The
+LAN Web view remains useful for read-only status and doctor results, but its privileged
+controls stay disabled on an insecure origin.
+
+Guarded CLI primitives are:
+
+```console
+pluto --admin-token-file /private/admin.token setup status
+pluto --admin-token-file /private/admin.token setup plan RADIO_ID
+pluto --admin-token-file /private/admin.token setup execute PLAN_ID --token ONE_TIME_TOKEN
+pluto --admin-token-file /private/admin.token setup receipt-list
+```
+
+The Web Doctor panel enables **Prepare setup repair** only for an eligible, noncanonical
+selected radio. Inspect the immutable diff, enter the admin token, type
+`PROVISION <serial>`, and execute once. A changed SSH host key is a hard verification
+failure: physically re-attest the USB serial/path before reviewing and re-pinning it.
+If an execution receipt reports an unknown outcome, do not retry provisioning. Preserve
+the receipt and backup reference, restore pinned SSH trust only after that out-of-band
+attestation, and run the dedicated read-only reconciliation action.
 
 ## Firmware update contract
 
@@ -159,4 +183,5 @@ plan, token, and receipt API; typing the selected serial is required before exec
 | Cold verification | physical power cycle, same serial/path, version and setup reread |
 | Recovery | interrupted jobs retain durable failure receipts; never fall back to boot images |
 
-No command in this guide was run against `.15` during the review.
+The `.15` observations above were verified on the attached unit. The remaining physical
+power-cycle checkpoint has not been performed.

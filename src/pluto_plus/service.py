@@ -50,6 +50,16 @@ from pluto_plus.models import (
     StreamJob,
     StreamRequest,
 )
+from pluto_plus.setup import (
+    CanonicalSetupManager,
+    PlannedSetup,
+    SetupError,
+    SetupIdentity,
+    SetupPlan,
+    SetupPlanNotFoundError,
+    SetupReceipt,
+    SetupUnavailableError,
+)
 
 
 class PlutoService:
@@ -59,6 +69,7 @@ class PlutoService:
         devices: tuple[RadioDevice, ...],
         *,
         firmware_manager: FirmwareManager | None = None,
+        setup_manager: CanonicalSetupManager | None = None,
         capture_free_bytes: Callable[[Path], int] | None = None,
         capture_reserve_bytes: int = 64 * 1024 * 1024,
     ) -> None:
@@ -73,10 +84,12 @@ class PlutoService:
             _reconcile_completed_records(state_root, self.catalog)
             self.analysis = AnalysisService(state_root / "analysis")
             self.firmware_manager = firmware_manager
+            self.setup_manager = setup_manager
             self._firmware_filesystem = LocalFirmwareFilesystem()
             self._firmware_images: dict[str, tuple[FirmwareImageSummary, Path]] = {}
             self._firmware_plans: dict[str, FirmwarePlan] = {}
             self._firmware_receipts: dict[str, FirmwareReceipt] = {}
+            self._setup_plans: dict[str, SetupPlan] = {}
             for device in devices:
                 controller = RadioController(
                     device,
@@ -106,10 +119,38 @@ class PlutoService:
         """Run fresh, read-only canonical setup checks for one or all managed radios."""
 
         def report(controller: RadioController) -> DoctorReport:
+            snapshot = controller.snapshot()
+            facts = controller.diagnostic_facts()
+            if self.setup_manager is not None:
+                identity = snapshot.identity
+                if identity.usb_path is not None and identity.firmware_version is not None:
+                    try:
+                        observation = self.setup_manager.inspect(
+                            SetupIdentity(
+                                serial=identity.serial,
+                                usb_sysfs_path=identity.usb_path,
+                                observed_firmware=identity.firmware_version,
+                            )
+                        )
+                    except SetupError:
+                        # Doctor remains useful when the optional privileged reader is
+                        # unavailable. Unknown is safer than stale or inferred state.
+                        pass
+                    else:
+                        facts.update(
+                            {
+                                "uboot": observation.uboot,
+                                "boot_provenance": observation.boot_provenance,
+                                "phy_model": observation.live_phy_model,
+                                "rx_scan_channels": observation.rx_scan_channels,
+                            }
+                        )
             return diagnose_radio(
-                controller.snapshot(),
-                controller.diagnostic_facts(),
-                firmware_helper_available=self.firmware_manager is not None,
+                snapshot,
+                facts,
+                firmware_helper_available=(
+                    self.firmware_manager is not None or self.setup_manager is not None
+                ),
             )
 
         if radio_id is not None:
@@ -204,6 +245,58 @@ class PlutoService:
             "safety": "plan-token-execute",
         }
 
+    def setup_status(self) -> dict[str, object]:
+        return {
+            "helper_available": self.setup_manager is not None,
+            "safety": "inspect-plan-token-execute-receipt",
+            "profile_id": CANONICAL_POLICY.profile_id,
+        }
+
+    def create_canonical_setup_plan(self, radio_id: str) -> PlannedSetup:
+        manager = self._require_setup()
+        controller = self._controller(radio_id)
+        snapshot = controller.snapshot()
+        if snapshot.state is not RadioState.READY:
+            raise RadioBusyError(f"radio cannot plan setup while {snapshot.state}")
+        identity = snapshot.identity
+        if identity.usb_path is None or identity.firmware_version is None:
+            raise SetupUnavailableError(
+                "setup planning requires an attested USB path and firmware version"
+            )
+        planned = manager.create_plan(
+            SetupIdentity(
+                serial=identity.serial,
+                usb_sysfs_path=identity.usb_path,
+                observed_firmware=identity.firmware_version,
+            )
+        )
+        self._setup_plans[planned.plan.plan_id] = planned.plan
+        return planned
+
+    def execute_setup_plan(self, plan_id: str, confirmation_token: str) -> SetupReceipt:
+        manager = self._require_setup()
+        try:
+            plan = self._setup_plans[plan_id]
+        except KeyError as error:
+            raise SetupPlanNotFoundError(f"unknown setup plan: {plan_id}") from error
+        controller = self._controller_for_serial(plan.identity.serial)
+        return manager.execute(
+            plan,
+            confirmation_token,
+            before_mutation=controller.prepare_radio_mutation,
+            after_mutation=lambda: controller.recover_after_radio_mutation(
+                require_paired_rx=True
+            ),
+        )
+
+    def list_setup_receipts(self) -> list[SetupReceipt]:
+        return self._require_setup().list_receipts()
+
+    def reconcile_setup_receipt(self, receipt_id: str) -> SetupReceipt:
+        """Re-attest an uncertain setup attempt without invoking any mutation callback."""
+
+        return self._require_setup().reconcile(receipt_id)
+
     def stage_firmware_image(self, filename: str, data: bytes) -> FirmwareImageSummary:
         self._require_firmware()
         if Path(filename).name != filename or filename in {"", ".", ".."}:
@@ -268,9 +361,7 @@ class PlutoService:
         try:
             _summary, source = self._firmware_images[image_id]
         except KeyError as error:
-            raise FirmwareObjectNotFoundError(
-                f"unknown firmware image: {image_id}"
-            ) from error
+            raise FirmwareObjectNotFoundError(f"unknown firmware image: {image_id}") from error
         planned = manager.create_plan(
             RadioFirmwareIdentity(
                 serial=identity.serial,
@@ -295,9 +386,7 @@ class PlutoService:
         try:
             summary, _source = self._firmware_images[image_id]
         except KeyError as error:
-            raise FirmwareObjectNotFoundError(
-                f"unknown firmware image: {image_id}"
-            ) from error
+            raise FirmwareObjectNotFoundError(f"unknown firmware image: {image_id}") from error
         if summary.sha256 != CANONICAL_POLICY.asset_sha256:
             raise FirmwareImageError(
                 "uploaded image SHA-256 does not match the selected canonical release: "
@@ -310,9 +399,7 @@ class PlutoService:
             expected_firmware_version=CANONICAL_POLICY.device_firmware,
         )
 
-    def execute_firmware_plan(
-        self, plan_id: str, confirmation_token: str
-    ) -> FirmwareReceipt:
+    def execute_firmware_plan(self, plan_id: str, confirmation_token: str) -> FirmwareReceipt:
         manager = self._require_firmware()
         try:
             plan = self._firmware_plans[plan_id]
@@ -364,6 +451,13 @@ class PlutoService:
                 "firmware operations require an explicitly configured privileged executor"
             )
         return self.firmware_manager
+
+    def _require_setup(self) -> CanonicalSetupManager:
+        if self.setup_manager is None:
+            raise SetupUnavailableError(
+                "canonical setup requires an explicitly configured privileged helper"
+            )
+        return self.setup_manager
 
     def _controller_for_serial(self, serial: str) -> RadioController:
         matches = [

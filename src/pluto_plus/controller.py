@@ -357,6 +357,11 @@ class RadioController:
     def prepare_firmware_mutation(self) -> None:
         """Quiesce this controller after a firmware plan has been re-attested."""
 
+        self.prepare_radio_mutation()
+
+    def prepare_radio_mutation(self) -> None:
+        """Quiesce this controller for an authorized exact-radio mutation."""
+
         with self._lock:
             if self._state is not RadioState.READY:
                 raise RadioBusyError(f"radio cannot enter firmware mode while {self._state}")
@@ -374,6 +379,11 @@ class RadioController:
     def recover_after_firmware_mutation(self) -> None:
         """Reopen and re-attest the radio after any authorized mutation attempt."""
 
+        self.recover_after_radio_mutation()
+
+    def recover_after_radio_mutation(self, *, require_paired_rx: bool = False) -> None:
+        """Reopen, re-attest, and optionally prove one paired dual-RX read."""
+
         with self._lock:
             if self._state is not RadioState.FLASHING:
                 raise RadioBusyError(f"radio cannot recover from firmware while {self._state}")
@@ -383,6 +393,17 @@ class RadioController:
             with self._device_lock:
                 self._device.open()
                 actual = self._device.read_settings()
+                if require_paired_rx:
+                    if set(actual.channels) != {0, 1}:
+                        raise RadioConfigurationError(
+                            "canonical setup verification requires both receiver channels"
+                        )
+                    block = self._device.read_block(1024)
+                    if block.samples.shape != (2, 1024):
+                        raise RadioConfigurationError(
+                            "canonical setup paired receiver verification returned "
+                            f"{block.samples.shape}, expected (2, 1024)"
+                        )
             if self._device.identity.serial != expected_serial:
                 raise RadioConfigurationError(
                     f"reopened serial {self._device.identity.serial!r}, "

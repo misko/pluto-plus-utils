@@ -22,7 +22,9 @@ const ui = Object.fromEntries(
     "scan-form", "scan-fieldset", "scan-start", "scan-stop", "scan-step", "scan-samples",
     "start-scan", "stop-scan", "scan-message", "scans-body",
     "doctor-health", "run-doctor", "prepare-doctor-fix", "doctor-profile",
-    "doctor-release", "doctor-sha", "doctor-findings",
+    "doctor-release", "doctor-sha", "doctor-findings", "prepare-setup-fix",
+    "setup-availability", "setup-admin-token", "setup-plan-output", "setup-confirm-serial",
+    "execute-setup", "reconcile-setup", "setup-result",
   ].map((id) => [id, document.getElementById(id)]),
 );
 
@@ -43,14 +45,18 @@ const state = {
   scanning: false,
   doctorReport: null,
   doctorRepair: false,
+  setupAvailable: false,
+  setupPlan: null,
+  uncertainSetupReceipt: null,
 };
 
 class ApiError extends Error {
-  constructor(message, status, code) {
+  constructor(message, status, code, document = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.receipt = document?.receipt || null;
   }
 }
 
@@ -69,9 +75,29 @@ async function apiRequest(path, options = {}) {
   }
   if (!response.ok) {
     const detail = document && document.error ? document.error : {};
-    throw new ApiError(detail.message || `Request failed (${response.status})`, response.status, detail.code);
+    throw new ApiError(
+      detail.message || `Request failed (${response.status})`,
+      response.status,
+      detail.code,
+      document,
+    );
   }
   return document;
+}
+
+function adminHeaders() {
+  if (!browserPrivilegedTransportSafe()) {
+    throw new Error("Privileged actions require HTTPS or an SSH tunnel to loopback.");
+  }
+  const token = ui["setup-admin-token"].value;
+  if (!token) throw new Error("Enter the admin bearer token first.");
+  return { Authorization: `Bearer ${token}` };
+}
+
+function browserPrivilegedTransportSafe() {
+  if (window.location.protocol === "https:") return true;
+  const host = window.location.hostname.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
 }
 
 function radioPath(radioId, suffix = "") {
@@ -220,6 +246,8 @@ function clearRadio() {
   ui["run-doctor"].disabled = true;
   setText(ui["run-doctor"], "Run doctor");
   ui["prepare-doctor-fix"].disabled = true;
+  ui["prepare-setup-fix"].disabled = true;
+  clearSetupPlan("No setup plan created.");
   renderSettingsList(ui["requested-settings"], null);
   renderSettingsList(ui["actual-settings"], null);
 }
@@ -254,6 +282,7 @@ function renderSnapshot(snapshot, populateForm = true) {
   ui["stop-scan"].disabled = !state.scanning;
   setStreamStatus(state.streaming, state.streaming ? "Streaming" : "Stopped");
   updateFirmwareEnabled();
+  updateSetupEnabled();
   ui["run-doctor"].disabled = false;
 }
 
@@ -292,6 +321,7 @@ function renderDoctor(report, reveal = false) {
   ui["prepare-doctor-fix"].disabled = !report.findings.some(
     (finding) => finding.remediation?.remediation_id === "flash_canonical_firmware_mtd3",
   );
+  updateSetupEnabled();
   if (reveal) ui["doctor-findings"].scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -326,6 +356,205 @@ function prepareDoctorFix() {
   );
 }
 
+function setupRepairNeeded() {
+  return Boolean(state.doctorReport?.findings.some(
+    (finding) => finding.status !== "pass"
+      && finding.remediation?.remediation_id === "provision_ad9361_2r2t",
+  ));
+}
+
+function updateSetupEnabled() {
+  const ready = state.snapshot?.state === "ready";
+  ui["prepare-setup-fix"].disabled = !(state.setupAvailable && ready && setupRepairNeeded());
+  ui["execute-setup"].disabled = !state.setupPlan;
+  ui["reconcile-setup"].disabled = !state.uncertainSetupReceipt;
+}
+
+function clearSetupPlan(message = "No setup plan created.") {
+  state.setupPlan = null;
+  ui["setup-confirm-serial"].value = "";
+  ui["execute-setup"].disabled = true;
+  setText(ui["setup-plan-output"], message);
+}
+
+function clearSetupUncertainty() {
+  state.uncertainSetupReceipt = null;
+  ui["reconcile-setup"].disabled = true;
+}
+
+function validatedSetupPlan(document) {
+  const plan = document?.plan;
+  const selected = state.snapshot?.identity;
+  const expectedValues = {
+    attr_name: "compatible",
+    attr_val: "ad9361",
+    compatible: "ad9361",
+    mode: "2r2t",
+  };
+  if (!plan || !document.confirmation_token || !selected) {
+    throw new Error("Daemon returned an incomplete setup plan.");
+  }
+  if (plan.identity?.serial !== selected.serial || plan.identity?.usb_sysfs_path !== selected.usb_path) {
+    throw new Error("Setup plan identity does not match the selected radio.");
+  }
+  if (!Array.isArray(plan.changes_items) || !plan.changes_items.length) {
+    throw new Error("Setup plan has no canonical changes.");
+  }
+  if (typeof plan.tx_mute_required !== "boolean") {
+    throw new Error("Setup plan omitted its transmit-safety action.");
+  }
+  const changes = {};
+  for (const item of plan.changes_items) {
+    if (!Array.isArray(item) || item.length !== 2 || expectedValues[item[0]] !== item[1]) {
+      throw new Error("Setup plan contains a non-canonical field or value.");
+    }
+    changes[item[0]] = item[1];
+  }
+  return {
+    plan: {
+      plan_id: plan.plan_id,
+      expires_at: plan.expires_at,
+      identity: {
+        serial: plan.identity.serial,
+        usb_sysfs_path: plan.identity.usb_sysfs_path,
+        observed_firmware: plan.identity.observed_firmware,
+      },
+      profile_id: plan.profile_id,
+      environment_sha256: plan.environment_sha256,
+      changes,
+      transmit_safety: plan.tx_mute_required
+        ? "Required action: apply and verify fail-closed TX mute before the environment write"
+        : "Already fail-closed; every TX safety indicator will be reread before write",
+    },
+    confirmationToken: document.confirmation_token,
+  };
+}
+
+async function loadSetupStatus() {
+  try {
+    const status = await apiRequest("/setup");
+    state.setupAvailable = Boolean(status.available) && browserPrivilegedTransportSafe();
+    setText(
+      ui["setup-availability"],
+      state.setupAvailable
+        ? "Guarded setup helper ready"
+        : (browserPrivilegedTransportSafe()
+          ? "Setup mutation not configured"
+          : "Read-only mode · use HTTPS or an SSH tunnel to loopback"),
+    );
+  } catch (error) {
+    state.setupAvailable = false;
+    setText(ui["setup-availability"], `Unavailable · ${describeError(error)}`);
+  }
+  updateSetupEnabled();
+}
+
+async function prepareSetupFix() {
+  if (!state.snapshot || !setupRepairNeeded()) return;
+  clearSetupPlan("Creating a serial- and environment-bound setup plan…");
+  setText(ui["setup-result"], "Inspecting persistent setup and transmit-safe state…");
+  try {
+    const planned = await apiRequest(
+      `${radioPath(state.snapshot.identity.radio_id)}/doctor/setup-plans`,
+      {
+        method: "POST",
+        headers: adminHeaders(),
+        body: JSON.stringify({}),
+      },
+    );
+    state.setupPlan = validatedSetupPlan(planned);
+    setText(ui["setup-plan-output"], JSON.stringify(state.setupPlan.plan, null, 2));
+    setText(
+      ui["setup-result"],
+      `Plan ready. Verify the immutable diff and type PROVISION ${state.snapshot.identity.serial}.`,
+    );
+    ui["setup-plan-output"].scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch (error) {
+    clearSetupPlan("Setup plan was not created.");
+    setText(ui["setup-result"], describeError(error));
+    toast(describeError(error), true);
+  }
+  updateSetupEnabled();
+}
+
+async function executeSetup() {
+  if (!state.snapshot || !state.setupPlan) return;
+  const required = `PROVISION ${state.snapshot.identity.serial}`;
+  if (ui["setup-confirm-serial"].value !== required) {
+    setText(ui["setup-result"], `Confirmation must exactly match ${required}.`);
+    return;
+  }
+  const plan = state.setupPlan;
+  ui["execute-setup"].disabled = true;
+  setText(ui["setup-result"], "Provisioning in progress. Do not disconnect power or USB.");
+  try {
+    const receipt = await apiRequest("/setup/executions", {
+      method: "POST",
+      headers: adminHeaders(),
+      body: JSON.stringify({
+        plan_id: plan.plan.plan_id,
+        confirmation_token: plan.confirmationToken,
+      }),
+    });
+    clearSetupPlan("Plan consumed. A new doctor run is required for any further repair.");
+    clearSetupUncertainty();
+    ui["setup-admin-token"].value = "";
+    setText(ui["setup-result"], `Setup verified · receipt ${receipt.receipt_id}`);
+    await loadSnapshot();
+    await runDoctor(true);
+  } catch (error) {
+    clearSetupPlan("Plan consumed. Never replay an execution with an uncertain outcome.");
+    const receipt = error instanceof ApiError ? error.receipt : null;
+    if (receipt?.outcome === "unknown" && receipt.reconciliation_required) {
+      state.uncertainSetupReceipt = receipt;
+      setText(
+        ui["setup-result"],
+        `Outcome unknown · Do not retry. Receipt ${receipt.receipt_id}. `
+          + `Failure phase: ${receipt.failure_phase || "unknown"}. `
+          + `Backup: ${receipt.backup_path || "unavailable"}. `
+          + `SHA-256: ${receipt.backup_sha256 || "unavailable"}. `
+          + "After pinned SSH trust is updated out of band, run read-only reconcile.",
+      );
+    } else {
+      ui["setup-admin-token"].value = "";
+      setText(ui["setup-result"], describeError(error));
+    }
+    toast(describeError(error), true);
+    await loadSnapshot();
+    await runDoctor(true);
+  }
+  updateSetupEnabled();
+}
+
+async function reconcileSetup() {
+  const uncertain = state.uncertainSetupReceipt;
+  if (!uncertain) return;
+  ui["reconcile-setup"].disabled = true;
+  setText(ui["setup-result"], "Running read-only serial, setup, and firmware attestation…");
+  try {
+    const receipt = await apiRequest(
+      `/setup/receipts/${encodeURIComponent(uncertain.receipt_id)}/reconcile`,
+      { method: "POST", headers: adminHeaders(), body: JSON.stringify({}) },
+    );
+    clearSetupUncertainty();
+    ui["setup-admin-token"].value = "";
+    setText(
+      ui["setup-result"],
+      receipt.outcome === "reconciled_verified"
+        ? `Read-only reconciliation verified setup · receipt ${receipt.receipt_id}`
+        : `Read-only reconciliation found setup not canonical · receipt ${receipt.receipt_id}`,
+    );
+    await loadSnapshot();
+    await runDoctor(true);
+  } catch (error) {
+    ui["reconcile-setup"].disabled = false;
+    setText(
+      ui["setup-result"],
+      `Reconciliation unavailable: ${describeError(error)} Do not retry provisioning.`,
+    );
+  }
+}
+
 function updateFirmwareEnabled() {
   const snapshot = state.snapshot;
   const capabilities = snapshot?.capabilities || {};
@@ -341,10 +570,14 @@ function updateFirmwareEnabled() {
 async function loadFirmwareStatus() {
   try {
     const status = await apiRequest("/firmware");
-    state.firmwareAvailable = Boolean(status.available);
+    state.firmwareAvailable = Boolean(status.available) && browserPrivilegedTransportSafe();
     setText(
       ui["firmware-availability"],
-      state.firmwareAvailable ? "Guarded helper ready" : "Privileged helper not configured",
+      state.firmwareAvailable
+        ? "Guarded helper ready"
+        : (browserPrivilegedTransportSafe()
+          ? "Privileged helper not configured"
+          : "Read-only mode · use HTTPS or an SSH tunnel to loopback"),
     );
   } catch (error) {
     state.firmwareAvailable = false;
@@ -394,7 +627,7 @@ async function planFirmware(event) {
   try {
     const upload = await apiRequest(`/firmware/images?filename=${encodeURIComponent(file.name)}`, {
       method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
+      headers: { ...adminHeaders(), "Content-Type": "application/octet-stream" },
       body: await file.arrayBuffer(),
     });
     const planSuffix = state.doctorRepair ? "/doctor/firmware-plans" : "/firmware/plans";
@@ -402,6 +635,7 @@ async function planFirmware(event) {
       `${radioPath(state.snapshot.identity.radio_id)}${planSuffix}`,
       {
         method: "POST",
+        headers: adminHeaders(),
         body: JSON.stringify({
           image_id: upload.image_id,
           mode: ui["firmware-mode"].value,
@@ -434,6 +668,7 @@ async function executeFirmware() {
   try {
     const receipt = await apiRequest("/firmware/executions", {
       method: "POST",
+      headers: adminHeaders(),
       body: JSON.stringify({
         plan_id: state.firmwarePlan.plan.plan_id,
         confirmation_token: state.firmwarePlan.confirmation_token,
@@ -1042,6 +1277,8 @@ function installEventHandlers() {
     state.firmwarePlan = null;
     state.doctorRepair = false;
     state.doctorReport = null;
+    clearSetupPlan("No setup plan created for this radio.");
+    clearSetupUncertainty();
     ui["execute-firmware"].disabled = true;
     setText(ui["firmware-plan-output"], "No firmware plan created.");
     if (ui["radio-select"].value) {
@@ -1078,14 +1315,22 @@ function installEventHandlers() {
   ui["execute-firmware"].addEventListener("click", executeFirmware);
   ui["run-doctor"].addEventListener("click", () => runDoctor(true));
   ui["prepare-doctor-fix"].addEventListener("click", prepareDoctorFix);
-  window.addEventListener("beforeunload", disconnectWaterfall);
+  ui["prepare-setup-fix"].addEventListener("click", prepareSetupFix);
+  ui["execute-setup"].addEventListener("click", executeSetup);
+  ui["reconcile-setup"].addEventListener("click", reconcileSetup);
+  window.addEventListener("beforeunload", () => {
+    state.setupPlan = null;
+    ui["setup-admin-token"].value = "";
+    disconnectWaterfall();
+  });
 }
 
 async function initialize() {
   installEventHandlers();
   clearRadio();
   await Promise.all([
-    loadRadios(), loadJobs(), loadArtifacts(), loadAnalyzers(), loadFirmwareStatus(), loadScans(),
+    loadRadios(), loadJobs(), loadArtifacts(), loadAnalyzers(), loadFirmwareStatus(),
+    loadSetupStatus(), loadScans(),
   ]);
   if (state.snapshot) await runDoctor();
   state.pollingTimer = window.setInterval(async () => {

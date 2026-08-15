@@ -40,9 +40,10 @@ known serial:
 uv run plutod --iio-ip 192.168.1.15 --iio-ip 192.168.1.20,SERIAL
 ```
 
-Loopback is the safe default because this release does not implement remote
-authentication. For a local multi-user deployment, bind a Unix socket and point
-clients at it:
+Loopback is the safe default. Setup and firmware mutations have a separately configured
+bearer-token and strict browser-Origin boundary, but ordinary tune/stream/capture routes
+are intentionally not a general remote-authentication system. For a local multi-user
+deployment, bind a Unix socket and point clients at it:
 
 ```bash
 uv run plutod --hardware --uds /run/pluto-plus/plutod.sock
@@ -72,6 +73,28 @@ It reports active firmware, live AD9361/dual-RX facts, USB correlation, persiste
 setup provenance, and guarded remediation. Read
 [`docs/FLASHING_AND_DOCTOR.md`](docs/FLASHING_AND_DOCTOR.md) before any Pluto+
 setup or firmware operation.
+
+Canonical AD9361/2R2T setup is a distinct inspect → plan → confirm → execute workflow:
+
+```bash
+uv run pluto --admin-token-file /private/admin.token setup status
+uv run pluto --admin-token-file /private/admin.token setup plan RADIO_ID
+uv run pluto --admin-token-file /private/admin.token setup execute PLAN_ID --token TOKEN
+uv run pluto --admin-token-file /private/admin.token setup receipt-list
+```
+
+The daemon enables this only with `--enable-canonical-setup` plus one exact serial,
+USB sysfs path, USB network interface/address, private password file, pinned host-key
+file, admin token file, and allowed browser Origin. The Web Doctor panel exposes the
+same guarded flow and never renders or stores the one-time token. Read-only radio and
+doctor views may remain LAN-visible, but privileged Web/API requests are accepted only
+over HTTPS, a Unix socket, or loopback (for example through an SSH tunnel); the browser
+will not send the bearer token over non-loopback plaintext HTTP.
+
+If execution becomes uncertain after mutation or reboot, the receipt records the last
+completed phase and durable backup reference. Do not replay the consumed plan. Re-attest
+and, if necessary, explicitly re-pin the selected radio's SSH host key out of band, then
+use the receipt's read-only reconciliation action.
 
 ## Guarded firmware workflow
 

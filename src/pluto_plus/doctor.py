@@ -37,6 +37,8 @@ CANONICAL_POLICY = FirmwarePolicy(
         "https://github.com/misko/plutosdr-fw/releases/tag/v0.38-plutoplus-spf-libiio-metadata-v5"
     ),
     source_commit="d7c87a9a28094ee6f0b23cb47df9ff737b5a69d8",
+    fit_body_sha256="ae8ee0dac655f1178d24d3d53a78ae44ccb21b4aaef9273c6416bdd6bef761d9",
+    fit_body_size=12_743_859,
     hardware_qualified=True,
     published_at=datetime(2026, 8, 12, 17, 21, 7, tzinfo=UTC),
 )
@@ -217,15 +219,15 @@ def diagnose_radio(
             code="firmware.helper",
             status=(DoctorStatus.PASS if firmware_helper_available else DoctorStatus.WARN),
             summary=(
-                "Privileged firmware helper is configured"
+                "Guarded radio mutation helper is configured"
                 if firmware_helper_available
-                else "Privileged firmware helper is not configured"
+                else "Guarded radio mutation helper is not configured"
             ),
             actual=firmware_helper_available,
             expected=True,
             evidence=(
-                "the daemon never elevates itself; mutations cross an explicit local "
-                "Unix-socket boundary"
+                "mutations require an explicitly configured exact-radio executor and "
+                "authenticated admin boundary"
             ),
             remediation=None if firmware_helper_available else _helper_remediation(),
         )
@@ -292,13 +294,10 @@ def _setup_remediation() -> DoctorRemediation:
             "Back up the complete U-Boot environment, write only the four canonical values, "
             "reboot, re-attest the exact USB serial/path, reread all values, and prove voltage0..3."
         ),
-        automatable=False,
+        automatable=True,
         mutation=True,
         requires_privileged_helper=True,
-        cli_hint=(
-            "See docs/FLASHING_AND_DOCTOR.md; automated setup execution is intentionally "
-            "not enabled yet."
-        ),
+        cli_hint="pluto setup plan RADIO; pluto setup execute PLAN_ID --token TOKEN",
     )
 
 
@@ -327,10 +326,10 @@ def _power_cycle_remediation() -> DoctorRemediation:
 def _helper_remediation() -> DoctorRemediation:
     return DoctorRemediation(
         remediation_id="configure_privileged_helper",
-        title="Configure the local privileged firmware helper",
+        title="Configure a guarded exact-radio mutation helper",
         description=(
-            "Install a site-specific exact-radio executor and connect plutod to its protected "
-            "Unix socket."
+            "Configure an exact-radio executor plus authenticated admin policy before "
+            "enabling setup or firmware changes."
         ),
     )
 

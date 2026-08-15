@@ -75,7 +75,7 @@ def test_doctor_does_not_infer_persistence_from_active_firmware_or_channels() ->
     assert findings["identity.usb_path"].status is DoctorStatus.WARN
     assert findings["firmware.helper"].status is DoctorStatus.WARN
     assert findings["rf.phy_model"].remediation is not None
-    assert not findings["rf.phy_model"].remediation.automatable
+    assert findings["rf.phy_model"].remediation.automatable
 
 
 def test_old_firmware_recommends_only_guarded_profile_aware_flash() -> None:

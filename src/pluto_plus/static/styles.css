@@ -168,6 +168,7 @@ h3 {
 
 .live-panel,
 .analysis-panel,
+.setup-panel,
 .firmware-panel {
   grid-column: 1 / -1;
 }
@@ -567,10 +568,27 @@ pre {
   line-height: 1.55;
 }
 
-.firmware-panel p {
+.firmware-panel p,
+.setup-panel > p {
   max-width: 75ch;
   color: var(--muted);
   line-height: 1.55;
+}
+
+.setup-warning {
+  margin: 1rem 0;
+  padding: 0.85rem 1rem;
+  color: #f4dec0;
+  background: rgb(231 181 91 / 9%);
+  border: 1px solid rgb(231 181 91 / 35%);
+  border-left: 4px solid #e7b55b;
+  border-radius: 7px;
+  line-height: 1.5;
+}
+
+.setup-panel pre {
+  min-height: 7rem;
+  margin: 1rem 0;
 }
 
 .toast-region {
@@ -629,6 +647,7 @@ footer {
 
   .live-panel,
   .analysis-panel,
+  .setup-panel,
   .firmware-panel {
     grid-column: auto;
   }

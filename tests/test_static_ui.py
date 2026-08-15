@@ -123,7 +123,7 @@ def test_ui_exposes_exclusive_scan_controls_and_results() -> None:
     } <= parser.ids
     assert {"scan-start", "scan-stop", "scan-step", "scan-samples"} <= parser.labels_for
     assert 'apiRequest("/scans")' in javascript
-    assert '}/scans/current`' in javascript
+    assert "}/scans/current`" in javascript
 
 
 def test_ui_uses_versioned_api_and_canonical_waterfall_websocket() -> None:
@@ -183,6 +183,7 @@ def test_firmware_controls_enforce_guarded_plan_then_execute_flow() -> None:
     assert "/firmware/images?filename=" in javascript
     assert "/firmware/executions" in javascript
     assert 'ui["firmware-confirm-serial"].value !== state.snapshot.identity.serial' in javascript
+    assert "headers: adminHeaders()" in javascript
 
 
 def test_doctor_is_read_only_and_routes_repairs_into_guarded_firmware_plan() -> None:
@@ -192,6 +193,7 @@ def test_doctor_is_read_only_and_routes_repairs_into_guarded_firmware_plan() -> 
         "doctor-health",
         "run-doctor",
         "prepare-doctor-fix",
+        "prepare-setup-fix",
         "doctor-profile",
         "doctor-release",
         "doctor-sha",
@@ -199,14 +201,46 @@ def test_doctor_is_read_only_and_routes_repairs_into_guarded_firmware_plan() -> 
     } <= parser.ids
     assert "run-doctor" in parser.disabled_ids
     assert "prepare-doctor-fix" in parser.disabled_ids
+    assert "prepare-setup-fix" in parser.disabled_ids
     assert "Persistent AD9361/2R2T provisioning" in html
     assert "}/doctor`)" in javascript
     assert 'ui["firmware-mode"].value = "volatile_dfu"' in javascript
     assert "flash_canonical_firmware_mtd3" in javascript
     assert '"/doctor/firmware-plans"' in javascript
     assert 'setText(ui["run-doctor"], "Checking…")' in javascript
-    assert 'statusOrder = { fail: 0, warn: 1, unknown: 2, pass: 3 }' in javascript
+    assert "statusOrder = { fail: 0, warn: 1, unknown: 2, pass: 3 }" in javascript
     assert 'ui["doctor-findings"].scrollIntoView' in javascript
+
+
+def test_setup_repair_is_separate_authenticated_and_canonical_only() -> None:
+    html, javascript, css, parser = _assets()
+
+    assert {
+        "setup-availability",
+        "setup-admin-token",
+        "setup-confirm-serial",
+        "setup-plan-output",
+        "execute-setup",
+        "setup-result",
+    } <= parser.ids
+    assert {"setup-admin-token", "setup-confirm-serial"} <= parser.labels_for
+    assert "execute-setup" in parser.disabled_ids
+    assert 'apiRequest("/setup")' in javascript
+    assert "}/doctor/setup-plans`" in javascript
+    assert 'apiRequest("/setup/executions"' in javascript
+    assert "Authorization: `Bearer ${token}`" in javascript
+    assert "PROVISION ${state.snapshot.identity.serial}" in javascript
+    assert "confirmation_token: plan.confirmationToken" in javascript
+    assert (
+        'setText(ui["setup-plan-output"], JSON.stringify(state.setupPlan.plan, null, 2))'
+        in javascript
+    )
+    assert 'ui["setup-admin-token"].value = ""' in javascript
+    assert "localStorage" not in javascript and "sessionStorage" not in javascript
+    assert "attr_name" in javascript and "compatible" in javascript and "2r2t" in javascript
+    assert "arbitrary" not in html.lower()
+    assert "Transmit safety is mandatory" in html
+    assert ".setup-warning" in css
 
 
 def test_css_has_responsive_and_reduced_motion_layouts() -> None:
