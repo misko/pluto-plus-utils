@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="Local control and signal analysis for Pluto+ radios">
+    <title>Pluto+ Control Deck</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to controls</a>
+
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Software-defined radio workspace</p>
+        <h1>Pluto+ Control Deck</h1>
+      </div>
+      <div class="connection" aria-live="polite">
+        <span id="connection-dot" class="status-dot status-idle" aria-hidden="true"></span>
+        <span id="connection-status">Connecting to daemon…</span>
+      </div>
+    </header>
+
+    <main id="main-content" class="layout">
+      <section class="panel radio-panel" aria-labelledby="radio-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">01 / Radio</p>
+            <h2 id="radio-heading">Choose a receiver</h2>
+          </div>
+          <button id="refresh-radios" class="button secondary" type="button">Refresh</button>
+        </div>
+
+        <label for="radio-select">Available radios</label>
+        <select id="radio-select" name="radio" aria-describedby="radio-help">
+          <option value="">Discovering radios…</option>
+        </select>
+        <p id="radio-help" class="hint">Radios are identified by their stable serial number.</p>
+
+        <dl class="radio-facts">
+          <div><dt>State</dt><dd id="radio-state">—</dd></div>
+          <div><dt>Serial</dt><dd id="radio-serial">—</dd></div>
+          <div><dt>Transport</dt><dd id="radio-transport">—</dd></div>
+          <div><dt>Firmware</dt><dd id="radio-firmware">—</dd></div>
+          <div><dt>Revision</dt><dd id="radio-revision">—</dd></div>
+          <div><dt>Activity</dt><dd id="radio-activity">Idle</dd></div>
+        </dl>
+        <p id="radio-error" class="inline-error" role="alert" hidden></p>
+        <button id="recover-radio" class="button secondary" type="button" disabled>Recover radio</button>
+      </section>
+
+      <section class="panel settings-panel" aria-labelledby="settings-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">02 / Tune</p>
+            <h2 id="settings-heading">Receiver settings</h2>
+          </div>
+          <span id="settings-revision" class="revision-badge">Revision —</span>
+        </div>
+
+        <form id="settings-form">
+          <fieldset id="settings-fieldset" disabled>
+            <legend class="sr-only">Radio tuning parameters</legend>
+            <div class="form-grid">
+              <div>
+                <label for="center-frequency">Center frequency (Hz)</label>
+                <input id="center-frequency" name="center_frequency_hz" type="number" min="1" step="1" required inputmode="decimal">
+              </div>
+              <div>
+                <label for="sample-rate">Sample rate (Hz)</label>
+                <input id="sample-rate" name="sample_rate_hz" type="number" min="1" step="1" required inputmode="decimal">
+              </div>
+              <div>
+                <label for="bandwidth">RF bandwidth (Hz)</label>
+                <input id="bandwidth" name="bandwidth_hz" type="number" min="1" step="1" required inputmode="decimal">
+              </div>
+              <div>
+                <label for="gain-mode">Gain mode</label>
+                <select id="gain-mode" name="gain_mode">
+                  <option value="manual">Manual</option>
+                  <option value="slow_attack">Slow attack</option>
+                  <option value="fast_attack">Fast attack</option>
+                </select>
+              </div>
+              <div>
+                <label for="gain-db">Gain (dB)</label>
+                <input id="gain-db" name="gain_db" type="number" min="-10" max="80" step="0.5" required inputmode="decimal">
+              </div>
+            </div>
+            <p id="settings-validation" class="inline-error" role="alert" hidden></p>
+            <div class="actions">
+              <button id="apply-settings" class="button primary" type="submit">Apply settings</button>
+              <button id="reset-settings" class="button secondary" type="button">Reset</button>
+          </fieldset>
+        </form>
+
+        <div class="settings-comparison" aria-label="Requested and actual radio settings">
+          <div>
+            <h3>Requested</h3>
+            <dl id="requested-settings" class="compact-facts"><div><dt>Waiting</dt><dd>—</dd></div></dl>
+          </div>
+          <div>
+            <h3>Actual read-back</h3>
+            <dl id="actual-settings" class="compact-facts"><div><dt>Waiting</dt><dd>—</dd></div></dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel live-panel" aria-labelledby="live-heading">
+        <div class="panel-heading live-heading-row">
+          <div>
+            <p class="section-number">03 / Observe</p>
+            <h2 id="live-heading">Live spectrum</h2>
+          </div>
+          <div class="stream-status" aria-live="polite">
+            <span id="stream-dot" class="status-dot status-idle" aria-hidden="true"></span>
+            <span id="stream-status">Stopped</span>
+          </div>
+        </div>
+
+        <div class="stream-controls">
+          <div>
+            <label for="fft-size">FFT size</label>
+            <select id="fft-size">
+              <option value="1024">1,024</option>
+              <option value="2048">2,048</option>
+              <option value="4096" selected>4,096</option>
+              <option value="8192">8,192</option>
+              <option value="16384">16,384</option>
+            </select>
+          </div>
+          <button id="start-preview" class="button primary" type="button" disabled>Start preview</button>
+          <button id="stop-preview" class="button danger" type="button" disabled>Stop</button>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-labels"><span>Power spectrum</span><span id="spectrum-range">Frequency span —</span></div>
+          <canvas id="spectrum-canvas" height="260" role="img" aria-label="Live power spectrum for receiver channels zero and one"></canvas>
+        </div>
+        <div class="waterfall-grid">
+          <div class="chart-card">
+            <div class="chart-labels"><span><i class="legend rx0"></i>RX0 waterfall</span><span id="rx0-level">— dB</span></div>
+            <canvas id="waterfall-rx0" height="280" role="img" aria-label="Scrolling waterfall for receiver channel zero"></canvas>
+          </div>
+          <div class="chart-card">
+            <div class="chart-labels"><span><i class="legend rx1"></i>RX1 waterfall</span><span id="rx1-level">— dB</span></div>
+            <canvas id="waterfall-rx1" height="280" role="img" aria-label="Scrolling waterfall for receiver channel one"></canvas>
+          </div>
+        </div>
+        <p id="frame-metadata" class="hint mono" aria-live="polite">No spectrum frames received.</p>
+      </section>
+
+      <section class="panel capture-panel" aria-labelledby="capture-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">04 / Record</p>
+            <h2 id="capture-heading">Bounded capture</h2>
+          </div>
+        </div>
+        <form id="capture-form">
+          <fieldset id="capture-fieldset" disabled>
+            <legend class="sr-only">Persistent capture parameters</legend>
+            <div class="form-grid capture-fields">
+              <div>
+                <label for="capture-duration">Duration (seconds)</label>
+                <input id="capture-duration" type="number" min="0.1" max="3600" step="0.1" value="10" required>
+              </div>
+              <div>
+                <label for="capture-label">Label</label>
+                <input id="capture-label" type="text" maxlength="120" placeholder="Optional capture label">
+              </div>
+            </div>
+            <p class="hint">Persistent captures must always have a finite duration.</p>
+            <button id="start-capture" class="button primary" type="submit">Start persistent capture</button>
+          </fieldset>
+        </form>
+        <p id="capture-message" class="operation-message" aria-live="polite"></p>
+
+        <div class="subsection-heading">
+          <h3>Recent jobs</h3>
+          <button id="refresh-jobs" class="button text-button" type="button">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Job</th><th scope="col">Mode</th><th scope="col">State</th><th scope="col">Artifact</th></tr></thead>
+            <tbody id="jobs-body"><tr><td colspan="4">No jobs loaded.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel analysis-panel" aria-labelledby="analysis-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">05 / Analyze</p>
+            <h2 id="analysis-heading">Artifacts &amp; analysis</h2>
+          </div>
+          <button id="refresh-artifacts" class="button secondary" type="button">Refresh</button>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Artifact</th><th scope="col">Radio</th><th scope="col">Samples</th><th scope="col">Created</th><th scope="col"></th></tr></thead>
+            <tbody id="artifacts-body"><tr><td colspan="5">No artifacts loaded.</td></tr></tbody>
+          </table>
+        </div>
+
+        <form id="analysis-form" class="analysis-form">
+          <fieldset id="analysis-fieldset" disabled>
+            <legend>Run analyzer</legend>
+            <div class="form-grid">
+              <div>
+                <label for="analysis-artifact">Artifact</label>
+                <select id="analysis-artifact"><option value="">Select an artifact</option></select>
+              </div>
+              <div>
+                <label for="analyzer-select">Analyzer</label>
+                <select id="analyzer-select"><option value="">Loading analyzers…</option></select>
+              </div>
+              <div class="wide-field">
+                <label for="analysis-parameters">Parameters (JSON object)</label>
+                <textarea id="analysis-parameters" rows="3" spellcheck="false">{}</textarea>
+              </div>
+            </div>
+            <p id="analysis-validation" class="inline-error" role="alert" hidden></p>
+            <button id="run-analysis" class="button primary" type="submit">Run analysis</button>
+          </fieldset>
+        </form>
+
+        <section class="result-card" aria-labelledby="result-heading">
+          <div class="subsection-heading">
+            <h3 id="result-heading">Latest result</h3>
+            <span id="analysis-summary" class="hint">No analysis run yet.</span>
+          </div>
+          <pre id="analysis-result" tabindex="0">Select an artifact and analyzer to begin.</pre>
+        </section>
+      </section>
+
+      <section class="panel" aria-labelledby="scan-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">06 / Scan</p>
+            <h2 id="scan-heading">Frequency scan</h2>
+          </div>
+        </div>
+        <p>Run an exclusive bounded sweep. The daemon restores the prior tune on completion, cancellation, or recoverable failure.</p>
+        <form id="scan-form">
+          <fieldset id="scan-fieldset" disabled>
+            <div class="control-grid compact-grid">
+              <div><label for="scan-start">Start (Hz)</label><input id="scan-start" type="number" min="1" value="900000000" required></div>
+              <div><label for="scan-stop">Stop (Hz)</label><input id="scan-stop" type="number" min="1" value="930000000" required></div>
+              <div><label for="scan-step">Step (Hz)</label><input id="scan-step" type="number" min="1" value="1000000" required></div>
+              <div><label for="scan-samples">Samples / point</label><input id="scan-samples" type="number" min="1024" value="16384" required></div>
+            </div>
+            <div class="actions">
+              <button id="start-scan" class="button primary" type="submit">Start exclusive scan</button>
+              <button id="stop-scan" class="button secondary" type="button" disabled>Cancel scan</button>
+            </div>
+          </fieldset>
+        </form>
+        <p id="scan-message" class="hint" role="status">No scan running.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Scan</th><th>Radio</th><th>Points</th><th>Finished</th></tr></thead>
+            <tbody id="scans-body"><tr><td colspan="4">No completed scans yet.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel doctor-panel" aria-labelledby="doctor-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">07 / Doctor</p>
+            <h2 id="doctor-heading">Canonical setup doctor</h2>
+          </div>
+          <span id="doctor-health" class="deferred-badge">Not checked</span>
+        </div>
+        <p>Read-only checks compare fresh radio facts with the selected, hardware-qualified Pluto+ Utils profile. A running RAM image is never accepted as proof of persistent QSPI.</p>
+        <div class="actions">
+          <button id="run-doctor" class="button primary" type="button" disabled>Run doctor</button>
+          <button id="prepare-doctor-fix" class="button secondary" type="button" disabled>Prepare firmware repair</button>
+        </div>
+        <dl class="radio-facts">
+          <div><dt>Profile</dt><dd id="doctor-profile">—</dd></div>
+          <div><dt>Canonical release</dt><dd id="doctor-release">—</dd></div>
+          <div><dt>Image SHA-256</dt><dd id="doctor-sha" class="mono">—</dd></div>
+        </dl>
+        <div id="doctor-findings" class="doctor-findings" aria-live="polite">
+          <p class="hint">Select a radio and run the doctor.</p>
+        </div>
+        <p class="hint">Setup and flashing are separate guarded operations. Persistent AD9361/2R2T provisioning is documented but remains disabled until a dedicated exact-radio helper is configured.</p>
+      </section>
+
+      <section class="panel firmware-panel" aria-labelledby="firmware-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">08 / Firmware</p>
+            <h2 id="firmware-heading">Firmware operations</h2>
+          </div>
+          <span id="firmware-availability" class="deferred-badge">Checking helper</span>
+        </div>
+        <p>Updates use a guarded privileged helper. Upload and plan first, inspect the exact serial, path, digest, and mode, then explicitly execute the short-lived one-time token.</p>
+        <div class="actions">
+          <button id="inspect-firmware" class="button secondary" type="button">Inspect firmware</button>
+        </div>
+        <form id="firmware-form">
+          <fieldset id="firmware-fieldset" disabled>
+            <div class="control-grid">
+              <div>
+                <label for="firmware-image">Validated image (.dfu or .frm)</label>
+                <input id="firmware-image" type="file" accept=".dfu,.frm" required>
+              </div>
+              <div>
+                <label for="firmware-mode">Update mode</label>
+                <select id="firmware-mode">
+                  <option value="volatile_dfu">Volatile RAM load</option>
+                  <option value="persistent_qspi">Persistent QSPI (pluto.frm only)</option>
+                </select>
+              </div>
+              <div>
+                <label for="firmware-expected-version">Expected version after reboot</label>
+                <input id="firmware-expected-version" maxlength="120" required placeholder="For example: v0.39">
+              </div>
+            </div>
+            <button id="plan-firmware" class="button danger" type="submit">Upload and create guarded plan</button>
+          </fieldset>
+        </form>
+        <pre id="firmware-plan-output" tabindex="0">No firmware plan created.</pre>
+        <div class="control-grid">
+          <div>
+            <label for="firmware-confirm-serial">Type the selected radio serial to execute</label>
+            <input id="firmware-confirm-serial" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="actions align-end">
+            <button id="execute-firmware" class="button danger" type="button" disabled>Execute exact plan</button>
+          </div>
+        </div>
+        <p id="firmware-result" class="hint" role="status">The daemon will quiesce, update, reopen, and re-attest the radio.</p>
+      </section>
+    </main>
+
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <footer>Pluto+ controls are local to this daemon. Transmit remains disabled.</footer>
+  </body>
+</html>
