@@ -286,6 +286,8 @@ def create_app(
             "status": "ok",
             "version": __version__,
             "radio_count": len(radios),
+            "managed_radio_count": sum(radio.managed for radio in radios),
+            "discovered_radio_count": sum(not radio.managed for radio in radios),
         }
 
     @router.get("/radios", response_model=list[RadioSnapshot])

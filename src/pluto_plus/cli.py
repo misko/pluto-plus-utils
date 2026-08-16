@@ -700,6 +700,69 @@ def _iio_ip_devices(specifications: list[str]) -> tuple[Any, ...]:
     return tuple(devices)
 
 
+def _network_iio_inventory(
+    networks: list[str], managed_serials: list[str]
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    """Discover network Plutos read-only and promote only selected serials."""
+
+    from pluto_plus.hardware.discovery import discover_network_iio
+    from pluto_plus.models import (
+        RadioCapabilities,
+        RadioIdentity,
+        RadioSettings,
+        RadioSnapshot,
+        RadioState,
+        Transport,
+    )
+
+    if len(managed_serials) != len(set(managed_serials)) or any(
+        not serial or serial.strip() != serial for serial in managed_serials
+    ):
+        _fail(
+            "invalid_managed_iio_serial",
+            "--manage-discovered-iio must be unique exact serials without whitespace",
+            2,
+        )
+    try:
+        observations = discover_network_iio(networks)
+    except ValueError as error:
+        _fail("invalid_iio_network_discovery", str(error), 2)
+    by_serial = {observation.serial: observation for observation in observations}
+    missing = sorted(set(managed_serials) - set(by_serial))
+    if missing:
+        _fail(
+            "managed_iio_serial_not_discovered",
+            f"requested managed network IIO serials were not discovered: {missing}",
+            2,
+        )
+    managed = tuple(by_serial[serial].device() for serial in managed_serials)
+    passive = tuple(
+        RadioSnapshot(
+            identity=RadioIdentity(
+                radio_id=observation.serial,
+                serial=observation.serial,
+                uri=f"ip:{observation.host}",
+                transport=Transport.IIO_IP,
+                model=observation.model,
+                firmware_version=observation.firmware_version,
+            ),
+            capabilities=RadioCapabilities(
+                receiver_channels=(0, 1),
+                supports_live_tuning=False,
+            ),
+            managed=False,
+            state=RadioState.OFFLINE,
+            revision=0,
+            requested_settings=RadioSettings(),
+            actual_settings=RadioSettings(),
+            last_error="Discovered read-only; not owned by this daemon",
+        )
+        for observation in observations
+        if observation.serial not in managed_serials
+    )
+    return managed, passive
+
+
 @app.command("serve")
 def serve(
     state_root: Path = typer.Option(DEFAULT_STATE_ROOT, "--state-root"),  # noqa: B008
@@ -725,6 +788,16 @@ def serve(
         None,
         "--iio-ip",
         help="Add a standard network-IIO HOST or HOST,SERIAL target (repeatable).",
+    ),
+    discover_iio_network: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--discover-iio-network",
+        help="Read-only inventory scan of a bounded IPv4 CIDR (repeatable).",
+    ),
+    manage_discovered_iio: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--manage-discovered-iio",
+        help="Exact discovered serial this daemon may open and control (repeatable).",
     ),
     hardware: bool = typer.Option(False, "--hardware", help="Discover production radios."),
     firmware_helper_socket: Path | None = typer.Option(  # noqa: B008
@@ -807,6 +880,14 @@ def serve(
     direct_specifications = direct_ip or []
     direct_usb_serials = direct_usb or []
     iio_ip_specifications = iio_ip or []
+    discovery_networks = discover_iio_network or []
+    managed_discovered_serials = manage_discovered_iio or []
+    if managed_discovered_serials and not discovery_networks:
+        _fail(
+            "iio_network_discovery_unavailable",
+            "--manage-discovered-iio requires --discover-iio-network",
+            2,
+        )
     serials = (
         fake_radio
         if fake_radio is not None
@@ -817,6 +898,7 @@ def serve(
                 and not direct_specifications
                 and not direct_usb_serials
                 and not iio_ip_specifications
+                and not discovery_networks
             )
             else []
         )
@@ -825,9 +907,15 @@ def serve(
     devices.extend(_direct_ip_devices(direct_specifications))
     devices.extend(_direct_usb_devices(direct_usb_serials))
     devices.extend(_iio_ip_devices(iio_ip_specifications))
+    discovered_radios: tuple[Any, ...] = ()
+    if discovery_networks:
+        managed_network_devices, discovered_radios = _network_iio_inventory(
+            discovery_networks, managed_discovered_serials
+        )
+        devices.extend(managed_network_devices)
     if hardware:
         devices.extend(_discover_production_devices())
-    if not devices:
+    if not devices and not discovered_radios:
         _fail("no_radios", "no fake radios requested and no hardware radios discovered", 2)
 
     setup_manager = None
@@ -984,6 +1072,7 @@ def serve(
     service = PlutoService(
         state_root=state_root,
         devices=tuple(devices),
+        discovered_radios=discovered_radios,
         firmware_manager=firmware_manager,
         setup_manager=setup_manager,
     )

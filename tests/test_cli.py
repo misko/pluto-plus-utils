@@ -14,6 +14,7 @@ from pluto_plus.cli import (
     _direct_ip_devices,
     _direct_usb_devices,
     _iio_ip_devices,
+    _network_iio_inventory,
     app,
 )
 from pluto_plus.models import Transport
@@ -544,3 +545,31 @@ def test_standard_iio_ip_targets_support_observed_or_pinned_serials() -> None:
     result = runner.invoke(app, ["serve", "--iio-ip", "192.168.1.15, serial"])
     assert result.exit_code == 2
     assert json.loads(result.stderr)["error"]["code"] == "invalid_iio_ip"
+
+
+def test_network_iio_inventory_promotes_only_selected_serial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.hardware.discovery import NetworkIioObservation
+
+    observations = (
+        NetworkIioObservation("192.0.2.10", "SERIAL_A", "Pluto A", "v1"),
+        NetworkIioObservation("192.0.2.11", "SERIAL_B", "Pluto B", "v2"),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.hardware.discovery.discover_network_iio",
+        lambda _networks: observations,
+    )
+
+    managed, passive = _network_iio_inventory(["192.0.2.0/24"], ["SERIAL_B"])
+
+    assert [device.identity.serial for device in managed] == ["SERIAL_B"]
+    assert [snapshot.identity.serial for snapshot in passive] == ["SERIAL_A"]
+    assert passive[0].managed is False
+    assert passive[0].capabilities.supports_live_tuning is False
+
+
+def test_network_iio_management_requires_discovery() -> None:
+    result = runner.invoke(app, ["serve", "--manage-discovered-iio", "SERIAL_A"])
+    assert result.exit_code == 2
+    assert json.loads(result.stderr)["error"]["code"] == "iio_network_discovery_unavailable"

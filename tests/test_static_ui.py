@@ -179,6 +179,8 @@ def test_ui_exposes_bounded_runtime_diagnostics_and_midstream_reconnect() -> Non
     assert 'diagnosticLog("info", "waterfall.render_summary"' in javascript
     assert "scheduleWaterfallReconnect" in javascript
     assert "DIAGNOSTIC_SUMMARY_INTERVAL_MS = 5000" in javascript
+    assert 'radio.managed === false ? "discovered" : radio.state' in javascript
+    assert "const managed = snapshot.managed !== false" in javascript
 
 
 def test_dynamic_api_data_is_never_rendered_as_html() -> None:

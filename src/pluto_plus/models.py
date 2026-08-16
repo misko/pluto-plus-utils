@@ -109,6 +109,7 @@ class RadioCapabilities(ApiModel):
 class RadioSnapshot(ApiModel):
     identity: RadioIdentity
     capabilities: RadioCapabilities
+    managed: bool = True
     state: RadioState
     revision: int = Field(ge=0)
     requested_settings: RadioSettings

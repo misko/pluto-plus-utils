@@ -40,6 +40,22 @@ known serial:
 uv run plutod --iio-ip 192.168.1.15 --iio-ip 192.168.1.20,SERIAL
 ```
 
+For DHCP-managed radio LANs, use bounded read-only discovery instead of listing
+device addresses. Every serial-attested Pluto appears in the Web inventory, but
+only explicitly promoted serials are opened for tuning or capture:
+
+```bash
+uv run plutod \
+  --discover-iio-network 192.168.1.0/24 \
+  --manage-discovered-iio EXACT_DEVELOPMENT_SERIAL
+```
+
+Discovery probes the standard libiio TCP port, then verifies the reported model,
+serial, firmware, AD936x PHY, and paired-RX buffer topology. CIDRs are limited to
+4,096 unique hosts and duplicate serials fail closed. Inventory-only radios are
+labelled `discovered` in the Web selector and cannot be tuned, recovered, or
+streamed until their serial is explicitly promoted at daemon startup.
+
 Loopback is the safe default. Setup and firmware mutations have a separately configured
 bearer-token and strict browser-Origin boundary, but ordinary tune/stream/capture routes
 are intentionally not a general remote-authentication system. For a local multi-user

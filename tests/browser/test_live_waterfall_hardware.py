@@ -13,16 +13,19 @@ pytestmark = [pytest.mark.browser, pytest.mark.hardware]
 
 _ORIGIN_ENV = "PLUTO_BROWSER_LIVE_ORIGIN"
 _SERIAL_ENV = "PLUTO_BROWSER_LIVE_SERIAL"
-_EXPECTED_URI = "ip:192.168.1.15"
+_URI_ENV = "PLUTO_BROWSER_LIVE_URI"
 _MINIMUM_ROWS = 50
 
 
-def _live_target() -> tuple[str, str]:
+def _live_target() -> tuple[str, str, str]:
     origin = os.environ.get(_ORIGIN_ENV, "").rstrip("/")
     serial = os.environ.get(_SERIAL_ENV, "").strip()
-    if not origin or not serial:
-        pytest.skip(f"set {_ORIGIN_ENV} and {_SERIAL_ENV} to run the attached .15 test")
-    return origin, serial
+    uri = os.environ.get(_URI_ENV, "").strip()
+    if not origin or not serial or not uri:
+        pytest.skip(
+            f"set {_ORIGIN_ENV}, {_SERIAL_ENV}, and {_URI_ENV} to run the attached-radio test"
+        )
+    return origin, serial, uri
 
 
 def _install_row_counter(page: Any) -> None:
@@ -133,8 +136,8 @@ def _waterfall_connection(page: Any, radio_id: str, initial_state: str) -> Itera
             page.evaluate("disconnectWaterfall()")
 
 
-def test_attached_15_waterfall_populates_fifty_reasonable_rows(chromium: Any) -> None:
-    origin, serial = _live_target()
+def test_attached_radio_waterfall_populates_fifty_reasonable_rows(chromium: Any) -> None:
+    origin, serial, expected_uri = _live_target()
     context = chromium.new_context(viewport={"width": 1440, "height": 1100})
     page = context.new_page()
     page_errors: list[str] = []
@@ -151,7 +154,8 @@ def test_attached_15_waterfall_populates_fifty_reasonable_rows(chromium: Any) ->
         assert inventory.ok
         targets = [item for item in inventory.json() if item["identity"]["serial"] == serial]
         assert len(targets) == 1
-        assert targets[0]["identity"]["uri"] == _EXPECTED_URI
+        assert targets[0]["identity"]["uri"] == expected_uri
+        assert targets[0]["managed"] is True
 
         page.locator("#radio-select").select_option(serial)
         page.wait_for_function(

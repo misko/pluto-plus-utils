@@ -13,14 +13,15 @@ uv run playwright install chromium
 PLUTO_BROWSER_TESTS=1 uv run pytest -m browser tests/browser
 ```
 
-The attached `.15` waterfall acceptance is additionally hardware-gated. It
+The attached-radio waterfall acceptance is additionally hardware-gated. It
 attaches read-only when a preview is already running, or starts and cleans up its
 own non-persistent preview when the radio is ready:
 
 ```bash
 PLUTO_BROWSER_TESTS=1 \
 PLUTO_BROWSER_LIVE_ORIGIN=http://127.0.0.1:8765 \
-PLUTO_BROWSER_LIVE_SERIAL=104000b29905000e17000800065934759d \
+PLUTO_BROWSER_LIVE_SERIAL=1040007c4a94000211000b009186843ef2 \
+PLUTO_BROWSER_LIVE_URI=ip:192.168.1.165 \
 uv run pytest -q tests/browser/test_live_waterfall_hardware.py
 ```
 

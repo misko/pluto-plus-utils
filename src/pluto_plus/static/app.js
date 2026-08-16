@@ -300,7 +300,9 @@ async function loadRadios() {
       for (const radio of radios) {
         const option = makeElement(
           "option",
-          `${radio.identity.model || "Pluto+"} · ${radio.identity.serial} · ${radio.state}`,
+          `${radio.identity.model || "Pluto+"} · ${radio.identity.serial} · ${
+            radio.managed === false ? "discovered" : radio.state
+          }`,
         );
         option.value = radio.identity.radio_id;
         options.push(option);
@@ -363,25 +365,29 @@ function clearRadio() {
 function renderSnapshot(snapshot, populateForm = true) {
   const wasStreaming = state.streaming;
   const identity = snapshot.identity;
-  setText(ui["radio-state"], snapshot.state);
+  const managed = snapshot.managed !== false;
+  setText(ui["radio-state"], managed ? snapshot.state : "discovered");
   setText(ui["radio-serial"], identity.serial);
   setText(ui["radio-transport"], identity.transport);
   setText(ui["radio-firmware"], identity.firmware_version, "Unknown");
   setText(ui["radio-revision"], snapshot.revision);
   setText(ui["settings-revision"], `Revision ${snapshot.revision}`);
-  setText(ui["radio-activity"], snapshot.activity_id ? shortId(snapshot.activity_id) : "Idle");
+  setText(
+    ui["radio-activity"],
+    managed ? (snapshot.activity_id ? shortId(snapshot.activity_id) : "Idle") : "Inventory only",
+  );
   setError(ui["radio-error"], snapshot.last_error || "");
-  ui["recover-radio"].disabled = !["error", "offline"].includes(snapshot.state);
-  renderSettingsList(ui["requested-settings"], snapshot.requested_settings);
-  renderSettingsList(ui["actual-settings"], snapshot.actual_settings);
-  if (populateForm) populateSettingsForm(snapshot.requested_settings);
+  ui["recover-radio"].disabled = !managed || !["error", "offline"].includes(snapshot.state);
+  renderSettingsList(ui["requested-settings"], managed ? snapshot.requested_settings : null);
+  renderSettingsList(ui["actual-settings"], managed ? snapshot.actual_settings : null);
+  if (populateForm && managed) populateSettingsForm(snapshot.requested_settings);
 
-  const configurable = snapshot.state === "ready" || snapshot.state === "streaming";
-  const ready = snapshot.state === "ready";
+  const configurable = managed && (snapshot.state === "ready" || snapshot.state === "streaming");
+  const ready = managed && snapshot.state === "ready";
   ui["settings-fieldset"].disabled = !configurable;
   ui["capture-fieldset"].disabled = !ready;
-  state.streaming = snapshot.state === "streaming";
-  state.scanning = snapshot.state === "scanning";
+  state.streaming = managed && snapshot.state === "streaming";
+  state.scanning = managed && snapshot.state === "scanning";
   if (wasStreaming && !state.streaming && state.socket) disconnectWaterfall();
   if (state.streaming && !state.socket && !state.socketReconnectTimer) {
     diagnosticLog("info", "waterfall.auto_attach", {

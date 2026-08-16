@@ -11,9 +11,14 @@ from pluto_plus.models import (
     AnalysisRequest,
     GainMode,
     JobState,
+    RadioCapabilities,
+    RadioIdentity,
+    RadioSettings,
+    RadioSnapshot,
     RadioState,
     SettingsPatch,
     StreamRequest,
+    Transport,
 )
 from pluto_plus.service import PlutoService
 
@@ -64,6 +69,43 @@ def test_service_capture_analysis_vertical_slice(tmp_path) -> None:
         for peak in analysis.result["peaks"]:
             assert peak["offset_hz"] == pytest.approx(expected, abs=artifact.sample_rate_hz / 2048)
         assert service.get_analysis(analysis.analysis_id) == analysis
+    finally:
+        service.close()
+
+
+def test_passive_network_inventory_is_visible_without_opening_a_controller(tmp_path) -> None:
+    passive = RadioSnapshot(
+        identity=RadioIdentity(
+            radio_id="PASSIVE",
+            serial="PASSIVE",
+            uri="ip:192.0.2.20",
+            transport=Transport.IIO_IP,
+            model="Pluto inventory",
+            firmware_version="v1",
+        ),
+        capabilities=RadioCapabilities(supports_live_tuning=False),
+        managed=False,
+        state=RadioState.OFFLINE,
+        revision=0,
+        requested_settings=RadioSettings(),
+        actual_settings=RadioSettings(),
+        last_error="Discovered read-only; not owned by this daemon",
+    )
+    service = PlutoService(
+        tmp_path,
+        (FakeRadioDevice("managed"),),
+        discovered_radios=(passive,),
+    )
+    try:
+        snapshots = service.list_radios()
+        assert [snapshot.identity.radio_id for snapshot in snapshots] == [
+            "managed",
+            "PASSIVE",
+        ]
+        assert snapshots[0].managed is True
+        assert service.get_radio("PASSIVE") == passive
+        report = service.doctor("PASSIVE")
+        assert report.radio_id == "PASSIVE"
     finally:
         service.close()
 

@@ -58,6 +58,8 @@ def test_health_and_radio_inventory(api: tuple[TestClient, PlutoService, FakeRad
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
     assert health.json()["radio_count"] == 1
+    assert health.json()["managed_radio_count"] == 1
+    assert health.json()["discovered_radio_count"] == 0
 
     radios = client.get(f"{API_PREFIX}/radios")
     assert radios.status_code == 200

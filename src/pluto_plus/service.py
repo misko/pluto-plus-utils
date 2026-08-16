@@ -68,6 +68,7 @@ class PlutoService:
         state_root: Path,
         devices: tuple[RadioDevice, ...],
         *,
+        discovered_radios: tuple[RadioSnapshot, ...] = (),
         firmware_manager: FirmwareManager | None = None,
         setup_manager: CanonicalSetupManager | None = None,
         capture_free_bytes: Callable[[Path], int] | None = None,
@@ -77,6 +78,12 @@ class PlutoService:
         state_root.mkdir(parents=True, exist_ok=True)
         self._state_lock = _acquire_state_lock(state_root)
         self._controllers: dict[str, RadioController] = {}
+        self._discovered_radios = {
+            snapshot.identity.radio_id: snapshot for snapshot in discovered_radios
+        }
+        if len(self._discovered_radios) != len(discovered_radios):
+            _release_state_lock(self._state_lock)
+            raise ValueError("duplicate discovered radio id")
         try:
             _recover_incomplete_files(state_root)
             self.catalog = Catalog(state_root / "catalog.sqlite3")
@@ -102,6 +109,7 @@ class PlutoService:
                     controller.close()
                     raise ValueError(f"duplicate radio id: {controller.radio_id}")
                 self._controllers[controller.radio_id] = controller
+                self._discovered_radios.pop(controller.radio_id, None)
         except BaseException:
             for controller in self._controllers.values():
                 with suppress(BaseException):
@@ -110,10 +118,20 @@ class PlutoService:
             raise
 
     def list_radios(self) -> list[RadioSnapshot]:
-        return [self._controllers[key].snapshot() for key in sorted(self._controllers)]
+        managed = [self._controllers[key].snapshot() for key in sorted(self._controllers)]
+        discovered = [
+            self._discovered_radios[key] for key in sorted(self._discovered_radios)
+        ]
+        return managed + discovered
 
     def get_radio(self, radio_id: str) -> RadioSnapshot:
-        return self._controller(radio_id).snapshot()
+        controller = self._controllers.get(radio_id)
+        if controller is not None:
+            return controller.snapshot()
+        try:
+            return self._discovered_radios[radio_id]
+        except KeyError as error:
+            raise RadioNotFoundError(f"unknown radio: {radio_id}") from error
 
     def doctor(self, radio_id: str | None = None) -> list[DoctorReport] | DoctorReport:
         """Run fresh, read-only canonical setup checks for one or all managed radios."""
@@ -153,9 +171,35 @@ class PlutoService:
                 ),
             )
 
+        def discovered_report(snapshot: RadioSnapshot) -> DoctorReport:
+            identity = snapshot.identity
+            return diagnose_radio(
+                snapshot,
+                {
+                    "model": identity.model,
+                    "phy_model": None,
+                    "rx_scan_channels": (),
+                    "boot_provenance": None,
+                    "uboot": None,
+                },
+                firmware_helper_available=False,
+            )
+
         if radio_id is not None:
-            return report(self._controller(radio_id))
-        return [report(self._controllers[key]) for key in sorted(self._controllers)]
+            controller = self._controllers.get(radio_id)
+            if controller is not None:
+                return report(controller)
+            try:
+                return discovered_report(self._discovered_radios[radio_id])
+            except KeyError as error:
+                raise RadioNotFoundError(f"unknown radio: {radio_id}") from error
+        return [
+            *(report(self._controllers[key]) for key in sorted(self._controllers)),
+            *(
+                discovered_report(self._discovered_radios[key])
+                for key in sorted(self._discovered_radios)
+            ),
+        ]
 
     def update_settings(self, radio_id: str, patch: SettingsPatch) -> RadioSnapshot:
         return self._controller(radio_id).update_settings(patch)
