@@ -6,7 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import BinaryIO
@@ -30,6 +30,7 @@ from pluto_plus.firmware import (
     FirmwareMode,
     FirmwarePlan,
     FirmwareReceipt,
+    FirmwareTransport,
     LocalFirmwareFilesystem,
     PlannedFirmware,
     RadioFirmwareIdentity,
@@ -49,6 +50,7 @@ from pluto_plus.models import (
     SettingsPatch,
     StreamJob,
     StreamRequest,
+    Transport,
 )
 from pluto_plus.setup import (
     CanonicalSetupManager,
@@ -70,6 +72,7 @@ class PlutoService:
         *,
         discovered_radios: tuple[RadioSnapshot, ...] = (),
         firmware_manager: FirmwareManager | None = None,
+        ip_firmware_managers: Mapping[str, FirmwareManager] | None = None,
         setup_manager: CanonicalSetupManager | None = None,
         capture_free_bytes: Callable[[Path], int] | None = None,
         capture_reserve_bytes: int = 64 * 1024 * 1024,
@@ -91,10 +94,17 @@ class PlutoService:
             _reconcile_completed_records(state_root, self.catalog)
             self.analysis = AnalysisService(state_root / "analysis")
             self.firmware_manager = firmware_manager
+            self.ip_firmware_managers = dict(ip_firmware_managers or {})
+            if any(
+                manager.transport is not FirmwareTransport.SSH_FRM
+                for manager in self.ip_firmware_managers.values()
+            ):
+                raise ValueError("IP firmware managers must use ssh_frm transport")
             self.setup_manager = setup_manager
             self._firmware_filesystem = LocalFirmwareFilesystem()
             self._firmware_images: dict[str, tuple[FirmwareImageSummary, Path]] = {}
             self._firmware_plans: dict[str, FirmwarePlan] = {}
+            self._firmware_plan_managers: dict[str, FirmwareManager] = {}
             self._firmware_receipts: dict[str, FirmwareReceipt] = {}
             self._setup_plans: dict[str, SetupPlan] = {}
             for device in devices:
@@ -167,7 +177,14 @@ class PlutoService:
                 snapshot,
                 facts,
                 firmware_helper_available=(
-                    self.firmware_manager is not None or self.setup_manager is not None
+                    self.firmware_manager is not None
+                    or (
+                        snapshot.identity.radio_id in self.ip_firmware_managers
+                        and not self.ip_firmware_managers[
+                            snapshot.identity.radio_id
+                        ].key_reconciliation_required
+                    )
+                    or self.setup_manager is not None
                 ),
             )
 
@@ -282,12 +299,45 @@ class PlutoService:
         return result
 
     def firmware_status(self) -> dict[str, object]:
+        usb_available = self.firmware_manager is not None
+        ssh_radio_ids = tuple(sorted(self.ip_firmware_managers))
+        ssh_enrollments = {
+            radio_id: {
+                "key_reconciliation_required": manager.key_reconciliation_required,
+                "mutation_available": not manager.key_reconciliation_required,
+            }
+            for radio_id, manager in sorted(self.ip_firmware_managers.items())
+        }
         return {
-            "available": self.firmware_manager is not None,
+            "available": usb_available or bool(ssh_radio_ids),
             "modes": tuple(mode.value for mode in FirmwareMode),
+            "transports": {
+                FirmwareTransport.USB.value: {"available": usb_available},
+                FirmwareTransport.SSH_FRM.value: {
+                    "available": bool(ssh_radio_ids),
+                    "enrolled_radio_ids": ssh_radio_ids,
+                    "enrollments": ssh_enrollments,
+                },
+            },
             "maximum_upload_bytes": 128 * 1024 * 1024,
             "safety": "plan-token-execute",
         }
+
+    def enroll_ip_firmware_manager(
+        self, radio_id: str, manager: FirmwareManager
+    ) -> None:
+        """Attach one explicitly configured SSH executor before serving requests."""
+
+        if manager.transport is not FirmwareTransport.SSH_FRM:
+            raise ValueError("IP firmware manager must use ssh_frm transport")
+        controller = self._controller(radio_id)
+        if controller.snapshot().identity.serial != radio_id:
+            raise ValueError("SSH firmware enrollment must use the exact managed serial")
+        if radio_id in self.ip_firmware_managers:
+            raise ValueError(f"duplicate SSH firmware enrollment for {radio_id!r}")
+        if self._firmware_plans:
+            raise RuntimeError("cannot add SSH firmware enrollment after planning has begun")
+        self.ip_firmware_managers[radio_id] = manager
 
     def setup_status(self) -> dict[str, object]:
         return {
@@ -342,7 +392,7 @@ class PlutoService:
         return self._require_setup().reconcile(receipt_id)
 
     def stage_firmware_image(self, filename: str, data: bytes) -> FirmwareImageSummary:
-        self._require_firmware()
+        self._require_any_firmware()
         if Path(filename).name != filename or filename in {"", ".", ".."}:
             raise ValueError("firmware filename must be one plain basename")
         if Path(filename).suffix.lower() not in {".dfu", ".frm"}:
@@ -370,7 +420,7 @@ class PlutoService:
         return summary
 
     def list_firmware_images(self) -> list[FirmwareImageSummary]:
-        self._require_firmware()
+        self._require_any_firmware()
         return sorted(
             (item[0] for item in self._firmware_images.values()),
             key=lambda item: item.original_name,
@@ -383,40 +433,78 @@ class PlutoService:
         mode: FirmwareMode,
         *,
         expected_firmware_version: str | None = None,
+        transport: FirmwareTransport = FirmwareTransport.USB,
     ) -> PlannedFirmware:
-        manager = self._require_firmware()
+        manager = self._firmware_manager_for(radio_id, transport)
         controller = self._controller(radio_id)
         snapshot = controller.snapshot()
         if snapshot.state is not RadioState.READY:
             raise RadioBusyError(f"radio cannot plan firmware while {snapshot.state}")
-        if mode is FirmwareMode.VOLATILE_DFU:
-            supported = snapshot.capabilities.supports_volatile_firmware
-        else:
-            supported = snapshot.capabilities.supports_persistent_firmware
-        if not supported:
-            raise FirmwareUnavailableError(
-                f"radio {radio_id!r} does not advertise support for {mode.value}"
-            )
         identity = snapshot.identity
-        if identity.usb_path is None or identity.firmware_version is None:
-            raise FirmwareUnavailableError(
-                "firmware planning requires an attested USB path and firmware version"
+        if transport is FirmwareTransport.USB:
+            if mode is FirmwareMode.VOLATILE_DFU:
+                supported = snapshot.capabilities.supports_volatile_firmware
+            else:
+                supported = snapshot.capabilities.supports_persistent_firmware
+            if not supported:
+                raise FirmwareUnavailableError(
+                    f"radio {radio_id!r} does not advertise support for {mode.value}"
+                )
+            if identity.usb_path is None or identity.firmware_version is None:
+                raise FirmwareUnavailableError(
+                    "firmware planning requires an attested USB path and firmware version"
+                )
+            firmware_identity = RadioFirmwareIdentity(
+                serial=identity.serial,
+                usb_sysfs_path=identity.usb_path,
+                observed_firmware=identity.firmware_version,
             )
+        else:
+            if mode is not FirmwareMode.PERSISTENT_QSPI:
+                raise FirmwareUnavailableError("ssh_frm supports persistent_qspi only")
+            if identity.transport is not Transport.IIO_IP:
+                raise FirmwareUnavailableError(
+                    "ssh_frm requires an explicitly managed network-IIO radio"
+                )
+            if identity.firmware_version is None:
+                raise FirmwareUnavailableError(
+                    "SSH firmware planning requires an observed managed firmware version"
+                )
+            firmware_identity = manager.observe_identity(identity.serial)
+            if firmware_identity.observed_firmware != identity.firmware_version:
+                raise FirmwareUnavailableError(
+                    "fresh enrolled SSH identity does not match the managed radio snapshot"
+                )
         try:
             _summary, source = self._firmware_images[image_id]
         except KeyError as error:
             raise FirmwareObjectNotFoundError(f"unknown firmware image: {image_id}") from error
+        if (
+            transport is FirmwareTransport.SSH_FRM
+            and expected_firmware_version != CANONICAL_POLICY.device_firmware
+        ):
+            raise FirmwareImageError(
+                "ssh_frm is restricted to the hardware-qualified canonical firmware"
+            )
         planned = manager.create_plan(
-            RadioFirmwareIdentity(
-                serial=identity.serial,
-                usb_sysfs_path=identity.usb_path,
-                observed_firmware=identity.firmware_version,
-            ),
+            firmware_identity,
             source,
             mode,
             expected_firmware=expected_firmware_version,
+            transport=transport,
         )
+        if transport is FirmwareTransport.SSH_FRM and not (
+            _summary.sha256 == CANONICAL_POLICY.asset_sha256
+            or (
+                planned.plan.fit_sha256 == CANONICAL_POLICY.fit_body_sha256
+                and planned.plan.fit_size == CANONICAL_POLICY.fit_body_size
+            )
+        ):
+            raise FirmwareImageError(
+                "ssh_frm image FIT body does not match the hardware-qualified canonical firmware"
+            )
         self._firmware_plans[planned.plan.plan_id] = planned.plan
+        self._firmware_plan_managers[planned.plan.plan_id] = manager
         return planned
 
     def create_canonical_firmware_plan(
@@ -424,6 +512,8 @@ class PlutoService:
         radio_id: str,
         image_id: str,
         mode: FirmwareMode,
+        *,
+        transport: FirmwareTransport = FirmwareTransport.USB,
     ) -> PlannedFirmware:
         """Plan only the immutable image selected by the shipped doctor policy."""
 
@@ -431,7 +521,10 @@ class PlutoService:
             summary, _source = self._firmware_images[image_id]
         except KeyError as error:
             raise FirmwareObjectNotFoundError(f"unknown firmware image: {image_id}") from error
-        if summary.sha256 != CANONICAL_POLICY.asset_sha256:
+        if (
+            transport is FirmwareTransport.USB
+            and summary.sha256 != CANONICAL_POLICY.asset_sha256
+        ):
             raise FirmwareImageError(
                 "uploaded image SHA-256 does not match the selected canonical release: "
                 f"expected {CANONICAL_POLICY.asset_sha256}, got {summary.sha256}"
@@ -441,12 +534,20 @@ class PlutoService:
             image_id,
             mode,
             expected_firmware_version=CANONICAL_POLICY.device_firmware,
+            transport=transport,
         )
 
-    def execute_firmware_plan(self, plan_id: str, confirmation_token: str) -> FirmwareReceipt:
-        manager = self._require_firmware()
+    def execute_firmware_plan(
+        self,
+        plan_id: str,
+        confirmation_token: str,
+        *,
+        operator_confirmation: str | None = None,
+    ) -> FirmwareReceipt:
+        self._require_any_firmware()
         try:
             plan = self._firmware_plans[plan_id]
+            manager = self._firmware_plan_managers[plan_id]
         except KeyError as error:
             raise FirmwareObjectNotFoundError(f"unknown firmware plan: {plan_id}") from error
         controller = self._controller_for_serial(plan.radio.serial)
@@ -456,6 +557,7 @@ class PlutoService:
                 confirmation_token,
                 before_mutation=controller.prepare_firmware_mutation,
                 after_mutation=controller.recover_after_firmware_mutation,
+                operator_confirmation=operator_confirmation,
             )
         except FirmwareExecutionError as error:
             self._firmware_receipts[error.receipt.receipt_id] = error.receipt
@@ -464,12 +566,32 @@ class PlutoService:
         return receipt
 
     def list_firmware_receipts(self) -> list[FirmwareReceipt]:
-        self._require_firmware()
+        managers = self._require_any_firmware()
+        receipts = {
+            receipt.receipt_id: receipt
+            for manager in managers
+            for receipt in manager.list_receipts()
+        }
+        receipts.update(self._firmware_receipts)
         return sorted(
-            self._firmware_receipts.values(),
+            receipts.values(),
             key=lambda item: item.started_at,
             reverse=True,
         )
+
+    def reconcile_firmware_receipt(self, receipt_id: str) -> FirmwareReceipt:
+        """Re-attest an uncertain firmware receipt; never retries the flash."""
+
+        matches = [
+            manager
+            for manager in self._require_any_firmware()
+            if any(receipt.receipt_id == receipt_id for receipt in manager.list_receipts())
+        ]
+        if len(matches) != 1:
+            raise FirmwareObjectNotFoundError(f"unknown firmware receipt: {receipt_id}")
+        receipt = matches[0].reconcile(receipt_id)
+        self._firmware_receipts[receipt.receipt_id] = receipt
+        return receipt
 
     def close(self) -> None:
         errors: list[BaseException] = []
@@ -495,6 +617,30 @@ class PlutoService:
                 "firmware operations require an explicitly configured privileged executor"
             )
         return self.firmware_manager
+
+    def _require_any_firmware(self) -> tuple[FirmwareManager, ...]:
+        managers = tuple(
+            manager
+            for manager in (self.firmware_manager, *self.ip_firmware_managers.values())
+            if manager is not None
+        )
+        if not managers:
+            raise FirmwareUnavailableError(
+                "firmware operations require an explicitly configured privileged executor"
+            )
+        return managers
+
+    def _firmware_manager_for(
+        self, radio_id: str, transport: FirmwareTransport
+    ) -> FirmwareManager:
+        if transport is FirmwareTransport.USB:
+            return self._require_firmware()
+        try:
+            return self.ip_firmware_managers[radio_id]
+        except KeyError as error:
+            raise FirmwareUnavailableError(
+                f"radio {radio_id!r} has no explicit ssh_frm enrollment"
+            ) from error
 
     def _require_setup(self) -> CanonicalSetupManager:
         if self.setup_manager is None:

@@ -198,20 +198,80 @@ def test_firmware_controls_enforce_guarded_plan_then_execute_flow() -> None:
     assert {
         "firmware-fieldset",
         "firmware-image",
+        "firmware-transport",
+        "firmware-transport-ssh",
+        "firmware-transport-evidence",
         "firmware-mode",
         "firmware-expected-version",
         "plan-firmware",
         "firmware-confirm-serial",
+        "firmware-confirmation-requirement",
         "execute-firmware",
+        "reconcile-firmware",
         "firmware-plan-output",
     } <= parser.ids
     assert "firmware-fieldset" in parser.disabled_ids
     assert "execute-firmware" in parser.disabled_ids
+    assert "reconcile-firmware" in parser.disabled_ids
     assert "guarded privileged helper" in html
     assert "/firmware/images?filename=" in javascript
     assert "/firmware/executions" in javascript
-    assert 'ui["firmware-confirm-serial"].value !== state.snapshot.identity.serial' in javascript
+    assert "`FLASH ${state.snapshot.identity.serial}`" in javascript
     assert "headers: adminHeaders()" in javascript
+
+
+def test_network_firmware_is_enrollment_gated_identity_bound_and_one_shot() -> None:
+    html, javascript, css, parser = _assets()
+
+    assert {"firmware-transport", "firmware-confirm-serial"} <= parser.labels_for
+    assert "firmware-transport-ssh" in parser.disabled_ids
+    assert "Network flashing is enrollment-only" in html
+    assert "Discovering a radio never enables SSH firmware access" in html
+    assert "ssh_frm" in javascript
+    assert "capability.enrolled_radio_ids.includes(serial)" in javascript
+    assert "capability.enrolled_radio_ids)" in javascript
+    assert "enrollment?.mutation_available !== false" in javascript
+    assert "key_reconciliation_required" in javascript
+    assert "verify and re-enroll" in javascript
+    assert "plan.transport !== requestedTransport" in javascript
+    assert "summary.serial !== selected.serial" in javascript
+    assert "summary.host_key_fingerprint" in javascript
+    assert "summary.current_firmware" in javascript
+    assert "summary.expected_firmware" in javascript
+    assert "summary.source_sha256" in javascript
+    assert "summary.image_sha256" in javascript
+    assert "phases: [...plan.phases]" in javascript
+    assert 'transport === "ssh_frm"' in javascript
+    assert 'mode === "persistent_qspi"' in javascript
+    assert "transport," in javascript
+    assert "operator_confirmation: required" in javascript
+    assert 'clearFirmwarePlan("Plan submitted exactly once.' in javascript
+    assert "confirmationToken" in javascript
+    assert "confirmation_token: plan.confirmationToken" in javascript
+    assert "JSON.stringify(state.firmwarePlan.plan, null, 2)" in javascript
+    assert "JSON.stringify(planned, null, 2)" not in javascript
+    assert "firmware-host" not in parser.ids
+    assert "firmware-path" not in parser.ids
+    assert "firmware-command" not in parser.ids
+    assert ".firmware-warning" in css
+
+
+def test_uncertain_network_flash_is_not_replayed_and_has_read_only_reconcile() -> None:
+    html, javascript, _, parser = _assets()
+
+    assert "reconcile-firmware" in parser.ids
+    assert "Run read-only reconcile" in html
+    assert 'receipt?.outcome === "unknown"' in javascript
+    assert "Outcome unknown · Do not retry" in javascript
+    assert "receipt.completed_phases" in javascript
+    assert "receipt.failure_phase" in javascript
+    assert "receipt.reconciliation_required" in javascript
+    assert "/firmware/receipts/${encodeURIComponent(uncertain.receipt_id)}/reconcile" in javascript
+    assert "Running read-only firmware and target attestation" in javascript
+    assert "Do not retry flashing" in javascript
+    assert "Outcome remains unknown. Do not retry flashing" in javascript
+    assert "state.uncertainFirmwareReceipt = receipt.reconciliation_required" in javascript
+    assert "Firmware bytes and reboot verified" not in javascript
 
 
 def test_doctor_is_read_only_and_routes_repairs_into_guarded_firmware_plan() -> None:
@@ -232,7 +292,9 @@ def test_doctor_is_read_only_and_routes_repairs_into_guarded_firmware_plan() -> 
     assert "prepare-setup-fix" in parser.disabled_ids
     assert "Persistent AD9361/2R2T provisioning" in html
     assert "}/doctor`)" in javascript
-    assert 'ui["firmware-mode"].value = "volatile_dfu"' in javascript
+    assert 'useSsh ? "ssh_frm" : "usb"' in javascript
+    assert 'useSsh ? "persistent_qspi" : "volatile_dfu"' in javascript
+    assert "hardware-qualified canonical release" in javascript
     assert "flash_canonical_firmware_mtd3" in javascript
     assert '"/doctor/firmware-plans"' in javascript
     assert 'setText(ui["run-doctor"], "Checking…")' in javascript

@@ -329,11 +329,43 @@ def _truthy_attribute(value: object) -> bool | None:
 
 
 def _mute_transmit(device: Any) -> None:
+    # Attenuate first so a later buffer/DDS selector transition cannot briefly
+    # expose a previously configured waveform at useful power.
+    gain_attributes = tuple(
+        name
+        for name in ("tx_hardwaregain_chan0", "tx_hardwaregain_chan1")
+        if hasattr(device, name)
+    )
+    for name in gain_attributes:
+        setattr(device, name, -80.0)
+
     close_tx = getattr(device, "tx_destroy_buffer", None)
     if callable(close_tx):
         close_tx()
     if hasattr(device, "tx_enabled_channels"):
         device.tx_enabled_channels = []
+
+    scales = getattr(device, "dds_scales", None)
+    if scales is not None:
+        device.dds_scales = [0.0] * len(scales)
+    disable_dds = getattr(device, "disable_dds", None)
+    if callable(disable_dds):
+        # Keep this last: changing TX scan selection can select DDS internally.
+        disable_dds()
+
+    if hasattr(device, "tx_enabled_channels") and list(device.tx_enabled_channels):
+        raise RadioConfigurationError("TX channels remained enabled after mute")
+    for name in gain_attributes:
+        if float(getattr(device, name)) > -80.0:
+            raise RadioConfigurationError(f"{name} did not reach the -80 dB safety limit")
+    muted_scales = getattr(device, "dds_scales", None)
+    if muted_scales is not None and any(float(value) != 0.0 for value in muted_scales):
+        raise RadioConfigurationError("DDS scale remained nonzero after mute")
+    dds_enabled = getattr(device, "dds_enabled", None)
+    if dds_enabled is not None and any(
+        str(value).strip().lower() not in {"0", "false"} for value in dds_enabled
+    ):
+        raise RadioConfigurationError("DDS source remained enabled after mute")
 
 
 def _release_device(device: Any) -> None:

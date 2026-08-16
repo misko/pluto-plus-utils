@@ -15,6 +15,7 @@ from pluto_plus.cli import (
     _direct_usb_devices,
     _iio_ip_devices,
     _network_iio_inventory,
+    _read_ssh_firmware_enrollment,
     app,
 )
 from pluto_plus.models import Transport
@@ -65,10 +66,15 @@ def api_transport(
             return httpx.Response(200, json={"analysis_id": "analysis-1"})
         if request.method == "POST" and path.endswith("/firmware/images"):
             return httpx.Response(201, json={"image_id": "image-1"})
-        if request.method == "POST" and path.endswith("/firmware/plans"):
+        if request.method == "POST" and (
+            path.endswith("/firmware/plans")
+            or path.endswith("/doctor/firmware-plans")
+        ):
             return httpx.Response(201, json={"plan": {"plan_id": "plan-1"}})
         if request.method == "POST" and path.endswith("/firmware/executions"):
             return httpx.Response(201, json={"receipt_id": "receipt-1"})
+        if request.method == "POST" and path.endswith("/reconcile"):
+            return httpx.Response(200, json={"receipt_id": "receipt-2"})
         if request.method == "POST" and path.endswith("/doctor/setup-plans"):
             return httpx.Response(201, json={"plan": {"plan_id": "setup-plan-1"}})
         if request.method == "POST" and path.endswith("/setup/executions"):
@@ -573,3 +579,123 @@ def test_network_iio_management_requires_discovery() -> None:
     result = runner.invoke(app, ["serve", "--manage-discovered-iio", "SERIAL_A"])
     assert result.exit_code == 2
     assert json.loads(result.stderr)["error"]["code"] == "iio_network_discovery_unavailable"
+
+
+def test_ssh_firmware_cli_sends_transport_confirmation_and_reconcile(
+    api_transport: Any,
+) -> None:
+    requests, _ = api_transport
+
+    plan = runner.invoke(
+        app,
+        [
+            "firmware",
+            "plan",
+            "SERIAL_A",
+            "image-1",
+            "--mode",
+            "persistent_qspi",
+            "--transport",
+            "ssh",
+        ],
+    )
+    assert plan.exit_code == 0, plan.output
+    assert _body(requests[-1])["transport"] == "ssh_frm"
+    assert requests[-1].url.path.endswith(
+        "/radios/SERIAL_A/doctor/firmware-plans"
+    )
+
+    rejected = runner.invoke(
+        app,
+        [
+            "firmware",
+            "plan",
+            "SERIAL_A",
+            "image-1",
+            "--transport",
+            "ssh",
+        ],
+    )
+    assert rejected.exit_code == 2
+    assert json.loads(rejected.stderr)["error"]["code"] == "invalid_firmware_mode"
+
+    execute = runner.invoke(
+        app,
+        [
+            "firmware",
+            "execute",
+            "plan-1",
+            "--token",
+            "secret",
+            "--operator-confirmation",
+            "FLASH SERIAL_A",
+        ],
+    )
+    assert execute.exit_code == 0, execute.output
+    assert _body(requests[-1])["operator_confirmation"] == "FLASH SERIAL_A"
+
+    reconcile = runner.invoke(app, ["firmware", "reconcile", "receipt-1"])
+    assert reconcile.exit_code == 0, reconcile.output
+    assert requests[-1].url.path.endswith("/firmware/receipts/receipt-1/reconcile")
+
+
+def test_ssh_firmware_enrollment_file_is_private_and_strict(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    private_key = tmp_path / "id_ed25519"
+    enrollment = tmp_path / "enrollment.json"
+    known_hosts.write_text("placeholder\n")
+    private_key.write_text("placeholder\n")
+    for path in (known_hosts, private_key):
+        path.chmod(0o600)
+    enrollment.write_text(
+        json.dumps(
+            {
+                "serial": "SERIAL_A",
+                "host": "192.168.2.15",
+                "username": "root",
+                "known_hosts_file": str(known_hosts),
+                "private_key_file": str(private_key),
+            }
+        )
+    )
+    enrollment.chmod(0o600)
+
+    parsed = _read_ssh_firmware_enrollment(enrollment)
+    assert parsed.serial == "SERIAL_A"
+    assert parsed.host == "192.168.2.15"
+
+    enrollment.chmod(0o644)
+    rejected = runner.invoke(
+        app,
+        [
+            "serve",
+            "--fake-radio",
+            "SERIAL_A",
+            "--ssh-firmware-enrollment",
+            str(enrollment),
+        ],
+    )
+    assert rejected.exit_code == 2
+    assert json.loads(rejected.stderr)["error"]["code"] == "invalid_private_file"
+
+    enrollment.chmod(0o600)
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("a-valid-admin-token-with-at-least-32-characters")
+    token_file.chmod(0o600)
+    wrong_transport = runner.invoke(
+        app,
+        [
+            "serve",
+            "--fake-radio",
+            "SERIAL_A",
+            "--admin-token-file",
+            str(token_file),
+            "--ssh-firmware-enrollment",
+            str(enrollment),
+        ],
+    )
+    assert wrong_transport.exit_code == 2
+    assert (
+        json.loads(wrong_transport.stderr)["error"]["code"]
+        == "invalid_ssh_firmware_enrollment"
+    )

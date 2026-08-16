@@ -37,6 +37,10 @@ class FakeAd9361:
         self.gain_control_mode_chan1 = "manual"
         self.rx_hardwaregain_chan0 = 40.0
         self.rx_hardwaregain_chan1 = 40.0
+        self.tx_hardwaregain_chan0 = -10.0
+        self.tx_hardwaregain_chan1 = -10.0
+        self.dds_scales = [0.5] * 8
+        self.dds_enabled = [1] * 8
         self.destroy_count = 0
 
     def rx_destroy_buffer(self) -> None:
@@ -44,6 +48,9 @@ class FakeAd9361:
 
     def tx_destroy_buffer(self) -> None:
         pass
+
+    def disable_dds(self) -> None:
+        self.dds_enabled = [0] * 8
 
     def rx(self) -> np.ndarray:
         return np.stack(
@@ -61,6 +68,17 @@ class FakeAdi:
 
     def ad9361(self, uri: str) -> FakeAd9361:
         self.device = FakeAd9361(uri, self.serial)
+        return self.device
+
+
+class UnsafeFakeAd9361(FakeAd9361):
+    def disable_dds(self) -> None:
+        pass
+
+
+class UnsafeFakeAdi(FakeAdi):
+    def ad9361(self, uri: str) -> FakeAd9361:
+        self.device = UnsafeFakeAd9361(uri, self.serial)
         return self.device
 
 
@@ -99,6 +117,10 @@ def test_iio_adapter_applies_reads_back_and_captures_paired_rx() -> None:
         assert block.samples.shape == (2, 2048)
         assert module.device is not None
         assert module.device.tx_enabled_channels == []
+        assert module.device.tx_hardwaregain_chan0 == -80.0
+        assert module.device.tx_hardwaregain_chan1 == -80.0
+        assert module.device.dds_scales == [0.0] * 8
+        assert module.device.dds_enabled == [0] * 8
     finally:
         radio.close()
 
@@ -111,6 +133,17 @@ def test_iio_adapter_fails_closed_on_wrong_opened_serial() -> None:
         iio_contexts={"usb:1": "serial=SERIAL_A"},
     )
     with pytest.raises(RadioConfigurationError, match="expected 'SERIAL_A'"):
+        radio.open()
+
+
+def test_iio_adapter_fails_closed_when_dds_mute_does_not_read_back() -> None:
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        adi_module=UnsafeFakeAdi(),
+        iio_contexts={"usb:1": "serial=SERIAL_A"},
+    )
+    with pytest.raises(RadioConfigurationError, match="DDS source remained enabled"):
         radio.open()
 
 

@@ -163,7 +163,11 @@ def test_api_firmware_plan_execute_reopens_and_receipts(tmp_path: Path) -> None:
         snapshot = client.get(f"{API_PREFIX}/radios/fake-001").json()
         assert snapshot["state"] == "ready"
         assert snapshot["revision"] == 1
-        receipts = client.get(f"{API_PREFIX}/firmware/receipts").json()
+        denied_receipts = client.get(f"{API_PREFIX}/firmware/receipts")
+        assert denied_receipts.status_code == 403
+        receipts = client.get(
+            f"{API_PREFIX}/firmware/receipts", headers=_admin_headers()
+        ).json()
         assert [item["receipt_id"] for item in receipts] == [executed.json()["receipt_id"]]
 
 

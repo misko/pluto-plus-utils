@@ -270,12 +270,14 @@ class FirmwareImageSummary(ApiModel):
 class FirmwarePlanRequest(ApiModel):
     image_id: str
     mode: str
+    transport: str = "usb"
     expected_firmware_version: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class FirmwareExecuteRequest(ApiModel):
     plan_id: str
     confirmation_token: str = Field(min_length=1)
+    operator_confirmation: str | None = Field(default=None, min_length=1, max_length=240)
 
 
 class DoctorStatus(StrEnum):

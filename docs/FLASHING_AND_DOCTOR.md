@@ -161,16 +161,48 @@ The staged flow is intentionally two-phase:
 Guarded CLI primitives are:
 
 ```console
-pluto firmware upload ./IMAGE.dfu
-pluto firmware plan RADIO_ID IMAGE_ID --mode volatile_dfu \
+pluto --admin-token-file /private/admin.token firmware upload ./IMAGE.dfu
+pluto --admin-token-file /private/admin.token firmware plan RADIO_ID IMAGE_ID --mode volatile_dfu \
   --expected-version v0.38-plutoplus-spf-libiio-metadata-v5
-pluto firmware execute PLAN_ID --token 'ONE_TIME_TOKEN'
+pluto --admin-token-file /private/admin.token firmware execute PLAN_ID --token 'ONE_TIME_TOKEN'
 ```
 
 After the volatile checkpoint, repeat `plan` with `--mode persistent_qspi`. These
 commands fail closed unless the daemon has a separately configured privileged helper
 and an exact USB identity. The web Firmware panel uses precisely the same upload,
 plan, token, and receipt API; typing the selected serial is required before execution.
+
+### Persistent update over enrolled SSH
+
+The experimental `ssh_frm` transport supports installed radios that have network IIO
+and SSH but no USB connection to the daemon host. It does not turn an IP address into
+identity: the daemon requires one private enrollment binding the literal endpoint to
+the exact managed IIO serial and an out-of-band verified SSH host key. Only key-based
+root SSH is accepted. Discovery does not enroll a radio.
+
+This transport is deliberately narrower than the USB firmware surface:
+
+- only `persistent_qspi` is accepted;
+- only the selected hardware-qualified canonical FIT body is accepted, whether the
+  uploaded source is the published DFU or a correctly generated FRM;
+- the remote staging path and updater command are fixed by the server;
+- the on-radio updater must report success and the exact FIT bytes are hashed back
+  from `mtd3` before reset;
+- no arbitrary path, command, DFU alternate, environment write, or direct MTD write
+  is exposed;
+- the same IIO serial and expected firmware must return, with TX mute read back.
+
+Every authorized attempt records `local_validation`, remote identity/TX preflight,
+upload, updater dispatch, QSPI readback, cleanup, sync, reset, return, and TX-safety
+phases. Failures before updater dispatch are known failures. Failures after dispatch
+are unknown until the read-only receipt reconciliation succeeds. A consumed plan is
+never retried.
+
+Pluto SSH host keys can change after reboot. A replacement key is not accepted from
+the network automatically. The receipt retains the verified pre-reset QSPI evidence,
+but the enrollment remains locked until an operator verifies the new fingerprint
+through an independent trusted path, updates the private known-hosts enrollment, and
+runs `pluto firmware reconcile RECEIPT_ID` after restarting the daemon.
 
 ## Checkpoints and tests
 

@@ -590,7 +590,8 @@ pre {
   line-height: 1.55;
 }
 
-.setup-warning {
+.setup-warning,
+.firmware-warning {
   margin: 1rem 0;
   padding: 0.85rem 1rem;
   color: #f4dec0;
@@ -599,6 +600,15 @@ pre {
   border-left: 4px solid #e7b55b;
   border-radius: 7px;
   line-height: 1.5;
+}
+
+.firmware-warning strong,
+.setup-warning strong {
+  color: #ffe5bd;
+}
+
+#firmware-transport-evidence {
+  margin-top: 0.45rem;
 }
 
 .setup-panel pre {

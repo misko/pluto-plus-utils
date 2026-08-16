@@ -152,6 +152,44 @@ Once that separately installed helper is listening on a protected Unix socket,
 compose the client boundary explicitly with
 `plutod --firmware-helper-socket /run/pluto-plus/firmware-helper.sock ...`.
 
+### Experimental network firmware transport
+
+An IP-attached, managed IIO radio can be explicitly enrolled for a canonical,
+persistent `pluto.frm` update. Network discovery alone never grants this ability.
+Enrollment is a private mode-0600 JSON file:
+
+```json
+{
+  "serial": "EXACT_HARDWARE_SERIAL",
+  "host": "192.168.1.165",
+  "username": "root",
+  "known_hosts_file": "/absolute/private/radio.known_hosts",
+  "private_key_file": "/absolute/private/radio_ed25519"
+}
+```
+
+The known-host key must be verified out of band; the daemon never performs
+trust-on-first-use. Add the enrollment to a daemon that already manages the same
+serial and IP with `--ssh-firmware-enrollment /absolute/private/enrollment.json`.
+The API remains unavailable for mutation over non-loopback plaintext HTTP.
+
+```bash
+uv run pluto --admin-token-file /private/admin.token firmware upload RELEASE.dfu
+uv run pluto --admin-token-file /private/admin.token firmware plan EXACT_HARDWARE_SERIAL IMAGE_ID \
+  --mode persistent_qspi --transport ssh \
+  --expected-version v0.38-plutoplus-spf-libiio-metadata-v5
+uv run pluto --admin-token-file /private/admin.token firmware execute PLAN_ID --token TOKEN \
+  --operator-confirmation 'FLASH EXACT_HARDWARE_SERIAL'
+uv run pluto --admin-token-file /private/admin.token firmware reconcile RECEIPT_ID
+```
+
+The SSH transport accepts only the hardware-qualified canonical FIT, invokes only
+the fixed on-radio FRM updater, verifies the exact `mtd3` FIT body before reset,
+and records durable phases. A disconnect after updater dispatch is an unknown
+outcome and must be reconciled, never replayed. A rebooted radio that presents a
+new SSH host key is locked out until that key is verified and re-enrolled out of
+band. See [ADR 0004](docs/adr/0004-ssh-staged-firmware.md).
+
 ## Direct transport status
 
 `pluto_plus.direct_radio` contains USB v3 and direct-IP v1 wire parsers, bounded

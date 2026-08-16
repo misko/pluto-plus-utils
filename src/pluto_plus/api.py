@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -36,6 +37,7 @@ from pluto_plus.firmware import (
     FirmwareError,
     FirmwareExecutionError,
     FirmwareMode,
+    FirmwareTransport,
 )
 from pluto_plus.models import (
     AnalysisRequest,
@@ -187,10 +189,7 @@ def create_app(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "error": {"code": "firmware_execution_failed", "message": str(error)},
-                "receipt": {
-                    "receipt_id": error.receipt.receipt_id,
-                    "success": error.receipt.success,
-                },
+                "receipt": jsonable_encoder(error.receipt),
             },
         )
 
@@ -529,11 +528,26 @@ def create_app(
                 f"unsupported firmware mode: {payload.mode}",
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
             )
+        try:
+            transport = FirmwareTransport(payload.transport)
+        except ValueError:
+            return _error(
+                "invalid_firmware_transport",
+                f"unsupported firmware transport: {payload.transport}",
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+            )
+        if transport is FirmwareTransport.SSH_FRM:
+            return _error(
+                "ssh_firmware_requires_canonical_route",
+                "ssh_frm plans must use the canonical doctor firmware-plan route",
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+            )
         return service.create_firmware_plan(
             radio_id,
             payload.image_id,
             mode,
             expected_firmware_version=payload.expected_firmware_version,
+            transport=transport,
         )
 
     @router.post(
@@ -553,7 +567,17 @@ def create_app(
                 f"unsupported firmware mode: {payload.mode}",
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
             )
-        return service.create_canonical_firmware_plan(radio_id, payload.image_id, mode)
+        try:
+            transport = FirmwareTransport(payload.transport)
+        except ValueError:
+            return _error(
+                "invalid_firmware_transport",
+                f"unsupported firmware transport: {payload.transport}",
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+            )
+        return service.create_canonical_firmware_plan(
+            radio_id, payload.image_id, mode, transport=transport
+        )
 
     @router.post(
         "/firmware/executions",
@@ -562,11 +586,21 @@ def create_app(
     )
     def execute_firmware_plan(payload: FirmwareExecuteRequest, request: Request) -> Any:
         require_admin(request, mutation=True)
-        return service.execute_firmware_plan(payload.plan_id, payload.confirmation_token)
+        return service.execute_firmware_plan(
+            payload.plan_id,
+            payload.confirmation_token,
+            operator_confirmation=payload.operator_confirmation,
+        )
 
     @router.get("/firmware/receipts", response_model=None)
-    def list_firmware_receipts() -> Any:
+    def list_firmware_receipts(request: Request) -> Any:
+        require_admin(request, mutation=False)
         return service.list_firmware_receipts()
+
+    @router.post("/firmware/receipts/{receipt_id}/reconcile", response_model=None)
+    def reconcile_firmware_receipt(receipt_id: str, request: Request) -> Any:
+        require_admin(request, mutation=True)
+        return service.reconcile_firmware_receipt(receipt_id)
 
     async def waterfall(websocket: WebSocket, radio_id: str) -> None:
         try:

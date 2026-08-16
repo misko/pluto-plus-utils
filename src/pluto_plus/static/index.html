@@ -331,7 +331,10 @@
           </div>
           <span id="firmware-availability" class="deferred-badge">Checking helper</span>
         </div>
-        <p>Updates use a guarded privileged helper. Upload and plan first, inspect the exact serial, path, digest, and mode, then explicitly execute the short-lived one-time token.</p>
+        <p>Updates use a guarded privileged helper. Upload and plan first, inspect the exact serial, pinned target identity, digests, phases, and mode, then explicitly execute the short-lived one-time token. The admin bearer token entered above is reused in memory and is never included in plan output.</p>
+        <div class="firmware-warning" role="note">
+          <strong>Network flashing is enrollment-only.</strong> Discovering a radio never enables SSH firmware access. The Network SSH option appears only when the daemon reports that the selected serial is enrolled with a pinned host key.
+        </div>
         <div class="actions">
           <button id="inspect-firmware" class="button secondary" type="button">Inspect firmware</button>
         </div>
@@ -341,6 +344,14 @@
               <div>
                 <label for="firmware-image">Validated image (.dfu or .frm)</label>
                 <input id="firmware-image" type="file" accept=".dfu,.frm" required>
+              </div>
+              <div>
+                <label for="firmware-transport">Transport</label>
+                <select id="firmware-transport">
+                  <option value="usb">USB</option>
+                  <option id="firmware-transport-ssh" value="ssh_frm" hidden disabled>Network SSH (enrolled)</option>
+                </select>
+                <p id="firmware-transport-evidence" class="hint">Checking server transport capabilities.</p>
               </div>
               <div>
                 <label for="firmware-mode">Update mode</label>
@@ -360,10 +371,11 @@
         <pre id="firmware-plan-output" tabindex="0">No firmware plan created.</pre>
         <div class="control-grid">
           <div>
-            <label for="firmware-confirm-serial">Type the selected radio serial to execute</label>
+            <label for="firmware-confirm-serial">Type <span id="firmware-confirmation-requirement" class="mono">the selected radio serial</span> to execute</label>
             <input id="firmware-confirm-serial" autocomplete="off" spellcheck="false">
           </div>
           <div class="actions align-end">
+            <button id="reconcile-firmware" class="button secondary" type="button" disabled>Run read-only reconcile</button>
             <button id="execute-firmware" class="button danger" type="button" disabled>Execute exact plan</button>
           </div>
         </div>

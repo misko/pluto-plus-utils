@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from importlib import import_module
 from ipaddress import ip_address
@@ -49,6 +50,14 @@ class _Context:
     endpoint: str
     admin_token: str | None = None
     client: ApiClient | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SshFirmwareEnrollmentConfig:
+    serial: str
+    host: str
+    known_hosts_file: Path
+    private_key_file: Path
 
 
 class ApiClient:
@@ -247,6 +256,87 @@ def _private_usb_host(value: str) -> str:
             2,
         )
     return str(address)
+
+
+def _read_ssh_firmware_enrollment(path: Path) -> _SshFirmwareEnrollmentConfig:
+    encoded = _read_private_file_bytes(
+        path, label="SSH firmware enrollment", maximum_bytes=64 * 1024
+    )
+    if stat.S_IMODE(path.lstat().st_mode) != 0o600:
+        _fail(
+            "invalid_ssh_firmware_enrollment",
+            "SSH firmware enrollment file mode must be exactly 0600",
+            2,
+        )
+    try:
+        document = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        _fail("invalid_ssh_firmware_enrollment", f"invalid JSON: {error}", 2)
+    if not isinstance(document, dict):
+        _fail("invalid_ssh_firmware_enrollment", "enrollment must be a JSON object", 2)
+    expected_keys = {
+        "serial",
+        "host",
+        "username",
+        "known_hosts_file",
+        "private_key_file",
+    }
+    if set(document) != expected_keys:
+        _fail(
+            "invalid_ssh_firmware_enrollment",
+            "enrollment must contain only serial, host, username, known_hosts_file, "
+            "and private_key_file",
+            2,
+        )
+    serial = document["serial"]
+    if not isinstance(serial, str) or not serial or serial.strip() != serial:
+        _fail("invalid_ssh_firmware_enrollment", "serial must be one exact value", 2)
+    if document["username"] != "root":
+        _fail("invalid_ssh_firmware_enrollment", "username must be exactly root", 2)
+    host_value = document["host"]
+    if not isinstance(host_value, str):
+        _fail("invalid_ssh_firmware_enrollment", "host must be a literal IP", 2)
+    try:
+        address = ip_address(host_value)
+    except ValueError:
+        _fail("invalid_ssh_firmware_enrollment", "host must be a literal IP", 2)
+    if address.is_global or address.is_loopback or address.is_multicast or address.is_unspecified:
+        _fail(
+            "invalid_ssh_firmware_enrollment",
+            "host must be a private or link-local unicast IP",
+            2,
+        )
+    if not isinstance(document["known_hosts_file"], str) or not isinstance(
+        document["private_key_file"], str
+    ):
+        _fail(
+            "invalid_ssh_firmware_enrollment",
+            "credential file paths must be strings",
+            2,
+        )
+    known_hosts_file = Path(document["known_hosts_file"])
+    private_key_file = Path(document["private_key_file"])
+    _read_private_file_bytes(
+        known_hosts_file, label="SSH firmware known-hosts", maximum_bytes=1024 * 1024
+    )
+    _read_private_file_bytes(
+        private_key_file, label="SSH firmware private key", maximum_bytes=1024 * 1024
+    )
+    if any(
+        stat.S_IMODE(path.lstat().st_mode) != 0o600
+        for path in (known_hosts_file, private_key_file)
+    ):
+        _fail(
+            "invalid_ssh_firmware_enrollment",
+            "SSH firmware credential file modes must be exactly 0600",
+            2,
+        )
+    return _SshFirmwareEnrollmentConfig(
+        serial=serial,
+        host=str(address),
+        known_hosts_file=known_hosts_file,
+        private_key_file=private_key_file,
+    )
 
 
 @radio_app.command("list")
@@ -516,16 +606,32 @@ def firmware_plan(
     radio_id: str = typer.Argument(...),
     image_id: str = typer.Argument(...),
     mode: str = typer.Option("volatile_dfu", "--mode"),
+    transport: str = typer.Option("usb", "--transport", help="usb or ssh"),
     expected_version: str | None = typer.Option(None, "--expected-version"),
 ) -> None:
     """Create an expiring identity/hash-bound plan and one-time token."""
+    normalized_transport = "ssh_frm" if transport == "ssh" else transport
+    if normalized_transport not in {"usb", "ssh_frm"}:
+        _fail("invalid_firmware_transport", "--transport must be usb or ssh", 2)
+    if normalized_transport == "ssh_frm" and mode != "persistent_qspi":
+        _fail(
+            "invalid_firmware_mode",
+            "SSH firmware transport requires --mode persistent_qspi",
+            2,
+        )
     body = {"image_id": image_id, "mode": mode}
+    if normalized_transport != "usb":
+        body["transport"] = normalized_transport
     if expected_version is not None:
         body["expected_firmware_version"] = expected_version
     _emit(
         _api(ctx).request(
             "POST",
-            f"radios/{radio_id}/firmware/plans",
+            (
+                f"radios/{radio_id}/doctor/firmware-plans"
+                if normalized_transport == "ssh_frm"
+                else f"radios/{radio_id}/firmware/plans"
+            ),
             json_body=body,
         )
     )
@@ -536,13 +642,21 @@ def firmware_execute(
     ctx: typer.Context,
     plan_id: str = typer.Argument(...),
     confirmation_token: str = typer.Option(..., "--token", prompt=True, hide_input=True),
+    operator_confirmation: str | None = typer.Option(
+        None,
+        "--operator-confirmation",
+        help="For ssh_frm, exact phrase FLASH <serial>.",
+    ),
 ) -> None:
     """Consume a plan's one-time token and perform its exact operation."""
+    body = {"plan_id": plan_id, "confirmation_token": confirmation_token}
+    if operator_confirmation is not None:
+        body["operator_confirmation"] = operator_confirmation
     _emit(
         _api(ctx).request(
             "POST",
             "firmware/executions",
-            json_body={"plan_id": plan_id, "confirmation_token": confirmation_token},
+            json_body=body,
         )
     )
 
@@ -551,6 +665,19 @@ def firmware_execute(
 def firmware_receipt_list(ctx: typer.Context) -> None:
     """List receipts for authorized firmware attempts in this daemon lifetime."""
     _emit(_api(ctx).request("GET", "firmware/receipts"))
+
+
+@firmware_app.command("reconcile")
+def firmware_reconcile(
+    ctx: typer.Context, receipt_id: str = typer.Argument(...)
+) -> None:
+    """Read-only re-attest an uncertain firmware attempt; never retry it."""
+
+    _emit(
+        _api(ctx).request(
+            "POST", f"firmware/receipts/{receipt_id}/reconcile", json_body={}
+        )
+    )
 
 
 @setup_app.command("status")
@@ -805,6 +932,11 @@ def serve(
         "--firmware-helper-socket",
         help="Protected absolute Unix socket for the site-specific privileged helper.",
     ),
+    ssh_firmware_enrollment: list[Path] | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-firmware-enrollment",
+        help="Private exact-radio SSH firmware enrollment JSON (repeatable).",
+    ),
     admin_token_file: Path | None = typer.Option(  # noqa: B008
         None,
         "--admin-token-file",
@@ -917,6 +1049,29 @@ def serve(
         devices.extend(_discover_production_devices())
     if not devices and not discovered_radios:
         _fail("no_radios", "no fake radios requested and no hardware radios discovered", 2)
+
+    ssh_enrollments = tuple(
+        _read_ssh_firmware_enrollment(path)
+        for path in (ssh_firmware_enrollment or [])
+    )
+    if ssh_enrollments and admin_policy is None:
+        _fail(
+            "admin_authentication_unavailable",
+            "SSH firmware enrollment requires --admin-token-file",
+            2,
+        )
+    if len({item.serial for item in ssh_enrollments}) != len(ssh_enrollments):
+        _fail(
+            "duplicate_ssh_firmware_enrollment",
+            "SSH firmware enrollment serials must be unique",
+            2,
+        )
+    if len({item.host for item in ssh_enrollments}) != len(ssh_enrollments):
+        _fail(
+            "duplicate_ssh_firmware_enrollment",
+            "SSH firmware enrollment hosts must be unique",
+            2,
+        )
 
     setup_manager = None
     setup_options = {
@@ -1076,6 +1231,159 @@ def serve(
         firmware_manager=firmware_manager,
         setup_manager=setup_manager,
     )
+    if ssh_enrollments:
+        from pluto_plus.doctor import CANONICAL_POLICY
+        from pluto_plus.firmware import (
+            FirmwareManager,
+            FirmwareTransport,
+            RadioFirmwareIdentity,
+        )
+        from pluto_plus.hardware.iio import IioRadioDevice
+        from pluto_plus.ip_firmware import (
+            IpFirmwareEnrollment,
+            IpFirmwareError,
+            IpFirmwareExecutor,
+            PinnedSshFirmwareTransport,
+        )
+        from pluto_plus.models import Transport
+
+        snapshots = {snapshot.identity.serial: snapshot for snapshot in service.list_radios()}
+        try:
+            for enrollment in ssh_enrollments:
+                snapshot = snapshots.get(enrollment.serial)
+                if snapshot is None or not snapshot.managed:
+                    raise ValueError(
+                        f"serial {enrollment.serial!r} is not exactly one managed radio"
+                    )
+                radio_identity = snapshot.identity
+                if radio_identity.transport is not Transport.IIO_IP:
+                    raise ValueError(
+                        f"serial {enrollment.serial!r} is not a managed network-IIO radio"
+                    )
+                if radio_identity.uri != f"ip:{enrollment.host}":
+                    raise ValueError(
+                        f"serial {enrollment.serial!r} URI does not match enrolled host"
+                    )
+                if radio_identity.firmware_version is None:
+                    raise ValueError(
+                        f"serial {enrollment.serial!r} has no observed firmware version"
+                    )
+                transport = PinnedSshFirmwareTransport(
+                    endpoint=enrollment.host,
+                    known_hosts_file=enrollment.known_hosts_file,
+                    private_key_file=enrollment.private_key_file,
+                )
+                initial_attestation = transport.attest()
+                if (
+                    initial_attestation.serial != enrollment.serial
+                    or initial_attestation.active_firmware
+                    != radio_identity.firmware_version
+                ):
+                    raise ValueError(
+                        "initial pinned-SSH identity does not match managed network-IIO state"
+                    )
+
+                def post_reset_probe(
+                    requested_serial: str,
+                    *,
+                    enrolled_serial: str = enrollment.serial,
+                    enrolled_host: str = enrollment.host,
+                    enrolled_fingerprint: str = transport.host_key_fingerprint,
+                ) -> Any:
+                    if requested_serial != enrolled_serial:
+                        raise RuntimeError("post-reset probe requested another serial")
+                    probe = IioRadioDevice(
+                        f"ip:{enrolled_host}",
+                        serial=enrolled_serial,
+                        radio_id=enrolled_serial,
+                    )
+                    probe.open()
+                    try:
+                        observed = probe.identity
+                        if (
+                            observed.serial != enrolled_serial
+                            or observed.transport is not Transport.IIO_IP
+                            or observed.uri != f"ip:{enrolled_host}"
+                            or observed.firmware_version is None
+                        ):
+                            raise RuntimeError(
+                                "post-reset network-IIO identity did not match enrollment"
+                            )
+                        return RadioFirmwareIdentity(
+                            serial=observed.serial,
+                            usb_sysfs_path=None,
+                            observed_firmware=observed.firmware_version,
+                            endpoint=enrolled_host,
+                            host_key_fingerprint=enrolled_fingerprint,
+                        )
+                    finally:
+                        probe.close()
+
+                def post_reset_tx_guard(
+                    requested_serial: str,
+                    *,
+                    enrolled_serial: str = enrollment.serial,
+                    enrolled_host: str = enrollment.host,
+                ) -> bool:
+                    if requested_serial != enrolled_serial:
+                        return False
+                    guard = IioRadioDevice(
+                        f"ip:{enrolled_host}",
+                        serial=enrolled_serial,
+                        radio_id=enrolled_serial,
+                    )
+                    try:
+                        # open() performs strict TX mute/readback before exposing identity.
+                        guard.open()
+                        observed = guard.identity
+                        return (
+                            observed.serial == enrolled_serial
+                            and observed.transport is Transport.IIO_IP
+                            and observed.uri == f"ip:{enrolled_host}"
+                            and observed.firmware_version
+                            == CANONICAL_POLICY.device_firmware
+                        )
+                    except Exception:
+                        return False
+                    finally:
+                        with suppress(Exception):
+                            guard.close()
+
+                ip_executor = IpFirmwareExecutor(
+                    enrollment=IpFirmwareEnrollment(
+                        endpoint=enrollment.host,
+                        serial=enrollment.serial,
+                        board_model=initial_attestation.board_model,
+                        observed_firmware=radio_identity.firmware_version,
+                        host_key_fingerprint=transport.host_key_fingerprint,
+                    ),
+                    transport=transport,
+                    expected_firmware=CANONICAL_POLICY.device_firmware,
+                    post_reset_probe=post_reset_probe,
+                    post_reset_tx_guard=post_reset_tx_guard,
+                    evidence_directory=(
+                        state_root / "firmware" / "ssh-evidence" / enrollment.serial
+                    ).absolute(),
+                )
+                service.enroll_ip_firmware_manager(
+                    enrollment.serial,
+                    FirmwareManager(
+                        staging_directory=(state_root / "firmware" / "staging").absolute(),
+                        receipt_directory=(
+                            state_root
+                            / "firmware"
+                            / "receipts"
+                            / "ssh_frm"
+                            / enrollment.serial
+                        ).absolute(),
+                        identity_probe=ip_executor.identity_probe,
+                        executor=ip_executor,
+                        transport=FirmwareTransport.SSH_FRM,
+                    ),
+                )
+        except (ValueError, IpFirmwareError) as error:
+            service.close()
+            _fail("invalid_ssh_firmware_enrollment", str(error), 2)
     api = create_app(service, admin_policy=admin_policy)
     try:
         if uds is not None:

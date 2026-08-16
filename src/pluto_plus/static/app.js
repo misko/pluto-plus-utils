@@ -24,8 +24,10 @@ const ui = Object.fromEntries(
     "analysis-artifact", "analyzer-select", "analysis-parameters", "analysis-validation",
     "analysis-summary", "analysis-result", "toast-region",
     "firmware-availability", "inspect-firmware", "firmware-form", "firmware-fieldset",
-    "firmware-image", "firmware-mode", "plan-firmware", "firmware-plan-output",
-    "firmware-expected-version", "firmware-confirm-serial", "execute-firmware", "firmware-result",
+    "firmware-image", "firmware-transport", "firmware-transport-ssh",
+    "firmware-transport-evidence", "firmware-mode", "plan-firmware", "firmware-plan-output",
+    "firmware-expected-version", "firmware-confirm-serial", "firmware-confirmation-requirement",
+    "execute-firmware", "reconcile-firmware", "firmware-result",
     "scan-form", "scan-fieldset", "scan-start", "scan-stop", "scan-step", "scan-samples",
     "start-scan", "stop-scan", "scan-message", "scans-body",
     "doctor-health", "run-doctor", "prepare-doctor-fix", "doctor-profile",
@@ -52,7 +54,9 @@ const state = {
   pollingTimer: null,
   settingsDirty: false,
   firmwareAvailable: false,
+  firmwareCapabilities: null,
   firmwarePlan: null,
+  uncertainFirmwareReceipt: null,
   scanning: false,
   doctorReport: null,
   doctorRepair: false,
@@ -467,13 +471,17 @@ function prepareDoctorFix() {
   const policy = state.doctorReport?.canonical_policy;
   if (!policy) return;
   ui["firmware-expected-version"].value = policy.device_firmware;
-  ui["firmware-mode"].value = "volatile_dfu";
+  const useSsh = firmwareTransportAvailable("ssh_frm");
+  ui["firmware-transport"].value = useSsh ? "ssh_frm" : "usb";
+  ui["firmware-mode"].value = useSsh ? "persistent_qspi" : "volatile_dfu";
   state.doctorRepair = true;
   updateFirmwareEnabled();
   ui["firmware-form"].scrollIntoView({ behavior: "smooth", block: "center" });
   setText(
     ui["firmware-result"],
-    `Choose ${policy.asset_name}; its SHA-256 must be ${policy.asset_sha256}. Qualify it in RAM before a separate persistent plan.`,
+    useSsh
+      ? `Choose ${policy.asset_name}; its SHA-256 must be ${policy.asset_sha256}. The enrolled SSH repair accepts only this hardware-qualified canonical release.`
+      : `Choose ${policy.asset_name}; its SHA-256 must be ${policy.asset_sha256}. Qualify it in RAM before a separate persistent plan.`,
   );
 }
 
@@ -676,21 +684,153 @@ async function reconcileSetup() {
   }
 }
 
+function firmwareTransportAvailable(transport = ui["firmware-transport"].value) {
+  const transports = state.firmwareCapabilities?.transports || {};
+  const capability = transports[transport];
+  if (!capability?.available || !state.snapshot || state.snapshot.managed === false) return false;
+  if (transport === "ssh_frm") {
+    const serial = state.snapshot.identity.serial;
+    const enrollment = capability.enrollments?.[serial];
+    return Array.isArray(capability.enrolled_radio_ids)
+      && capability.enrolled_radio_ids.includes(serial)
+      && enrollment?.mutation_available !== false;
+  }
+  return transport === "usb";
+}
+
+function selectedSshFirmwareEnrollment() {
+  const serial = state.snapshot?.identity?.serial;
+  const capability = state.firmwareCapabilities?.transports?.ssh_frm;
+  if (!serial || !Array.isArray(capability?.enrolled_radio_ids)
+      || !capability.enrolled_radio_ids.includes(serial)) return null;
+  return capability.enrollments?.[serial] || { mutation_available: true };
+}
+
+function updateFirmwareTransportOptions() {
+  const sshEnrollment = selectedSshFirmwareEnrollment();
+  const sshEnrolled = firmwareTransportAvailable("ssh_frm");
+  ui["firmware-transport-ssh"].hidden = !sshEnrolled;
+  ui["firmware-transport-ssh"].disabled = !sshEnrolled;
+  if (!sshEnrolled && ui["firmware-transport"].value === "ssh_frm") {
+    ui["firmware-transport"].value = "usb";
+  }
+  const transport = ui["firmware-transport"].value;
+  if (transport === "ssh_frm") {
+    ui["firmware-mode"].value = "persistent_qspi";
+    setText(
+      ui["firmware-transport-evidence"],
+      `Selected serial ${state.snapshot.identity.serial} is server-enrolled. The pinned host-key fingerprint will be fixed in the plan.`,
+    );
+  } else if (sshEnrollment?.key_reconciliation_required) {
+    setText(
+      ui["firmware-transport-evidence"],
+      "Network SSH is locked: verify and re-enroll the changed host key out of band, then reconcile the prior receipt.",
+    );
+  } else if (sshEnrolled) {
+    setText(
+      ui["firmware-transport-evidence"],
+      "USB selected. Network SSH is also available for this enrolled serial.",
+    );
+  } else {
+    setText(
+      ui["firmware-transport-evidence"],
+      "USB only. Discovery does not enroll a radio for Network SSH flashing.",
+    );
+  }
+  setText(
+    ui["firmware-confirmation-requirement"],
+    transport === "ssh_frm" && state.snapshot
+      ? `FLASH ${state.snapshot.identity.serial}`
+      : "the selected radio serial",
+  );
+}
+
 function updateFirmwareEnabled() {
+  updateFirmwareTransportOptions();
   const snapshot = state.snapshot;
   const capabilities = snapshot?.capabilities || {};
+  const transport = ui["firmware-transport"].value;
   const mode = ui["firmware-mode"].value;
-  const radioSupportsMode = mode === "persistent_qspi"
-    ? capabilities.supports_persistent_firmware
-    : capabilities.supports_volatile_firmware;
-  const ready = snapshot?.state === "ready";
-  ui["firmware-fieldset"].disabled = !(state.firmwareAvailable && ready && radioSupportsMode);
+  const radioSupportsMode = transport === "ssh_frm"
+    ? mode === "persistent_qspi"
+    : (mode === "persistent_qspi"
+      ? capabilities.supports_persistent_firmware
+      : capabilities.supports_volatile_firmware);
+  const ready = snapshot?.managed !== false && snapshot?.state === "ready";
+  ui["firmware-fieldset"].disabled = !(
+    state.firmwareAvailable
+    && ready
+    && radioSupportsMode
+    && firmwareTransportAvailable(transport)
+  );
   ui["execute-firmware"].disabled = !state.firmwarePlan;
+  ui["reconcile-firmware"].disabled = !state.uncertainFirmwareReceipt;
+}
+
+function clearFirmwarePlan(message = "No firmware plan created.") {
+  state.firmwarePlan = null;
+  ui["firmware-confirm-serial"].value = "";
+  ui["execute-firmware"].disabled = true;
+  setText(ui["firmware-plan-output"], message);
+}
+
+function clearFirmwareUncertainty() {
+  state.uncertainFirmwareReceipt = null;
+  ui["reconcile-firmware"].disabled = true;
+}
+
+function validatedFirmwarePlan(document, requestedTransport) {
+  const plan = document?.plan;
+  const summary = plan?.transport_summary;
+  const selected = state.snapshot?.identity;
+  if (!plan || !document.confirmation_token || !summary || !selected) {
+    throw new Error("Daemon returned an incomplete firmware plan.");
+  }
+  if (plan.transport !== requestedTransport || summary.serial !== selected.serial) {
+    throw new Error("Firmware plan identity or transport does not match the selected radio.");
+  }
+  if (!Array.isArray(plan.phases) || !plan.phases.length) {
+    throw new Error("Firmware plan omitted its execution phases.");
+  }
+  for (const digest of [summary.source_sha256, summary.image_sha256]) {
+    if (!/^[0-9a-f]{64}$/.test(digest || "")) {
+      throw new Error("Firmware plan contains an invalid image digest.");
+    }
+  }
+  if (requestedTransport === "ssh_frm") {
+    if (!summary.endpoint || !summary.host_key_fingerprint) {
+      throw new Error("Network SSH plan omitted its enrolled endpoint or host-key fingerprint.");
+    }
+  }
+  return {
+    plan: {
+      plan_id: plan.plan_id,
+      expires_at: plan.expires_at,
+      mode: plan.mode,
+      transport: plan.transport,
+      target: {
+        serial: summary.serial,
+        endpoint: summary.endpoint || "local USB",
+        host_key_fingerprint: summary.host_key_fingerprint || "not applicable",
+      },
+      versions: {
+        current: summary.current_firmware,
+        expected: summary.expected_firmware,
+      },
+      hashes: {
+        source_sha256: summary.source_sha256,
+        image_sha256: summary.image_sha256,
+      },
+      phases: [...plan.phases],
+    },
+    confirmationToken: document.confirmation_token,
+  };
 }
 
 async function loadFirmwareStatus() {
   try {
     const status = await apiRequest("/firmware");
+    state.firmwareCapabilities = status;
     state.firmwareAvailable = Boolean(status.available) && browserPrivilegedTransportSafe();
     setText(
       ui["firmware-availability"],
@@ -701,6 +841,7 @@ async function loadFirmwareStatus() {
           : "Read-only mode · use HTTPS or an SSH tunnel to loopback"),
     );
   } catch (error) {
+    state.firmwareCapabilities = null;
     state.firmwareAvailable = false;
     setText(ui["firmware-availability"], `Unavailable · ${describeError(error)}`);
   }
@@ -742,16 +883,20 @@ async function planFirmware(event) {
     setText(ui["firmware-result"], "Choose one .dfu or .frm image.");
     return;
   }
-  state.firmwarePlan = null;
+  clearFirmwarePlan("Uploading and validating firmware…");
+  clearFirmwareUncertainty();
   updateFirmwareEnabled();
   setText(ui["firmware-result"], "Uploading and validating firmware…");
   try {
+    const transport = ui["firmware-transport"].value;
     const upload = await apiRequest(`/firmware/images?filename=${encodeURIComponent(file.name)}`, {
       method: "POST",
       headers: { ...adminHeaders(), "Content-Type": "application/octet-stream" },
       body: await file.arrayBuffer(),
     });
-    const planSuffix = state.doctorRepair ? "/doctor/firmware-plans" : "/firmware/plans";
+    const planSuffix = state.doctorRepair || transport === "ssh_frm"
+      ? "/doctor/firmware-plans"
+      : "/firmware/plans";
     const planned = await apiRequest(
       `${radioPath(state.snapshot.identity.radio_id)}${planSuffix}`,
       {
@@ -760,16 +905,19 @@ async function planFirmware(event) {
         body: JSON.stringify({
           image_id: upload.image_id,
           mode: ui["firmware-mode"].value,
+          transport,
           expected_firmware_version: ui["firmware-expected-version"].value.trim(),
         }),
       },
     );
-    state.firmwarePlan = planned;
+    state.firmwarePlan = validatedFirmwarePlan(planned, transport);
     state.doctorRepair = false;
-    setText(ui["firmware-plan-output"], JSON.stringify(planned, null, 2));
+    setText(ui["firmware-plan-output"], JSON.stringify(state.firmwarePlan.plan, null, 2));
     setText(
       ui["firmware-result"],
-      "Plan created. Verify every field, type the selected serial, then execute before expiry.",
+      transport === "ssh_frm"
+        ? `Plan created. Verify the pinned identity and phases, then type FLASH ${state.snapshot.identity.serial}.`
+        : "Plan created. Verify every field, type the selected serial, then execute before expiry.",
     );
     updateFirmwareEnabled();
   } catch (error) {
@@ -780,33 +928,98 @@ async function planFirmware(event) {
 
 async function executeFirmware() {
   if (!state.snapshot || !state.firmwarePlan) return;
-  if (ui["firmware-confirm-serial"].value !== state.snapshot.identity.serial) {
-    setText(ui["firmware-result"], "Confirmation must exactly match the selected radio serial.");
+  const plan = state.firmwarePlan;
+  const required = plan.plan.transport === "ssh_frm"
+    ? `FLASH ${state.snapshot.identity.serial}`
+    : state.snapshot.identity.serial;
+  if (ui["firmware-confirm-serial"].value !== required) {
+    setText(ui["firmware-result"], `Confirmation must exactly match ${required}.`);
     return;
   }
-  ui["execute-firmware"].disabled = true;
+  clearFirmwarePlan("Plan submitted exactly once. Waiting for its receipt…");
   setText(ui["firmware-result"], "Firmware operation in progress. Do not disconnect power.");
   try {
     const receipt = await apiRequest("/firmware/executions", {
       method: "POST",
       headers: adminHeaders(),
       body: JSON.stringify({
-        plan_id: state.firmwarePlan.plan.plan_id,
-        confirmation_token: state.firmwarePlan.confirmation_token,
+        plan_id: plan.plan.plan_id,
+        confirmation_token: plan.confirmationToken,
+        operator_confirmation: required,
       }),
     });
-    state.firmwarePlan = null;
     state.doctorRepair = false;
-    ui["firmware-confirm-serial"].value = "";
+    ui["setup-admin-token"].value = "";
     setText(ui["firmware-plan-output"], "Plan consumed. Create a new plan for another update.");
-    setText(ui["firmware-result"], `Update verified · receipt ${receipt.receipt_id}`);
+    if (receipt.reconciliation_required) {
+      state.uncertainFirmwareReceipt = receipt;
+      setText(
+        ui["firmware-result"],
+        `Firmware follow-up required · receipt ${receipt.receipt_id}. `
+          + "Completion is not authenticated. Verify and re-enroll the SSH host key out of band, then run read-only reconcile. Do not create another flash plan.",
+      );
+    } else {
+      clearFirmwareUncertainty();
+      setText(ui["firmware-result"], `Update verified · receipt ${receipt.receipt_id}`);
+    }
     await loadRadios();
   } catch (error) {
-    state.firmwarePlan = null;
-    setText(ui["firmware-result"], describeError(error));
+    const receipt = error instanceof ApiError ? error.receipt : null;
+    if (receipt?.outcome === "unknown" && receipt.reconciliation_required) {
+      state.uncertainFirmwareReceipt = receipt;
+      setText(
+        ui["firmware-result"],
+        `Outcome unknown · Do not retry. Receipt ${receipt.receipt_id}. `
+          + `Failure phase: ${receipt.failure_phase || "unknown"}. `
+          + `Completed phases: ${(receipt.completed_phases || []).join(", ") || "none"}. `
+          + "Run read-only reconcile before making another plan.",
+      );
+    } else {
+      ui["setup-admin-token"].value = "";
+      setText(ui["firmware-result"], describeError(error));
+    }
     toast(describeError(error), true);
   }
   updateFirmwareEnabled();
+}
+
+async function reconcileFirmware() {
+  const uncertain = state.uncertainFirmwareReceipt;
+  if (!uncertain) return;
+  ui["reconcile-firmware"].disabled = true;
+  setText(ui["firmware-result"], "Running read-only firmware and target attestation…");
+  try {
+    const receipt = await apiRequest(
+      `/firmware/receipts/${encodeURIComponent(uncertain.receipt_id)}/reconcile`,
+      { method: "POST", headers: adminHeaders(), body: JSON.stringify({}) },
+    );
+    if (receipt.success === true || receipt.outcome === "reconciled_verified") {
+      clearFirmwareUncertainty();
+      ui["setup-admin-token"].value = "";
+      setText(
+        ui["firmware-result"],
+        `Read-only reconciliation verified firmware · receipt ${receipt.receipt_id}`,
+      );
+    } else {
+      state.uncertainFirmwareReceipt = receipt.reconciliation_required
+        ? receipt
+        : uncertain;
+      ui["reconcile-firmware"].disabled = false;
+      setText(
+        ui["firmware-result"],
+        `Read-only reconciliation could not verify firmware · receipt ${receipt.receipt_id}. `
+          + "Outcome remains unknown. Do not retry flashing; correct enrollment or connectivity, then reconcile again.",
+      );
+    }
+    await loadSnapshot();
+    await runDoctor(true);
+  } catch (error) {
+    ui["reconcile-firmware"].disabled = false;
+    setText(
+      ui["firmware-result"],
+      `Reconciliation unavailable: ${describeError(error)} Do not retry flashing.`,
+    );
+  }
 }
 
 function scanPayload() {
@@ -1526,6 +1739,7 @@ function installEventHandlers() {
     state.streaming = false;
     state.settingsDirty = false;
     state.firmwarePlan = null;
+    clearFirmwareUncertainty();
     state.doctorRepair = false;
     state.doctorReport = null;
     clearSetupPlan("No setup plan created for this radio.");
@@ -1562,8 +1776,14 @@ function installEventHandlers() {
   ui["stop-scan"].addEventListener("click", stopScan);
   ui["inspect-firmware"].addEventListener("click", inspectFirmware);
   ui["firmware-mode"].addEventListener("change", updateFirmwareEnabled);
+  ui["firmware-transport"].addEventListener("change", () => {
+    clearFirmwarePlan("Transport changed. Create a new exact plan.");
+    clearFirmwareUncertainty();
+    updateFirmwareEnabled();
+  });
   ui["firmware-form"].addEventListener("submit", planFirmware);
   ui["execute-firmware"].addEventListener("click", executeFirmware);
+  ui["reconcile-firmware"].addEventListener("click", reconcileFirmware);
   ui["run-doctor"].addEventListener("click", () => runDoctor(true));
   ui["prepare-doctor-fix"].addEventListener("click", prepareDoctorFix);
   ui["prepare-setup-fix"].addEventListener("click", prepareSetupFix);
@@ -1571,6 +1791,8 @@ function installEventHandlers() {
   ui["reconcile-setup"].addEventListener("click", reconcileSetup);
   window.addEventListener("beforeunload", () => {
     state.setupPlan = null;
+    state.firmwarePlan = null;
+    state.uncertainFirmwareReceipt = null;
     ui["setup-admin-token"].value = "";
     disconnectWaterfall();
   });
