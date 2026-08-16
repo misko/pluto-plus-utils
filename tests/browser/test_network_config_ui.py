@@ -118,7 +118,9 @@ def test_static_ip_is_read_redacted_planned_and_persisted_without_restart(
     page.wait_for_function(
         "document.querySelector('#config-txt-output').textContent.includes('<redacted>')"
     )
-    config_output = page.locator("#config-txt-output").inner_text()
+    # The redacted document is inside a closed <details>; text_content observes
+    # the DOM value without requiring this test to open the disclosure widget.
+    config_output = page.locator("#config-txt-output").text_content() or ""
     assert "<redacted>" in config_output
     assert "secret" not in config_output
     assert page.locator("#config-ethernet-current").inner_text().startswith("192.168.1.165")
