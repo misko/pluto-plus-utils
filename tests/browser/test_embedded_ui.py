@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -42,6 +43,61 @@ def _canvas_has_rendered_pixels(page: Any, selector: str) -> bool:
             }"""
         )
     )
+
+
+def test_page_loaded_during_existing_stream_auto_attaches_and_reports_diagnostics(
+    browser_page: Any,
+    fake_daemon_origin: str,
+) -> None:
+    page = browser_page
+    diagnostic_messages: list[str] = []
+    page.on(
+        "console",
+        lambda message: diagnostic_messages.append(message.text)
+        if message.text.startswith("[pluto+]")
+        else None,
+    )
+    started = page.request.post(
+        f"{fake_daemon_origin}/api/v1/radios/fake-001/streams",
+        data={"block_size": 65_536, "fft_size": 512, "persist": False},
+    )
+    assert started.ok
+    try:
+        response = page.goto(fake_daemon_origin, wait_until="networkidle")
+        assert response is not None and response.ok
+        page.wait_for_function(
+            "document.querySelector('#frame-metadata').textContent.includes('Frame ')",
+            timeout=10_000,
+        )
+        page.wait_for_function(
+            "window.plutoDiagnostics().waterfall.renderedFrames > 0",
+            timeout=10_000,
+        )
+        diagnostics = page.evaluate("window.plutoDiagnostics()")
+        assert diagnostics["waterfall"]["messages"] > 0
+        assert diagnostics["waterfall"]["renderedFrames"] > 0
+        assert diagnostics["waterfall"]["socketState"] == "open"
+        assert any("waterfall.auto_attach" in message for message in diagnostic_messages)
+        assert any("waterfall.socket_open" in message for message in diagnostic_messages)
+        assert any("waterfall.first_frame" in message for message in diagnostic_messages)
+        connections = diagnostics["waterfall"]["connections"]
+        page.evaluate("state.socket.close(4000, 'browser acceptance reconnect')")
+        page.wait_for_function(
+            "previous => { const value = window.plutoDiagnostics().waterfall; "
+            "return value.connections > previous && value.socketState === 'open'; }",
+            arg=connections,
+            timeout=10_000,
+        )
+        diagnostics = page.evaluate("window.plutoDiagnostics()")
+        assert diagnostics["waterfall"]["reconnects"] >= 1
+        assert any("waterfall.reconnect_scheduled" in message for message in diagnostic_messages)
+    finally:
+        request = Request(  # noqa: S310
+            f"{fake_daemon_origin}/api/v1/radios/fake-001/streams/current",
+            method="DELETE",
+        )
+        with urlopen(request, timeout=5) as stopped:  # noqa: S310
+            assert stopped.status == 200
 
 
 def test_complete_fake_radio_browser_workflow(browser_page: Any, fake_daemon_origin: str) -> None:

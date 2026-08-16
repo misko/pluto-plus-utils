@@ -169,6 +169,18 @@ def test_websocket_rendering_is_bounded_to_latest_animation_frame() -> None:
     assert "state.latestFrame = null" in javascript
 
 
+def test_ui_exposes_bounded_runtime_diagnostics_and_midstream_reconnect() -> None:
+    _, javascript, _, _ = _assets()
+
+    assert "window.plutoDiagnostics" in javascript
+    assert "PerformanceObserver" in javascript
+    assert 'window.addEventListener("unhandledrejection"' in javascript
+    assert 'diagnosticLog("info", "waterfall.auto_attach"' in javascript
+    assert 'diagnosticLog("info", "waterfall.render_summary"' in javascript
+    assert "scheduleWaterfallReconnect" in javascript
+    assert "DIAGNOSTIC_SUMMARY_INTERVAL_MS = 5000" in javascript
+
+
 def test_dynamic_api_data_is_never_rendered_as_html() -> None:
     _, javascript, _, _ = _assets()
     unsafe_rendering = (".innerHTML", ".outerHTML", "insertAdjacentHTML", "document.write", "eval(")

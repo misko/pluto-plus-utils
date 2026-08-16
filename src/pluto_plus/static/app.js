@@ -6,6 +6,9 @@ const PREVIEW_MAX_FPS = 12;
 const SPECTRUM_MAX_FPS = 4;
 const MAX_PREVIEW_BINS = 1024;
 const MAX_CANVAS_WIDTH = 1024;
+const DIAGNOSTIC_SUMMARY_INTERVAL_MS = 5000;
+const EVENT_LOOP_STALL_THRESHOLD_MS = 250;
+const WATERFALL_RECONNECT_MAX_DELAY_MS = 5000;
 
 const ui = Object.fromEntries(
   [
@@ -37,6 +40,8 @@ const state = {
   snapshot: null,
   socket: null,
   socketGeneration: 0,
+  socketReconnectTimer: null,
+  socketReconnectAttempts: 0,
   streaming: false,
   artifacts: [],
   analyzers: [],
@@ -56,6 +61,71 @@ const state = {
   uncertainSetupReceipt: null,
 };
 
+const diagnosticState = {
+  startedAtMs: performance.now(),
+  api: {
+    requests: 0,
+    failures: 0,
+    responseBytes: 0,
+    lastDurationMs: null,
+  },
+  waterfall: {
+    socketState: "closed",
+    connections: 0,
+    reconnects: 0,
+    messages: 0,
+    payloadBytes: 0,
+    parsedFrames: 0,
+    renderedFrames: 0,
+    coalescedFrames: 0,
+    invalidFrames: 0,
+    lastSequence: null,
+    lastMessageAtMs: null,
+    lastSummaryAtMs: performance.now(),
+    lastSummaryMessages: 0,
+    lastSummaryBytes: 0,
+    lastSummaryRendered: 0,
+  },
+  browser: {
+    longTasks: 0,
+    eventLoopStalls: 0,
+    largestStallMs: 0,
+  },
+};
+
+function diagnosticLog(level, event, details = {}) {
+  const payload = {
+    event,
+    elapsed_ms: Math.round(performance.now() - diagnosticState.startedAtMs),
+    ...details,
+  };
+  const writer = typeof console[level] === "function" ? console[level] : console.log;
+  writer.call(console, `[pluto+] ${JSON.stringify(payload)}`);
+}
+
+function diagnosticsSnapshot() {
+  const now = performance.now();
+  return {
+    uptimeMs: Math.round(now - diagnosticState.startedAtMs),
+    page: {
+      visibility: document.visibilityState,
+      online: navigator.onLine,
+      selectedRadio: ui["radio-select"]?.value || null,
+      radioState: state.snapshot?.state || null,
+    },
+    api: { ...diagnosticState.api },
+    waterfall: {
+      ...diagnosticState.waterfall,
+      lastMessageAgeMs: diagnosticState.waterfall.lastMessageAtMs === null
+        ? null
+        : Math.round(now - diagnosticState.waterfall.lastMessageAtMs),
+    },
+    browser: { ...diagnosticState.browser },
+  };
+}
+
+window.plutoDiagnostics = diagnosticsSnapshot;
+
 class ApiError extends Error {
   constructor(message, status, code, document = null) {
     super(message);
@@ -67,12 +137,44 @@ class ApiError extends Error {
 }
 
 async function apiRequest(path, options = {}) {
+  const startedAtMs = performance.now();
+  const method = String(options.method || "GET").toUpperCase();
+  diagnosticState.api.requests += 1;
   const headers = new Headers(options.headers || {});
   if (options.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   headers.set("Accept", "application/json");
-  const response = await fetch(`${API_ROOT}${path}`, { ...options, headers });
+  let response;
+  try {
+    response = await fetch(`${API_ROOT}${path}`, { ...options, headers });
+  } catch (error) {
+    const durationMs = Math.round(performance.now() - startedAtMs);
+    diagnosticState.api.failures += 1;
+    diagnosticState.api.lastDurationMs = durationMs;
+    diagnosticLog("warn", "api.transport_failure", {
+      method,
+      path,
+      duration_ms: durationMs,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  const durationMs = Math.round(performance.now() - startedAtMs);
+  const contentLength = response.headers.get("content-length");
+  const responseBytes = contentLength === null ? null : Number(contentLength);
+  diagnosticState.api.lastDurationMs = durationMs;
+  if (Number.isFinite(responseBytes) && responseBytes >= 0) {
+    diagnosticState.api.responseBytes += responseBytes;
+  }
+  if (!response.ok) diagnosticState.api.failures += 1;
+  diagnosticLog(response.ok ? "info" : "warn", "api.response", {
+    method,
+    path,
+    status: response.status,
+    duration_ms: durationMs,
+    response_bytes: Number.isFinite(responseBytes) ? responseBytes : null,
+  });
   let document = null;
   try {
     document = await response.json();
@@ -281,6 +383,13 @@ function renderSnapshot(snapshot, populateForm = true) {
   state.streaming = snapshot.state === "streaming";
   state.scanning = snapshot.state === "scanning";
   if (wasStreaming && !state.streaming && state.socket) disconnectWaterfall();
+  if (state.streaming && !state.socket && !state.socketReconnectTimer) {
+    diagnosticLog("info", "waterfall.auto_attach", {
+      radio_id: identity.radio_id,
+      reason: wasStreaming ? "socket_missing" : "page_loaded_mid_stream",
+    });
+    connectWaterfall(identity.radio_id, "snapshot");
+  }
   ui["start-preview"].disabled = !ready;
   ui["stop-preview"].disabled = !state.streaming;
   ui["scan-fieldset"].disabled = !(ready || state.scanning);
@@ -941,40 +1050,114 @@ function setStreamStatus(live, textValue) {
   ui["stream-dot"].className = `status-dot ${live ? "status-live" : "status-idle"}`;
 }
 
-function connectWaterfall(radioId) {
+function connectWaterfall(radioId, reason = "requested") {
+  const reconnectAttempts = state.socketReconnectAttempts;
   disconnectWaterfall();
+  if (reason === "reconnect") state.socketReconnectAttempts = reconnectAttempts;
   const generation = ++state.socketGeneration;
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = `${protocol}//${window.location.host}${API_ROOT}/ws/radios/${encodeURIComponent(radioId)}/waterfall`;
+  let messagesOnSocket = 0;
+  diagnosticState.waterfall.socketState = "connecting";
+  diagnosticState.waterfall.connections += 1;
+  if (reason === "reconnect") diagnosticState.waterfall.reconnects += 1;
+  diagnosticLog("info", "waterfall.socket_connect", {
+    radio_id: radioId,
+    reason,
+    attempt: state.socketReconnectAttempts,
+    url,
+  });
   const socket = new WebSocket(url);
   state.socket = socket;
   socket.addEventListener("open", () => {
-    if (generation === state.socketGeneration) setStreamStatus(true, "Live · receiving spectrum");
+    if (generation !== state.socketGeneration) return;
+    diagnosticState.waterfall.socketState = "open";
+    state.socketReconnectAttempts = 0;
+    setStreamStatus(true, "Live · receiving spectrum");
+    diagnosticLog("info", "waterfall.socket_open", { radio_id: radioId });
   });
   socket.addEventListener("message", (event) => {
     if (generation !== state.socketGeneration || typeof event.data !== "string") return;
+    diagnosticState.waterfall.messages += 1;
+    messagesOnSocket += 1;
+    diagnosticState.waterfall.payloadBytes += event.data.length;
+    diagnosticState.waterfall.lastMessageAtMs = performance.now();
     try {
-      enqueueFrame(JSON.parse(event.data));
-    } catch (_error) {
+      const frame = JSON.parse(event.data);
+      diagnosticState.waterfall.parsedFrames += 1;
+      diagnosticState.waterfall.lastSequence = frame.sequence ?? null;
+      if (messagesOnSocket === 1) {
+        diagnosticLog("info", "waterfall.first_frame", {
+          radio_id: radioId,
+          sequence: diagnosticState.waterfall.lastSequence,
+          payload_bytes: event.data.length,
+        });
+      }
+      enqueueFrame(frame);
+    } catch (error) {
+      diagnosticState.waterfall.invalidFrames += 1;
       setStreamStatus(true, "Live · invalid frame skipped");
+      diagnosticLog("warn", "waterfall.invalid_frame", {
+        payload_bytes: event.data.length,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   });
-  socket.addEventListener("close", () => {
-    if (generation === state.socketGeneration && state.streaming) {
-      setStreamStatus(false, "Stream disconnected");
+  socket.addEventListener("close", (event) => {
+    if (generation !== state.socketGeneration) return;
+    state.socket = null;
+    diagnosticState.waterfall.socketState = "closed";
+    diagnosticLog(state.streaming ? "warn" : "info", "waterfall.socket_close", {
+      radio_id: radioId,
+      code: event.code,
+      clean: event.wasClean,
+      reason: String(event.reason || "").slice(0, 160),
+      streaming: state.streaming,
+    });
+    if (state.streaming) {
+      setStreamStatus(false, "Stream disconnected · reconnecting");
+      scheduleWaterfallReconnect(radioId);
     }
   });
   socket.addEventListener("error", () => {
-    if (generation === state.socketGeneration) setStreamStatus(false, "Waterfall connection error");
+    if (generation !== state.socketGeneration) return;
+    diagnosticState.waterfall.socketState = "error";
+    setStreamStatus(false, "Waterfall connection error");
+    diagnosticLog("warn", "waterfall.socket_error", { radio_id: radioId });
   });
+}
+
+function scheduleWaterfallReconnect(radioId) {
+  if (state.socketReconnectTimer || !state.streaming) return;
+  state.socketReconnectAttempts += 1;
+  const delayMs = Math.min(
+    WATERFALL_RECONNECT_MAX_DELAY_MS,
+    500 * (2 ** Math.min(4, state.socketReconnectAttempts - 1)),
+  );
+  diagnosticLog("info", "waterfall.reconnect_scheduled", {
+    radio_id: radioId,
+    attempt: state.socketReconnectAttempts,
+    delay_ms: delayMs,
+  });
+  state.socketReconnectTimer = window.setTimeout(() => {
+    state.socketReconnectTimer = null;
+    const selectedRadio = state.snapshot?.identity.radio_id;
+    if (state.streaming && selectedRadio === radioId) connectWaterfall(radioId, "reconnect");
+  }, delayMs);
 }
 
 function disconnectWaterfall() {
   state.socketGeneration += 1;
+  if (state.socketReconnectTimer) {
+    window.clearTimeout(state.socketReconnectTimer);
+    state.socketReconnectTimer = null;
+  }
+  state.socketReconnectAttempts = 0;
   if (state.socket) {
     state.socket.close(1000, "UI stopped stream");
     state.socket = null;
   }
+  diagnosticState.waterfall.socketState = "closed";
 }
 
 function validPowerRows(frame) {
@@ -994,7 +1177,11 @@ function validPowerRows(frame) {
 }
 
 function enqueueFrame(frame) {
-  if (!frame || !Array.isArray(frame.receiver_power_db)) return;
+  if (!frame || !Array.isArray(frame.receiver_power_db)) {
+    diagnosticState.waterfall.invalidFrames += 1;
+    return;
+  }
+  if (state.frameScheduled && state.latestFrame) diagnosticState.waterfall.coalescedFrames += 1;
   state.latestFrame = frame;
   if (state.frameScheduled) return;
   state.frameScheduled = true;
@@ -1013,7 +1200,11 @@ function enqueueFrame(frame) {
 
 function renderFrame(frame) {
   const rows = validPowerRows(frame);
-  if (!rows) return;
+  if (!rows) {
+    diagnosticState.waterfall.invalidFrames += 1;
+    return;
+  }
+  diagnosticState.waterfall.renderedFrames += 1;
   const now = performance.now();
   if (now - state.lastSpectrumRenderMs >= 1000 / SPECTRUM_MAX_FPS) {
     drawSpectrum(rows);
@@ -1037,6 +1228,32 @@ function renderFrame(frame) {
     ui["frame-metadata"],
     `Frame ${formatNumber(frame.sequence)} · rev ${formatNumber(frame.configuration_revision)} · ${received} · ${formatHz(frame.bin_width_hz)}/bin`,
   );
+  maybeLogWaterfallSummary();
+}
+
+function maybeLogWaterfallSummary() {
+  const metrics = diagnosticState.waterfall;
+  const now = performance.now();
+  const elapsedMs = now - metrics.lastSummaryAtMs;
+  const renderedSinceSummary = metrics.renderedFrames - metrics.lastSummaryRendered;
+  if (elapsedMs < DIAGNOSTIC_SUMMARY_INTERVAL_MS && renderedSinceSummary < 50) return;
+  const messages = metrics.messages - metrics.lastSummaryMessages;
+  const payloadBytes = metrics.payloadBytes - metrics.lastSummaryBytes;
+  const rendered = metrics.renderedFrames - metrics.lastSummaryRendered;
+  diagnosticLog("info", "waterfall.render_summary", {
+    interval_ms: Math.round(elapsedMs),
+    messages,
+    rendered_frames: rendered,
+    coalesced_total: metrics.coalescedFrames,
+    payload_bytes: payloadBytes,
+    kib_per_second: elapsedMs > 0 ? Number((payloadBytes / 1024 / (elapsedMs / 1000)).toFixed(1)) : 0,
+    render_fps: elapsedMs > 0 ? Number((rendered / (elapsedMs / 1000)).toFixed(1)) : 0,
+    last_sequence: metrics.lastSequence,
+  });
+  metrics.lastSummaryAtMs = now;
+  metrics.lastSummaryMessages = metrics.messages;
+  metrics.lastSummaryBytes = metrics.payloadBytes;
+  metrics.lastSummaryRendered = metrics.renderedFrames;
 }
 
 function fitCanvas(canvas) {
@@ -1044,8 +1261,15 @@ function fitCanvas(canvas) {
   const fallbackHeight = Number(canvas.getAttribute("height"));
   const height = Math.max(1, Math.floor(canvas.clientHeight || fallbackHeight));
   if (canvas.width !== width || canvas.height !== height) {
+    const previous = [canvas.width, canvas.height];
     canvas.width = width;
     canvas.height = height;
+    diagnosticLog("debug", "canvas.resize", {
+      canvas: canvas.id,
+      previous,
+      current: [width, height],
+      css: [canvas.clientWidth, canvas.clientHeight],
+    });
     return true;
   }
   return false;
@@ -1347,6 +1571,12 @@ function installEventHandlers() {
 }
 
 async function initialize() {
+  diagnosticLog("info", "ui.initialize_start", {
+    location: window.location.origin,
+    user_agent: navigator.userAgent,
+    viewport: [window.innerWidth, window.innerHeight],
+    device_pixel_ratio: window.devicePixelRatio,
+  });
   installEventHandlers();
   clearRadio();
   await Promise.all([
@@ -1358,6 +1588,79 @@ async function initialize() {
     await Promise.all([checkHealth(), loadJobs(), loadArtifacts(), loadScans()]);
     if (ui["radio-select"].value) await loadSnapshot(ui["radio-select"].value);
   }, 5000);
+  diagnosticLog("info", "ui.initialize_complete", {
+    radios: state.radios.size,
+    selected_radio: ui["radio-select"].value || null,
+    state: state.snapshot?.state || null,
+  });
 }
 
-initialize();
+function installRuntimeDiagnostics() {
+  diagnosticLog("info", "diagnostics.ready", {
+    help: "Run plutoDiagnostics() in this console for the current counters.",
+    summary_interval_ms: DIAGNOSTIC_SUMMARY_INTERVAL_MS,
+  });
+  window.addEventListener("error", (event) => {
+    diagnosticLog("error", "browser.uncaught_error", {
+      message: String(event.message || "Unknown browser error").slice(0, 300),
+      source: String(event.filename || "").slice(0, 200),
+      line: event.lineno,
+      column: event.colno,
+    });
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event.reason instanceof Error ? event.reason.message : String(event.reason);
+    diagnosticLog("error", "browser.unhandled_rejection", { reason: reason.slice(0, 300) });
+  });
+  window.addEventListener("online", () => diagnosticLog("info", "browser.online"));
+  window.addEventListener("offline", () => diagnosticLog("warn", "browser.offline"));
+  document.addEventListener("visibilitychange", () => {
+    diagnosticLog("info", "browser.visibility", { state: document.visibilityState });
+  });
+  if (typeof PerformanceObserver === "function") {
+    try {
+      const observer = new PerformanceObserver((list) => {
+        list.getEntries().forEach((entry) => {
+          diagnosticState.browser.longTasks += 1;
+          if (
+            diagnosticState.browser.longTasks <= 10
+            || diagnosticState.browser.longTasks % 10 === 0
+          ) {
+            diagnosticLog("warn", "browser.long_task", {
+              duration_ms: Number(entry.duration.toFixed(1)),
+              start_ms: Number(entry.startTime.toFixed(1)),
+              count: diagnosticState.browser.longTasks,
+            });
+          }
+        });
+      });
+      observer.observe({ type: "longtask", buffered: true });
+    } catch (error) {
+      diagnosticLog("debug", "browser.long_task_observer_unavailable", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  let expectedTickMs = performance.now() + 1000;
+  window.setInterval(() => {
+    const now = performance.now();
+    const driftMs = Math.max(0, now - expectedTickMs);
+    expectedTickMs = now + 1000;
+    if (driftMs < EVENT_LOOP_STALL_THRESHOLD_MS) return;
+    diagnosticState.browser.eventLoopStalls += 1;
+    diagnosticState.browser.largestStallMs = Math.max(
+      diagnosticState.browser.largestStallMs,
+      Math.round(driftMs),
+    );
+    diagnosticLog("warn", "browser.event_loop_stall", { drift_ms: Math.round(driftMs) });
+  }, 1000);
+}
+
+installRuntimeDiagnostics();
+initialize().catch((error) => {
+  diagnosticLog("error", "ui.initialize_failed", {
+    error: error instanceof Error ? error.message : String(error),
+  });
+  setText(ui["connection-status"], "Initialization failed · see browser console");
+  ui["connection-dot"].className = "status-dot status-error";
+});

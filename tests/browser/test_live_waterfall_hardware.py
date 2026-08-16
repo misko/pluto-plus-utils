@@ -112,9 +112,12 @@ def _waterfall_connection(page: Any, radio_id: str, initial_state: str) -> Itera
     if started_by_test:
         page.locator("#start-preview").click()
     elif initial_state == "streaming":
-        # Attach a read-only subscriber to the already-running preview. Do not
-        # cancel a stream that may belong to another operator.
-        page.evaluate("selected => connectWaterfall(selected)", radio_id)
+        # Loading a page mid-stream must attach a read-only subscriber itself.
+        # Do not cancel a stream that may belong to another operator.
+        page.wait_for_function(
+            "window.plutoDiagnostics().waterfall.socketState === 'open'",
+            timeout=10_000,
+        )
     else:
         pytest.fail(f".15 must be ready or streaming, not {initial_state!r}")
     try:

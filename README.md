@@ -68,6 +68,17 @@ uv run pluto --endpoint unix:///run/pluto-plus/plutod.sock radio list
 State is stored below `--state-root`: SQLite catalog, captures, scan results,
 analysis documents, firmware staging, and firmware receipts.
 
+### Browser diagnostics
+
+The embedded UI writes structured `[pluto+]` events to the browser developer
+console for initialization, API status and latency, WebSocket lifecycle and
+reconnects, first-frame payload size, canvas resizes, invalid frames, long tasks,
+and event-loop stalls. During a preview it emits a bounded waterfall summary every
+five seconds or 50 rendered frames with payload KiB/s, render FPS, coalesced-frame
+count, and sequence progress. Run `plutoDiagnostics()` in the console for the
+current cumulative snapshot. Request bodies, authorization headers, and setup or
+firmware tokens are never logged.
+
 The doctor compares each radio with an explicit, profile-aware canonical policy.
 It reports active firmware, live AD9361/dual-RX facts, USB correlation, persistent
 setup provenance, and guarded remediation. Read
