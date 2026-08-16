@@ -33,6 +33,10 @@ firmware_app = typer.Typer(no_args_is_help=True, help="Plan and execute guarded 
 setup_app = typer.Typer(
     no_args_is_help=True, help="Plan and execute guarded canonical AD9361/2R2T setup."
 )
+config_app = typer.Typer(
+    no_args_is_help=True,
+    help="Read redacted config.txt and plan validated static-IP changes.",
+)
 
 app.add_typer(radio_app, name="radio")
 radio_app.add_typer(settings_app, name="settings")
@@ -43,6 +47,7 @@ app.add_typer(artifact_app, name="artifact")
 app.add_typer(scan_app, name="scan")
 app.add_typer(firmware_app, name="firmware")
 app.add_typer(setup_app, name="setup")
+app.add_typer(config_app, name="config")
 
 
 @dataclass
@@ -355,6 +360,76 @@ def radio_status(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> Non
 def radio_recover(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> None:
     """Reopen an errored/offline radio and re-attest its stable serial."""
     _emit(_api(ctx).request("POST", f"radios/{radio_id}/recover"))
+
+
+@config_app.command("status")
+def config_status(ctx: typer.Context) -> None:
+    """Show whether exact-radio config administration is available."""
+
+    _emit(_api(ctx).request("GET", "network-config"))
+
+
+@config_app.command("show")
+def config_show(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> None:
+    """Read structured network settings and password-redacted config.txt."""
+
+    _emit(_api(ctx).request("GET", f"radios/{radio_id}/config"))
+
+
+@config_app.command("plan")
+def config_plan(
+    ctx: typer.Context,
+    radio_id: str = typer.Argument(...),
+    interface: str = typer.Option("ethernet", "--interface"),
+    mode: str = typer.Option("static", "--mode"),
+    address: str | None = typer.Option(None, "--address"),
+    netmask: str | None = typer.Option(None, "--netmask"),
+    host_address: str | None = typer.Option(None, "--host-address"),
+) -> None:
+    """Create a short-lived structured network configuration plan."""
+
+    _emit(
+        _api(ctx).request(
+            "POST",
+            f"radios/{radio_id}/config/plans",
+            json_body={
+                "interface": interface,
+                "mode": mode,
+                "address": address,
+                "netmask": netmask,
+                "host_address": host_address,
+            },
+        )
+    )
+
+
+@config_app.command("execute")
+def config_execute(
+    ctx: typer.Context,
+    plan_id: str = typer.Argument(...),
+    token: str = typer.Option(..., "--token"),
+    operator_confirmation: str = typer.Option(..., "--operator-confirmation"),
+) -> None:
+    """Persist one exact plan; restart remains a separate operator action."""
+
+    _emit(
+        _api(ctx).request(
+            "POST",
+            "network-config/executions",
+            json_body={
+                "plan_id": plan_id,
+                "confirmation_token": token,
+                "operator_confirmation": operator_confirmation,
+            },
+        )
+    )
+
+
+@config_app.command("receipt-list")
+def config_receipt_list(ctx: typer.Context) -> None:
+    """List durable network-configuration mutation receipts."""
+
+    _emit(_api(ctx).request("GET", "network-config/receipts"))
 
 
 @app.command("doctor")
@@ -934,8 +1009,12 @@ def serve(
     ),
     ssh_firmware_enrollment: list[Path] | None = typer.Option(  # noqa: B008
         None,
+        "--ssh-radio-admin-enrollment",
         "--ssh-firmware-enrollment",
-        help="Private exact-radio SSH firmware enrollment JSON (repeatable).",
+        help=(
+            "Private exact-radio pinned-SSH enrollment for canonical firmware and "
+            "structured config.txt administration (repeatable)."
+        ),
     ),
     admin_token_file: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1246,6 +1325,10 @@ def serve(
             PinnedSshFirmwareTransport,
         )
         from pluto_plus.models import Transport
+        from pluto_plus.network_config import (
+            NetworkConfigIdentity,
+            NetworkConfigManager,
+        )
 
         snapshots = {snapshot.identity.serial: snapshot for snapshot in service.list_radios()}
         try:
@@ -1379,6 +1462,23 @@ def serve(
                         identity_probe=ip_executor.identity_probe,
                         executor=ip_executor,
                         transport=FirmwareTransport.SSH_FRM,
+                    ),
+                )
+                service.enroll_network_config_manager(
+                    enrollment.serial,
+                    NetworkConfigManager(
+                        identity=NetworkConfigIdentity(
+                            serial=enrollment.serial,
+                            endpoint=enrollment.host,
+                            host_key_fingerprint=transport.host_key_fingerprint,
+                        ),
+                        backend=transport,
+                        receipt_directory=(
+                            state_root
+                            / "network-config"
+                            / "receipts"
+                            / enrollment.serial
+                        ).absolute(),
                     ),
                 )
         except (ValueError, IpFirmwareError) as error:

@@ -44,6 +44,10 @@ def api_transport(
             return httpx.Response(200, json={"available": True})
         if request.method == "GET" and path.endswith("/setup/receipts"):
             return httpx.Response(200, json=[{"receipt_id": "setup-receipt-1"}])
+        if request.method == "GET" and path.endswith("/network-config"):
+            return httpx.Response(200, json={"available": True})
+        if request.method == "GET" and path.endswith("/network-config/receipts"):
+            return httpx.Response(200, json=[{"receipt_id": "network-receipt-1"}])
         if request.method == "GET" and path.endswith("/doctor"):
             return httpx.Response(200, json={"radio_id": "fake-001", "healthy": False})
         if request.method == "GET" and "/radios/" in path:
@@ -79,6 +83,10 @@ def api_transport(
             return httpx.Response(201, json={"plan": {"plan_id": "setup-plan-1"}})
         if request.method == "POST" and path.endswith("/setup/executions"):
             return httpx.Response(201, json={"receipt_id": "setup-receipt-1"})
+        if request.method == "POST" and path.endswith("/config/plans"):
+            return httpx.Response(201, json={"plan": {"plan_id": "network-plan-1"}})
+        if request.method == "POST" and path.endswith("/network-config/executions"):
+            return httpx.Response(201, json={"receipt_id": "network-receipt-1"})
         return httpx.Response(404, json={"error": {"code": "not_found", "message": path}})
 
     monkeypatch.setattr(
@@ -286,6 +294,61 @@ def test_settings_set_fetches_revision_and_sends_only_requested_fields(api_trans
             {"plan_id": "setup-plan-1", "confirmation_token": "secret"},
         ),
         (["setup", "receipt-list"], "GET", "/api/v1/setup/receipts", None),
+        (["config", "status"], "GET", "/api/v1/network-config", None),
+        (
+            ["config", "show", "fake-001"],
+            "GET",
+            "/api/v1/radios/fake-001/config",
+            None,
+        ),
+        (
+            [
+                "config",
+                "plan",
+                "fake-001",
+                "--interface",
+                "ethernet",
+                "--mode",
+                "static",
+                "--address",
+                "192.168.1.165",
+                "--netmask",
+                "255.255.255.0",
+            ],
+            "POST",
+            "/api/v1/radios/fake-001/config/plans",
+            {
+                "interface": "ethernet",
+                "mode": "static",
+                "address": "192.168.1.165",
+                "netmask": "255.255.255.0",
+                "host_address": None,
+            },
+        ),
+        (
+            [
+                "config",
+                "execute",
+                "network-plan-1",
+                "--token",
+                "secret",
+                "--operator-confirmation",
+                "SET STATIC IP fake-001 192.168.1.165",
+            ],
+            "POST",
+            "/api/v1/network-config/executions",
+            {
+                "plan_id": "network-plan-1",
+                "confirmation_token": "secret",
+                "operator_confirmation": "SET STATIC IP fake-001 192.168.1.165",
+            },
+        ),
+        (
+            ["config", "receipt-list"],
+            "GET",
+            "/api/v1/network-config/receipts",
+            None,
+        ),
     ],
 )
 def test_command_routes(

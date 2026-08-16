@@ -333,6 +333,50 @@ def test_setup_repair_is_separate_authenticated_and_canonical_only() -> None:
     assert ".setup-warning" in css
 
 
+def test_network_config_is_redacted_structured_and_restart_separate() -> None:
+    html, javascript, _, parser = _assets()
+
+    assert {
+        "network-config-availability",
+        "read-network-config",
+        "config-txt-output",
+        "network-config-fieldset",
+        "network-config-interface",
+        "network-config-mode",
+        "network-config-address",
+        "network-config-netmask",
+        "network-config-host-address",
+        "network-config-plan-output",
+        "network-config-confirmation",
+        "execute-network-config",
+    } <= parser.ids
+    assert {
+        "network-config-interface",
+        "network-config-mode",
+        "network-config-address",
+        "network-config-netmask",
+        "network-config-host-address",
+        "network-config-confirmation",
+    } <= parser.labels_for
+    assert "network-config-fieldset" in parser.disabled_ids
+    assert "execute-network-config" in parser.disabled_ids
+    assert "password-redacted" in html
+    assert "Restart is deliberately separate" in html
+    assert 'apiRequest("/network-config")' in javascript
+    assert "}/config`" in javascript
+    assert "}/config/plans`" in javascript
+    assert 'apiRequest("/network-config/executions"' in javascript
+    assert "ipaddr_eth" in javascript and "ipaddr_host" in javascript
+    assert "plan.confirmation.startsWith(\"SET \"" in javascript
+    assert "confirmation_token: planned.confirmationToken" in javascript
+    assert "JSON.stringify(state.networkConfigPlan.plan, null, 2)" in javascript
+    assert "JSON.stringify(planned, null, 2)" not in javascript
+    assert "Persisting network variables without restarting the radio" in javascript
+    assert "config_txt_redacted" in javascript
+    assert "config-put" not in javascript
+    assert "reboot_network" not in javascript
+
+
 def test_css_has_responsive_and_reduced_motion_layouts() -> None:
     _, _, css, _ = _assets()
 

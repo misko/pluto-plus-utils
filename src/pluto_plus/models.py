@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -84,6 +84,14 @@ class SettingsPatch(ApiModel):
     gain_mode: GainMode | None = None
     gain_db: float | None = Field(default=None, ge=-10, le=80)
     channels: tuple[int, ...] | None = None
+
+
+class NetworkConfigPlanRequest(ApiModel):
+    interface: Literal["ethernet", "usb_gadget"]
+    mode: Literal["static", "dhcp"]
+    address: str | None = Field(default=None, max_length=15)
+    netmask: str | None = Field(default=None, max_length=15)
+    host_address: str | None = Field(default=None, max_length=15)
 
 
 class RadioIdentity(ApiModel):

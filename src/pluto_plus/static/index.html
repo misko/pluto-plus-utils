@@ -323,10 +323,81 @@
         <p id="setup-result" class="hint" role="status">Run doctor, then prepare a setup repair for an eligible selected radio.</p>
       </section>
 
+      <section class="panel network-config-panel" aria-labelledby="network-config-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">09 / Network</p>
+            <h2 id="network-config-heading">config.txt and static IP</h2>
+          </div>
+          <span id="network-config-availability" class="deferred-badge">Checking enrollment</span>
+        </div>
+        <p>Read the selected radio's password-redacted <span class="mono">config.txt</span>, or create a guarded plan that changes only its documented network variables. The admin token entered above is reused and never rendered.</p>
+        <div class="firmware-warning" role="note">
+          <strong>Restart is deliberately separate.</strong> Saving changes updates persistent configuration but leaves the current connection untouched. After an Ethernet address change, update the daemon's managed IIO target and pinned-SSH enrollment before restarting the radio.
+        </div>
+        <div class="actions">
+          <button id="read-network-config" class="button secondary" type="button" disabled>Read config.txt</button>
+        </div>
+        <dl class="radio-facts">
+          <div><dt>Hostname</dt><dd id="config-hostname">—</dd></div>
+          <div><dt>Ethernet</dt><dd id="config-ethernet-current">—</dd></div>
+          <div><dt>USB radio / host</dt><dd id="config-usb-current">—</dd></div>
+          <div><dt>Persistent digest</dt><dd id="config-environment-sha" class="mono">—</dd></div>
+        </dl>
+        <details>
+          <summary>View password-redacted config.txt</summary>
+          <pre id="config-txt-output" tabindex="0">Read config.txt for the selected enrolled radio.</pre>
+        </details>
+        <form id="network-config-form">
+          <fieldset id="network-config-fieldset" disabled>
+            <div class="control-grid">
+              <div>
+                <label for="network-config-interface">Interface</label>
+                <select id="network-config-interface">
+                  <option value="ethernet">Ethernet LAN (ipaddr_eth)</option>
+                  <option value="usb_gadget">USB gadget (ipaddr)</option>
+                </select>
+              </div>
+              <div>
+                <label for="network-config-mode">Address mode</label>
+                <select id="network-config-mode">
+                  <option value="static">Static</option>
+                  <option value="dhcp">DHCP (Ethernet only)</option>
+                </select>
+              </div>
+              <div>
+                <label for="network-config-address">Radio IPv4 address</label>
+                <input id="network-config-address" inputmode="decimal" placeholder="192.168.1.165" maxlength="15">
+              </div>
+              <div>
+                <label for="network-config-netmask">IPv4 netmask</label>
+                <input id="network-config-netmask" inputmode="decimal" value="255.255.255.0" maxlength="15">
+              </div>
+              <div id="network-config-host-field" hidden>
+                <label for="network-config-host-address">Paired USB host address</label>
+                <input id="network-config-host-address" inputmode="decimal" placeholder="192.168.2.10" maxlength="15">
+              </div>
+            </div>
+            <button id="plan-network-config" class="button danger" type="submit">Create guarded network plan</button>
+          </fieldset>
+        </form>
+        <pre id="network-config-plan-output" tabindex="0">No network plan created.</pre>
+        <div class="control-grid">
+          <div>
+            <label for="network-config-confirmation">Type the exact confirmation shown in the plan</label>
+            <input id="network-config-confirmation" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="actions align-end">
+            <button id="execute-network-config" class="button danger" type="button" disabled>Persist network settings</button>
+          </div>
+        </div>
+        <p id="network-config-result" class="hint" role="status">Read config.txt before planning a change.</p>
+      </section>
+
       <section class="panel firmware-panel" aria-labelledby="firmware-heading">
         <div class="panel-heading">
           <div>
-            <p class="section-number">09 / Firmware</p>
+            <p class="section-number">10 / Firmware</p>
             <h2 id="firmware-heading">Firmware operations</h2>
           </div>
           <span id="firmware-availability" class="deferred-badge">Checking helper</span>

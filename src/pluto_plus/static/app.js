@@ -34,6 +34,13 @@ const ui = Object.fromEntries(
     "doctor-release", "doctor-sha", "doctor-findings", "prepare-setup-fix",
     "setup-availability", "setup-admin-token", "setup-plan-output", "setup-confirm-serial",
     "execute-setup", "reconcile-setup", "setup-result",
+    "network-config-availability", "read-network-config", "config-hostname",
+    "config-ethernet-current", "config-usb-current", "config-environment-sha",
+    "config-txt-output", "network-config-form", "network-config-fieldset",
+    "network-config-interface", "network-config-mode", "network-config-address",
+    "network-config-netmask", "network-config-host-field", "network-config-host-address",
+    "plan-network-config", "network-config-plan-output", "network-config-confirmation",
+    "execute-network-config", "network-config-result",
   ].map((id) => [id, document.getElementById(id)]),
 );
 
@@ -63,6 +70,10 @@ const state = {
   setupAvailable: false,
   setupPlan: null,
   uncertainSetupReceipt: null,
+  networkConfigAvailable: false,
+  networkConfigCapabilities: null,
+  networkConfigObservation: null,
+  networkConfigPlan: null,
 };
 
 const diagnosticState = {
@@ -361,6 +372,8 @@ function clearRadio() {
   setText(ui["run-doctor"], "Run doctor");
   ui["prepare-doctor-fix"].disabled = true;
   ui["prepare-setup-fix"].disabled = true;
+  clearNetworkConfig("Read config.txt for the selected enrolled radio.");
+  updateNetworkConfigEnabled();
   clearSetupPlan("No setup plan created.");
   renderSettingsList(ui["requested-settings"], null);
   renderSettingsList(ui["actual-settings"], null);
@@ -408,6 +421,7 @@ function renderSnapshot(snapshot, populateForm = true) {
   setStreamStatus(state.streaming, state.streaming ? "Streaming" : "Stopped");
   updateFirmwareEnabled();
   updateSetupEnabled();
+  updateNetworkConfigEnabled();
   ui["run-doctor"].disabled = false;
 }
 
@@ -682,6 +696,242 @@ async function reconcileSetup() {
       `Reconciliation unavailable: ${describeError(error)} Do not retry provisioning.`,
     );
   }
+}
+
+function selectedNetworkConfigEnrolled() {
+  const serial = state.snapshot?.identity?.serial;
+  const enrolled = state.networkConfigCapabilities?.enrolled_radio_ids;
+  return Boolean(serial && Array.isArray(enrolled) && enrolled.includes(serial));
+}
+
+function updateNetworkConfigEnabled() {
+  const ready = state.snapshot?.managed !== false && state.snapshot?.state === "ready";
+  const enabled = state.networkConfigAvailable && ready && selectedNetworkConfigEnrolled();
+  ui["read-network-config"].disabled = !enabled;
+  ui["network-config-fieldset"].disabled = !enabled;
+  ui["execute-network-config"].disabled = !(enabled && state.networkConfigPlan);
+}
+
+function clearNetworkConfig(message = "Read config.txt for the selected enrolled radio.") {
+  state.networkConfigObservation = null;
+  clearNetworkConfigPlan("No network plan created.");
+  setText(ui["config-hostname"], null);
+  setText(ui["config-ethernet-current"], null);
+  setText(ui["config-usb-current"], null);
+  setText(ui["config-environment-sha"], null);
+  setText(ui["config-txt-output"], message);
+}
+
+function clearNetworkConfigPlan(message = "No network plan created.") {
+  state.networkConfigPlan = null;
+  ui["network-config-confirmation"].value = "";
+  ui["execute-network-config"].disabled = true;
+  setText(ui["network-config-plan-output"], message);
+}
+
+function syncNetworkConfigFields() {
+  const isUsb = ui["network-config-interface"].value === "usb_gadget";
+  if (isUsb && ui["network-config-mode"].value !== "static") {
+    ui["network-config-mode"].value = "static";
+  }
+  const isDhcp = !isUsb && ui["network-config-mode"].value === "dhcp";
+  ui["network-config-mode"].querySelector('option[value="dhcp"]').disabled = isUsb;
+  ui["network-config-address"].disabled = isDhcp;
+  ui["network-config-address"].required = !isDhcp;
+  ui["network-config-netmask"].disabled = isDhcp;
+  ui["network-config-netmask"].required = !isDhcp;
+  ui["network-config-host-field"].hidden = !isUsb;
+  ui["network-config-host-address"].required = isUsb;
+}
+
+async function loadNetworkConfigStatus() {
+  try {
+    const status = await apiRequest("/network-config");
+    state.networkConfigCapabilities = status;
+    state.networkConfigAvailable = Boolean(status.available) && browserPrivilegedTransportSafe();
+    setText(
+      ui["network-config-availability"],
+      state.networkConfigAvailable
+        ? "Pinned SSH administration ready"
+        : (browserPrivilegedTransportSafe()
+          ? "No selected-radio administration enrollment"
+          : "Read-only mode · use HTTPS or an SSH tunnel to loopback"),
+    );
+  } catch (error) {
+    state.networkConfigCapabilities = null;
+    state.networkConfigAvailable = false;
+    setText(ui["network-config-availability"], `Unavailable · ${describeError(error)}`);
+  }
+  updateNetworkConfigEnabled();
+}
+
+function populateNetworkConfig(observation) {
+  state.networkConfigObservation = observation;
+  setText(ui["config-hostname"], observation.hostname);
+  setText(
+    ui["config-ethernet-current"],
+    observation.ethernet_address
+      ? `${observation.ethernet_address} / ${observation.ethernet_netmask}`
+      : "DHCP",
+  );
+  setText(
+    ui["config-usb-current"],
+    `${observation.usb_radio_address} / ${observation.usb_host_address} / ${observation.usb_netmask}`,
+  );
+  setText(ui["config-environment-sha"], observation.environment_sha256);
+  setText(ui["config-txt-output"], observation.config_txt_redacted, "Empty redacted config.txt");
+  if (ui["network-config-interface"].value === "usb_gadget") {
+    ui["network-config-mode"].value = "static";
+    ui["network-config-address"].value = observation.usb_radio_address;
+    ui["network-config-netmask"].value = observation.usb_netmask;
+    ui["network-config-host-address"].value = observation.usb_host_address;
+  } else {
+    ui["network-config-mode"].value = observation.ethernet_address ? "static" : "dhcp";
+    ui["network-config-address"].value = observation.ethernet_address || "";
+    ui["network-config-netmask"].value = observation.ethernet_netmask;
+  }
+  syncNetworkConfigFields();
+}
+
+async function inspectNetworkConfig() {
+  if (!state.snapshot) return;
+  clearNetworkConfigPlan("No network plan created after this fresh read.");
+  setText(ui["network-config-result"], "Reading and redacting config.txt…");
+  try {
+    const observation = await apiRequest(
+      `${radioPath(state.snapshot.identity.radio_id)}/config`,
+      { headers: adminHeaders() },
+    );
+    if (observation.identity?.serial !== state.snapshot.identity.serial) {
+      throw new Error("Network configuration identity does not match the selected radio.");
+    }
+    populateNetworkConfig(observation);
+    setText(ui["network-config-result"], "Fresh persistent network configuration loaded.");
+  } catch (error) {
+    setText(ui["network-config-result"], describeError(error));
+    toast(describeError(error), true);
+  }
+}
+
+function validatedNetworkConfigPlan(document) {
+  const plan = document?.plan;
+  const selected = state.snapshot?.identity;
+  const mutableKeys = new Set(["ipaddr", "ipaddr_host", "netmask", "ipaddr_eth", "netmask_eth"]);
+  if (!plan || !document.confirmation_token || !selected) {
+    throw new Error("Daemon returned an incomplete network configuration plan.");
+  }
+  if (plan.identity?.serial !== selected.serial) {
+    throw new Error("Network configuration plan identity does not match the selected radio.");
+  }
+  if (!Array.isArray(plan.changes_items) || !plan.changes_items.length) {
+    throw new Error("Network configuration plan contains no changes.");
+  }
+  const changes = {};
+  for (const item of plan.changes_items) {
+    if (!Array.isArray(item) || item.length !== 2 || !mutableKeys.has(item[0])
+        || typeof item[1] !== "string") {
+      throw new Error("Network configuration plan contains an unsupported field.");
+    }
+    changes[item[0]] = item[1] || "<delete for DHCP>";
+  }
+  if (typeof plan.confirmation !== "string" || !plan.confirmation.startsWith("SET ")) {
+    throw new Error("Network configuration plan omitted its exact confirmation.");
+  }
+  return {
+    plan: {
+      plan_id: plan.plan_id,
+      expires_at: plan.expires_at,
+      serial: plan.identity.serial,
+      interface: plan.interface,
+      mode: plan.mode,
+      changes,
+      endpoint_after_restart: plan.endpoint_after_restart,
+      restart_required: plan.restart_required,
+      confirmation: plan.confirmation,
+    },
+    confirmationToken: document.confirmation_token,
+  };
+}
+
+async function planNetworkConfig(event) {
+  event.preventDefault();
+  if (!state.snapshot) return;
+  clearNetworkConfigPlan("Creating an exact persistent-network plan…");
+  setText(ui["network-config-result"], "Re-reading persistent values and creating a bound plan…");
+  try {
+    const isDhcp = ui["network-config-mode"].value === "dhcp";
+    const planned = await apiRequest(
+      `${radioPath(state.snapshot.identity.radio_id)}/config/plans`,
+      {
+        method: "POST",
+        headers: adminHeaders(),
+        body: JSON.stringify({
+          interface: ui["network-config-interface"].value,
+          mode: ui["network-config-mode"].value,
+          address: isDhcp ? null : ui["network-config-address"].value.trim(),
+          netmask: isDhcp ? null : ui["network-config-netmask"].value.trim(),
+          host_address: ui["network-config-interface"].value === "usb_gadget"
+            ? ui["network-config-host-address"].value.trim()
+            : null,
+        }),
+      },
+    );
+    state.networkConfigPlan = validatedNetworkConfigPlan(planned);
+    setText(ui["network-config-plan-output"], JSON.stringify(state.networkConfigPlan.plan, null, 2));
+    setText(
+      ui["network-config-result"],
+      `Plan ready. Type exactly: ${state.networkConfigPlan.plan.confirmation}`,
+    );
+  } catch (error) {
+    clearNetworkConfigPlan("Network configuration plan was not created.");
+    setText(ui["network-config-result"], describeError(error));
+    toast(describeError(error), true);
+  }
+  updateNetworkConfigEnabled();
+}
+
+async function executeNetworkConfig() {
+  if (!state.networkConfigPlan) return;
+  const planned = state.networkConfigPlan;
+  if (ui["network-config-confirmation"].value !== planned.plan.confirmation) {
+    setText(
+      ui["network-config-result"],
+      `Confirmation must exactly match ${planned.plan.confirmation}.`,
+    );
+    return;
+  }
+  clearNetworkConfigPlan("Plan submitted exactly once. Waiting for its durable receipt…");
+  setText(ui["network-config-result"], "Persisting network variables without restarting the radio…");
+  try {
+    const receipt = await apiRequest("/network-config/executions", {
+      method: "POST",
+      headers: adminHeaders(),
+      body: JSON.stringify({
+        plan_id: planned.plan.plan_id,
+        confirmation_token: planned.confirmationToken,
+        operator_confirmation: planned.plan.confirmation,
+      }),
+    });
+    ui["setup-admin-token"].value = "";
+    setText(
+      ui["network-config-result"],
+      `Saved and read back · receipt ${receipt.receipt_id}. Restart required. `
+        + `Expected Ethernet endpoint after restart: ${receipt.endpoint_after_restart || "unchanged"}.`,
+    );
+    setText(ui["network-config-plan-output"], "Plan consumed. Read config.txt again before another change.");
+    await loadSnapshot();
+  } catch (error) {
+    const receipt = error instanceof ApiError ? error.receipt : null;
+    ui["setup-admin-token"].value = "";
+    setText(
+      ui["network-config-result"],
+      receipt?.outcome === "unknown"
+        ? `Outcome unknown · Do not retry. Receipt ${receipt.receipt_id}. Inspect config.txt before creating another plan.`
+        : describeError(error),
+    );
+    toast(describeError(error), true);
+  }
+  updateNetworkConfigEnabled();
 }
 
 function firmwareTransportAvailable(transport = ui["firmware-transport"].value) {
@@ -1744,6 +1994,7 @@ function installEventHandlers() {
     state.doctorReport = null;
     clearSetupPlan("No setup plan created for this radio.");
     clearSetupUncertainty();
+    clearNetworkConfig("Read config.txt for the selected enrolled radio.");
     ui["execute-firmware"].disabled = true;
     setText(ui["firmware-plan-output"], "No firmware plan created.");
     if (ui["radio-select"].value) {
@@ -1789,10 +2040,31 @@ function installEventHandlers() {
   ui["prepare-setup-fix"].addEventListener("click", prepareSetupFix);
   ui["execute-setup"].addEventListener("click", executeSetup);
   ui["reconcile-setup"].addEventListener("click", reconcileSetup);
+  ui["read-network-config"].addEventListener("click", inspectNetworkConfig);
+  ui["network-config-interface"].addEventListener("change", () => {
+    clearNetworkConfigPlan("Interface changed. Create a new exact plan.");
+    if (state.networkConfigObservation) populateNetworkConfig(state.networkConfigObservation);
+    else syncNetworkConfigFields();
+    updateNetworkConfigEnabled();
+  });
+  ui["network-config-mode"].addEventListener("change", () => {
+    clearNetworkConfigPlan("Address mode changed. Create a new exact plan.");
+    syncNetworkConfigFields();
+    updateNetworkConfigEnabled();
+  });
+  ui["network-config-form"].addEventListener("input", () => {
+    if (state.networkConfigPlan) {
+      clearNetworkConfigPlan("Fields changed. Create a new exact plan.");
+      updateNetworkConfigEnabled();
+    }
+  });
+  ui["network-config-form"].addEventListener("submit", planNetworkConfig);
+  ui["execute-network-config"].addEventListener("click", executeNetworkConfig);
   window.addEventListener("beforeunload", () => {
     state.setupPlan = null;
     state.firmwarePlan = null;
     state.uncertainFirmwareReceipt = null;
+    state.networkConfigPlan = null;
     ui["setup-admin-token"].value = "";
     disconnectWaterfall();
   });
@@ -1809,7 +2081,7 @@ async function initialize() {
   clearRadio();
   await Promise.all([
     loadRadios(), loadJobs(), loadArtifacts(), loadAnalyzers(), loadFirmwareStatus(),
-    loadSetupStatus(), loadScans(),
+    loadSetupStatus(), loadNetworkConfigStatus(), loadScans(),
   ]);
   if (state.snapshot) await runDoctor();
   state.pollingTimer = window.setInterval(async () => {

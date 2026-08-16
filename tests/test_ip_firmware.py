@@ -25,6 +25,13 @@ from pluto_plus.ip_firmware import (
     PinnedSshFirmwareTransport,
     SshCommandResult,
 )
+from pluto_plus.network_config import (
+    NetworkAddressMode,
+    NetworkConfigIdentity,
+    NetworkConfigManager,
+    NetworkInterface,
+    persistent_environment_sha256,
+)
 
 
 def _fit() -> bytes:
@@ -561,6 +568,88 @@ def test_concrete_transport_accepts_only_its_fixed_attest_stage_and_mtd3_scripts
     assert stage_call[1] == _frm()
     assert mtd_call[0][-1] == f"/bin/sh -s -- {len(fit)}"
     assert mtd_call[1] is not None
+
+
+def test_pinned_transport_reads_redacted_config_and_applies_only_bound_network_plan(
+    tmp_path: Path,
+) -> None:
+    before_values = {
+        "ipaddr": "192.168.2.1",
+        "ipaddr_host": "192.168.2.10",
+        "netmask": "255.255.255.0",
+        "ipaddr_eth": "",
+        "netmask_eth": "255.255.255.0",
+    }
+    after_values = {**before_values, "ipaddr_eth": "192.168.1.165"}
+    redacted = b"[WLAN]\r\npwd_wlan = <redacted>\r\n"
+    backup = b"hostname=pluto\nipaddr_eth=\n"
+
+    def inspection(values: dict[str, str]) -> SshCommandResult:
+        lines = [
+            "PPU\tserial\tSERIAL_A",
+            "PPU\thostname\tpluto",
+            *(f"PPU\t{key}\t{value}" for key, value in values.items()),
+            f"PPU\tenvironment_sha256\t{persistent_environment_sha256(values)}",
+            f"PPU\tconfig_txt_sha256\t{hashlib.sha256(b'original').hexdigest()}",
+            f"PPU\tconfig_txt_redacted_b64\t{base64.b64encode(redacted).decode()}",
+        ]
+        return SshCommandResult(0, ("\n".join(lines) + "\n").encode(), b"")
+
+    runner = RecordingSshRunner(
+        [
+            inspection(before_values),
+            inspection(before_values),
+            inspection(before_values),
+            SshCommandResult(
+                0,
+                (
+                    "PPU\tserial\tSERIAL_A\n"
+                    "PPU\tbackup_path\t/root/.pluto-plus-network-config/plan.env\n"
+                    f"PPU\tbackup_sha256\t{hashlib.sha256(backup).hexdigest()}\n"
+                    f"PPU\tbackup_b64\t{base64.b64encode(backup).decode()}\n"
+                    f"PPU\tenvironment_sha256\t{persistent_environment_sha256(after_values)}\n"
+                    "PPU\tmutation_completed\t1\n"
+                ).encode(),
+                b"",
+            ),
+            inspection(after_values),
+        ]
+    )
+    transport = _ssh_transport(tmp_path, runner)
+    identity = NetworkConfigIdentity(
+        serial="SERIAL_A",
+        endpoint=transport.endpoint,
+        host_key_fingerprint=transport.host_key_fingerprint,
+    )
+    manager = NetworkConfigManager(
+        identity=identity,
+        backend=transport,
+        receipt_directory=tmp_path / "network-receipts",
+    )
+    observed = manager.inspect()
+    assert "<redacted>" in observed.config_txt_redacted
+    planned = manager.create_plan(
+        interface=NetworkInterface.ETHERNET,
+        mode=NetworkAddressMode.STATIC,
+        address="192.168.1.165",
+        netmask="255.255.255.0",
+        host_address=None,
+    )
+    receipt = manager.execute(
+        planned.plan,
+        planned.confirmation_token,
+        planned.plan.confirmation,
+    )
+    assert receipt.success is True
+    assert receipt.backup_path is not None
+    assert Path(receipt.backup_path).read_bytes() == backup
+    apply_argv, apply_stdin, _timeout = runner.calls[3]
+    assert apply_argv[-1].endswith(
+        " ipaddr_eth 192.168.1.165"
+    )
+    assert apply_stdin is not None
+    assert b"fw_setenv -s" in apply_stdin
+    assert b"device_reboot" not in apply_stdin
 
 
 def test_pinned_transport_rejects_hostnames_loose_files_and_changed_key(

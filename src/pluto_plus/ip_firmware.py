@@ -34,6 +34,14 @@ from pluto_plus.firmware import (
     RadioFirmwareIdentity,
     validate_frm,
 )
+from pluto_plus.network_config import (
+    NETWORK_KEYS,
+    NetworkConfigExecutionResult,
+    NetworkConfigIdentity,
+    NetworkConfigObservation,
+    NetworkConfigPlan,
+    persistent_environment_sha256,
+)
 
 _SERIAL_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
@@ -265,6 +273,113 @@ printf 'PPU\tfit_size\t%s\n' "$actual"
 printf 'PPU\tfit_sha256\t%s\n' "$digest"
 """
 
+_NETWORK_INSPECT_SCRIPT = rb"""set -eu
+serial_expected="$1"
+emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
+read_env() { fw_printenv -n "$1" 2>/dev/null || true; }
+serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
+test "$serial" = "$serial_expected"
+test -f /opt/config.txt && test ! -L /opt/config.txt
+hostname=$(read_env hostname)
+test -n "$hostname" || hostname=$(cat /etc/hostname)
+ipaddr=$(read_env ipaddr); test -n "$ipaddr" || ipaddr=192.168.2.1
+ipaddr_host=$(read_env ipaddr_host); test -n "$ipaddr_host" || ipaddr_host=192.168.2.10
+netmask=$(read_env netmask); test -n "$netmask" || netmask=255.255.255.0
+ipaddr_eth=$(read_env ipaddr_eth)
+netmask_eth=$(read_env netmask_eth); test -n "$netmask_eth" || netmask_eth=255.255.255.0
+env_sha=$({
+  printf 'ipaddr=%s\n' "$ipaddr"
+  printf 'ipaddr_host=%s\n' "$ipaddr_host"
+  printf 'netmask=%s\n' "$netmask"
+  printf 'ipaddr_eth=%s\n' "$ipaddr_eth"
+  printf 'netmask_eth=%s\n' "$netmask_eth"
+} | sha256sum | awk '{print $1}')
+config_sha=$(sha256sum /opt/config.txt | awk '{print $1}')
+config_redacted=$(
+  sed -e 's/^\([[:space:]]*pwd_wlan[[:space:]]*=[[:space:]]*\).*$/\1<redacted>/' \
+    /opt/config.txt |
+  base64 |
+  tr -d '\n'
+)
+emit serial "$serial"
+emit hostname "$hostname"
+emit ipaddr "$ipaddr"
+emit ipaddr_host "$ipaddr_host"
+emit netmask "$netmask"
+emit ipaddr_eth "$ipaddr_eth"
+emit netmask_eth "$netmask_eth"
+emit environment_sha256 "$env_sha"
+emit config_txt_sha256 "$config_sha"
+emit config_txt_redacted_b64 "$config_redacted"
+"""
+
+_NETWORK_APPLY_SCRIPT = rb"""set -eu
+serial_expected="$1"; expected_digest="$2"; plan_id="$3"; shift 3
+emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
+read_env() { fw_printenv -n "$1" 2>/dev/null || true; }
+serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
+test "$serial" = "$serial_expected"
+ipaddr=$(read_env ipaddr); test -n "$ipaddr" || ipaddr=192.168.2.1
+ipaddr_host=$(read_env ipaddr_host); test -n "$ipaddr_host" || ipaddr_host=192.168.2.10
+netmask=$(read_env netmask); test -n "$netmask" || netmask=255.255.255.0
+ipaddr_eth=$(read_env ipaddr_eth)
+netmask_eth=$(read_env netmask_eth); test -n "$netmask_eth" || netmask_eth=255.255.255.0
+current_digest=$({
+  printf 'ipaddr=%s\n' "$ipaddr"
+  printf 'ipaddr_host=%s\n' "$ipaddr_host"
+  printf 'netmask=%s\n' "$netmask"
+  printf 'ipaddr_eth=%s\n' "$ipaddr_eth"
+  printf 'netmask_eth=%s\n' "$netmask_eth"
+} | sha256sum | awk '{print $1}')
+test "$current_digest" = "$expected_digest"
+umask 077
+backup_dir=/root/.pluto-plus-network-config
+mkdir -p "$backup_dir"; test -d "$backup_dir"; test ! -L "$backup_dir"; chmod 700 "$backup_dir"
+backup="$backup_dir/$plan_id.env"
+test ! -e "$backup"
+fw_printenv >"$backup"
+chmod 600 "$backup"
+sync
+backup_sha=$(sha256sum "$backup" | awk '{print $1}')
+backup_b64=$(base64 "$backup" | tr -d '\n')
+batch="$backup_dir/$plan_id.batch"
+: >"$batch"; chmod 600 "$batch"
+count=0
+while [ "$#" -gt 0 ]; do
+  test "$#" -ge 2
+  key="$1"; value="$2"; shift 2
+  case "$key" in ipaddr|ipaddr_host|netmask|ipaddr_eth|netmask_eth) ;; *) exit 12 ;; esac
+  case "$value" in
+    __DELETE__) printf '%s\n' "$key" >>"$batch" ;;
+    *[!0-9.]*) exit 13 ;;
+    *) printf '%s %s\n' "$key" "$value" >>"$batch" ;;
+  esac
+  count=$((count + 1))
+done
+test "$count" -ge 1 && test "$count" -le 3
+fw_setenv -s "$batch"
+rm -f "$batch"
+sync
+ipaddr=$(read_env ipaddr); test -n "$ipaddr" || ipaddr=192.168.2.1
+ipaddr_host=$(read_env ipaddr_host); test -n "$ipaddr_host" || ipaddr_host=192.168.2.10
+netmask=$(read_env netmask); test -n "$netmask" || netmask=255.255.255.0
+ipaddr_eth=$(read_env ipaddr_eth)
+netmask_eth=$(read_env netmask_eth); test -n "$netmask_eth" || netmask_eth=255.255.255.0
+after_digest=$({
+  printf 'ipaddr=%s\n' "$ipaddr"
+  printf 'ipaddr_host=%s\n' "$ipaddr_host"
+  printf 'netmask=%s\n' "$netmask"
+  printf 'ipaddr_eth=%s\n' "$ipaddr_eth"
+  printf 'netmask_eth=%s\n' "$netmask_eth"
+} | sha256sum | awk '{print $1}')
+emit serial "$serial"
+emit backup_path "$backup"
+emit backup_sha256 "$backup_sha"
+emit backup_b64 "$backup_b64"
+emit environment_sha256 "$after_digest"
+emit mutation_completed 1
+"""
+
 
 class PinnedSshFirmwareTransport:
     """Key-only OpenSSH transport pinned to one literal endpoint and host key."""
@@ -392,6 +507,107 @@ class PinnedSshFirmwareTransport:
         combined = result.stdout + result.stderr
         if b"PPU\treset_dispatched\t1" not in combined:
             self._raise_result(result)
+
+    def inspect_network_config(self, serial: str) -> NetworkConfigObservation:
+        """Read the generated config safely, redacting the Wi-Fi password."""
+
+        if not _SERIAL_RE.fullmatch(serial):
+            raise IpFirmwareError("invalid serial for network-config inspection")
+        fields = _parse_report(
+            self._run(
+                "/bin/sh -s -- " + serial,
+                stdin=_NETWORK_INSPECT_SCRIPT,
+                timeout_s=20,
+            )
+        )
+        if _required(fields, "serial") != serial:
+            raise IpFirmwareError("network-config inspection returned another serial")
+        encoded = _required(fields, "config_txt_redacted_b64")
+        try:
+            config_bytes = base64.b64decode(encoded, validate=True)
+            config_text = config_bytes.decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError) as error:
+            raise IpFirmwareError("redacted config.txt report is malformed") from error
+        if len(config_bytes) > 65_536 or "pwd_wlan" in config_text and not all(
+            "<redacted>" in line
+            for line in config_text.splitlines()
+            if line.lstrip().startswith("pwd_wlan")
+        ):
+            raise IpFirmwareError("config.txt redaction did not pass validation")
+        values = {key: fields.get(key, "") for key in NETWORK_KEYS}
+        if not hmac.compare_digest(
+            persistent_environment_sha256(values),
+            _required_digest(fields, "environment_sha256"),
+        ):
+            raise IpFirmwareError("network environment digest report is inconsistent")
+        return NetworkConfigObservation(
+            identity=NetworkConfigIdentity(
+                serial=serial,
+                endpoint=self.endpoint,
+                host_key_fingerprint=self.host_key_fingerprint,
+            ),
+            config_txt_sha256=_required_digest(fields, "config_txt_sha256"),
+            environment_sha256=_required_digest(fields, "environment_sha256"),
+            config_txt_redacted=config_text,
+            hostname=_required(fields, "hostname"),
+            usb_radio_address=_required(fields, "ipaddr"),
+            usb_host_address=_required(fields, "ipaddr_host"),
+            usb_netmask=_required(fields, "netmask"),
+            ethernet_address=fields.get("ipaddr_eth") or None,
+            ethernet_netmask=_required(fields, "netmask_eth"),
+        )
+
+    def apply_network_config(
+        self, plan: NetworkConfigPlan
+    ) -> NetworkConfigExecutionResult:
+        """Persist one validated plan without restarting or changing live addresses."""
+
+        if plan.identity != NetworkConfigIdentity(
+            serial=plan.identity.serial,
+            endpoint=self.endpoint,
+            host_key_fingerprint=self.host_key_fingerprint,
+        ):
+            raise IpFirmwareError("network-config plan identity does not match enrollment")
+        if not re.fullmatch(r"[0-9a-f]{32}", plan.plan_id):
+            raise IpFirmwareError("network-config plan identifier is malformed")
+        arguments: list[str] = [
+            plan.identity.serial,
+            plan.before.environment_sha256,
+            plan.plan_id,
+        ]
+        for key, value in plan.changes_items:
+            if key not in NETWORK_KEYS or (value and not re.fullmatch(r"[0-9.]{7,15}", value)):
+                raise IpFirmwareError("network-config plan contains an invalid change")
+            arguments.extend((key, value or "__DELETE__"))
+        command = "/bin/sh -s -- " + " ".join(arguments)
+        fields = _parse_report(
+            self._run(command, stdin=_NETWORK_APPLY_SCRIPT, timeout_s=45)
+        )
+        if fields.get("mutation_completed") != "1" or fields.get("serial") != plan.identity.serial:
+            raise IpFirmwareError("network-config persistent write was not acknowledged")
+        after = self.inspect_network_config(plan.identity.serial)
+        if not hmac.compare_digest(
+            after.environment_sha256,
+            _required_digest(fields, "environment_sha256"),
+        ):
+            raise IpFirmwareError("network-config post-write digest changed during readback")
+        return NetworkConfigExecutionResult(
+            observation=after,
+            backup_path=_required(fields, "backup_path"),
+            backup_sha256=_required_digest(fields, "backup_sha256"),
+            backup_content=_decode_bounded_base64(
+                _required(fields, "backup_b64"),
+                label="network environment backup",
+                maximum_bytes=131_072,
+            ),
+            completed_phases=(
+                "identity_attested",
+                "environment_revalidated",
+                "backup_persisted",
+                "environment_written",
+                "persistent_readback_verified",
+            ),
+        )
 
     def _run(
         self, command: str, *, stdin: bytes | None = None, timeout_s: float
@@ -998,6 +1214,13 @@ def _validate_fixed_command(command: str) -> None:
         return
     if re.fullmatch(r"/bin/sh -s -- [A-Za-z0-9._:-]{1,128}", command):
         return
+    if re.fullmatch(
+        r"/bin/sh -s -- [A-Za-z0-9._:-]{1,128} [0-9a-f]{64} [0-9a-f]{32}"
+        r"(?: (?:ipaddr|ipaddr_host|netmask|ipaddr_eth|netmask_eth)"
+        r" (?:[0-9.]{7,15}|__DELETE__)){1,3}",
+        command,
+    ):
+        return
     raise IpFirmwareError("SSH command is outside the fixed firmware operation set")
 
 
@@ -1071,3 +1294,13 @@ def _required_positive_int(fields: dict[str, str], key: str) -> int:
 def _bounded_text(value: str, limit: int = 4096) -> str:
     cleaned = value.replace("\x00", "�")
     return cleaned if len(cleaned) <= limit else cleaned[-limit:]
+
+
+def _decode_bounded_base64(value: str, *, label: str, maximum_bytes: int) -> bytes:
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except binascii.Error as error:
+        raise IpFirmwareError(f"{label} is not valid base64") from error
+    if not decoded or len(decoded) > maximum_bytes:
+        raise IpFirmwareError(f"{label} is empty or exceeds its size limit")
+    return decoded

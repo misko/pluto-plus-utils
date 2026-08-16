@@ -52,6 +52,17 @@ from pluto_plus.models import (
     StreamRequest,
     Transport,
 )
+from pluto_plus.network_config import (
+    NetworkAddressMode,
+    NetworkConfigManager,
+    NetworkConfigObservation,
+    NetworkConfigPlan,
+    NetworkConfigPlanNotFoundError,
+    NetworkConfigReceipt,
+    NetworkConfigUnavailableError,
+    NetworkInterface,
+    PlannedNetworkConfig,
+)
 from pluto_plus.setup import (
     CanonicalSetupManager,
     PlannedSetup,
@@ -73,6 +84,7 @@ class PlutoService:
         discovered_radios: tuple[RadioSnapshot, ...] = (),
         firmware_manager: FirmwareManager | None = None,
         ip_firmware_managers: Mapping[str, FirmwareManager] | None = None,
+        network_config_managers: Mapping[str, NetworkConfigManager] | None = None,
         setup_manager: CanonicalSetupManager | None = None,
         capture_free_bytes: Callable[[Path], int] | None = None,
         capture_reserve_bytes: int = 64 * 1024 * 1024,
@@ -100,6 +112,7 @@ class PlutoService:
                 for manager in self.ip_firmware_managers.values()
             ):
                 raise ValueError("IP firmware managers must use ssh_frm transport")
+            self.network_config_managers = dict(network_config_managers or {})
             self.setup_manager = setup_manager
             self._firmware_filesystem = LocalFirmwareFilesystem()
             self._firmware_images: dict[str, tuple[FirmwareImageSummary, Path]] = {}
@@ -107,6 +120,8 @@ class PlutoService:
             self._firmware_plan_managers: dict[str, FirmwareManager] = {}
             self._firmware_receipts: dict[str, FirmwareReceipt] = {}
             self._setup_plans: dict[str, SetupPlan] = {}
+            self._network_config_plans: dict[str, NetworkConfigPlan] = {}
+            self._network_config_plan_managers: dict[str, NetworkConfigManager] = {}
             for device in devices:
                 controller = RadioController(
                     device,
@@ -345,6 +360,104 @@ class PlutoService:
             "safety": "inspect-plan-token-execute-receipt",
             "profile_id": CANONICAL_POLICY.profile_id,
         }
+
+    def enroll_network_config_manager(
+        self, radio_id: str, manager: NetworkConfigManager
+    ) -> None:
+        """Attach one explicit pinned-SSH config manager before serving requests."""
+
+        controller = self._controller(radio_id)
+        identity = controller.snapshot().identity
+        if identity.serial != radio_id or manager.identity.serial != identity.serial:
+            raise ValueError("network-config enrollment must use the exact managed serial")
+        if identity.uri != f"ip:{manager.identity.endpoint}":
+            raise ValueError("network-config enrollment endpoint does not match managed IIO")
+        if radio_id in self.network_config_managers:
+            raise ValueError(f"duplicate network-config enrollment for {radio_id!r}")
+        if self._network_config_plans:
+            raise RuntimeError("cannot enroll network config after planning has begun")
+        self.network_config_managers[radio_id] = manager
+
+    def network_config_status(self) -> dict[str, object]:
+        return {
+            "available": bool(self.network_config_managers),
+            "enrolled_radio_ids": sorted(self.network_config_managers),
+            "safety": "redacted-read-structured-plan-token-execute",
+            "mutable_fields": [
+                "ipaddr",
+                "ipaddr_host",
+                "netmask",
+                "ipaddr_eth",
+                "netmask_eth",
+            ],
+        }
+
+    def inspect_network_config(self, radio_id: str) -> NetworkConfigObservation:
+        manager = self._network_config_manager(radio_id)
+        snapshot = self._controller(radio_id).snapshot()
+        if snapshot.identity.serial != manager.identity.serial:
+            raise NetworkConfigUnavailableError("managed radio identity does not match enrollment")
+        return manager.inspect()
+
+    def create_network_config_plan(
+        self,
+        radio_id: str,
+        *,
+        interface: NetworkInterface,
+        mode: NetworkAddressMode,
+        address: str | None,
+        netmask: str | None,
+        host_address: str | None,
+    ) -> PlannedNetworkConfig:
+        manager = self._network_config_manager(radio_id)
+        controller = self._controller(radio_id)
+        snapshot = controller.snapshot()
+        if snapshot.state is not RadioState.READY:
+            raise RadioBusyError(
+                f"radio cannot plan network configuration while {snapshot.state}"
+            )
+        planned = manager.create_plan(
+            interface=interface,
+            mode=mode,
+            address=address,
+            netmask=netmask,
+            host_address=host_address,
+        )
+        self._network_config_plans[planned.plan.plan_id] = planned.plan
+        self._network_config_plan_managers[planned.plan.plan_id] = manager
+        return planned
+
+    def execute_network_config_plan(
+        self,
+        plan_id: str,
+        confirmation_token: str,
+        operator_confirmation: str,
+    ) -> NetworkConfigReceipt:
+        try:
+            plan = self._network_config_plans[plan_id]
+            manager = self._network_config_plan_managers[plan_id]
+        except KeyError as error:
+            raise NetworkConfigPlanNotFoundError(
+                f"unknown network-config plan: {plan_id}"
+            ) from error
+        controller = self._controller_for_serial(plan.identity.serial)
+        return manager.execute(
+            plan,
+            confirmation_token,
+            operator_confirmation,
+            before_mutation=controller.prepare_radio_mutation,
+            after_mutation=controller.recover_after_radio_mutation,
+        )
+
+    def list_network_config_receipts(self) -> list[NetworkConfigReceipt]:
+        receipts = {
+            receipt.receipt_id: receipt
+            for manager in self.network_config_managers.values()
+            for receipt in manager.list_receipts()
+        }
+        return sorted(
+            receipts.values(), key=lambda item: item.started_at, reverse=True
+        )
 
     def create_canonical_setup_plan(self, radio_id: str) -> PlannedSetup:
         manager = self._require_setup()
@@ -648,6 +761,14 @@ class PlutoService:
                 "canonical setup requires an explicitly configured privileged helper"
             )
         return self.setup_manager
+
+    def _network_config_manager(self, radio_id: str) -> NetworkConfigManager:
+        try:
+            return self.network_config_managers[radio_id]
+        except KeyError as error:
+            raise NetworkConfigUnavailableError(
+                f"radio {radio_id!r} has no explicit network-config enrollment"
+            ) from error
 
     def _controller_for_serial(self, serial: str) -> RadioController:
         matches = [

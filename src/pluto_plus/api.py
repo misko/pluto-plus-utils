@@ -47,6 +47,7 @@ from pluto_plus.models import (
     FirmwareExecuteRequest,
     FirmwareImageSummary,
     FirmwarePlanRequest,
+    NetworkConfigPlanRequest,
     RadioSnapshot,
     ScanJob,
     ScanRequest,
@@ -54,6 +55,15 @@ from pluto_plus.models import (
     SettingsPatch,
     StreamJob,
     StreamRequest,
+)
+from pluto_plus.network_config import (
+    NetworkAddressMode,
+    NetworkConfigAuthorizationError,
+    NetworkConfigExecutionError,
+    NetworkConfigPlanNotFoundError,
+    NetworkConfigPreconditionError,
+    NetworkConfigUnavailableError,
+    NetworkInterface,
 )
 from pluto_plus.service import PlutoService
 from pluto_plus.setup import (
@@ -199,6 +209,61 @@ def create_app(
             "firmware_validation_failed",
             str(error),
             status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+
+    @app.exception_handler(NetworkConfigUnavailableError)
+    async def network_config_unavailable(
+        _request: Request, error: NetworkConfigUnavailableError
+    ) -> JSONResponse:
+        return _error(
+            "network_config_unavailable",
+            str(error),
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    @app.exception_handler(NetworkConfigPlanNotFoundError)
+    async def network_config_plan_not_found(
+        _request: Request, error: NetworkConfigPlanNotFoundError
+    ) -> JSONResponse:
+        return _error(
+            "network_config_plan_not_found",
+            str(error),
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    @app.exception_handler(NetworkConfigAuthorizationError)
+    async def network_config_authorization(
+        _request: Request, error: NetworkConfigAuthorizationError
+    ) -> JSONResponse:
+        return _error(
+            "network_config_authorization_failed",
+            str(error),
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    @app.exception_handler(NetworkConfigPreconditionError)
+    async def network_config_precondition(
+        _request: Request, error: NetworkConfigPreconditionError
+    ) -> JSONResponse:
+        return _error(
+            "network_config_precondition_failed",
+            str(error),
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+
+    @app.exception_handler(NetworkConfigExecutionError)
+    async def network_config_execution(
+        _request: Request, error: NetworkConfigExecutionError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "error": {
+                    "code": "network_config_execution_failed",
+                    "message": str(error),
+                },
+                "receipt": jsonable_encoder(error.receipt),
+            },
         )
 
     @app.exception_handler(AdminPolicyUnavailableError)
@@ -359,6 +424,65 @@ def create_app(
         """Return revision plus requested and read-back settings as one transaction view."""
 
         return service.get_radio(radio_id)
+
+    @router.get("/network-config", response_model=None)
+    def network_config_status(request: Request) -> Any:
+        configured = service.network_config_status()
+        return {
+            **configured,
+            "admin_authentication_configured": admin_policy is not None,
+            "secure_transport": _admin_transport_secure(request),
+            "available": bool(configured["available"])
+            and admin_policy is not None
+            and _admin_transport_secure(request),
+            "transport_guidance": (
+                "Use HTTPS, loopback through an SSH tunnel, or a Unix socket for "
+                "config.txt access."
+            ),
+        }
+
+    @router.get("/radios/{radio_id}/config", response_model=None)
+    def inspect_network_config(radio_id: str, request: Request) -> Any:
+        require_admin(request, mutation=False)
+        return service.inspect_network_config(radio_id)
+
+    @router.post(
+        "/radios/{radio_id}/config/plans",
+        status_code=status.HTTP_201_CREATED,
+        response_model=None,
+    )
+    def create_network_config_plan(
+        radio_id: str, payload: NetworkConfigPlanRequest, request: Request
+    ) -> Any:
+        require_admin(request, mutation=True)
+        return service.create_network_config_plan(
+            radio_id,
+            interface=NetworkInterface(payload.interface),
+            mode=NetworkAddressMode(payload.mode),
+            address=payload.address,
+            netmask=payload.netmask,
+            host_address=payload.host_address,
+        )
+
+    @router.post(
+        "/network-config/executions",
+        status_code=status.HTTP_201_CREATED,
+        response_model=None,
+    )
+    def execute_network_config_plan(
+        payload: FirmwareExecuteRequest, request: Request
+    ) -> Any:
+        require_admin(request, mutation=True)
+        return service.execute_network_config_plan(
+            payload.plan_id,
+            payload.confirmation_token,
+            payload.operator_confirmation or "",
+        )
+
+    @router.get("/network-config/receipts", response_model=None)
+    def list_network_config_receipts(request: Request) -> Any:
+        require_admin(request, mutation=False)
+        return service.list_network_config_receipts()
 
     @router.patch("/radios/{radio_id}/settings", response_model=RadioSnapshot)
     def update_settings(radio_id: str, patch: SettingsPatch) -> RadioSnapshot:

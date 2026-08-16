@@ -123,6 +123,41 @@ completed phase and durable backup reference. Do not replay the consumed plan. R
 and, if necessary, explicitly re-pin the selected radio's SSH host key out of band, then
 use the receipt's read-only reconciliation action.
 
+## Guarded config.txt and static IP workflow
+
+On Pluto firmware, `/opt/config.txt` is generated at boot from persistent U-Boot
+environment values; editing that file directly is not a durable configuration API.
+Pluto+ Utils therefore exposes a password-redacted read view and structured changes
+for only the documented Ethernet and USB-gadget network variables. It does not expose
+WLAN passwords, `[ACTIONS]`, arbitrary environment keys, remote paths, or shell commands.
+
+The feature reuses an exact-radio pinned-SSH enrollment described below. Reads and
+mutations require the admin token and a protected transport. Example Ethernet workflow:
+
+```bash
+uv run pluto --admin-token-file /private/admin.token config status
+uv run pluto --admin-token-file /private/admin.token config show EXACT_HARDWARE_SERIAL
+uv run pluto --admin-token-file /private/admin.token config plan EXACT_HARDWARE_SERIAL \
+  --interface ethernet --mode static --address 192.168.1.165 \
+  --netmask 255.255.255.0
+uv run pluto --admin-token-file /private/admin.token config execute PLAN_ID \
+  --token ONE_TIME_TOKEN \
+  --operator-confirmation 'SET STATIC IP EXACT_HARDWARE_SERIAL 192.168.1.165'
+uv run pluto --admin-token-file /private/admin.token config receipt-list
+```
+
+Use `--mode dhcp` with `--interface ethernet` to remove the persistent static
+Ethernet address. USB gadget changes use `--interface usb_gadget --mode static`
+and additionally require `--host-address`. Every plan is bound to the selected
+serial, enrolled endpoint and host key, fresh canonical-network-value digest, exact
+change set, expiry, and one-time token. Execution writes a private complete
+environment backup, performs one batch update, and verifies persistent read-back.
+
+Saving intentionally does **not** restart the radio. Before restarting after an
+Ethernet address change, update the daemon's `--iio-ip` target and the pinned-SSH
+enrollment to the new endpoint. The Web Network panel implements the same workflow
+and reuses the in-memory admin-token input. See [ADR 0005](docs/adr/0005-structured-network-config.md).
+
 ## Guarded firmware workflow
 
 Firmware is fail-closed unless the service is constructed with an explicit
@@ -152,7 +187,7 @@ Once that separately installed helper is listening on a protected Unix socket,
 compose the client boundary explicitly with
 `plutod --firmware-helper-socket /run/pluto-plus/firmware-helper.sock ...`.
 
-### Experimental network firmware transport
+### Experimental pinned-SSH radio administration
 
 An IP-attached, managed IIO radio can be explicitly enrolled for a canonical,
 persistent `pluto.frm` update. Network discovery alone never grants this ability.
@@ -170,8 +205,11 @@ Enrollment is a private mode-0600 JSON file:
 
 The known-host key must be verified out of band; the daemon never performs
 trust-on-first-use. Add the enrollment to a daemon that already manages the same
-serial and IP with `--ssh-firmware-enrollment /absolute/private/enrollment.json`.
-The API remains unavailable for mutation over non-loopback plaintext HTTP.
+serial and IP with `--ssh-radio-admin-enrollment /absolute/private/enrollment.json`
+(the existing `--ssh-firmware-enrollment` name remains an alias). This enables the
+structured network-config surface and the canonical SSH firmware transport for that
+exact managed serial. The API remains unavailable for privileged operations over
+non-loopback plaintext HTTP.
 
 ```bash
 uv run pluto --admin-token-file /private/admin.token firmware upload RELEASE.dfu
