@@ -16,6 +16,7 @@ Open <http://127.0.0.1:8765>, or use another terminal:
 
 ```bash
 uv run pluto radio list
+uv run pluto radio inventory
 uv run pluto radio status fake-001
 uv run pluto doctor
 uv run pluto doctor fake-001
@@ -55,6 +56,27 @@ serial, firmware, AD936x PHY, and paired-RX buffer topology. CIDRs are limited t
 4,096 unique hosts and duplicate serials fail closed. Inventory-only radios are
 labelled `discovered` in the Web selector and cannot be tuned, recovered, or
 streamed until their serial is explicitly promoted at daemon startup.
+
+### Full radio inventory table
+
+`radio inventory` prints a fresh correlation of the daemon host's USB/sysfs
+topology and every managed or startup-discovered network radio:
+
+```bash
+uv run pluto radio inventory
+uv run pluto radio inventory --format json
+```
+
+The default table includes the complete serial, classification, managed state,
+radio IP/IIO URI, firmware, USB bus/device and sysfs path, local `/dev/ttyACM*`
+terminal, USB-network interface and host IP, mass-storage node, model, and any
+identity warning. Unique serials are the only correlation key. Blank or duplicate
+USB serials remain separate and are marked ambiguous rather than guessed.
+
+USB topology is read fresh on every command. “Network” covers radios already known
+to `plutod`; start the daemon with bounded `--discover-iio-network CIDR` options when
+the table should include passive LAN inventory beyond explicitly configured
+`--iio-ip` targets. The command never opens an unmanaged radio or changes hardware.
 
 Loopback is the safe default. Setup and firmware mutations have a separately configured
 bearer-token and strict browser-Origin boundary, but ordinary tune/stream/capture routes

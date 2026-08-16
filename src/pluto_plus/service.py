@@ -36,6 +36,12 @@ from pluto_plus.firmware import (
     RadioFirmwareIdentity,
 )
 from pluto_plus.hardware.base import RadioDevice
+from pluto_plus.inventory import (
+    LocalUsbPluto,
+    RadioInventoryReport,
+    build_radio_inventory,
+    scan_local_usb_plutos,
+)
 from pluto_plus.models import (
     AnalysisRequest,
     AnalysisResult,
@@ -86,6 +92,7 @@ class PlutoService:
         ip_firmware_managers: Mapping[str, FirmwareManager] | None = None,
         network_config_managers: Mapping[str, NetworkConfigManager] | None = None,
         setup_manager: CanonicalSetupManager | None = None,
+        local_usb_inventory: Callable[[], tuple[LocalUsbPluto, ...]] | None = None,
         capture_free_bytes: Callable[[Path], int] | None = None,
         capture_reserve_bytes: int = 64 * 1024 * 1024,
     ) -> None:
@@ -93,6 +100,7 @@ class PlutoService:
         state_root.mkdir(parents=True, exist_ok=True)
         self._state_lock = _acquire_state_lock(state_root)
         self._controllers: dict[str, RadioController] = {}
+        self._local_usb_inventory = local_usb_inventory or scan_local_usb_plutos
         self._discovered_radios = {
             snapshot.identity.radio_id: snapshot for snapshot in discovered_radios
         }
@@ -148,6 +156,11 @@ class PlutoService:
             self._discovered_radios[key] for key in sorted(self._discovered_radios)
         ]
         return managed + discovered
+
+    def radio_inventory(self) -> RadioInventoryReport:
+        """Return a fresh daemon-host USB and known-network correlation."""
+
+        return build_radio_inventory(self.list_radios(), self._local_usb_inventory())
 
     def get_radio(self, radio_id: str) -> RadioSnapshot:
         controller = self._controllers.get(radio_id)

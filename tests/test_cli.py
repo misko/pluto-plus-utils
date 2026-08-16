@@ -32,6 +32,38 @@ def api_transport(
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         path = request.url.path
+        if request.method == "GET" and path.endswith("/inventory"):
+            return httpx.Response(
+                200,
+                json={
+                    "generated_at": "2026-08-16T12:00:00Z",
+                    "records": [
+                        {
+                            "inventory_id": "SERIAL_A",
+                            "serial": "SERIAL_A",
+                            "classification": "confirmed_pluto_plus",
+                            "sources": ["usb", "daemon_managed", "network"],
+                            "managed": True,
+                            "state": "ready",
+                            "model": "PlutoSDR Rev.C",
+                            "firmware_version": "v5",
+                            "transport": "iio_ip",
+                            "iio_uri": "ip:192.168.1.15",
+                            "radio_ip": "192.168.1.15",
+                            "usb_path": "/sys/bus/usb/devices/3-8",
+                            "usb_bus_device": "003:011",
+                            "usb_speed_mbps": 480,
+                            "usb_interface_count": 7,
+                            "host_network_interfaces": [
+                                {"name": "enx001", "ipv4_addresses": ["192.168.2.10"]}
+                            ],
+                            "terminal_devices": ["/dev/ttyACM0"],
+                            "storage_devices": ["/dev/sdb1"],
+                            "notes": [],
+                        }
+                    ],
+                },
+            )
         if request.method == "GET" and path.endswith("/radios"):
             return httpx.Response(200, json=[{"identity": {"radio_id": "fake-001"}}])
         if request.method == "GET" and path.endswith("/firmware"):
@@ -112,6 +144,37 @@ def test_radio_list_emits_json_and_uses_versioned_route(api_transport: Any) -> N
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)[0]["identity"]["radio_id"] == "fake-001"
     assert requests[0].url.path == "/api/v1/radios"
+
+
+def test_radio_inventory_defaults_to_full_table_and_supports_json(
+    api_transport: Any,
+) -> None:
+    requests, _ = api_transport
+    result = runner.invoke(app, ["radio", "inventory"])
+
+    assert result.exit_code == 0, result.output
+    for value in (
+        "SERIAL_A",
+        "192.168.1.15",
+        "v5",
+        "003:011 /sys/bus/usb/devices/3-8",
+        "/dev/ttyACM0",
+        "enx001=192.168.2.10",
+        "/dev/sdb1",
+    ):
+        assert value in result.stdout
+    assert requests[-1].url.path == "/api/v1/inventory"
+
+    result = runner.invoke(app, ["radio", "inventory", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["records"][0]["serial"] == "SERIAL_A"
+
+
+def test_radio_inventory_rejects_unknown_output_format(api_transport: Any) -> None:
+    result = runner.invoke(app, ["radio", "inventory", "--format", "yaml"])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stderr)["error"]["code"] == "invalid_inventory_format"
 
 
 def test_endpoint_option_and_environment_are_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:

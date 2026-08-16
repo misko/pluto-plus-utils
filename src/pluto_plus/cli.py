@@ -198,6 +198,82 @@ def _emit(payload: Any) -> None:
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _inventory_table(report: Any) -> str:
+    if not isinstance(report, dict) or not isinstance(report.get("records"), list):
+        _fail("invalid_daemon_response", "plutod returned an invalid inventory report", 5)
+    columns = (
+        ("CLASS", "class"),
+        ("SERIAL", "serial"),
+        ("STATE", "state"),
+        ("IP / URI", "endpoint"),
+        ("FIRMWARE", "firmware"),
+        ("USB", "usb"),
+        ("TERMINAL", "terminal"),
+        ("HOST NET", "host_net"),
+        ("STORAGE", "storage"),
+        ("MODEL / NOTES", "details"),
+    )
+    rows: list[dict[str, str]] = []
+    class_labels = {
+        "confirmed_pluto_plus": "Pluto+",
+        "daemon_attested_pluto": "Pluto",
+        "pluto_class_ambiguous": "Ambiguous",
+        "simulated": "Simulated",
+    }
+    for item in report["records"]:
+        if not isinstance(item, dict):
+            _fail("invalid_daemon_response", "inventory contains a malformed record", 5)
+        interfaces = item.get("host_network_interfaces") or []
+        host_network = []
+        for interface in interfaces:
+            if not isinstance(interface, dict):
+                continue
+            addresses = interface.get("ipv4_addresses") or []
+            address_text = ",".join(str(value) for value in addresses) or "no-ip"
+            host_network.append(
+                f"{interface.get('name', '?')}={address_text}"
+            )
+        notes = [str(value) for value in (item.get("notes") or [])]
+        model = str(item.get("model") or "—")
+        details = model if not notes else f"{model}; {'; '.join(notes)}"
+        usb_parts = [
+            str(value)
+            for value in (item.get("usb_bus_device"), item.get("usb_path"))
+            if value
+        ]
+        managed = "managed" if item.get("managed") else "unmanaged"
+        rows.append(
+            {
+                "class": class_labels.get(
+                    str(item.get("classification")), str(item.get("classification") or "—")
+                ),
+                "serial": str(item.get("serial") or "<blank>"),
+                "state": f"{item.get('state', 'unknown')}/{managed}",
+                "endpoint": str(item.get("radio_ip") or item.get("iio_uri") or "—"),
+                "firmware": str(item.get("firmware_version") or "unknown"),
+                "usb": " ".join(usb_parts) or "—",
+                "terminal": ",".join(
+                    str(value) for value in (item.get("terminal_devices") or [])
+                ) or "—",
+                "host_net": ",".join(host_network) or "—",
+                "storage": ",".join(
+                    str(value) for value in (item.get("storage_devices") or [])
+                ) or "—",
+                "details": details,
+            }
+        )
+    if not rows:
+        return "No Pluto radios found."
+    widths = {
+        key: max(len(title), *(len(row[key]) for row in rows))
+        for title, key in columns
+    }
+    header = "  ".join(title.ljust(widths[key]) for title, key in columns)
+    separator = "  ".join("-" * widths[key] for _title, key in columns)
+    body = ["  ".join(row[key].ljust(widths[key]) for _title, key in columns) for row in rows]
+    return "\n".join((header, separator, *body))
+
+
 def _fail(code: str, message: str, exit_code: int) -> NoReturn:
     typer.echo(json.dumps({"error": {"code": code, "message": message}}, sort_keys=True), err=True)
     raise typer.Exit(exit_code)
@@ -348,6 +424,25 @@ def _read_ssh_firmware_enrollment(path: Path) -> _SshFirmwareEnrollmentConfig:
 def radio_list(ctx: typer.Context) -> None:
     """List radios known to plutod."""
     _emit(_api(ctx).request("GET", "radios"))
+
+
+@radio_app.command("inventory")
+def radio_inventory(
+    ctx: typer.Context,
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table or json."
+    ),
+) -> None:
+    """Print attached USB and daemon-known network Pluto radios."""
+
+    normalized = output_format.strip().lower()
+    if normalized not in {"json", "table"}:
+        _fail("invalid_inventory_format", "inventory format must be table or json", 2)
+    report = _api(ctx).request("GET", "inventory")
+    if normalized == "json":
+        _emit(report)
+    else:
+        typer.echo(_inventory_table(report))
 
 
 @radio_app.command("status")

@@ -10,6 +10,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from pluto_plus.api import API_PREFIX, WATERFALL_MIN_FRAME_INTERVAL_S, create_app
 from pluto_plus.hardware.fake import FakeRadioDevice
+from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.models import RadioSettings
 from pluto_plus.service import PlutoService
 
@@ -85,6 +86,36 @@ def test_health_and_radio_inventory(api: tuple[TestClient, PlutoService, FakeRad
     all_reports = client.get(f"{API_PREFIX}/doctor")
     assert all_reports.status_code == 200
     assert [report["radio_id"] for report in all_reports.json()] == ["fake-001"]
+
+
+def test_full_inventory_route_correlates_daemon_host_usb_topology(tmp_path: Path) -> None:
+    local = LocalUsbPluto(
+        usb_path="/sys/bus/usb/devices/3-8",
+        bus_number=3,
+        device_number=11,
+        product="PlutoSDR+ with timestamp support",
+        serial="fake-001",
+        speed_mbps=480,
+        interface_count=7,
+        host_network_interfaces=(
+            HostNetworkInterface(name="enx001", ipv4_addresses=("192.168.2.10",)),
+        ),
+        terminal_devices=("/dev/ttyACM0",),
+        storage_devices=("/dev/sdb1",),
+    )
+    service = PlutoService(
+        tmp_path / "inventory-state",
+        (FakeRadioDevice(serial="fake-001"),),
+        local_usb_inventory=lambda: (local,),
+    )
+    with TestClient(create_app(service)) as client:
+        response = client.get(f"{API_PREFIX}/inventory")
+
+    assert response.status_code == 200
+    report = response.json()
+    assert report["records"][0]["serial"] == "fake-001"
+    assert report["records"][0]["classification"] == "simulated"
+    assert report["records"][0]["terminal_devices"] == ["/dev/ttyACM0"]
 
 
 def test_settings_are_revision_guarded(

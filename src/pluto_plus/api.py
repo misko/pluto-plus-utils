@@ -39,6 +39,7 @@ from pluto_plus.firmware import (
     FirmwareMode,
     FirmwareTransport,
 )
+from pluto_plus.inventory import RadioInventoryReport
 from pluto_plus.models import (
     AnalysisRequest,
     AnalysisResult,
@@ -357,6 +358,12 @@ def create_app(
     @router.get("/radios", response_model=list[RadioSnapshot])
     def list_radios() -> list[RadioSnapshot]:
         return service.list_radios()
+
+    @router.get("/inventory", response_model=RadioInventoryReport)
+    def radio_inventory() -> RadioInventoryReport:
+        """Correlate fresh daemon-host USB topology with known network radios."""
+
+        return service.radio_inventory()
 
     @router.get("/radios/{radio_id}", response_model=RadioSnapshot)
     def get_radio(radio_id: str) -> RadioSnapshot:
