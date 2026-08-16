@@ -2,6 +2,10 @@
 
 const API_ROOT = "/api/v1";
 const MAX_TABLE_ROWS = 30;
+const PREVIEW_MAX_FPS = 12;
+const SPECTRUM_MAX_FPS = 4;
+const MAX_PREVIEW_BINS = 1024;
+const MAX_CANVAS_WIDTH = 1024;
 
 const ui = Object.fromEntries(
   [
@@ -38,6 +42,8 @@ const state = {
   analyzers: [],
   latestFrame: null,
   frameScheduled: false,
+  lastPreviewRenderMs: 0,
+  lastSpectrumRenderMs: 0,
   pollingTimer: null,
   settingsDirty: false,
   firmwareAvailable: false,
@@ -975,33 +981,48 @@ function validPowerRows(frame) {
   if (!frame || !Array.isArray(frame.receiver_power_db)) return null;
   const rows = frame.receiver_power_db.slice(0, 2).map((row) => {
     if (!Array.isArray(row) || row.length < 2) return null;
-    const values = row.map(Number);
-    return values.every(Number.isFinite) ? values : null;
+    const stride = Math.max(1, Math.ceil(row.length / MAX_PREVIEW_BINS));
+    const values = [];
+    for (let index = 0; index < row.length; index += stride) {
+      const value = Number(row[index]);
+      if (!Number.isFinite(value)) return null;
+      values.push(value);
+    }
+    return values.length >= 2 ? values : null;
   });
   return rows.length && rows[0] ? rows : null;
 }
 
 function enqueueFrame(frame) {
-  if (!validPowerRows(frame)) return;
+  if (!frame || !Array.isArray(frame.receiver_power_db)) return;
   state.latestFrame = frame;
   if (state.frameScheduled) return;
   state.frameScheduled = true;
-  window.requestAnimationFrame(() => {
-    state.frameScheduled = false;
-    const latest = state.latestFrame;
-    state.latestFrame = null;
-    if (latest) renderFrame(latest);
-  });
+  const interval = 1000 / PREVIEW_MAX_FPS;
+  const delay = Math.max(0, interval - (performance.now() - state.lastPreviewRenderMs));
+  window.setTimeout(() => {
+    window.requestAnimationFrame(() => {
+      state.frameScheduled = false;
+      state.lastPreviewRenderMs = performance.now();
+      const latest = state.latestFrame;
+      state.latestFrame = null;
+      if (latest) renderFrame(latest);
+    });
+  }, delay);
 }
 
 function renderFrame(frame) {
   const rows = validPowerRows(frame);
   if (!rows) return;
-  drawSpectrum(rows);
+  const now = performance.now();
+  if (now - state.lastSpectrumRenderMs >= 1000 / SPECTRUM_MAX_FPS) {
+    drawSpectrum(rows);
+    state.lastSpectrumRenderMs = now;
+  }
   rows.forEach((row, index) => {
     if (!row) return;
     if (index < 2) drawWaterfallRow(index === 0 ? ui["waterfall-rx0"] : ui["waterfall-rx1"], row);
-    const peak = Math.max(...row);
+    const peak = row.reduce((maximum, value) => Math.max(maximum, value), -Infinity);
     if (index === 0) setText(ui["rx0-level"], `${peak.toFixed(1)} dB peak`);
     if (index === 1) setText(ui["rx1-level"], `${peak.toFixed(1)} dB peak`);
   });
@@ -1019,9 +1040,9 @@ function renderFrame(frame) {
 }
 
 function fitCanvas(canvas) {
-  const ratio = Math.min(window.devicePixelRatio || 1, 2);
-  const width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
-  const height = Math.max(1, Math.floor(Number(canvas.getAttribute("height")) * ratio));
+  const width = Math.max(1, Math.min(MAX_CANVAS_WIDTH, Math.floor(canvas.clientWidth)));
+  const fallbackHeight = Number(canvas.getAttribute("height"));
+  const height = Math.max(1, Math.floor(canvas.clientHeight || fallbackHeight));
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
@@ -1044,8 +1065,8 @@ function drawSpectrum(rows) {
   const context = canvas.getContext("2d");
   const width = canvas.width;
   const height = canvas.height;
-  const ratio = Math.min(window.devicePixelRatio || 1, 2);
-  const inset = { left: 48 * ratio, right: 12 * ratio, top: 12 * ratio, bottom: 26 * ratio };
+  const ratio = 1;
+  const inset = { left: 32, right: 5, top: 4, bottom: 4 };
   const plotWidth = width - inset.left - inset.right;
   const plotHeight = height - inset.top - inset.bottom;
   const [minimum, maximumRaw] = powerBounds(rows);
@@ -1055,19 +1076,19 @@ function drawSpectrum(rows) {
   context.fillRect(0, 0, width, height);
   context.strokeStyle = "#17333d";
   context.fillStyle = "#78999f";
-  context.font = `${10 * ratio}px ui-monospace, monospace`;
+  context.font = "8px ui-monospace, monospace";
   context.lineWidth = ratio;
-  for (let index = 0; index <= 4; index += 1) {
-    const y = inset.top + (plotHeight * index) / 4;
+  for (let index = 0; index <= 2; index += 1) {
+    const y = inset.top + (plotHeight * index) / 2;
     context.beginPath();
     context.moveTo(inset.left, y);
     context.lineTo(width - inset.right, y);
     context.stroke();
-    const label = maximum - ((maximum - minimum) * index) / 4;
-    context.fillText(`${label.toFixed(0)} dB`, 3 * ratio, y + 3 * ratio);
+    const label = maximum - ((maximum - minimum) * index) / 2;
+    context.fillText(`${label.toFixed(0)}`, 2, y + 3);
   }
-  for (let index = 0; index <= 4; index += 1) {
-    const x = inset.left + (plotWidth * index) / 4;
+  for (let index = 0; index <= 2; index += 1) {
+    const x = inset.left + (plotWidth * index) / 2;
     context.beginPath();
     context.moveTo(x, inset.top);
     context.lineTo(x, height - inset.bottom);

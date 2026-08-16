@@ -65,6 +65,7 @@ from pluto_plus.setup import (
 )
 
 API_PREFIX = "/api/v1"
+WATERFALL_MIN_FRAME_INTERVAL_S = 1 / 12
 
 
 def _error(code: str, message: str, status_code: int) -> JSONResponse:
@@ -574,6 +575,7 @@ def create_app(
 
         await websocket.accept()
         receive_task = asyncio.create_task(websocket.receive())
+        next_frame_at = 0.0
         try:
             while True:
                 if receive_task.done():
@@ -581,6 +583,11 @@ def create_app(
                     if event["type"] == "websocket.disconnect":
                         break
                     receive_task = asyncio.create_task(websocket.receive())
+                delay = next_frame_at - asyncio.get_running_loop().time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                    if receive_task.done():
+                        continue
                 try:
                     frame = await asyncio.to_thread(subscription.frames.get, True, 0.25)
                 except queue.Empty:
@@ -590,6 +597,9 @@ def create_app(
                 if receive_task.done():
                     continue
                 await websocket.send_text(frame.model_dump_json())
+                next_frame_at = (
+                    asyncio.get_running_loop().time() + WATERFALL_MIN_FRAME_INTERVAL_S
+                )
         except WebSocketDisconnect:
             pass
         finally:

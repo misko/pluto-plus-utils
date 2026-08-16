@@ -15,6 +15,7 @@ class UiDocumentParser(HTMLParser):
         self.labels_for: set[str] = set()
         self.disabled_ids: set[str] = set()
         self.canvas_labels: dict[str, str] = {}
+        self.canvas_heights: dict[str, int] = {}
         self.scripts: list[str] = []
         self.stylesheets: list[str] = []
 
@@ -29,6 +30,7 @@ class UiDocumentParser(HTMLParser):
             self.labels_for.add(str(attributes["for"]))
         if tag == "canvas" and element_id:
             self.canvas_labels[element_id] = str(attributes.get("aria-label", ""))
+            self.canvas_heights[element_id] = int(str(attributes.get("height", "0")))
         if tag == "script" and attributes.get("src"):
             self.scripts.append(str(attributes["src"]))
         if tag == "link" and attributes.get("rel") == "stylesheet":
@@ -93,10 +95,22 @@ def test_ui_exposes_required_radio_settings_and_capture_controls() -> None:
 
 
 def test_ui_exposes_dual_rx_visualization_and_analysis_controls() -> None:
-    _, _, _, parser = _assets()
+    html, javascript, css, parser = _assets()
 
     assert {"spectrum-canvas", "waterfall-rx0", "waterfall-rx1"} <= parser.canvas_labels.keys()
     assert all(parser.canvas_labels[canvas_id] for canvas_id in parser.canvas_labels)
+    assert parser.canvas_heights["spectrum-canvas"] <= 80
+    assert parser.canvas_heights["waterfall-rx0"] >= 280
+    assert parser.canvas_heights["waterfall-rx1"] >= 280
+    assert html.index("waterfall-grid") < html.index("spectrum-canvas")
+    assert '<option value="512" selected>' in html
+    assert '<option value="4096"' not in html
+    assert '<option value="8192"' not in html
+    assert '<option value="16384"' not in html
+    assert ".spectrum-overview canvas" in css
+    assert "const PREVIEW_MAX_FPS = 12" in javascript
+    assert "const SPECTRUM_MAX_FPS = 4" in javascript
+    assert "const MAX_CANVAS_WIDTH = 1024" in javascript
     assert {
         "artifacts-body",
         "analysis-artifact",

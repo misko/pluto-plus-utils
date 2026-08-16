@@ -112,7 +112,7 @@
         <div class="panel-heading live-heading-row">
           <div>
             <p class="section-number">03 / Observe</p>
-            <h2 id="live-heading">Live spectrum</h2>
+            <h2 id="live-heading">Live waterfall</h2>
           </div>
           <div class="stream-status" aria-live="polite">
             <span id="stream-dot" class="status-dot status-idle" aria-hidden="true"></span>
@@ -124,30 +124,29 @@
           <div>
             <label for="fft-size">FFT size</label>
             <select id="fft-size">
+              <option value="256">256</option>
+              <option value="512" selected>512</option>
               <option value="1024">1,024</option>
               <option value="2048">2,048</option>
-              <option value="4096" selected>4,096</option>
-              <option value="8192">8,192</option>
-              <option value="16384">16,384</option>
             </select>
           </div>
           <button id="start-preview" class="button primary" type="button" disabled>Start preview</button>
           <button id="stop-preview" class="button danger" type="button" disabled>Stop</button>
         </div>
 
-        <div class="chart-card">
-          <div class="chart-labels"><span>Power spectrum</span><span id="spectrum-range">Frequency span —</span></div>
-          <canvas id="spectrum-canvas" height="260" role="img" aria-label="Live power spectrum for receiver channels zero and one"></canvas>
-        </div>
         <div class="waterfall-grid">
           <div class="chart-card">
             <div class="chart-labels"><span><i class="legend rx0"></i>RX0 waterfall</span><span id="rx0-level">— dB</span></div>
-            <canvas id="waterfall-rx0" height="280" role="img" aria-label="Scrolling waterfall for receiver channel zero"></canvas>
+            <canvas id="waterfall-rx0" height="320" role="img" aria-label="Scrolling waterfall for receiver channel zero"></canvas>
           </div>
           <div class="chart-card">
             <div class="chart-labels"><span><i class="legend rx1"></i>RX1 waterfall</span><span id="rx1-level">— dB</span></div>
-            <canvas id="waterfall-rx1" height="280" role="img" aria-label="Scrolling waterfall for receiver channel one"></canvas>
+            <canvas id="waterfall-rx1" height="320" role="img" aria-label="Scrolling waterfall for receiver channel one"></canvas>
           </div>
+        </div>
+        <div class="chart-card spectrum-overview">
+          <div class="chart-labels"><span>Power overview</span><span id="spectrum-range">Frequency span —</span></div>
+          <canvas id="spectrum-canvas" height="56" role="img" aria-label="Compact live power spectrum overview for receiver channels zero and one"></canvas>
         </div>
         <p id="frame-metadata" class="hint mono" aria-live="polite">No spectrum frames received.</p>
       </section>

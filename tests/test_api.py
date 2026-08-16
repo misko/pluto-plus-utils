@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from pluto_plus.api import API_PREFIX, create_app
+from pluto_plus.api import API_PREFIX, WATERFALL_MIN_FRAME_INTERVAL_S, create_app
 from pluto_plus.hardware.fake import FakeRadioDevice
 from pluto_plus.models import RadioSettings
 from pluto_plus.service import PlutoService
@@ -285,6 +285,27 @@ def test_waterfall_websocket_streams_spectrum_frames(
 
     stopped = client.delete(f"{API_PREFIX}/radios/fake-001/streams/current")
     assert stopped.status_code == 200
+
+
+def test_waterfall_websocket_rate_is_bounded_for_browser_responsiveness(
+    api: tuple[TestClient, PlutoService, FakeRadioDevice],
+) -> None:
+    client, _service, _device = api
+    assert WATERFALL_MIN_FRAME_INTERVAL_S >= 1 / 12
+    started = client.post(
+        f"{API_PREFIX}/radios/fake-001/streams",
+        json={"block_size": 4096, "fft_size": 256},
+    )
+    assert started.status_code == 201
+
+    with client.websocket_connect(f"{API_PREFIX}/ws/radios/fake-001/waterfall") as websocket:
+        websocket.receive_json()
+        started_wait = time.monotonic()
+        websocket.receive_json()
+        elapsed = time.monotonic() - started_wait
+        assert elapsed >= WATERFALL_MIN_FRAME_INTERVAL_S * 0.7
+
+    assert client.delete(f"{API_PREFIX}/radios/fake-001/streams/current").status_code == 200
 
 
 def test_slow_waterfall_consumer_does_not_block_capture(

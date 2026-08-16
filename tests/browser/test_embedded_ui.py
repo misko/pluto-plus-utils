@@ -95,6 +95,7 @@ def test_complete_fake_radio_browser_workflow(browser_page: Any, fake_daemon_ori
 
     # Exercise the real WebSocket and require evidence that a frame reached both the
     # metadata view and canvas renderer, rather than merely opening a connection.
+    assert page.locator("#fft-size").input_value() == "512"
     page.locator("#fft-size").select_option("1024")
     page.locator("#start-preview").click()
     page.wait_for_function(
@@ -105,6 +106,23 @@ def test_complete_fake_radio_browser_workflow(browser_page: Any, fake_daemon_ori
     assert _canvas_has_rendered_pixels(page, "#spectrum-canvas")
     assert _canvas_has_rendered_pixels(page, "#waterfall-rx0")
     assert _canvas_has_rendered_pixels(page, "#waterfall-rx1")
+    canvas_sizes = page.evaluate(
+        """() => Object.fromEntries(
+          ['spectrum-canvas', 'waterfall-rx0', 'waterfall-rx1'].map(id => {
+            const canvas = document.getElementById(id);
+            return [id, {
+              pixels: [canvas.width, canvas.height],
+              css: [canvas.clientWidth, canvas.clientHeight],
+            }];
+          })
+        )"""
+    )
+    assert canvas_sizes["spectrum-canvas"]["css"][1] <= 56
+    assert canvas_sizes["spectrum-canvas"]["pixels"][0] <= 1_024
+    assert canvas_sizes["waterfall-rx0"]["css"][1] >= 280
+    assert canvas_sizes["waterfall-rx1"]["css"][1] >= 280
+    assert canvas_sizes["waterfall-rx0"]["pixels"][0] <= 1_024
+    assert canvas_sizes["waterfall-rx1"]["pixels"][0] <= 1_024
     page.locator("#stop-preview").click()
     page.wait_for_function("document.querySelector('#radio-state').textContent === 'ready'")
 

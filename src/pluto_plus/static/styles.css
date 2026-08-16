@@ -458,7 +458,22 @@ canvas {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
-  margin-top: 1rem;
+}
+
+.waterfall-grid canvas {
+  height: clamp(280px, 36vh, 360px);
+}
+
+.spectrum-overview {
+  margin-top: 0.7rem;
+}
+
+.spectrum-overview .chart-labels {
+  padding-block: 0.35rem;
+}
+
+.spectrum-overview canvas {
+  height: 56px;
 }
 
 .legend {
