@@ -148,7 +148,9 @@ def test_enrolled_network_flash_is_identity_bound_one_shot_and_reconciled(
     response = page.goto(fake_daemon_origin, wait_until="networkidle")
     assert response is not None and response.ok
     ssh_option = page.locator("#firmware-transport-ssh")
-    assert ssh_option.is_hidden()
+    # Chromium does not report an <option> as geometrically visible while its
+    # collapsed <select> is closed. Assert the actual disclosure attribute.
+    assert ssh_option.get_attribute("hidden") is not None
     assert ssh_option.is_disabled()
     assert "Discovery does not enroll" in page.locator("#firmware-transport-evidence").inner_text()
 
@@ -157,7 +159,7 @@ def test_enrolled_network_flash_is_identity_bound_one_shot_and_reconciled(
     enrolled["value"] = True
     page.locator("#inspect-firmware").click()
     page.wait_for_function("!document.querySelector('#firmware-transport-ssh').disabled")
-    assert ssh_option.is_visible()
+    assert ssh_option.get_attribute("hidden") is None
     page.locator("#firmware-transport").select_option("ssh_frm")
     assert page.locator("#firmware-mode").input_value() == "persistent_qspi"
     assert f"FLASH {SERIAL}" in page.locator("#firmware-confirmation-requirement").inner_text()
