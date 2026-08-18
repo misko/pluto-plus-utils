@@ -21,6 +21,7 @@ def _plan() -> LocalRebootPlan:
         serial=SERIAL,
         usb_sysfs_path="/sys/bus/usb/devices/3-8",
         usb_interface="enx001",
+        ssh_interface="enx001",
         ssh_host="192.168.2.1",
         known_hosts_sha256="a" * 64,
         route_observation=UsbSshRouteObservation(

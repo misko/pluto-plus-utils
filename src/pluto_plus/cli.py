@@ -681,7 +681,7 @@ def radio_reboot_local(
     try:
         ssh = BoundSshTransport(
             host=plan.ssh_host,
-            interface=plan.usb_interface,
+            interface=plan.ssh_interface,
             password=password,
             known_hosts_file=selected_known_hosts,
         )

@@ -124,8 +124,29 @@ def test_prepare_binds_exact_serial_path_interface_route_and_private_trust(
     assert plan.serial == SERIAL
     assert plan.usb_sysfs_path == str(PATH)
     assert plan.usb_interface == INTERFACE
+    assert plan.ssh_interface == INTERFACE
     assert plan.confirmation_phrase == f"REBOOT {SERIAL}"
     assert len(plan.known_hosts_sha256) == 64
+
+
+def test_prepare_lan_route_retains_usb_identity_without_usb_bind(tmp_path: Path) -> None:
+    route_calls: list[tuple[str, str]] = []
+
+    plan = prepare_local_reboot(
+        SERIAL,
+        PATH,
+        ssh_host="192.168.1.14",
+        known_hosts_file=_credentials(tmp_path),
+        scanner=lambda: (_radio(),),
+        route_checker=lambda interface, host: route_calls.append((interface, host)) or ROUTE,
+        interface_validator=lambda interface, path: None,
+    )
+
+    assert plan.usb_interface == INTERFACE
+    assert plan.ssh_interface is None
+    assert plan.ssh_host == "192.168.1.14"
+    assert plan.route_observation is None
+    assert route_calls == []
 
 
 def test_prepare_refuses_duplicate_or_non_private_identity(tmp_path: Path) -> None:

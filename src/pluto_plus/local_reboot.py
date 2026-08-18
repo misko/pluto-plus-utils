@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -61,9 +62,10 @@ class LocalRebootPlan:
     serial: str
     usb_sysfs_path: str
     usb_interface: str
+    ssh_interface: str | None
     ssh_host: str
     known_hosts_sha256: str
-    route_observation: UsbSshRouteObservation
+    route_observation: UsbSshRouteObservation | None
     confirmation_phrase: str
 
 
@@ -170,8 +172,15 @@ def prepare_local_reboot(
         raise LocalRebootError("selected radio must expose exactly one USB network interface")
     interface = local.host_network_interfaces[0].name
     try:
+        address = ipaddress.ip_address(ssh_host)
+    except ValueError as error:
+        raise LocalRebootError("SSH host must be a literal IP address") from error
+    if address.version != 4 or not address.is_private:
+        raise LocalRebootError("SSH host must be a private IPv4 address")
+    ssh_interface = interface if ssh_host == "192.168.2.1" else None
+    try:
         interface_validator(interface, str(path))
-        route = route_checker(interface, ssh_host)
+        route = route_checker(interface, ssh_host) if ssh_interface is not None else None
     except (OSError, ValueError, RuntimeError) as error:
         raise LocalRebootError(str(error)) from error
     known_hosts_sha256 = _private_file_sha256(known_hosts_file, "SSH known-hosts")
@@ -182,6 +191,7 @@ def prepare_local_reboot(
         serial=serial,
         usb_sysfs_path=str(path),
         usb_interface=interface,
+        ssh_interface=ssh_interface,
         ssh_host=ssh_host,
         known_hosts_sha256=known_hosts_sha256,
         route_observation=route,
@@ -263,12 +273,14 @@ def execute_local_reboot(
             fresh.serial,
             fresh.usb_sysfs_path,
             fresh.usb_interface,
+            fresh.ssh_interface,
             fresh.ssh_host,
             fresh.known_hosts_sha256,
         ) != (
             plan.serial,
             plan.usb_sysfs_path,
             plan.usb_interface,
+            plan.ssh_interface,
             plan.ssh_host,
             plan.known_hosts_sha256,
         ):
@@ -299,7 +311,8 @@ def execute_local_reboot(
         last_error: BaseException | None = None
         while time.monotonic() < deadline:
             try:
-                route_checker(plan.usb_interface, plan.ssh_host)
+                if plan.ssh_interface is not None:
+                    route_checker(plan.ssh_interface, plan.ssh_host)
                 candidate = transport.attest(plan.serial)
             except BaseException as error:
                 last_error = error
