@@ -429,6 +429,18 @@ binding the shared USB-gadget subnet. If firmware rotates its SSH key on reboot,
 the new key is never trusted: return is independently attested and TX-muted through
 the already selected USB-IIOD interface.
 
+When several local Pluto gadget interfaces all claim `192.168.2.10/24` and the
+radio endpoint `192.168.2.1`, add `--isolate-usb-route` to the dry run. The plan
+records the selected interface, peer Pluto interfaces, overlapping host routes,
+and the separate confirmation phrase `ISOLATE USB SSH <interface>`. Repeat the
+enrollment or reboot with both its normal confirmation and
+`--isolation-confirm 'ISOLATE USB SSH <interface>'`. Execution requires `ip`,
+`networkctl`, and non-interactive sudo. It writes an atomic mode-0600 receipt
+under `~/.local/state/pluto-plus-utils/host-isolation-receipts`, temporarily
+removes only the recorded competing routes and peer Pluto links, attests the
+selected route, runs the bounded operation, and restores the host network in a
+`finally` block. Uncertain restoration always overrides operation success.
+
 ## Direct transport status
 
 `pluto_plus.direct_radio` contains USB v3 and direct-IP v1 wire parsers, bounded

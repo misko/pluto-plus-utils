@@ -6,6 +6,8 @@ import pytest
 from typer.testing import CliRunner
 
 from pluto_plus.cli import app
+from pluto_plus.host_isolation import HostIsolationPlan, HostRoute
+from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.ip_firmware import UsbSshRouteObservation
 from pluto_plus.local_reboot import LocalRebootPlan
 
@@ -55,6 +57,63 @@ def test_reboot_local_defaults_to_read_only_plan(monkeypatch: pytest.MonkeyPatch
     assert document["mode"] == "dry_run"
     assert document["will_reboot"] is False
     assert document["plan"]["confirmation_phrase"] == "REBOOT SERIAL_A"
+
+
+def test_reboot_local_isolation_dry_run_exposes_separate_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    radio = LocalUsbPluto(
+        usb_path="/sys/bus/usb/devices/3-8",
+        bus_number=3,
+        device_number=11,
+        product="PlutoSDR+",
+        serial=SERIAL,
+        speed_mbps=480,
+        interface_count=7,
+        host_network_interfaces=(
+            HostNetworkInterface(name="enx001", ipv4_addresses=("192.168.2.10",)),
+        ),
+    )
+    isolation = HostIsolationPlan(
+        schema_version=1,
+        plan_id="isolation-a",
+        created_at="2026-08-18T00:00:00+00:00",
+        selected_interface="enx001",
+        endpoint="192.168.2.1",
+        selected_addresses=("192.168.2.10",),
+        peer_interfaces=("enx002",),
+        peer_addresses=(("enx002", ("192.168.2.10",)),),
+        competing_routes=(HostRoute("192.168.2.0/24", "enx002"),),
+        sudo_ready=True,
+        confirmation_phrase="ISOLATE USB SSH enx001",
+    )
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (radio,))
+    monkeypatch.setattr(
+        "pluto_plus.host_isolation.prepare_usb_ssh_isolation", lambda *a, **k: isolation
+    )
+    monkeypatch.setattr("pluto_plus.local_reboot.prepare_local_reboot", lambda *a, **k: _plan())
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "reboot-local",
+            SERIAL,
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            "/private/radio.known_hosts",
+            "--isolate-usb-route",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.output)
+    assert document["will_reboot"] is False
+    assert document["host_isolation"]["selected_interface"] == "enx001"
+    assert document["host_isolation"]["confirmation_phrase"] == (
+        "ISOLATE USB SSH enx001"
+    )
 
 
 def test_reboot_local_execute_requires_exact_confirmation(

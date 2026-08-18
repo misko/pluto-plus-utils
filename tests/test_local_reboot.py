@@ -195,7 +195,7 @@ def test_success_reboots_only_after_safe_state_and_attests_same_return(
     plan = _plan(tmp_path)
     known_hosts = tmp_path / "known_hosts"
     transport = FakeTransport((_attestation("before"), _attestation("after")))
-    scans = iter(((_radio(),), (), (_radio(),)))
+    scans = iter(((_radio(),), (), (_radio(serial=""),), (_radio(),)))
 
     receipt = execute_local_reboot(
         plan,
@@ -267,7 +267,7 @@ def test_unwritable_raw_usb_fails_before_radio_operation(tmp_path: Path) -> None
 def test_wrong_return_topology_is_unknown_and_receipted(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     transport = FakeTransport((_attestation("before"),))
-    scans = iter(((_radio(),), (), (_radio(serial="WRONG"),)))
+    scans = [(_radio(),), (), (_radio(serial="WRONG"),)]
 
     with pytest.raises(LocalRebootExecutionError) as caught:
         execute_local_reboot(
@@ -276,7 +276,7 @@ def test_wrong_return_topology_is_unknown_and_receipted(tmp_path: Path) -> None:
             transport=transport,
             known_hosts_file=tmp_path / "known_hosts",
             receipt_directory=tmp_path / "receipts",
-            scanner=lambda: next(scans),
+            scanner=lambda: scans.pop(0) if len(scans) > 1 else scans[0],
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
             usb_access_checker=lambda path: True,

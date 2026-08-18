@@ -7,6 +7,7 @@ import os
 import stat
 import sys
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from importlib import import_module
@@ -34,6 +35,9 @@ DEFAULT_BOOTSTRAP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/bootst
 DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qualification-reports"
 DEFAULT_LOCAL_REBOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/reboot-receipts"
 DEFAULT_RAM_BOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/ram-boot-receipts"
+DEFAULT_HOST_ISOLATION_RECEIPTS = (
+    Path.home() / ".local/state/pluto-plus-utils/host-isolation-receipts"
+)
 API_PREFIX = "api/v1"
 
 app = typer.Typer(
@@ -669,9 +673,31 @@ def radio_reboot_local(
         "--receipt-directory",
         help="Private directory for durable local reboot receipts.",
     ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing local Pluto NICs/routes with a durable receipt.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="With isolation execution, exact phrase ISOLATE USB SSH <interface>.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for host-isolation receipts.",
+    ),
 ) -> None:
     """Plan or execute one serial/path-scoped local USB reboot."""
 
+    from pluto_plus.host_isolation import (
+        HostIsolationError,
+        HostIsolationExecutionError,
+        execute_usb_ssh_isolated,
+        prepare_usb_ssh_isolation,
+    )
+    from pluto_plus.ip_firmware import UsbSshRouteObservation
     from pluto_plus.local_reboot import (
         FixedSshLocalRebootTransport,
         LocalRebootError,
@@ -682,12 +708,54 @@ def radio_reboot_local(
     from pluto_plus.setup_helper import BoundSshTransport
 
     selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    isolation_plan = None
+    route_checker_override: Callable[[str, str], UsbSshRouteObservation] | None = None
+    pluto_interfaces: tuple[str, ...] = ()
+    if isolate_usb_route:
+        if ssh_host != "192.168.2.1":
+            _fail("host_isolation_invalid", "USB route isolation requires 192.168.2.1", 2)
+        local_devices = scan_local_usb_plutos()
+        selected_matches = [
+            item
+            for item in local_devices
+            if item.serial == serial and item.usb_path == str(usb_sysfs_path)
+        ]
+        if len(selected_matches) != 1 or len(selected_matches[0].host_network_interfaces) != 1:
+            _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
+        pluto_interfaces = tuple(
+            interface.name
+            for item in local_devices
+            for interface in item.host_network_interfaces
+        )
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                selected_matches[0].host_network_interfaces[0].name,
+                ssh_host,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        anticipated_route = UsbSshRouteObservation(
+            interface_addresses=(
+                (isolation_plan.selected_interface, isolation_plan.selected_addresses),
+            ),
+            destination_routes=((isolation_plan.selected_interface, "192.168.2.0/24"),),
+        )
+
+        def anticipated_checker(interface: str, host: str) -> UsbSshRouteObservation:
+            return anticipated_route
+
+        route_checker_override = anticipated_checker
     try:
+        prepare_options: dict[str, Any] = {}
+        if route_checker_override is not None:
+            prepare_options["route_checker"] = route_checker_override
         plan = prepare_local_reboot(
             serial,
             usb_sysfs_path,
             ssh_host=ssh_host,
             known_hosts_file=selected_known_hosts,
+            **prepare_options,
         )
     except (LocalRebootError, OSError, ValueError) as error:
         _fail("local_reboot_preflight_failed", str(error), 4)
@@ -698,6 +766,9 @@ def radio_reboot_local(
                 "mode": "dry_run",
                 "will_reboot": False,
                 "plan": asdict(plan),
+                "host_isolation": (
+                    None if isolation_plan is None else asdict(isolation_plan)
+                ),
                 "host_environment": environment.model_dump(mode="json"),
                 "next_command": (
                     f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
@@ -709,6 +780,12 @@ def radio_reboot_local(
         _fail(
             "local_reboot_confirmation_required",
             f"--execute requires --confirm {plan.confirmation_phrase!r}",
+            2,
+        )
+    if isolation_plan is not None and isolation_confirmation != isolation_plan.confirmation_phrase:
+        _fail(
+            "host_isolation_confirmation_required",
+            f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
             2,
         )
     if not plan.raw_usb_write_access:
@@ -736,26 +813,47 @@ def radio_reboot_local(
             )
         except UnicodeDecodeError:
             _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
-    try:
+    def reboot_action() -> Any:
         ssh = BoundSshTransport(
             host=plan.ssh_host,
             interface=(plan.usb_interface if plan.ssh_route_mode == "usb_gadget" else None),
             password=password,
             known_hosts_file=selected_known_hosts,
         )
-        receipt = execute_local_reboot(
+        return execute_local_reboot(
             plan,
-            confirmation=confirmation,
+            confirmation=confirmation or "",
             transport=FixedSshLocalRebootTransport(ssh),
             known_hosts_file=selected_known_hosts,
             receipt_directory=receipt_directory.expanduser().resolve(),
         )
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            receipt = reboot_action()
+        else:
+            receipt, isolation_receipt = execute_usb_ssh_isolated(
+                isolation_plan,
+                confirmation=isolation_confirmation or "",
+                receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                action=reboot_action,
+                pluto_interfaces=pluto_interfaces,
+            )
+    except HostIsolationExecutionError as error:
+        _emit({"host_isolation": asdict(error.receipt)})
+        raise typer.Exit(5) from error
+    except HostIsolationError as error:
+        _fail("host_isolation_failed", str(error), 4)
     except LocalRebootExecutionError as error:
         _emit(asdict(error.receipt))
         raise typer.Exit(5) from error
     except (LocalRebootError, OSError, ValueError) as error:
         _fail("local_reboot_failed", str(error), 4)
-    _emit(asdict(receipt))
+    if isolation_receipt is None:
+        _emit(asdict(receipt))
+    else:
+        _emit({"host_isolation": asdict(isolation_receipt), "result": asdict(receipt)})
 
 
 @app.command("environment")
@@ -1490,13 +1588,29 @@ def firmware_enroll_usb_ssh(
         "--ssh-host",
         help="Literal private IPv4 endpoint; non-default addresses use the LAN route.",
     ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing local Pluto NICs/routes with a durable receipt.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="With isolation execution, exact phrase ISOLATE USB SSH <interface>.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for host-isolation receipts.",
+    ),
 ) -> None:
     """Pin an SSH host key after USB-selected remote serial attestation."""
 
     phrase = f"TRUST USB SSH {serial}"
+    local_devices = scan_local_usb_plutos()
     matches = [
         item
-        for item in scan_local_usb_plutos()
+        for item in local_devices
         if item.serial == serial and item.usb_path == str(usb_sysfs_path)
     ]
     if len(matches) != 1 or len(matches[0].host_network_interfaces) != 1:
@@ -1513,11 +1627,45 @@ def firmware_enroll_usb_ssh(
         "ssh_host": ssh_host,
         "confirmation_phrase": phrase,
     }
+    isolation_plan = None
+    pluto_interfaces = tuple(
+        interface.name
+        for item in local_devices
+        for interface in item.host_network_interfaces
+    )
+    if isolate_usb_route:
+        if ssh_host != "192.168.2.1":
+            _fail("host_isolation_invalid", "USB route isolation requires 192.168.2.1", 2)
+        from pluto_plus.host_isolation import HostIsolationError, prepare_usb_ssh_isolation
+
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                matches[0].host_network_interfaces[0].name,
+                ssh_host,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
     if not execute:
-        _emit({"mode": "dry_run", "will_trust_host_key": False, "plan": plan})
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_trust_host_key": False,
+                "plan": plan,
+                "host_isolation": (
+                    None if isolation_plan is None else asdict(isolation_plan)
+                ),
+            }
+        )
         return
     if confirmation != phrase:
         _fail("usb_ssh_confirmation_required", f"--confirm must be exactly {phrase!r}", 2)
+    if isolation_plan is not None and isolation_confirmation != isolation_plan.confirmation_phrase:
+        _fail(
+            "host_isolation_confirmation_required",
+            f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
+            2,
+        )
     if password_file is None:
         password = typer.prompt("Radio SSH password", hide_input=True)
     else:
@@ -1538,17 +1686,45 @@ def firmware_enroll_usb_ssh(
         enroll_bound_usb_ssh_host_key,
     )
 
-    try:
-        result = enroll_bound_usb_ssh_host_key(
+    def enrollment_action() -> dict[str, str]:
+        return enroll_bound_usb_ssh_host_key(
             serial=serial,
             usb_sysfs_path=usb_sysfs_path,
             known_hosts_file=known_hosts_file,
             password=password,
             host=ssh_host,
         )
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            result = enrollment_action()
+        else:
+            from pluto_plus.host_isolation import (
+                HostIsolationError,
+                HostIsolationExecutionError,
+                execute_usb_ssh_isolated,
+            )
+
+            try:
+                result, isolation_receipt = execute_usb_ssh_isolated(
+                    isolation_plan,
+                    confirmation=isolation_confirmation or "",
+                    receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                    action=enrollment_action,
+                    pluto_interfaces=pluto_interfaces,
+                )
+            except HostIsolationExecutionError as error:
+                _emit({"host_isolation": asdict(error.receipt)})
+                raise typer.Exit(5) from error
+            except HostIsolationError as error:
+                _fail("host_isolation_failed", str(error), 4)
     except (BootstrapFirmwareError, OSError, ValueError) as error:
         _fail("usb_ssh_enrollment_failed", str(error), 4)
-    _emit(result)
+    if isolation_receipt is None:
+        _emit(result)
+    else:
+        _emit({"host_isolation": asdict(isolation_receipt), "result": result})
 
 
 @firmware_app.command("flash")

@@ -454,6 +454,7 @@ def _wait_for_same_topology(
 ) -> None:
     deadline = time.monotonic() + timeout_s
     disappeared = False
+    returned_mismatch: str | None = None
     while time.monotonic() < deadline:
         devices = scanner()
         at_path = [item for item in devices if item.usb_path == plan.usb_sysfs_path]
@@ -461,12 +462,15 @@ def _wait_for_same_topology(
             disappeared = True
         elif disappeared:
             if len(at_path) != 1 or at_path[0].serial != plan.serial:
-                raise LocalRebootError("a different radio appeared at the selected USB topology")
-            names = tuple(item.name for item in at_path[0].host_network_interfaces)
-            if names != (plan.usb_interface,):
-                raise LocalRebootError("USB network interface changed across reboot")
-            return
+                returned_mismatch = "a different radio appeared at the selected USB topology"
+            else:
+                names = tuple(item.name for item in at_path[0].host_network_interfaces)
+                if names == (plan.usb_interface,):
+                    return
+                returned_mismatch = "USB network interface changed across reboot"
         time.sleep(poll_interval_s)
+    if returned_mismatch is not None:
+        raise LocalRebootError(returned_mismatch)
     raise LocalRebootError("selected USB topology did not disappear and reappear")
 
 
