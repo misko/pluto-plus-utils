@@ -351,7 +351,15 @@ def test_rotated_ssh_key_is_not_trusted_and_exact_usb_verifier_can_reconcile(
     ) -> LocalRebootAttestation:
         assert selected_plan == plan
         verifier_calls.append((before.serial, before.boot_id))
-        return _attestation("ignored-usb-proof")
+        return LocalRebootAttestation(
+            serial=SERIAL,
+            firmware="v6",
+            boot_id=None,
+            capabilities=replace(
+                CAPABILITIES,
+                board_model="Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
+            ),
+        )
 
     receipt = execute_local_reboot(
         plan,

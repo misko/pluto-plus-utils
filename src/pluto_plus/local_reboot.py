@@ -350,7 +350,7 @@ def execute_local_reboot(
                 raise LocalRebootError("radio serial changed across reboot")
             if candidate.firmware != before.firmware:
                 raise LocalRebootError("radio firmware changed across reboot")
-            if candidate.capabilities != before.capabilities:
+            if not _equivalent_capabilities(candidate.capabilities, before.capabilities):
                 raise LocalRebootError("radio capabilities changed across reboot")
             after = candidate
             break
@@ -420,11 +420,7 @@ def attest_and_mute_returned_usb(
     )
     if (
         candidate.firmware != before.firmware
-        or not _is_plutosdr_rev_c(before.capabilities.board_model)
-        or not _is_plutosdr_rev_c(candidate.capabilities.board_model)
-        or candidate.capabilities.phy_model != before.capabilities.phy_model
-        or candidate.capabilities.rx_scan_channels != before.capabilities.rx_scan_channels
-        or candidate.capabilities.tandem_agc is not before.capabilities.tandem_agc
+        or not _equivalent_capabilities(candidate.capabilities, before.capabilities)
     ):
         raise LocalRebootError("returned USB-IIO firmware or capabilities changed across reboot")
     mute_returned_radio(plan.serial)
@@ -434,7 +430,19 @@ def attest_and_mute_returned_usb(
 def _is_plutosdr_rev_c(model: str) -> bool:
     """Match the stable board identity across device-tree and IIOD spellings."""
 
-    return "plutosdr rev.c" in model.casefold()
+    return "plutosdr rev.c" in model.casefold().replace("+", "")
+
+
+def _equivalent_capabilities(
+    first: LocalRebootCapabilities, second: LocalRebootCapabilities
+) -> bool:
+    return (
+        _is_plutosdr_rev_c(first.board_model)
+        and _is_plutosdr_rev_c(second.board_model)
+        and first.phy_model == second.phy_model
+        and first.rx_scan_channels == second.rx_scan_channels
+        and first.tandem_agc is second.tandem_agc
+    )
 
 
 def _wait_for_same_topology(

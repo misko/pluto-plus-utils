@@ -135,7 +135,7 @@ class SshRamBootTransition:
 def _is_plutosdr_rev_c(model: str) -> bool:
     """Match the stable board identity across IIOD and device-tree spellings."""
 
-    return "plutosdr rev.c" in model.casefold()
+    return "plutosdr rev.c" in model.casefold().replace("+", "")
 
 
 def prepare_ram_boot_plan(
