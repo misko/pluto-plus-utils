@@ -21,6 +21,7 @@ from pluto_plus.inventory import scan_local_usb_plutos
 from pluto_plus.tandem import (
     RadioMetadataV4,
     TandemEventDirection,
+    TandemGainTable,
     TandemMode,
     TandemSessionRequestV1,
     TandemState,
@@ -29,12 +30,12 @@ from pluto_plus.tandem import (
 SAMPLE_RATE_HZ = 3_000_000
 SAMPLES_PER_CHANNEL = 65_536
 RF_BANDWIDTH_HZ = 1_500_000
-LO_HZ = 915_000_000
 TONE_HZ = 100_000
 INITIAL_GAIN_DB = 30
 ADC_FULL_SCALE = 2048.0
 WATCHDOG_FAULT = 1 << 18
 WATCHDOG_SETTLE_SECONDS = 6.5
+QUALIFICATION_FREQUENCIES_HZ = (915_000_000, 2_450_000_000, 5_800_000_000)
 
 
 class TandemQualificationError(RuntimeError):
@@ -51,6 +52,7 @@ class TandemQualificationPlan:
     effective_attenuation_db: float
     expected_firmware: str
     expected_metadata_abi: int
+    frequencies_hz: tuple[int, ...]
     confirmation_phrase: str
 
 
@@ -152,6 +154,7 @@ def prepare_tandem_qualification(
         effective_attenuation_db=effective,
         expected_firmware=V6_TANDEM_LATCH_CLEAR_RAM_PROFILE.firmware_version,
         expected_metadata_abi=2,
+        frequencies_hz=QUALIFICATION_FREQUENCIES_HZ,
         confirmation_phrase=phrase,
     )
 
@@ -190,7 +193,7 @@ def execute_tandem_qualification(
     sdr = adi.ad9361(uri=uris[0])
     receiver: _MetadataReceiver | None = None
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "started_at_unix_ns": time.time_ns(),
         "plan": asdict(plan),
         "usb_uri": uris[0],
@@ -207,12 +210,24 @@ def execute_tandem_qualification(
         if sdr._ctx.find_device("tandem-agc") is None:
             raise TandemQualificationError("radio lacks the tandem-agc capability")
         _configure(sdr)
-        report["checks"]["hold"] = _qualify_hold(sdr)
-        report["checks"]["tone"] = _qualify_tone(sdr, plan.strong_tx_gain_db)
-        report["checks"]["auto"] = _qualify_auto(sdr, plan)
+        report["checks"]["bands"] = []
+        for frequency_hz in plan.frequencies_hz:
+            gain_table = _expected_gain_table(frequency_hz)
+            _configure_frequency(sdr, frequency_hz)
+            report["checks"]["bands"].append(
+                {
+                    "frequency_hz": frequency_hz,
+                    "expected_gain_table_id": int(gain_table),
+                    "hold": _qualify_hold(sdr, gain_table),
+                    "tone": _qualify_tone(sdr, plan.strong_tx_gain_db, frequency_hz),
+                    "auto": _qualify_auto(sdr, plan, gain_table),
+                }
+            )
         if include_watchdog:
             report["checks"]["watchdog"] = _qualify_watchdog(sdr)
-            report["checks"]["post_watchdog_hold"] = _qualify_hold(sdr)
+            report["checks"]["post_watchdog_hold"] = _qualify_hold(
+                sdr, _expected_gain_table(plan.frequencies_hz[-1])
+            )
         report["outcome"] = "pass"
     except BaseException as error:
         report["outcome"] = "fail"
@@ -251,8 +266,6 @@ def _configure(sdr: Any) -> None:
     sdr.sample_rate = SAMPLE_RATE_HZ
     sdr.rx_rf_bandwidth = RF_BANDWIDTH_HZ
     sdr.tx_rf_bandwidth = RF_BANDWIDTH_HZ
-    sdr.rx_lo = LO_HZ
-    sdr.tx_lo = LO_HZ
     sdr.rx_buffer_size = SAMPLES_PER_CHANNEL
     sdr._rxadc.set_kernel_buffers_count(2)
     sdr.gain_control_mode_chan0 = "manual"
@@ -261,7 +274,28 @@ def _configure(sdr: Any) -> None:
     sdr.rx_hardwaregain_chan1 = INITIAL_GAIN_DB
 
 
-def _qualify_hold(sdr: Any) -> dict[str, Any]:
+def _configure_frequency(sdr: Any, frequency_hz: int) -> None:
+    _mute_transmit(sdr)
+    sdr.rx_destroy_buffer()
+    sdr.rx_lo = frequency_hz
+    sdr.tx_lo = frequency_hz
+    if int(sdr.rx_lo) != frequency_hz or int(sdr.tx_lo) != frequency_hz:
+        raise TandemQualificationError(f"radio did not tune both LOs to {frequency_hz}")
+
+
+def _expected_gain_table(frequency_hz: int) -> TandemGainTable:
+    if 200_000_000 <= frequency_hz <= 1_300_000_000:
+        return TandemGainTable.MHZ_200_1300
+    if 1_300_000_000 < frequency_hz <= 4_000_000_000:
+        return TandemGainTable.MHZ_1300_4000
+    if 4_000_000_000 < frequency_hz <= 6_000_000_000:
+        return TandemGainTable.MHZ_4000_6000
+    raise TandemQualificationError(
+        f"frequency {frequency_hz} Hz is outside the qualified gain tables"
+    )
+
+
+def _qualify_hold(sdr: Any, expected_gain_table: TandemGainTable) -> dict[str, Any]:
     receiver = _MetadataReceiver(sdr, TandemMode.HOLD)
     receiver.open()
     try:
@@ -270,6 +304,8 @@ def _qualify_hold(sdr: Any) -> dict[str, Any]:
             raise TandemQualificationError("HOLD metadata does not report ARMED_HOLD")
         if any(frame.gain_events or frame.tandem_transition_count for frame in frames):
             raise TandemQualificationError("HOLD unexpectedly changed gain")
+        if any(frame.gain_table_id is not expected_gain_table for frame in frames):
+            raise TandemQualificationError("HOLD metadata reports the wrong gain table")
         try:
             sdr.rx_hardwaregain_chan0 = INITIAL_GAIN_DB + 1
         except OSError as error:
@@ -280,12 +316,16 @@ def _qualify_hold(sdr: Any) -> dict[str, Any]:
         epochs = {frame.ownership_epoch for frame in frames}
         if len(epochs) != 1:
             raise TandemQualificationError("HOLD ownership epoch changed")
-        return {"frames": len(frames), "ownership_epoch": frames[0].ownership_epoch}
+        return {
+            "frames": len(frames),
+            "ownership_epoch": frames[0].ownership_epoch,
+            "gain_table_id": int(frames[0].gain_table_id),
+        }
     finally:
         receiver.close()
 
 
-def _qualify_tone(sdr: Any, strong_tx_gain_db: float) -> dict[str, Any]:
+def _qualify_tone(sdr: Any, strong_tx_gain_db: float, frequency_hz: int) -> dict[str, Any]:
     _mute_transmit(sdr)
     sdr._ctrl.attrs["calib_mode"].value = "tx_quad"
     sdr.tx_hardwaregain_chan1 = strong_tx_gain_db
@@ -295,6 +335,13 @@ def _qualify_tone(sdr: Any, strong_tx_gain_db: float) -> dict[str, Any]:
     sdr.rx_destroy_buffer()
     if signal.shape[0] != 2:
         raise TandemQualificationError("tone preflight did not capture both receivers")
+    return _analyze_tone(signal, frequency_hz)
+
+
+def _analyze_tone(signal: np.ndarray, frequency_hz: int) -> dict[str, Any]:
+    signal = np.asarray(signal)
+    if signal.ndim != 2 or signal.shape[0] != 2 or signal.shape[1] < 4096:
+        raise TandemQualificationError("tone analysis requires two sufficiently long RX channels")
     sample_index = np.arange(signal.shape[1])
     window = np.hanning(signal.shape[1])
     spectra = np.fft.fft(signal * window, axis=1)
@@ -324,21 +371,31 @@ def _qualify_tone(sdr: Any, strong_tx_gain_db: float) -> dict[str, Any]:
     tone_power = np.abs(tones) ** 2
     residual = signal - tones[:, None] / reference[None, :]
     residual_power = np.mean(np.abs(residual) ** 2, axis=1)
-    snr_db = 10 * np.log10(tone_power / np.maximum(residual_power, 1e-12))
+    snr_db = 10 * np.log10(np.maximum(tone_power, 1e-12) / np.maximum(residual_power, 1e-12))
     tone_dbfs = 20 * np.log10(np.maximum(np.abs(tones), 1e-12) / ADC_FULL_SCALE)
     clipping = np.mean(
         (np.abs(signal.real) >= ADC_FULL_SCALE - 1) | (np.abs(signal.imag) >= ADC_FULL_SCALE - 1),
         axis=1,
     )
-    coherence = abs(np.vdot(signal[0], signal[1])) / math.sqrt(
+    coherence_denominator = math.sqrt(
         float(np.vdot(signal[0], signal[0]).real * np.vdot(signal[1], signal[1]).real)
     )
+    coherence = (
+        abs(np.vdot(signal[0], signal[1])) / coherence_denominator if coherence_denominator else 0.0
+    )
     diagnostics = {
+        "frequency_hz": frequency_hz,
         "tone_frequency_hz": tone_frequency_hz,
-        "tone_dbfs": tone_dbfs.tolist(),
-        "tone_snr_db": snr_db.tolist(),
-        "clipping_fraction": clipping.tolist(),
-        "coherence": coherence,
+        "rx_channels": [
+            {
+                "channel": f"RX{index + 1}",
+                "tone_dbfs": float(tone_dbfs[index]),
+                "tone_snr_db": float(snr_db[index]),
+                "clipping_fraction": float(clipping[index]),
+            }
+            for index in range(2)
+        ],
+        "cross_channel_coherence": coherence,
     }
     if np.any(snr_db < 6) or np.any(tone_dbfs < -75) or np.any(tone_dbfs > -3):
         raise TandemQualificationError(
@@ -349,7 +406,11 @@ def _qualify_tone(sdr: Any, strong_tx_gain_db: float) -> dict[str, Any]:
     return diagnostics
 
 
-def _qualify_auto(sdr: Any, plan: TandemQualificationPlan) -> dict[str, Any]:
+def _qualify_auto(
+    sdr: Any,
+    plan: TandemQualificationPlan,
+    expected_gain_table: TandemGainTable,
+) -> dict[str, Any]:
     receiver = _MetadataReceiver(sdr, TandemMode.AUTO)
     sdr.tx_hardwaregain_chan1 = plan.weak_tx_gain_db
     receiver.open()
@@ -395,6 +456,8 @@ def _qualify_auto(sdr: Any, plan: TandemQualificationPlan) -> dict[str, Any]:
         raise TandemQualificationError("AUTO metadata does not report ARMED_AUTO")
     if any(frame.rx1_gain_index != frame.rx2_gain_index for frame in frames):
         raise TandemQualificationError("AUTO endpoint gains diverged")
+    if any(frame.gain_table_id is not expected_gain_table for frame in frames):
+        raise TandemQualificationError("AUTO metadata reports the wrong gain table")
     for previous, current in zip(events, events[1:], strict=False):
         delta = (current.event_sequence - previous.event_sequence) & 0xFFFFFFFF
         if not 1 <= delta < 1 << 31:
@@ -410,6 +473,7 @@ def _qualify_auto(sdr: Any, plan: TandemQualificationPlan) -> dict[str, Any]:
         ),
         "first_transition_count": frames[0].tandem_transition_count,
         "last_transition_count": frames[-1].tandem_transition_count,
+        "gain_table_id": int(frames[0].gain_table_id),
         "attempts": attempts,
     }
 

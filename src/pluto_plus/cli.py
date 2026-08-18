@@ -1024,7 +1024,7 @@ def radio_qualify_tandem(
         help="Include the 6.5-second stalled-owner rollback gate.",
     ),
 ) -> None:
-    """Qualify tandem HOLD/AUTO/watchdog on one attenuated TX2 loopback."""
+    """Qualify three-band tandem HOLD/AUTO/watchdog on one TX2 loopback."""
 
     from pluto_plus.tandem_qualification import (
         execute_tandem_qualification,

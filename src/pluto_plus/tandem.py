@@ -54,6 +54,12 @@ class TandemState(enum.IntEnum):
     RESTORING = 5
 
 
+class TandemGainTable(enum.IntEnum):
+    MHZ_200_1300 = 1
+    MHZ_1300_4000 = 2
+    MHZ_4000_6000 = 3
+
+
 class TandemEventDirection(enum.IntEnum):
     INCREASE = 1
     DECREASE = 2
@@ -161,6 +167,8 @@ class RadioMetadataV4:
     tandem_state: TandemState
     tandem_fault_flags: int
     tandem_transition_count: int
+    gain_table_id: TandemGainTable
+    threshold_provenance: int
     minimum_gain_db: int
     maximum_gain_db: int
     initial_gain_db: int
@@ -218,8 +226,8 @@ class RadioMetadataV4:
             tandem_state,
             fault_flags,
             transition_count,
-            _gain_table,
-            _thresholds,
+            gain_table,
+            threshold_provenance,
             minimum_gain_db,
             maximum_gain_db,
             initial_gain_db,
@@ -231,8 +239,9 @@ class RadioMetadataV4:
         ) = extension
         try:
             state = TandemState(tandem_state)
+            parsed_gain_table = TandemGainTable(gain_table)
         except ValueError as error:
-            raise ProtocolError("unknown tandem state") from error
+            raise ProtocolError("unknown tandem state or gain table") from error
         if (
             not ownership_epoch
             or fault_flags
@@ -296,6 +305,8 @@ class RadioMetadataV4:
             state,
             fault_flags,
             transition_count,
+            parsed_gain_table,
+            threshold_provenance,
             minimum_gain_db,
             maximum_gain_db,
             initial_gain_db,
