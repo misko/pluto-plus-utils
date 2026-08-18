@@ -101,6 +101,7 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         "one non-empty stable serial",
         "USB serial is stable" if device.serial else "USB serial is blank",
     )
+    _usb_topology_checks(checks, device)
     interface = (
         device.host_network_interfaces[0].name if len(device.host_network_interfaces) == 1 else None
     )
@@ -285,6 +286,81 @@ def _unknown_facts(checks: list[LocalDoctorCheck]) -> None:
         ("setup.uboot_ad9361_2r2t", "canonical persistent U-Boot tuple"),
     ):
         _check(checks, code, "unknown", None, expected, "Fresh fact is unavailable")
+
+
+def _usb_topology_checks(
+    checks: list[LocalDoctorCheck],
+    device: LocalUsbPluto,
+) -> None:
+    speed = device.speed_mbps
+    _check(
+        checks,
+        "usb.negotiated_speed",
+        "unknown" if speed is None else "pass" if speed >= 480 else "fail",
+        speed,
+        ">= 480 Mb/s (USB high speed)",
+        "USB link negotiated high speed"
+        if speed is not None and speed >= 480
+        else "USB link speed is unavailable or below high speed",
+    )
+    _check(
+        checks,
+        "usb.controller_lineage",
+        "pass" if device.root_controller_pci_address else "unknown",
+        {
+            "resolved_parent_path": device.resolved_parent_path,
+            "direct_to_root_hub": device.direct_to_root_hub,
+            "intermediate_hub_count": device.intermediate_hub_count,
+            "pci_address": device.root_controller_pci_address,
+            "vendor_id": device.root_controller_vendor_id,
+            "device_id": device.root_controller_device_id,
+        },
+        "resolved USB parent path and root xHCI PCI controller",
+        "USB controller lineage is resolved"
+        if device.root_controller_pci_address
+        else "USB controller lineage is unavailable",
+    )
+    _check(
+        checks,
+        "usb.power_budget",
+        "pass" if device.advertised_max_power_ma is not None else "unknown",
+        {
+            "advertised_max_power_ma": device.advertised_max_power_ma,
+            "runtime_status": device.runtime_power_status,
+            "runtime_control": device.runtime_power_control,
+        },
+        "descriptor budget and runtime state (not measured voltage/current)",
+        (
+            f"Device advertises {device.advertised_max_power_ma} mA; this is not "
+            "measured electrical consumption"
+            if device.advertised_max_power_ma is not None
+            else "USB descriptor power budget is unavailable"
+        ),
+    )
+    faults = device.link_faults
+    fault_count = 0 if faults is None else faults.error_count + faults.port_power_cycle_count
+    disconnects = 0 if faults is None else faults.disconnect_count
+    fault_status: CheckStatus = (
+        "unknown"
+        if faults is None or (fault_count == 0 and disconnects > 0)
+        else "fail"
+        if fault_count > 0
+        else "pass"
+    )
+    _check(
+        checks,
+        "usb.recent_link_faults",
+        fault_status,
+        None if faults is None else faults.model_dump(mode="json"),
+        "no recent port-scoped enumeration errors or power cycles",
+        "Recent port-scoped USB errors need investigation"
+        if fault_count > 0
+        else "Recent disconnects may be intentional and need operator correlation"
+        if disconnects > 0
+        else "No recent port-scoped USB link faults were observed"
+        if faults is not None
+        else "Kernel journal is unavailable; link fault status is unknown",
+    )
 
 
 def _check(

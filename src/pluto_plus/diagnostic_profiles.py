@@ -50,13 +50,26 @@ V6_PROFILE = DiagnosticProfile(
 
 V6_TANDEM_ABI2_PROFILE = DiagnosticProfile(
     profile_id="libiio-metadata-v6-tandem-abi2-development",
-    firmware_version="v0.39-plutoplus-spf-libiio-metadata-v6-36-gab79b",
+    firmware_version="v0.39-plutoplus-spf-libiio-metadata-v6-35-g7f812",
     metadata_abis=(2,),
     tandem_agc_required=True,
     release_status="recognized development build; diagnostic-only",
 )
 
-DIAGNOSTIC_PROFILES = (V5_PROFILE, V6_PROFILE, V6_TANDEM_ABI2_PROFILE)
+V6_TANDEM_LATCH_CLEAR_RAM_PROFILE = DiagnosticProfile(
+    profile_id="libiio-metadata-v6-tandem-latch-clear-ram",
+    firmware_version="v0.39-plutoplus-spf-libiio-metadata-v6-36-gab79b",
+    metadata_abis=(2,),
+    tandem_agc_required=True,
+    release_status="RAM-only hardware-promotion candidate; never persistence-qualified",
+)
+
+DIAGNOSTIC_PROFILES = (
+    V5_PROFILE,
+    V6_PROFILE,
+    V6_TANDEM_ABI2_PROFILE,
+    V6_TANDEM_LATCH_CLEAR_RAM_PROFILE,
+)
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
 

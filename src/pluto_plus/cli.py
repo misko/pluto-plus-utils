@@ -33,6 +33,7 @@ DEFAULT_STATE_ROOT = Path(os.environ.get("PLUTO_STATE_ROOT", "./pluto-state"))
 DEFAULT_BOOTSTRAP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/bootstrap-receipts"
 DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qualification-reports"
 DEFAULT_LOCAL_REBOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/reboot-receipts"
+DEFAULT_RAM_BOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/ram-boot-receipts"
 API_PREFIX = "api/v1"
 
 app = typer.Typer(
@@ -225,6 +226,9 @@ def _inventory_table(report: Any) -> str:
         ("IP / URI", "endpoint"),
         ("FIRMWARE", "firmware"),
         ("USB", "usb"),
+        ("USB LINK", "usb_link"),
+        ("POWER BUDGET", "power"),
+        ("CONTROLLER", "controller"),
         ("TERMINAL", "terminal"),
         ("HOST NET", "host_net"),
         ("STORAGE", "storage"),
@@ -250,11 +254,47 @@ def _inventory_table(report: Any) -> str:
             address_text = ",".join(str(value) for value in addresses) or "no-ip"
             host_network.append(f"{interface.get('name', '?')}={address_text}")
         notes = [str(value) for value in (item.get("notes") or [])]
+        fault_summary = item.get("usb_link_faults")
+        if isinstance(fault_summary, dict):
+            errors = int(fault_summary.get("error_count") or 0)
+            disconnects = int(fault_summary.get("disconnect_count") or 0)
+            cycles = int(fault_summary.get("port_power_cycle_count") or 0)
+            if errors or disconnects or cycles:
+                notes.append(
+                    "recent port log: "
+                    f"{errors} error(s), {disconnects} disconnect(s), {cycles} power cycle(s)"
+                )
         model = str(item.get("model") or "—")
         details = model if not notes else f"{model}; {'; '.join(notes)}"
         usb_parts = [
             str(value) for value in (item.get("usb_bus_device"), item.get("usb_path")) if value
         ]
+        speed = item.get("usb_speed_mbps")
+        speed_text = "—" if speed is None else f"{float(speed):g} Mb/s"
+        usb_version = item.get("usb_spec_version")
+        direct = item.get("usb_direct_to_root_hub")
+        topology = "direct" if direct is True else "via hub" if direct is False else "unknown path"
+        link_text = f"{speed_text}; USB {usb_version or '?'}; {topology}"
+        advertised_power = item.get("usb_advertised_max_power_ma")
+        runtime_status = item.get("usb_runtime_power_status") or "unknown"
+        runtime_control = item.get("usb_runtime_power_control") or "unknown"
+        power_text = (
+            "—"
+            if item.get("usb_path") is None
+            else (
+                f"{advertised_power} mA advertised; {runtime_status}/{runtime_control}"
+                if advertised_power is not None
+                else f"unknown advertised; {runtime_status}/{runtime_control}"
+            )
+        )
+        controller_address = item.get("usb_root_controller_pci_address")
+        controller_vendor = item.get("usb_root_controller_vendor_id")
+        controller_device = item.get("usb_root_controller_device_id")
+        controller_text = (
+            "—"
+            if controller_address is None
+            else f"{controller_address} {controller_vendor or '????'}:{controller_device or '????'}"
+        )
         managed = "managed" if item.get("managed") else "unmanaged"
         rows.append(
             {
@@ -266,6 +306,9 @@ def _inventory_table(report: Any) -> str:
                 "endpoint": str(item.get("radio_ip") or item.get("iio_uri") or "—"),
                 "firmware": str(item.get("firmware_version") or "unknown"),
                 "usb": " ".join(usb_parts) or "—",
+                "usb_link": link_text if usb_parts else "—",
+                "power": power_text,
+                "controller": controller_text,
                 "terminal": ",".join(str(value) for value in (item.get("terminal_devices") or []))
                 or "—",
                 "host_net": ",".join(host_network) or "—",
@@ -280,7 +323,8 @@ def _inventory_table(report: Any) -> str:
     header = "  ".join(title.ljust(widths[key]) for title, key in columns)
     separator = "  ".join("-" * widths[key] for _title, key in columns)
     body = ["  ".join(row[key].ljust(widths[key]) for _title, key in columns) for row in rows]
-    return "\n".join((header, separator, *body))
+    footer = "USB power values are descriptor budgets, not measured voltage or current."
+    return "\n".join((header, separator, *body, "", footer))
 
 
 def _ladder_table(report: LadderReport) -> str:
@@ -605,7 +649,10 @@ def radio_reboot_local(
     ssh_host: str = typer.Option(
         "192.168.2.1",
         "--ssh-host",
-        help="Literal USB gadget IPv4 address; the route must resolve only through this radio.",
+        help=(
+            "Literal private IPv4 address; 192.168.2.1 uses the exact USB route, "
+            "other addresses use the normal LAN route."
+        ),
     ),
     execute: bool = typer.Option(
         False,
@@ -645,14 +692,15 @@ def radio_reboot_local(
     except (LocalRebootError, OSError, ValueError) as error:
         _fail("local_reboot_preflight_failed", str(error), 4)
     if not execute:
+        environment = inspect_iio_environment()
         _emit(
             {
                 "mode": "dry_run",
                 "will_reboot": False,
                 "plan": asdict(plan),
+                "host_environment": environment.model_dump(mode="json"),
                 "next_command": (
-                    "repeat with --execute and "
-                    f"--confirm {json.dumps(plan.confirmation_phrase)}"
+                    f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
                 ),
             }
         )
@@ -663,6 +711,16 @@ def radio_reboot_local(
             f"--execute requires --confirm {plan.confirmation_phrase!r}",
             2,
         )
+    if not plan.raw_usb_write_access:
+        _fail(
+            "local_reboot_usb_permission_denied",
+            f"raw USB node {plan.runtime_usb_device_node} is not writable; install "
+            "packaging/udev/70-pluto-plus-utils.rules and reconnect before execution",
+            4,
+        )
+    environment = inspect_iio_environment()
+    if not environment.healthy:
+        _fail("local_reboot_environment_failed", environment.actionable_message, 5)
     if ssh_password_file is None:
         password = typer.prompt("Radio SSH password", hide_input=True)
     else:
@@ -681,7 +739,7 @@ def radio_reboot_local(
     try:
         ssh = BoundSshTransport(
             host=plan.ssh_host,
-            interface=plan.ssh_interface,
+            interface=(plan.usb_interface if plan.ssh_route_mode == "usb_gadget" else None),
             password=password,
             known_hosts_file=selected_known_hosts,
         )
@@ -1551,6 +1609,144 @@ def firmware_flash_usb(
         ssh_host=ssh_host,
         mutation_profile_id=profile,
     )
+
+
+@firmware_app.command("ram-boot")
+def firmware_ram_boot(
+    image: Path = typer.Argument(...),  # noqa: B008
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ...,
+        "--usb-sysfs-path",
+        help="Exact direct runtime USB sysfs node for one stable serial.",
+    ),
+    profile: str = typer.Option(
+        ...,
+        "--profile",
+        help="Exact immutable RAM-boot profile; never inferred from image bytes.",
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--ssh-known-hosts-file",
+        help="Private pinned known_hosts file for the selected radio.",
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1",
+        "--ssh-host",
+        help=(
+            "Private literal SSH endpoint used only to enter DFU; non-default "
+            "addresses use the normal LAN route."
+        ),
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Private radio password file; otherwise execution prompts without echo.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Load the image into volatile RAM; omission produces a read-only plan.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase RAM BOOT <serial>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_RAM_BOOT_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for durable RAM-boot receipts.",
+    ),
+) -> None:
+    """Load one exact qualified DFU into RAM without writing QSPI."""
+
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapFirmwareError,
+        BoundSshBootstrapTransport,
+    )
+    from pluto_plus.volatile_firmware import (
+        SshRamBootTransition,
+        VolatileFirmwareError,
+        execute_ram_boot_plan,
+        prepare_ram_boot_plan,
+    )
+
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    try:
+        plan = prepare_ram_boot_plan(
+            image,
+            usb_sysfs_path,
+            profile_id=profile,
+            transition_host=ssh_host,
+            known_hosts_file=selected_known_hosts,
+        )
+    except (VolatileFirmwareError, OSError, ValueError) as error:
+        _fail("ram_boot_preflight_failed", str(error), 4)
+    if not execute:
+        environment = inspect_iio_environment()
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_write_qspi": False,
+                "will_load_volatile_ram": False,
+                "plan": asdict(plan),
+                "host_environment": environment.model_dump(mode="json"),
+                "next_command": (
+                    f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
+                ),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "ram_boot_confirmation_required",
+            f"--execute requires --confirm {plan.confirmation_phrase!r}",
+            2,
+        )
+    if not plan.raw_usb_write_access:
+        _fail(
+            "ram_boot_usb_permission_denied",
+            f"raw USB node {plan.runtime_usb_device_node} is not writable; install "
+            "packaging/udev/70-pluto-plus-utils.rules and reconnect before execution",
+            4,
+        )
+    environment = inspect_iio_environment()
+    if not environment.healthy:
+        _fail("ram_boot_environment_failed", environment.actionable_message, 5)
+    if ssh_password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        try:
+            password = (
+                _read_private_file_bytes(
+                    ssh_password_file,
+                    label="radio SSH password",
+                    maximum_bytes=4096,
+                )
+                .decode("utf-8")
+                .strip()
+            )
+        except UnicodeDecodeError:
+            _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
+    try:
+        ssh = BoundSshBootstrapTransport(
+            interface=(plan.usb_interface if plan.transition_route_mode == "usb_gadget" else None),
+            password=password,
+            known_hosts_file=selected_known_hosts,
+            host=plan.transition_host,
+        )
+        result = execute_ram_boot_plan(
+            plan,
+            confirmation=confirmation,
+            known_hosts_file=selected_known_hosts,
+            transition=SshRamBootTransition(ssh),
+            receipt_directory=receipt_directory.expanduser().resolve(),
+        )
+    except (VolatileFirmwareError, BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("ram_boot_failed", str(error), 4)
+    _emit(asdict(result))
+    if result.outcome != "success":
+        raise typer.Exit(5)
 
 
 @firmware_app.command("bootstrap-usb")

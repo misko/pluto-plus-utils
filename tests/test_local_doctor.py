@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import pluto_plus.local_doctor as local_doctor
-from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
+from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto, UsbLinkFaultSummary
 
 
 def _device(*, serial: str | None = "SERIAL_A") -> LocalUsbPluto:
@@ -82,3 +82,37 @@ def test_local_doctor_exact_path_must_resolve_once() -> None:
             Path("/sys/bus/usb/devices/9-9"),
             devices=(_device(),),
         )
+
+
+def test_local_doctor_surfaces_usb_power_lineage_and_recent_faults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(local_doctor, "inspect_bound_iiod", lambda interface: {})
+    device = _device().model_copy(
+        update={
+            "advertised_max_power_ma": 500,
+            "runtime_power_status": "active",
+            "runtime_power_control": "on",
+            "resolved_parent_path": "/sys/devices/pci0000:80/0000:82:00.0/usb5/5-1",
+            "direct_to_root_hub": True,
+            "intermediate_hub_count": 0,
+            "root_controller_pci_address": "0000:82:00.0",
+            "root_controller_vendor_id": "1b21",
+            "root_controller_device_id": "3042",
+            "link_faults": UsbLinkFaultSummary(
+                observation_window="current boot",
+                error_count=2,
+                disconnect_count=1,
+                port_power_cycle_count=1,
+            ),
+        }
+    )
+
+    radio = local_doctor.diagnose_local_usb_radios(devices=(device,)).radios[0]
+    checks = {check.code: check for check in radio.checks}
+
+    assert checks["usb.negotiated_speed"].status == "pass"
+    assert checks["usb.controller_lineage"].status == "pass"
+    assert checks["usb.power_budget"].status == "pass"
+    assert "not measured" in checks["usb.power_budget"].summary
+    assert checks["usb.recent_link_faults"].status == "fail"

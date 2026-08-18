@@ -13,16 +13,18 @@ runner = CliRunner()
 SERIAL = "SERIAL_A"
 
 
-def _plan() -> LocalRebootPlan:
+def _plan(*, raw_usb_write_access: bool = True) -> LocalRebootPlan:
     return LocalRebootPlan(
-        schema_version=1,
+        schema_version=3,
         plan_id="plan-a",
         created_at="2026-08-18T00:00:00+00:00",
         serial=SERIAL,
         usb_sysfs_path="/sys/bus/usb/devices/3-8",
         usb_interface="enx001",
-        ssh_interface="enx001",
+        runtime_usb_device_node="/dev/bus/usb/003/011",
+        raw_usb_write_access=raw_usb_write_access,
         ssh_host="192.168.2.1",
+        ssh_route_mode="usb_gadget",
         known_hosts_sha256="a" * 64,
         route_observation=UsbSshRouteObservation(
             interface_addresses=(("enx001", ("192.168.2.10",)),),
@@ -96,3 +98,33 @@ def test_reboot_local_execute_requires_exact_confirmation(
     )
     assert wrong.exit_code == 2
     assert json.loads(wrong.stderr)["error"]["code"] == "local_reboot_confirmation_required"
+
+
+def test_reboot_local_refuses_raw_usb_permission_before_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pluto_plus.local_reboot.prepare_local_reboot",
+        lambda *a, **k: _plan(raw_usb_write_access=False),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "reboot-local",
+            SERIAL,
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            "/private/radio.known_hosts",
+            "--execute",
+            "--confirm",
+            "REBOOT SERIAL_A",
+        ],
+    )
+
+    assert result.exit_code == 4
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "local_reboot_usb_permission_denied"
+    assert "udev" in error["message"]

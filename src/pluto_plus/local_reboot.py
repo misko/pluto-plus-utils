@@ -21,7 +21,11 @@ from pluto_plus.ip_firmware import (
     UsbSshRouteObservation,
     require_unambiguous_usb_ssh_route,
 )
-from pluto_plus.setup_helper import SetupTransport, validate_bound_interface
+from pluto_plus.setup_helper import (
+    SetupSshHostKeyChangedError,
+    SetupTransport,
+    validate_bound_interface,
+)
 
 _SERIAL_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -50,7 +54,7 @@ class LocalRebootCapabilities:
 class LocalRebootAttestation:
     serial: str
     firmware: str
-    boot_id: str
+    boot_id: str | None
     capabilities: LocalRebootCapabilities
 
 
@@ -62,8 +66,10 @@ class LocalRebootPlan:
     serial: str
     usb_sysfs_path: str
     usb_interface: str
-    ssh_interface: str | None
+    runtime_usb_device_node: str
+    raw_usb_write_access: bool
     ssh_host: str
+    ssh_route_mode: Literal["usb_gadget", "lan"]
     known_hosts_sha256: str
     route_observation: UsbSshRouteObservation | None
     confirmation_phrase: str
@@ -101,9 +107,7 @@ class FixedSshLocalRebootTransport:
     def attest(self, serial: str) -> LocalRebootAttestation:
         _validate_serial(serial)
         fields = _parse_report(
-            self._transport.run(
-                f"/bin/sh -s -- {serial}", stdin=_ATTEST_SCRIPT, timeout_s=25
-            )
+            self._transport.run(f"/bin/sh -s -- {serial}", stdin=_ATTEST_SCRIPT, timeout_s=25)
         )
         if fields.get("serial") != serial:
             raise LocalRebootError("remote serial did not match the selected local radio")
@@ -127,9 +131,7 @@ class FixedSshLocalRebootTransport:
     def ensure_tx_safe(self, serial: str) -> None:
         _validate_serial(serial)
         fields = _parse_report(
-            self._transport.run(
-                f"/bin/sh -s -- {serial}", stdin=_TX_SAFE_SCRIPT, timeout_s=20
-            )
+            self._transport.run(f"/bin/sh -s -- {serial}", stdin=_TX_SAFE_SCRIPT, timeout_s=20)
         )
         if fields.get("tx_safe") != "1":
             raise LocalRebootError("TX-safe readback was not affirmative")
@@ -157,6 +159,7 @@ def prepare_local_reboot(
         require_unambiguous_usb_ssh_route
     ),
     interface_validator: Callable[[str, str], None] = validate_bound_interface,
+    usb_access_checker: Callable[[Path], bool] = lambda path: os.access(path, os.R_OK | os.W_OK),
 ) -> LocalRebootPlan:
     """Build a read-only plan for exactly one locally attached USB radio."""
 
@@ -170,29 +173,34 @@ def prepare_local_reboot(
     local = matches[0]
     if len(local.host_network_interfaces) != 1:
         raise LocalRebootError("selected radio must expose exactly one USB network interface")
+    if local.bus_number is None or local.device_number is None:
+        raise LocalRebootError("selected radio has no current USB bus/device address")
+    usb_device_node = Path(f"/dev/bus/usb/{local.bus_number:03d}/{local.device_number:03d}")
     interface = local.host_network_interfaces[0].name
     try:
-        address = ipaddress.ip_address(ssh_host)
+        host_address = ipaddress.ip_address(ssh_host)
     except ValueError as error:
-        raise LocalRebootError("SSH host must be a literal IP address") from error
-    if address.version != 4 or not address.is_private:
-        raise LocalRebootError("SSH host must be a private IPv4 address")
-    ssh_interface = interface if ssh_host == "192.168.2.1" else None
+        raise LocalRebootError("SSH host must be a literal private IPv4 address") from error
+    if host_address.version != 4 or not host_address.is_private:
+        raise LocalRebootError("SSH host must be a literal private IPv4 address")
+    route_mode: Literal["usb_gadget", "lan"] = "usb_gadget" if ssh_host == "192.168.2.1" else "lan"
     try:
         interface_validator(interface, str(path))
-        route = route_checker(interface, ssh_host) if ssh_interface is not None else None
+        route = route_checker(interface, ssh_host) if route_mode == "usb_gadget" else None
     except (OSError, ValueError, RuntimeError) as error:
         raise LocalRebootError(str(error)) from error
     known_hosts_sha256 = _private_file_sha256(known_hosts_file, "SSH known-hosts")
     return LocalRebootPlan(
-        schema_version=1,
+        schema_version=3,
         plan_id=uuid.uuid4().hex,
         created_at=_now(),
         serial=serial,
         usb_sysfs_path=str(path),
         usb_interface=interface,
-        ssh_interface=ssh_interface,
+        runtime_usb_device_node=str(usb_device_node),
+        raw_usb_write_access=usb_access_checker(usb_device_node),
         ssh_host=ssh_host,
+        ssh_route_mode=route_mode,
         known_hosts_sha256=known_hosts_sha256,
         route_observation=route,
         confirmation_phrase=f"REBOOT {serial}",
@@ -211,6 +219,10 @@ def execute_local_reboot(
         require_unambiguous_usb_ssh_route
     ),
     interface_validator: Callable[[str, str], None] = validate_bound_interface,
+    usb_access_checker: Callable[[Path], bool] = lambda path: os.access(path, os.R_OK | os.W_OK),
+    post_reboot_usb_verifier: Callable[
+        [LocalRebootPlan, LocalRebootAttestation], LocalRebootAttestation
+    ] = lambda plan, before: attest_and_mute_returned_usb(plan, before),
     timeout_s: float = 60,
     poll_interval_s: float = 0.25,
 ) -> LocalRebootReceipt:
@@ -227,10 +239,9 @@ def execute_local_reboot(
     before: LocalRebootAttestation | None = None
     after: LocalRebootAttestation | None = None
     mutation_dispatched = False
-    outcome: Literal["success", "failed_before_mutation", "unknown"] = (
-        "failed_before_mutation"
-    )
+    outcome: Literal["success", "failed_before_mutation", "unknown"] = "failed_before_mutation"
     error_text: str | None = None
+    post_reboot_verified_over_usb = False
 
     def checkpoint(
         checkpoint_outcome: Literal[
@@ -268,23 +279,33 @@ def execute_local_reboot(
             scanner=scanner,
             route_checker=route_checker,
             interface_validator=interface_validator,
+            usb_access_checker=usb_access_checker,
         )
         if (
             fresh.serial,
             fresh.usb_sysfs_path,
             fresh.usb_interface,
-            fresh.ssh_interface,
+            fresh.runtime_usb_device_node,
+            fresh.raw_usb_write_access,
             fresh.ssh_host,
+            fresh.ssh_route_mode,
             fresh.known_hosts_sha256,
         ) != (
             plan.serial,
             plan.usb_sysfs_path,
             plan.usb_interface,
-            plan.ssh_interface,
+            plan.runtime_usb_device_node,
+            plan.raw_usb_write_access,
             plan.ssh_host,
+            plan.ssh_route_mode,
             plan.known_hosts_sha256,
         ):
             raise LocalRebootError("local reboot plan identity or SSH trust changed")
+        if not fresh.raw_usb_write_access:
+            raise LocalRebootError(
+                f"raw USB node {fresh.runtime_usb_device_node} is not writable; "
+                "post-reboot TX-safe reconciliation cannot be guaranteed"
+            )
         completed.append("local_identity_reattested")
         checkpoint()
         before = transport.attest(plan.serial)
@@ -311,14 +332,19 @@ def execute_local_reboot(
         last_error: BaseException | None = None
         while time.monotonic() < deadline:
             try:
-                if plan.ssh_interface is not None:
-                    route_checker(plan.ssh_interface, plan.ssh_host)
+                if plan.ssh_route_mode == "usb_gadget":
+                    route_checker(plan.usb_interface, plan.ssh_host)
                 candidate = transport.attest(plan.serial)
+            except SetupSshHostKeyChangedError:
+                # The changed key is never trusted. Reconcile through the already
+                # selected physical USB path/interface and exact USB-IIO serial.
+                candidate = post_reboot_usb_verifier(plan, before)
+                post_reboot_verified_over_usb = True
             except BaseException as error:
                 last_error = error
                 time.sleep(poll_interval_s)
                 continue
-            if candidate.boot_id == before.boot_id:
+            if not post_reboot_verified_over_usb and candidate.boot_id == before.boot_id:
                 raise LocalRebootError("radio returned without a new boot identity")
             if candidate.serial != before.serial:
                 raise LocalRebootError("radio serial changed across reboot")
@@ -330,9 +356,14 @@ def execute_local_reboot(
             break
         if after is None:
             raise LocalRebootError(f"radio did not pass post-reboot attestation: {last_error}")
-        completed.append("post_reboot_identity_attested")
+        completed.append(
+            "post_reboot_usb_iiod_attested"
+            if post_reboot_verified_over_usb
+            else "post_reboot_identity_attested"
+        )
         checkpoint()
-        transport.ensure_tx_safe(plan.serial)
+        if not post_reboot_verified_over_usb:
+            transport.ensure_tx_safe(plan.serial)
         completed.append("tx_safe_after_reboot")
         outcome = "success"
     except BaseException as error:
@@ -343,6 +374,54 @@ def execute_local_reboot(
     if outcome != "success":
         raise LocalRebootExecutionError(error_text or "local reboot failed", receipt)
     return receipt
+
+
+def attest_and_mute_returned_usb(
+    plan: LocalRebootPlan,
+    before: LocalRebootAttestation,
+) -> LocalRebootAttestation:
+    """Independently reconcile a rotated SSH key via exact physical USB-IIO."""
+
+    from pluto_plus.bootstrap_firmware import inspect_bound_iiod, mute_returned_radio
+
+    facts = inspect_bound_iiod(plan.usb_interface)
+    serial = str(facts.get("hw_serial") or "").strip()
+    if serial != plan.serial:
+        raise LocalRebootError("returned USB-IIO serial does not match the selected radio")
+    firmware = str(facts.get("fw_version") or "").strip()
+    board_model = str(facts.get("hw_model") or "").strip()
+    phy_model = str(facts.get("ad9361-phy,model") or "").strip()
+    raw_names = facts.get("device_names", ())
+    names = (
+        {str(value) for value in raw_names}
+        if isinstance(raw_names, (tuple, list, set, frozenset))
+        else set()
+    )
+    raw_channels = facts.get("cf-ad9361-lpc,scan_channels", ())
+    channels = (
+        tuple(sorted(str(value) for value in raw_channels))
+        if isinstance(raw_channels, (tuple, list, set, frozenset))
+        else ()
+    )
+    if not firmware or not board_model or not phy_model or "cf-ad9361-lpc" not in names:
+        raise LocalRebootError("returned USB-IIO capability attestation is incomplete")
+    candidate = LocalRebootAttestation(
+        serial=serial,
+        firmware=firmware,
+        # Exact USB disappearance/reappearance is the reset proof in this path;
+        # no SSH boot_id is invented.
+        boot_id=None,
+        capabilities=LocalRebootCapabilities(
+            board_model=board_model,
+            phy_model=phy_model,
+            rx_scan_channels=channels,
+            tandem_agc="tandem-agc" in names,
+        ),
+    )
+    if candidate.firmware != before.firmware or candidate.capabilities != before.capabilities:
+        raise LocalRebootError("returned USB-IIO firmware or capabilities changed across reboot")
+    mute_returned_radio(plan.serial)
+    return candidate
 
 
 def _wait_for_same_topology(

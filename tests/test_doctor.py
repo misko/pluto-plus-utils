@@ -51,7 +51,7 @@ def test_doctor_passes_only_with_complete_persistent_evidence() -> None:
     assert report.healthy
     assert all(finding.status is DoctorStatus.PASS for finding in report.findings)
     assert report.canonical_policy.asset_sha256 == (
-        "948b46506febacb087f3955be86015e074f8c0e3370a9dfc6a942e735d97f882"
+        "8ffbb0bf0912285636ddbcf0b00e12deaca0f55612faf7d29efa067b22e61352"
     )
 
 
@@ -84,9 +84,7 @@ def test_old_firmware_recommends_only_guarded_profile_aware_flash() -> None:
         {},
         firmware_helper_available=True,
     )
-    finding = next(
-        item for item in report.findings if item.code == "firmware.device_version"
-    )
+    finding = next(item for item in report.findings if item.code == "firmware.device_version")
     assert finding.status is DoctorStatus.FAIL
     assert finding.remediation is not None
     assert finding.remediation.remediation_id == "flash_canonical_firmware_mtd3"

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import os
 import sys
 from collections.abc import Callable, Sequence
+from ctypes import CDLL, RTLD_GLOBAL
 from ctypes.util import find_library
 from enum import StrEnum
 from pathlib import Path
@@ -79,7 +81,12 @@ def inspect_iio_environment(
             pylibiio_path=pylibiio_path,
         )
 
-    native_candidate = locate_library("iio")
+    preloaded = (
+        _preload_project_native_libiio()
+        if locate_library is find_library and load_module is importlib.import_module
+        else None
+    )
+    native_candidate = locate_library("iio") or preloaded
     if not native_candidate:
         return _report(
             IioEnvironmentStatus.NATIVE_LIBIIO_MISSING,
@@ -239,3 +246,30 @@ def _loaded_library_path(iio: ModuleType, candidate: str, *, maps_path: Path) ->
 def _exception_text(error: BaseException) -> str:
     message = str(error).strip()
     return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
+def _preload_project_native_libiio() -> str | None:
+    """Load an explicit or venv-local libiio without changing global linker state."""
+
+    configured = os.environ.get("PLUTO_LIBIIO_LIBRARY", "").strip()
+    candidates = (
+        (Path(configured),)
+        if configured
+        else (
+            Path(sys.prefix) / "lib" / "libiio.so.0",
+            Path(sys.prefix) / "lib64" / "libiio.so.0",
+        )
+    )
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve(strict=True)
+        except OSError:
+            continue
+        if not resolved.is_file():
+            continue
+        try:
+            CDLL(str(resolved), mode=RTLD_GLOBAL)
+        except OSError:
+            continue
+        return str(resolved)
+    return None

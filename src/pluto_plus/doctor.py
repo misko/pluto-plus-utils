@@ -36,18 +36,18 @@ CANONICAL_UBOOT = {
 
 CANONICAL_POLICY = FirmwarePolicy(
     profile_id="libiio-continuous-metadata",
-    release_tag="v0.38-plutoplus-spf-libiio-metadata-v5",
-    device_firmware="v0.38-plutoplus-spf-libiio-metadata-v5",
-    asset_name="plutoplus-spf-libiio-metadata-v5-d7c87a9a2809-pluto.dfu",
-    asset_sha256="948b46506febacb087f3955be86015e074f8c0e3370a9dfc6a942e735d97f882",
+    release_tag="v0.39-plutoplus-spf-libiio-metadata-v6",
+    device_firmware="v0.39-plutoplus-spf-libiio-metadata-v6",
+    asset_name="plutoplus-spf-libiio-metadata-v6-e3700cc72681-pluto.dfu",
+    asset_sha256="8ffbb0bf0912285636ddbcf0b00e12deaca0f55612faf7d29efa067b22e61352",
     release_url=(
-        "https://github.com/misko/plutosdr-fw/releases/tag/v0.38-plutoplus-spf-libiio-metadata-v5"
+        "https://github.com/misko/plutosdr-fw/releases/tag/v0.39-plutoplus-spf-libiio-metadata-v6"
     ),
-    source_commit="d7c87a9a28094ee6f0b23cb47df9ff737b5a69d8",
-    fit_body_sha256="ae8ee0dac655f1178d24d3d53a78ae44ccb21b4aaef9273c6416bdd6bef761d9",
-    fit_body_size=12_743_859,
+    source_commit="e3700cc7268132eb6baa4bc88d8f3320dc7148b9",
+    fit_body_sha256="b23c90be6841255ee38b08bbe609b087d53bcef96ff4e94e40dbc4c72c0f0480",
+    fit_body_size=12_762_675,
     hardware_qualified=True,
-    published_at=datetime(2026, 8, 12, 17, 21, 7, tzinfo=UTC),
+    published_at=datetime(2026, 8, 17, 17, 22, 3, tzinfo=UTC),
 )
 
 # This is a separately selected mutation target, not the canonical repair
@@ -55,6 +55,23 @@ CANONICAL_POLICY = FirmwarePolicy(
 # recognition from silently authorizing a firmware write.
 TANDEM_V6_DEVELOPMENT_POLICY = FirmwarePolicy(
     profile_id="libiio-metadata-v6-tandem-abi2-development",
+    release_tag="tandem-agc-v2-7f812fe63c96",
+    device_firmware="v0.39-plutoplus-spf-libiio-metadata-v6-35-g7f812",
+    asset_name="plutoplus-spf-tandem-agc-v2-7f812fe63c96-pluto.dfu",
+    asset_sha256="8e324b6ce77d657925355fcb4a17eb7392ec6a187a41e40c8fd63ccfba40caf0",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/32170709605",
+    source_commit="7f812fe63c96eaf091550ab8804fd867dcb43fe2",
+    fit_body_sha256="a3879aaa73cd69c5225c7f4775033868aac7414db576eb3545bfc9e29f31c70e",
+    fit_body_size=12_776_899,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 18, 18, 39, 52, tzinfo=UTC),
+)
+
+# RAM-only successor to the initial tandem development image. It is deliberately
+# not canonical or persistence-qualified; the standalone volatile-DFU command is
+# the only automatic mutation path that should select this profile.
+TANDEM_V6_LATCH_CLEAR_RAM_POLICY = FirmwarePolicy(
+    profile_id="libiio-metadata-v6-tandem-latch-clear-ram",
     release_tag="tandem-agc-v2-ab79bb591a6e",
     device_firmware="v0.39-plutoplus-spf-libiio-metadata-v6-36-gab79b",
     asset_name="plutoplus-spf-tandem-agc-v2-ab79bb591a6e-pluto.dfu",

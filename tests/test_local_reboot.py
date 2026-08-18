@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import stat
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,11 @@ from pluto_plus.local_reboot import (
     LocalRebootCapabilities,
     LocalRebootError,
     LocalRebootExecutionError,
+    LocalRebootPlan,
     execute_local_reboot,
     prepare_local_reboot,
 )
+from pluto_plus.setup_helper import SetupSshHostKeyChangedError
 
 SERIAL = "104000b29905000e17000800065934759d"
 PATH = Path("/sys/bus/usb/devices/3-8")
@@ -113,6 +116,7 @@ def _plan(tmp_path: Path):
         scanner=lambda: (_radio(),),
         route_checker=lambda interface, host: ROUTE,
         interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
     )
 
 
@@ -124,28 +128,33 @@ def test_prepare_binds_exact_serial_path_interface_route_and_private_trust(
     assert plan.serial == SERIAL
     assert plan.usb_sysfs_path == str(PATH)
     assert plan.usb_interface == INTERFACE
-    assert plan.ssh_interface == INTERFACE
     assert plan.confirmation_phrase == f"REBOOT {SERIAL}"
     assert len(plan.known_hosts_sha256) == 64
 
 
-def test_prepare_lan_route_retains_usb_identity_without_usb_bind(tmp_path: Path) -> None:
+def test_prepare_unique_lan_host_keeps_usb_identity_but_does_not_bind_usb_route(
+    tmp_path: Path,
+) -> None:
     route_calls: list[tuple[str, str]] = []
+
+    def route_checker(interface: str, host: str) -> UsbSshRouteObservation:
+        route_calls.append((interface, host))
+        raise AssertionError("LAN host must not be forced through the USB gadget interface")
 
     plan = prepare_local_reboot(
         SERIAL,
         PATH,
-        ssh_host="192.168.1.14",
+        ssh_host="192.168.1.15",
         known_hosts_file=_credentials(tmp_path),
         scanner=lambda: (_radio(),),
-        route_checker=lambda interface, host: route_calls.append((interface, host)) or ROUTE,
+        route_checker=route_checker,
         interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
     )
 
-    assert plan.usb_interface == INTERFACE
-    assert plan.ssh_interface is None
-    assert plan.ssh_host == "192.168.1.14"
+    assert plan.ssh_route_mode == "lan"
     assert plan.route_observation is None
+    assert plan.usb_interface == INTERFACE
     assert route_calls == []
 
 
@@ -161,6 +170,7 @@ def test_prepare_refuses_duplicate_or_non_private_identity(tmp_path: Path) -> No
             scanner=lambda: (_radio(),),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
         )
 
     known_hosts.chmod(0o600)
@@ -173,6 +183,7 @@ def test_prepare_refuses_duplicate_or_non_private_identity(tmp_path: Path) -> No
             scanner=lambda: (_radio(), _radio()),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
         )
 
 
@@ -193,6 +204,7 @@ def test_success_reboots_only_after_safe_state_and_attests_same_return(
         scanner=lambda: next(scans),
         route_checker=lambda interface, host: ROUTE,
         interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
         timeout_s=0.2,
         poll_interval_s=0.001,
     )
@@ -228,6 +240,28 @@ def test_refuses_confirmation_without_touching_transport(tmp_path: Path) -> None
     assert transport.events == []
 
 
+def test_unwritable_raw_usb_fails_before_radio_operation(tmp_path: Path) -> None:
+    plan = replace(_plan(tmp_path), raw_usb_write_access=False)
+    transport = FakeTransport((_attestation("before"),))
+
+    with pytest.raises(LocalRebootExecutionError) as caught:
+        execute_local_reboot(
+            plan,
+            confirmation=plan.confirmation_phrase,
+            transport=transport,
+            known_hosts_file=tmp_path / "known_hosts",
+            receipt_directory=tmp_path / "receipts",
+            scanner=lambda: (_radio(),),
+            route_checker=lambda interface, host: ROUTE,
+            interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: False,
+        )
+
+    assert caught.value.receipt.outcome == "failed_before_mutation"
+    assert "not writable" in (caught.value.receipt.error or "")
+    assert transport.events == []
+
+
 def test_wrong_return_topology_is_unknown_and_receipted(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     transport = FakeTransport((_attestation("before"),))
@@ -243,6 +277,7 @@ def test_wrong_return_topology_is_unknown_and_receipted(tmp_path: Path) -> None:
             scanner=lambda: next(scans),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
             timeout_s=0.2,
             poll_interval_s=0.001,
         )
@@ -267,6 +302,7 @@ def test_reboot_dispatch_error_is_unknown_not_safe_to_retry(tmp_path: Path) -> N
             scanner=lambda: (_radio(),),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
         )
 
     assert caught.value.receipt.outcome == "unknown"
@@ -290,6 +326,7 @@ def test_changed_firmware_never_passes_post_return_attestation(tmp_path: Path) -
             scanner=lambda: next(scans),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
             timeout_s=0.01,
             poll_interval_s=0.001,
         )
@@ -297,3 +334,41 @@ def test_changed_firmware_never_passes_post_return_attestation(tmp_path: Path) -
     assert caught.value.receipt.outcome == "unknown"
     assert "firmware changed" in (caught.value.receipt.error or "")
     assert f"tx-safe:{SERIAL}" not in transport.events[3:]
+
+
+def test_rotated_ssh_key_is_not_trusted_and_exact_usb_verifier_can_reconcile(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    transport = FakeTransport((_attestation("before"), SetupSshHostKeyChangedError("rotated")))
+    scans = iter(((_radio(),), (), (_radio(),)))
+    verifier_calls: list[tuple[str, str | None]] = []
+
+    def verify_usb(
+        selected_plan: LocalRebootPlan, before: LocalRebootAttestation
+    ) -> LocalRebootAttestation:
+        assert selected_plan == plan
+        verifier_calls.append((before.serial, before.boot_id))
+        return _attestation("ignored-usb-proof")
+
+    receipt = execute_local_reboot(
+        plan,
+        confirmation=plan.confirmation_phrase,
+        transport=transport,
+        known_hosts_file=tmp_path / "known_hosts",
+        receipt_directory=tmp_path / "receipts",
+        scanner=lambda: next(scans),
+        route_checker=lambda interface, host: ROUTE,
+        interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
+        post_reboot_usb_verifier=verify_usb,
+        timeout_s=0.2,
+        poll_interval_s=0.001,
+    )
+
+    assert receipt.outcome == "success"
+    assert "post_reboot_usb_iiod_attested" in receipt.completed_phases
+    assert verifier_calls == [(SERIAL, "before")]
+    # The verifier owns the independent TX mute/readback, so rotated SSH is
+    # never used again after it fails host-key authentication.
+    assert transport.events[-1] == f"attest:{SERIAL}"

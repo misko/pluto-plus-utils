@@ -52,6 +52,18 @@ with `--series 0.25` and
 package and generated `pylibiio` wheel into this environment together; an
 unmodified PyPI `pylibiio` installation does not provide native libiio.
 
+For a rootless, checkout-local install on Linux, use the repository installer:
+
+```bash
+scripts/install_native_libiio.sh
+uv run pluto environment
+```
+
+It verifies the immutable source commit, builds the USB backend, installs the
+matched native library and patched binding into `.venv`, and performs the same
+preflight. Pluto+ Utils automatically preloads `.venv/lib/libiio.so.0`; no
+`LD_LIBRARY_PATH`, `ldconfig`, or system-wide installation is required.
+
 Standard network/libiio radios are explicit and may optionally be pinned to a
 known serial:
 
@@ -92,7 +104,11 @@ uv run pluto radio inventory --daemon
 The default table includes the complete serial, classification, managed state,
 radio IP/IIO URI, firmware, USB bus/device and sysfs path, local `/dev/ttyACM*`
 terminal, USB-network interface and host IP, mass-storage node, model, and any
-identity warning. Unique serials are the only correlation key. Blank or duplicate
+identity warning. It also reports negotiated speed, USB specification, advertised
+MaxPower, runtime power state, direct-versus-intermediate hub topology, the nearest
+xHCI PCI controller, and bounded port-scoped kernel errors/disconnects. MaxPower is
+a descriptor budget—not measured voltage, current, or power margin. Unique serials
+are the only correlation key. Blank or duplicate
 USB serials remain separate and are marked ambiguous rather than guessed.
 
 USB topology is read fresh on every command. `--network` scans private, shared, and
@@ -372,7 +388,7 @@ non-loopback plaintext HTTP.
 uv run pluto --admin-token-file /private/admin.token firmware upload RELEASE.dfu
 uv run pluto --admin-token-file /private/admin.token firmware plan EXACT_HARDWARE_SERIAL IMAGE_ID \
   --mode persistent_qspi --transport ssh \
-  --expected-version v0.38-plutoplus-spf-libiio-metadata-v5
+  --expected-version v0.39-plutoplus-spf-libiio-metadata-v6
 uv run pluto --admin-token-file /private/admin.token firmware execute PLAN_ID --token TOKEN \
   --operator-confirmation 'FLASH EXACT_HARDWARE_SERIAL'
 uv run pluto --admin-token-file /private/admin.token firmware reconcile RECEIPT_ID
@@ -407,6 +423,11 @@ new boot identity and unchanged serial, firmware, and capabilities, then repeats
 the TX mute/readback. Every dispatched attempt gets an atomic mode-0600 receipt
 under `~/.local/state/pluto-plus-utils/reboot-receipts`. USB route ambiguity is a
 hard refusal; the command never falls back to network discovery or another radio.
+For a unique LAN endpoint, pass `--ssh-host 192.168.1.X`; the command retains the
+exact USB serial/path checks but deliberately uses the normal LAN route without
+binding the shared USB-gadget subnet. If firmware rotates its SSH key on reboot,
+the new key is never trusted: return is independently attested and TX-muted through
+the already selected USB-IIOD interface.
 
 ## Direct transport status
 
