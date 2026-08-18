@@ -239,6 +239,24 @@ def test_selected_forward_profile_is_exact_and_blank_recovery_stays_canonical(
         )
 
 
+def test_latch_clear_persistence_requires_distinct_promotion_profile() -> None:
+    ram = bootstrap.STANDALONE_FLASH_PROFILES[
+        "libiio-metadata-v6-tandem-latch-clear-ram"
+    ]
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "libiio-metadata-v6-tandem-latch-clear-persistent-promotion"
+    ]
+
+    assert ram.persistent_allowed is False
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.profile_id != ram.policy.profile_id
+    assert promotion.policy.asset_sha256 == ram.policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == ram.policy.fit_body_sha256
+    assert promotion.policy.device_firmware == ram.policy.device_firmware
+    assert promotion.metadata_abi == ram.metadata_abi == 2
+    assert promotion.tandem_agc is ram.tandem_agc is True
+
+
 def test_normal_flash_requires_matching_stable_usb_and_iiod_serial(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     monkeypatch: pytest.MonkeyPatch,

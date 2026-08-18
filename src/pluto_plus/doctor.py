@@ -84,6 +84,16 @@ TANDEM_V6_LATCH_CLEAR_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 18, 19, 27, 12, tzinfo=UTC),
 )
 
+# The exact same immutable bytes receive a distinct mutation identity only after
+# passing the multi-board RAM-only hardware gate. Keeping this separate from the
+# RAM profile prevents a diagnostic selection from silently authorizing QSPI.
+TANDEM_V6_LATCH_CLEAR_PERSISTENT_POLICY = TANDEM_V6_LATCH_CLEAR_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "libiio-metadata-v6-tandem-latch-clear-persistent-promotion",
+        "hardware_qualified": True,
+    }
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,
