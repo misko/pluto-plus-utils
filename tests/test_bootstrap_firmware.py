@@ -119,7 +119,7 @@ def test_prepare_rejects_an_image_outside_immutable_policy(
         bootstrap.BOOTSTRAP_POLICY.model_copy(update={"asset_sha256": "0" * 64}),
     )
 
-    with pytest.raises(bootstrap.BootstrapFirmwareError, match="canonical qualified DFU"):
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="exact qualified DFU"):
         bootstrap.prepare_bootstrap_plan(Path(plan.image_path), target)
 
 
@@ -136,6 +136,59 @@ def test_prepare_refuses_to_bypass_normal_serial_flow(
 
     with pytest.raises(bootstrap.BootstrapFirmwareError, match="firmware flash"):
         bootstrap.prepare_bootstrap_plan(Path(plan.image_path), target)
+
+
+def test_selected_forward_profile_is_exact_and_blank_recovery_stays_canonical(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical_plan, _, target = planned
+    image = Path(canonical_plan.image_path)
+    policy = bootstrap.TANDEM_V6_DEVELOPMENT_POLICY.model_copy(
+        update={
+            "asset_sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+            "fit_body_sha256": canonical_plan.fit_sha256,
+            "fit_body_size": canonical_plan.fit_size,
+        }
+    )
+    profile_id = policy.profile_id
+    monkeypatch.setitem(
+        bootstrap.STANDALONE_FLASH_PROFILES,
+        profile_id,
+        bootstrap.StandaloneFlashProfile(policy, 2, True),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "scan_local_usb_plutos",
+        lambda: (_local(target, serial="SERIAL_A"),),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "inspect_bound_iiod",
+        lambda interface: {
+            "hw_serial": "SERIAL_A",
+            "hw_model": "Analog Devices PlutoSDR Rev.C",
+            "fw_version": "v6",
+            "ad9361-phy,model": "ad9361",
+        },
+    )
+
+    plan, _ = bootstrap.prepare_usb_flash_plan(
+        image,
+        target,
+        mutation_profile_id=profile_id,
+    )
+
+    assert plan.mutation_profile_id == profile_id
+    assert plan.expected_metadata_abi == 2
+    assert plan.expected_tandem_agc is True
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="blank-serial recovery"):
+        bootstrap.prepare_usb_flash_plan(
+            image,
+            target,
+            force_blank_serial=True,
+            mutation_profile_id=profile_id,
+        )
 
 
 def test_normal_flash_requires_matching_stable_usb_and_iiod_serial(
@@ -209,7 +262,7 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
     monkeypatch.setattr(
         bootstrap,
         "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial: (plan, frm),
+        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
     monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
     monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: commands.append(tuple(argv)))
@@ -263,7 +316,7 @@ def test_failure_after_write_is_unknown_and_durably_receipted(
     monkeypatch.setattr(
         bootstrap,
         "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial: (plan, frm),
+        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
     monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
 
@@ -331,7 +384,7 @@ def test_bound_ssh_force_flash_verifies_stage_mtd3_and_return(
     monkeypatch.setattr(
         bootstrap,
         "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial: (plan, frm),
+        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
     monkeypatch.setattr(bootstrap, "_wait_for_path", lambda path, present, timeout_s: None)
     monkeypatch.setattr(
@@ -375,7 +428,7 @@ def test_bound_ssh_ambiguous_updater_result_is_unknown(
     monkeypatch.setattr(
         bootstrap,
         "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial: (plan, frm),
+        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
 
     result = bootstrap.execute_usb_flash_plan_ssh(

@@ -50,6 +50,23 @@ CANONICAL_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 12, 17, 21, 7, tzinfo=UTC),
 )
 
+# This is a separately selected mutation target, not the canonical repair
+# policy above.  Keeping the two objects distinct prevents read-only diagnostic
+# recognition from silently authorizing a firmware write.
+TANDEM_V6_DEVELOPMENT_POLICY = FirmwarePolicy(
+    profile_id="libiio-metadata-v6-tandem-abi2-development",
+    release_tag="tandem-agc-v2-da46979faccd",
+    device_firmware="v0.39-plutoplus-spf-libiio-metadata-v6-34-gda46",
+    asset_name="plutoplus-spf-tandem-agc-v2-da46979faccd-pluto.dfu",
+    asset_sha256="43401c5d850608fea115ddf4bb15ce3b1dffe1f758798db795f73a50ae86b20e",
+    release_url="https://github.com/misko/pluto-plus-utils/issues/2",
+    source_commit="da46979faccd",
+    fit_body_sha256="ed129308226fafaa0b2432dd7fefdd7efc4b7c55698e492ac0c330805ce0c889",
+    fit_body_size=12_776_787,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 18, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,

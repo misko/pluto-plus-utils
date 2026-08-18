@@ -1,0 +1,307 @@
+"""Tandem-AGC request and metadata-v4 protocol primitives.
+
+The layouts mirror the reviewed firmware UAPI and the metadata ABI emitted by
+the qualified v6 tandem development profile.  Parsing is deliberately strict:
+unknown bits, torn gain pairs, sequence holes, and bad CRCs fail the session.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import enum
+import struct
+import zlib
+from typing import Final
+
+from pluto_plus.direct_radio.usb import (
+    GAIN_EVENT_BYTES,
+    GAIN_OBSERVATION_BYTES,
+    HEADER_PREFIX_BYTES_V3,
+    VERSION_V3,
+    MetadataFeatures,
+    ProtocolError,
+    RadioMetadataV3,
+)
+
+TANDEM_REQUEST_MAGIC: Final = 0x54465053
+TANDEM_ABI_VERSION: Final = 1
+TANDEM_REQUIRED_FEATURES: Final = 0x7
+VERSION_V4: Final = 4
+TANDEM_METADATA_FEATURE: Final = 1 << 8
+TANDEM_METADATA_VALID_FLAG: Final = 1 << 22
+HEADER_EXTENSION_BYTES_V4: Final = 56
+HEADER_PREFIX_BYTES_V4: Final = HEADER_PREFIX_BYTES_V3 + HEADER_EXTENSION_BYTES_V4
+
+_REQUEST = struct.Struct("<IHHIIIIiiiIIIIII4BII8I")
+_IDENTITY = struct.Struct("<IHHII")
+_V3_EXTENSION = struct.Struct("<IHHHHHHIIII")
+_V4_EXTENSION = struct.Struct("<IIIIIIiiiBBBB4I")
+_EVENT = struct.Struct("<QIHBB")
+_LEGACY_EVENT = struct.Struct("<QHHI")
+
+
+class TandemMode(enum.IntEnum):
+    HOLD = 0
+    AUTO = 1
+
+
+class TandemState(enum.IntEnum):
+    IDLE = 0
+    VALIDATING = 1
+    ARMED_HOLD = 2
+    ARMED_AUTO = 3
+    FAULTED = 4
+    RESTORING = 5
+
+
+class TandemEventDirection(enum.IntEnum):
+    INCREASE = 1
+    DECREASE = 2
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TandemSessionRequestV1:
+    mode: TandemMode
+    observation_capacity: int = 64
+    event_capacity: int = 64
+    minimum_gain_db: int = 0
+    maximum_gain_db: int = 62
+    initial_gain_db: int = 30
+    power_measurement_samples: int = 1024
+    low_power_dwell_periods: int = 3
+    cooldown_periods: int = 16
+    pulse_high_cycles: int = 4
+    pulse_low_cycles: int = 4
+    detector_blanking_cycles: int = 8
+    low_power_threshold: int = 20
+    large_lmt_overload_threshold: int = 58
+    large_adc_overload_threshold: int = 49
+    small_adc_overload_threshold: int = 48
+
+    def pack(self, samples_per_channel: int) -> bytes:
+        if not 0 <= self.minimum_gain_db <= self.initial_gain_db <= self.maximum_gain_db <= 62:
+            raise ValueError("tandem gains must be ordered within 0..62 dB")
+        if not 1 <= self.observation_capacity <= 64 or not 1 <= self.event_capacity <= 64:
+            raise ValueError("tandem capacities must be within 1..64")
+        if samples_per_channel <= 0:
+            raise ValueError("samples_per_channel must be positive")
+        minimum_transition_samples = self.power_measurement_samples * (self.cooldown_periods + 1)
+        maximum_events = (
+            0
+            if self.mode is TandemMode.HOLD
+            else 1 + (samples_per_channel - 1) // minimum_transition_samples
+        )
+        if maximum_events > self.event_capacity:
+            raise ValueError("event capacity cannot cover worst-case AUTO transitions")
+        byte_values = (
+            self.low_power_threshold,
+            self.large_lmt_overload_threshold,
+            self.large_adc_overload_threshold,
+            self.small_adc_overload_threshold,
+        )
+        if any(not 0 <= value <= 0xFF for value in byte_values):
+            raise ValueError("detector thresholds must fit uint8")
+        return _REQUEST.pack(
+            TANDEM_REQUEST_MAGIC,
+            TANDEM_ABI_VERSION,
+            _REQUEST.size,
+            TANDEM_REQUIRED_FEATURES,
+            int(self.mode),
+            self.observation_capacity,
+            self.event_capacity,
+            self.minimum_gain_db,
+            self.maximum_gain_db,
+            self.initial_gain_db,
+            self.power_measurement_samples,
+            self.low_power_dwell_periods,
+            self.cooldown_periods,
+            self.pulse_high_cycles,
+            self.pulse_low_cycles,
+            self.detector_blanking_cycles,
+            *byte_values,
+            0,
+            0,
+            *([0] * 8),
+        )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TandemGainEventV1:
+    sample_sequence: int
+    event_sequence: int
+    flags: int
+    rx1_gain_index: int
+    rx2_gain_index: int
+
+    @property
+    def direction(self) -> TandemEventDirection:
+        return TandemEventDirection((self.flags >> 4) & 0x3)
+
+    @classmethod
+    def unpack(cls, payload: bytes) -> TandemGainEventV1:
+        if len(payload) != _EVENT.size:
+            raise ProtocolError("tandem event record has the wrong size")
+        event = cls(*_EVENT.unpack(payload))
+        if event.flags & 0xFFC0:
+            raise ProtocolError("tandem event has unknown flag bits")
+        try:
+            _ = event.direction
+        except ValueError as error:
+            raise ProtocolError("tandem event direction is invalid") from error
+        if event.rx1_gain_index != event.rx2_gain_index or event.rx1_gain_index > 0x7F:
+            raise ProtocolError("tandem event gain pair is invalid")
+        return event
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RadioMetadataV4:
+    base: RadioMetadataV3
+    header_bytes: int
+    ownership_epoch: int
+    tandem_state: TandemState
+    tandem_fault_flags: int
+    tandem_transition_count: int
+    minimum_gain_db: int
+    maximum_gain_db: int
+    initial_gain_db: int
+    minimum_gain_index: int
+    maximum_gain_index: int
+    rx1_gain_index: int
+    rx2_gain_index: int
+    gain_events: tuple[TandemGainEventV1, ...]
+
+    @classmethod
+    def unpack(cls, header: bytes | bytearray | memoryview) -> RadioMetadataV4:
+        raw = bytes(header)
+        if len(raw) < HEADER_PREFIX_BYTES_V4 + 4:
+            raise ProtocolError("short protocol v4 metadata header")
+        magic, version, header_bytes, features, flags = _IDENTITY.unpack_from(raw)
+        if (magic, version) != (0x314D4753, VERSION_V4) or len(raw) != header_bytes:
+            raise ProtocolError("bad protocol v4 identity or length")
+        if not features & TANDEM_METADATA_FEATURE or not features & int(
+            MetadataFeatures.FPGA_GAIN_EVENTS
+        ):
+            raise ProtocolError("protocol v4 lacks tandem event features")
+        if not flags & TANDEM_METADATA_VALID_FLAG:
+            raise ProtocolError("protocol v4 tandem metadata is invalid")
+        scratch = bytearray(raw)
+        received_crc = struct.unpack_from("<I", scratch, header_bytes - 4)[0]
+        scratch[-4:] = bytes(4)
+        if received_crc != zlib.crc32(scratch) & 0xFFFFFFFF:
+            raise ProtocolError("protocol v4 metadata CRC mismatch")
+
+        v3_extension = _V3_EXTENSION.unpack_from(raw, 92)
+        observation_count = v3_extension[1]
+        observation_capacity = v3_extension[2]
+        observation_bytes = v3_extension[3]
+        event_count = v3_extension[4]
+        event_capacity = v3_extension[5]
+        event_bytes = v3_extension[6]
+        expected = (
+            HEADER_PREFIX_BYTES_V4
+            + observation_capacity * observation_bytes
+            + event_capacity * event_bytes
+            + 4
+        )
+        if header_bytes != expected or observation_count > observation_capacity:
+            raise ProtocolError("protocol v4 capacities disagree with its header")
+        if event_count > event_capacity or observation_bytes != GAIN_OBSERVATION_BYTES:
+            raise ProtocolError("protocol v4 record capacity is invalid")
+        if event_bytes != GAIN_EVENT_BYTES:
+            raise ProtocolError("protocol v4 event size is unsupported")
+
+        extension = _V4_EXTENSION.unpack_from(raw, HEADER_PREFIX_BYTES_V3)
+        if any(extension[-4:]):
+            raise ProtocolError("protocol v4 reserved fields are nonzero")
+        (
+            ownership_epoch,
+            tandem_state,
+            fault_flags,
+            transition_count,
+            _gain_table,
+            _thresholds,
+            minimum_gain_db,
+            maximum_gain_db,
+            initial_gain_db,
+            minimum_gain_index,
+            maximum_gain_index,
+            rx1_gain_index,
+            rx2_gain_index,
+            *_reserved,
+        ) = extension
+        try:
+            state = TandemState(tandem_state)
+        except ValueError as error:
+            raise ProtocolError("unknown tandem state") from error
+        if (
+            not ownership_epoch
+            or fault_flags
+            or state
+            not in {
+                TandemState.ARMED_HOLD,
+                TandemState.ARMED_AUTO,
+            }
+        ):
+            raise ProtocolError("tandem lease is not valid and armed")
+        if rx1_gain_index != rx2_gain_index:
+            raise ProtocolError("tandem endpoint gains are not paired")
+
+        arrays = raw[HEADER_PREFIX_BYTES_V4:header_bytes]
+        event_offset = observation_capacity * observation_bytes
+        events: list[TandemGainEventV1] = []
+        for index in range(event_count):
+            offset = event_offset + index * event_bytes
+            event = TandemGainEventV1.unpack(arrays[offset : offset + event_bytes])
+            if events and event.event_sequence != (events[-1].event_sequence + 1) & 0xFFFFFFFF:
+                raise ProtocolError("tandem event sequence has a hole")
+            if events and event.sample_sequence < events[-1].sample_sequence:
+                raise ProtocolError("tandem events are not sample ordered")
+            events.append(event)
+        if any(
+            arrays[
+                event_offset + event_count * event_bytes : event_offset
+                + event_capacity * event_bytes
+            ]
+        ):
+            raise ProtocolError("unused tandem event records are nonzero")
+
+        synthetic = bytearray(raw[:HEADER_PREFIX_BYTES_V3])
+        struct.pack_into("<H", synthetic, 4, VERSION_V3)
+        struct.pack_into("<H", synthetic, 6, header_bytes - HEADER_EXTENSION_BYTES_V4)
+        struct.pack_into("<I", synthetic, 8, features & ~TANDEM_METADATA_FEATURE)
+        struct.pack_into("<I", synthetic, 12, flags & ~TANDEM_METADATA_VALID_FLAG)
+        synthetic.extend(arrays)
+        synthetic_event_offset = HEADER_PREFIX_BYTES_V3 + event_offset
+        for index, event in enumerate(events):
+            _LEGACY_EVENT.pack_into(
+                synthetic,
+                synthetic_event_offset + index * GAIN_EVENT_BYTES,
+                event.sample_sequence,
+                3,
+                0,
+                0,
+            )
+        synthetic[-4:] = bytes(4)
+        struct.pack_into("<I", synthetic, len(synthetic) - 4, zlib.crc32(synthetic))
+        base = RadioMetadataV3.unpack(synthetic)
+        frame_end = base.first_sample_sequence + base.samples_per_channel
+        if any(
+            not base.first_sample_sequence <= event.sample_sequence < frame_end for event in events
+        ):
+            raise ProtocolError("tandem event lies outside its IQ frame")
+        return cls(
+            base,
+            header_bytes,
+            ownership_epoch,
+            state,
+            fault_flags,
+            transition_count,
+            minimum_gain_db,
+            maximum_gain_db,
+            initial_gain_db,
+            minimum_gain_index,
+            maximum_gain_index,
+            rx1_gain_index,
+            rx2_gain_index,
+            tuple(events),
+        )

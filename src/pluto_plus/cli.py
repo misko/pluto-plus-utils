@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+import time
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from importlib import import_module
@@ -29,6 +30,7 @@ from pluto_plus.ladder import DEFAULT_RATE_LADDER, LadderReport, parse_rate_ladd
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
 DEFAULT_STATE_ROOT = Path(os.environ.get("PLUTO_STATE_ROOT", "./pluto-state"))
 DEFAULT_BOOTSTRAP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/bootstrap-receipts"
+DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qualification-reports"
 API_PREFIX = "api/v1"
 
 app = typer.Typer(
@@ -655,6 +657,99 @@ def radio_ladder(
         raise typer.Exit(5)
 
 
+@radio_app.command("qualify-tandem")
+def radio_qualify_tandem(
+    serial: str = typer.Argument(..., help="Exact serial of one USB-attached local radio."),
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ...,
+        "--usb-sysfs-path",
+        help="Exact direct USB sysfs node correlated with the serial.",
+    ),
+    attenuation_db: float = typer.Option(
+        ...,
+        "--attenuation-db",
+        help="Declared physical attenuation on each TX2-to-RX loopback path.",
+    ),
+    strong_tx_gain_db: float = typer.Option(
+        -10.0,
+        "--strong-tx-gain-db",
+        help="Strongest bounded TX2 hardware gain used by AUTO qualification.",
+    ),
+    weak_tx_gain_db: float = typer.Option(
+        -60.0,
+        "--weak-tx-gain-db",
+        help="Weak TX2 hardware gain used by AUTO qualification.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Enable the bounded TX2 stimulus and run qualification.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, the exact phrase printed by the dry run.",
+    ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--report",
+        help="Durable JSON report path.",
+    ),
+    watchdog: bool = typer.Option(
+        True,
+        "--watchdog/--no-watchdog",
+        help="Include the 6.5-second stalled-owner rollback gate.",
+    ),
+) -> None:
+    """Qualify tandem HOLD/AUTO/watchdog on one attenuated TX2 loopback."""
+
+    from pluto_plus.tandem_qualification import (
+        execute_tandem_qualification,
+        prepare_tandem_qualification,
+    )
+
+    try:
+        plan = prepare_tandem_qualification(
+            serial,
+            usb_sysfs_path,
+            physical_attenuation_db=attenuation_db,
+            strong_tx_gain_db=strong_tx_gain_db,
+            weak_tx_gain_db=weak_tx_gain_db,
+        )
+        selected_report = report_path or (
+            DEFAULT_QUALIFICATION_REPORTS / f"tandem-{serial}-{time.time_ns()}.json"
+        )
+        if not execute:
+            _emit(
+                {
+                    "mode": "dry_run",
+                    "will_enable_tx2": False,
+                    "plan": asdict(plan),
+                    "report_path": str(selected_report.expanduser().resolve()),
+                    "next_command": (
+                        "repeat with --execute and "
+                        f"--confirm {json.dumps(plan.confirmation_phrase)}"
+                    ),
+                }
+            )
+            return
+        if confirmation is None:
+            _fail(
+                "tandem_confirmation_required",
+                f"--execute requires --confirm {plan.confirmation_phrase!r}",
+                2,
+            )
+        report = execute_tandem_qualification(
+            plan,
+            confirmation=confirmation,
+            report_path=selected_report,
+            include_watchdog=watchdog,
+        )
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("tandem_qualification_failed", str(error), 5)
+    _emit({"report_path": str(selected_report.expanduser().resolve()), "report": report})
+
+
 @radio_app.command("status")
 def radio_status(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> None:
     """Show identity, state, capabilities, and current settings."""
@@ -1149,6 +1244,81 @@ def firmware_reconcile(ctx: typer.Context, receipt_id: str = typer.Argument(...)
     _emit(_api(ctx).request("POST", f"firmware/receipts/{receipt_id}/reconcile", json_body={}))
 
 
+@firmware_app.command("enroll-usb-ssh")
+def firmware_enroll_usb_ssh(
+    serial: str = typer.Argument(..., help="Exact serial of one USB-attached local radio."),
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ..., "--usb-sysfs-path", help="Exact direct USB sysfs node for the serial."
+    ),
+    known_hosts_file: Path = typer.Option(  # noqa: B008
+        ..., "--known-hosts-file", help="New private serial-specific known_hosts file."
+    ),
+    execute: bool = typer.Option(False, "--execute", help="Perform the bounded enrollment."),
+    confirmation: str | None = typer.Option(
+        None, "--confirm", help="With --execute, exact phrase TRUST USB SSH <serial>."
+    ),
+    password_file: Path | None = typer.Option(  # noqa: B008
+        None, "--password-file", help="Optional private password file; otherwise prompt."
+    ),
+) -> None:
+    """Pin an SSH host key through one serial-attested physical USB interface."""
+
+    phrase = f"TRUST USB SSH {serial}"
+    matches = [
+        item
+        for item in scan_local_usb_plutos()
+        if item.serial == serial and item.usb_path == str(usb_sysfs_path)
+    ]
+    if len(matches) != 1 or len(matches[0].host_network_interfaces) != 1:
+        _fail(
+            "usb_ssh_identity_unavailable",
+            "serial/path must identify one local radio with one USB network interface",
+            4,
+        )
+    plan = {
+        "serial": serial,
+        "usb_sysfs_path": str(usb_sysfs_path),
+        "usb_interface": matches[0].host_network_interfaces[0].name,
+        "known_hosts_file": str(known_hosts_file.expanduser().resolve()),
+        "confirmation_phrase": phrase,
+    }
+    if not execute:
+        _emit({"mode": "dry_run", "will_trust_host_key": False, "plan": plan})
+        return
+    if confirmation != phrase:
+        _fail("usb_ssh_confirmation_required", f"--confirm must be exactly {phrase!r}", 2)
+    if password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        try:
+            password = (
+                _read_private_file_bytes(
+                    password_file,
+                    label="radio SSH password",
+                    maximum_bytes=4096,
+                )
+                .decode("utf-8")
+                .strip()
+            )
+        except UnicodeDecodeError:
+            _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapFirmwareError,
+        enroll_bound_usb_ssh_host_key,
+    )
+
+    try:
+        result = enroll_bound_usb_ssh_host_key(
+            serial=serial,
+            usb_sysfs_path=usb_sysfs_path,
+            known_hosts_file=known_hosts_file,
+            password=password,
+        )
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("usb_ssh_enrollment_failed", str(error), 4)
+    _emit(result)
+
+
 @firmware_app.command("flash")
 def firmware_flash_usb(
     image: Path = typer.Argument(...),  # noqa: B008
@@ -1156,6 +1326,11 @@ def firmware_flash_usb(
         ...,
         "--usb-sysfs-path",
         help="Exact direct runtime USB node for one serial-attested Pluto.",
+    ),
+    profile: str = typer.Option(
+        "libiio-continuous-metadata",
+        "--profile",
+        help="Exact standalone mutation profile; never inferred from the image.",
     ),
     execute: bool = typer.Option(
         False,
@@ -1182,7 +1357,7 @@ def firmware_flash_usb(
         None, "--ssh-password-file", help="Optional mode-private password file; otherwise prompt."
     ),
 ) -> None:
-    """Flash canonical v5 onto one serial-attested local USB Pluto."""
+    """Flash one exact qualified profile onto a serial-attested local USB Pluto."""
 
     _standalone_usb_flash(
         image,
@@ -1194,6 +1369,7 @@ def firmware_flash_usb(
         transport=transport,
         ssh_known_hosts_file=ssh_known_hosts_file,
         ssh_password_file=ssh_password_file,
+        mutation_profile_id=profile,
     )
 
 
@@ -1244,6 +1420,7 @@ def firmware_force_flash_usb(
         transport=transport,
         ssh_known_hosts_file=ssh_known_hosts_file,
         ssh_password_file=ssh_password_file,
+        mutation_profile_id="libiio-continuous-metadata",
     )
 
 
@@ -1258,6 +1435,7 @@ def _standalone_usb_flash(
     transport: str,
     ssh_known_hosts_file: Path | None,
     ssh_password_file: Path | None,
+    mutation_profile_id: str,
 ) -> None:
     """Plan or execute one canonical local USB firmware operation."""
 
@@ -1290,6 +1468,7 @@ def _standalone_usb_flash(
             image,
             usb_sysfs_path,
             force_blank_serial=force_blank_serial,
+            mutation_profile_id=mutation_profile_id,
         )
         if not execute:
             _emit(

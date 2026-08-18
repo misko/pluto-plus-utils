@@ -945,7 +945,10 @@ def test_usb_bootstrap_cli_is_dry_run_by_default(
     force_modes: list[bool] = []
 
     def prepare(
-        image: Path, usb_sysfs_path: Path, force_blank_serial: bool
+        image: Path,
+        usb_sysfs_path: Path,
+        force_blank_serial: bool,
+        **kwargs: object,
     ) -> tuple[object, bytes]:
         del image, usb_sysfs_path
         force_modes.append(force_blank_serial)
@@ -1021,7 +1024,7 @@ def test_usb_bootstrap_cli_requires_and_passes_exact_confirmation(
     confirmations: list[str] = []
     monkeypatch.setattr(
         "pluto_plus.bootstrap_firmware.prepare_usb_flash_plan",
-        lambda image, usb_sysfs_path, force_blank_serial: (plan, b"frm"),
+        lambda image, usb_sysfs_path, force_blank_serial, **kwargs: (plan, b"frm"),
     )
 
     def execute(plan: object, frm: bytes, **kwargs: Any) -> BootstrapResult:

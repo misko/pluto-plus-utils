@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
-from pluto_plus.doctor import CANONICAL_POLICY
+from pluto_plus.doctor import CANONICAL_POLICY, TANDEM_V6_DEVELOPMENT_POLICY
 from pluto_plus.firmware import FirmwareImageError, generate_frm, validate_frm
 from pluto_plus.hardware.discovery import _facts_from_context_xml
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
@@ -32,6 +32,23 @@ _USB_ROOT = Path("/sys/bus/usb/devices")
 _BLOCK_ROOT = Path("/sys/class/block")
 _IIOD_PORT = 30_431
 BOOTSTRAP_POLICY = CANONICAL_POLICY
+
+
+@dataclass(frozen=True, slots=True)
+class StandaloneFlashProfile:
+    """Exact mutation policy plus required post-boot capabilities."""
+
+    policy: Any
+    metadata_abi: int
+    tandem_agc: bool
+
+
+STANDALONE_FLASH_PROFILES = {
+    CANONICAL_POLICY.profile_id: StandaloneFlashProfile(CANONICAL_POLICY, 1, False),
+    TANDEM_V6_DEVELOPMENT_POLICY.profile_id: StandaloneFlashProfile(
+        TANDEM_V6_DEVELOPMENT_POLICY, 2, True
+    ),
+}
 
 
 class BootstrapFirmwareError(RuntimeError):
@@ -150,6 +167,104 @@ class BoundSshBootstrapTransport:
                 local_path.unlink(missing_ok=True)
 
 
+def enroll_bound_usb_ssh_host_key(
+    *,
+    serial: str,
+    usb_sysfs_path: Path,
+    known_hosts_file: Path,
+    password: str,
+    timeout_s: float = 15,
+) -> dict[str, str]:
+    """Pin one host key only after an interface-bound serial attestation."""
+
+    target = _direct_usb_path(usb_sysfs_path)
+    local = _one_local_target(target)
+    if local.serial != serial or not serial.strip():
+        raise BootstrapFirmwareError("USB path does not match the requested stable serial")
+    if len(local.host_network_interfaces) != 1:
+        raise BootstrapFirmwareError("SSH enrollment requires one exact USB network interface")
+    destination = known_hosts_file.expanduser().resolve()
+    if destination.exists():
+        raise BootstrapFirmwareError("known-hosts destination already exists; refusing overwrite")
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    temporary.chmod(0o600)
+    command = (
+        "printf 'serial='; cat /sys/kernel/config/usb_gadget/composite_gadget/"
+        "strings/0x409/serialnumber"
+    )
+    try:
+        import pexpect
+
+        child = pexpect.spawn(
+            "ssh",
+            [
+                "-o",
+                f"BindInterface={local.host_network_interfaces[0].name}",
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                f"UserKnownHostsFile={temporary}",
+                "root@192.168.2.1",
+                command,
+            ],
+            encoding=None,
+            timeout=timeout_s,
+        )
+        transcript = bytearray()
+        password_sent = False
+        try:
+            while True:
+                matched = child.expect([b"[Pp]assword:", pexpect.EOF, pexpect.TIMEOUT])
+                transcript.extend(cast(bytes, child.before or b""))
+                if matched == 0:
+                    if password_sent:
+                        raise BootstrapFirmwareError("USB-bound SSH authentication failed")
+                    child.sendline(password.encode())
+                    password_sent = True
+                    continue
+                if matched == 1:
+                    break
+                raise BootstrapFirmwareError("USB-bound SSH enrollment timed out")
+        finally:
+            child.close(force=True)
+        output = bytes(transcript).decode(errors="replace").replace("\r", "")
+        if child.exitstatus != 0 or f"serial={serial}" not in output.splitlines():
+            raise BootstrapFirmwareError(
+                "USB-bound SSH endpoint did not attest the selected serial"
+            )
+        if not temporary.is_file() or temporary.stat().st_size == 0:
+            raise BootstrapFirmwareError("SSH did not record a host key")
+        temporary.replace(destination)
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        fingerprint = _run_output(
+            ("ssh-keygen", "-lf", str(destination), "-E", "sha256"), timeout_s=10
+        ).strip()
+        return {
+            "serial": serial,
+            "usb_sysfs_path": str(target),
+            "usb_interface": local.host_network_interfaces[0].name,
+            "known_hosts_file": str(destination),
+            "fingerprint": fingerprint,
+        }
+    except ImportError as error:
+        raise BootstrapFirmwareError("USB-bound SSH enrollment requires pexpect") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @dataclass(frozen=True, slots=True)
 class BootstrapPlan:
     plan_id: str
@@ -168,6 +283,9 @@ class BootstrapPlan:
     frm_sha256: str
     expected_firmware: str
     confirmation_phrase: str
+    mutation_profile_id: str = CANONICAL_POLICY.profile_id
+    expected_metadata_abi: int = 1
+    expected_tandem_agc: bool = False
     operation: Literal["flash", "force_flash"] = "force_flash"
     target_serial: str | None = None
 
@@ -198,19 +316,31 @@ def prepare_usb_flash_plan(
     usb_sysfs_path: Path,
     *,
     force_blank_serial: bool = False,
+    mutation_profile_id: str = CANONICAL_POLICY.profile_id,
 ) -> tuple[BootstrapPlan, bytes]:
-    """Create a canonical path-bound USB flash plan without mutating hardware."""
+    """Create an exact-profile path-bound USB flash plan without mutation."""
 
     target = _direct_usb_path(usb_sysfs_path)
+    profile = STANDALONE_FLASH_PROFILES.get(mutation_profile_id)
+    if profile is None:
+        raise BootstrapFirmwareError(
+            f"unknown standalone mutation profile {mutation_profile_id!r}; expected one of "
+            f"{sorted(STANDALONE_FLASH_PROFILES)}"
+        )
+    if force_blank_serial and mutation_profile_id != CANONICAL_POLICY.profile_id:
+        raise BootstrapFirmwareError("blank-serial recovery accepts only the canonical policy")
+    policy = (
+        BOOTSTRAP_POLICY if mutation_profile_id == CANONICAL_POLICY.profile_id else profile.policy
+    )
     try:
         image_data = image.read_bytes()
     except OSError as error:
         raise BootstrapFirmwareError(f"cannot read firmware image: {error}") from error
     image_sha256 = hashlib.sha256(image_data).hexdigest()
-    if image_sha256 != BOOTSTRAP_POLICY.asset_sha256:
+    if image_sha256 != policy.asset_sha256:
         raise BootstrapFirmwareError(
-            "bootstrap accepts only the canonical qualified DFU: "
-            f"expected SHA-256 {BOOTSTRAP_POLICY.asset_sha256}, got {image_sha256}"
+            f"profile {mutation_profile_id!r} accepts only its exact qualified DFU: "
+            f"expected SHA-256 {policy.asset_sha256}, got {image_sha256}"
         )
     try:
         frm = generate_frm(image_data)
@@ -275,7 +405,10 @@ def prepare_usb_flash_plan(
             fit_sha256=hashlib.sha256(fit).hexdigest(),
             fit_size=len(fit),
             frm_sha256=hashlib.sha256(frm).hexdigest(),
-            expected_firmware=BOOTSTRAP_POLICY.device_firmware,
+            expected_firmware=policy.device_firmware,
+            mutation_profile_id=mutation_profile_id,
+            expected_metadata_abi=profile.metadata_abi,
+            expected_tandem_agc=profile.tandem_agc,
             confirmation_phrase=confirmation,
             operation=operation,
             target_serial=local.serial,
@@ -310,6 +443,7 @@ def execute_bootstrap_plan(
         Path(plan.image_path),
         Path(plan.usb_sysfs_path),
         force_blank_serial=plan.operation == "force_flash",
+        mutation_profile_id=plan.mutation_profile_id,
     )
     for field in (
         "usb_sysfs_path",
@@ -324,6 +458,9 @@ def execute_bootstrap_plan(
         "fit_size",
         "frm_sha256",
         "expected_firmware",
+        "mutation_profile_id",
+        "expected_metadata_abi",
+        "expected_tandem_agc",
         "operation",
         "target_serial",
     ):
@@ -379,6 +516,8 @@ def execute_bootstrap_plan(
             plan, timeout_s=return_timeout_s
         )
         phases.append("return_attested")
+        if plan.target_serial is not None:
+            phases.append("tx_safe_attested")
         result = BootstrapResult(
             receipt_id=receipt_id,
             outcome="success",
@@ -447,6 +586,7 @@ def execute_usb_flash_plan_ssh(
         Path(plan.image_path),
         Path(plan.usb_sysfs_path),
         force_blank_serial=plan.operation == "force_flash",
+        mutation_profile_id=plan.mutation_profile_id,
     )
     _require_same_plan(plan, fresh_plan, fresh_frm, frm)
     receipt_id = str(uuid.uuid4())
@@ -521,6 +661,8 @@ def execute_usb_flash_plan_ssh(
             plan, timeout_s=return_timeout_s
         )
         phases.append("return_attested")
+        if plan.target_serial is not None:
+            phases.append("tx_safe_attested")
         result = BootstrapResult(
             receipt_id=receipt_id,
             outcome="success",
@@ -608,6 +750,9 @@ def _require_same_plan(
         "fit_size",
         "frm_sha256",
         "expected_firmware",
+        "mutation_profile_id",
+        "expected_metadata_abi",
+        "expected_tandem_agc",
         "operation",
         "target_serial",
     ):
@@ -635,9 +780,57 @@ def _attest_return(plan: BootstrapPlan) -> tuple[str | None, str, str]:
         raise BootstrapFirmwareError(
             f"returned firmware is {returned_firmware!r}, expected {plan.expected_firmware!r}"
         )
-    if str(facts.get("iio,buffer-metadata") or "").strip() != "1":
-        raise BootstrapFirmwareError("returned firmware lacks buffer metadata capability")
+    observed_metadata = str(facts.get("iio,buffer-metadata") or "").strip()
+    if observed_metadata != str(plan.expected_metadata_abi):
+        raise BootstrapFirmwareError(
+            f"returned metadata ABI is {observed_metadata!r}, expected {plan.expected_metadata_abi}"
+        )
+    raw_device_names = facts.get("device_names", ())
+    device_names = (
+        {str(value) for value in raw_device_names}
+        if isinstance(raw_device_names, (tuple, list, set, frozenset))
+        else set()
+    )
+    observed_tandem = "tandem-agc" in device_names
+    if observed_tandem is not plan.expected_tandem_agc:
+        raise BootstrapFirmwareError(
+            f"returned tandem capability is {observed_tandem}, expected {plan.expected_tandem_agc}"
+        )
+    if plan.target_serial is not None:
+        _mute_returned_radio(plan.target_serial)
     return returned_serial, returned_firmware, returned_phy
+
+
+def _mute_returned_radio(serial: str) -> None:
+    """Mute and read back one exact returned USB-IIO radio."""
+
+    try:
+        import adi  # type: ignore[import-untyped]
+        import iio  # type: ignore[import-untyped]
+
+        from pluto_plus.hardware.iio import _mute_transmit
+
+        matches = [
+            uri
+            for uri, description in iio.scan_contexts().items()
+            if uri.startswith("usb:") and f"serial={serial}" in description
+        ]
+        if len(matches) != 1:
+            raise BootstrapFirmwareError(
+                f"expected one returned USB-IIO context for TX safety, got {matches}"
+            )
+        device = adi.ad9361(uri=matches[0])
+        try:
+            if device._ctx.attrs.get("hw_serial") != serial:
+                raise BootstrapFirmwareError("TX safety context has the wrong serial")
+            _mute_transmit(device)
+        finally:
+            device.rx_destroy_buffer()
+            device._ctx.close()
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        if isinstance(error, BootstrapFirmwareError):
+            raise
+        raise BootstrapFirmwareError(f"cannot attest returned TX-safe state: {error}") from error
 
 
 def _attest_return_when_ready(
@@ -812,6 +1005,20 @@ def _run(argv: tuple[str, ...], *, timeout_s: float) -> None:
         raise BootstrapFirmwareError(
             f"command {argv[0]!r} exited {error.returncode}{suffix}"
         ) from error
+    except (OSError, subprocess.SubprocessError) as error:
+        raise BootstrapFirmwareError(f"command {argv[0]!r} failed: {error}") from error
+
+
+def _run_output(argv: tuple[str, ...], *, timeout_s: float) -> str:
+    try:
+        completed = subprocess.run(
+            argv,
+            check=True,
+            timeout=timeout_s,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout
     except (OSError, subprocess.SubprocessError) as error:
         raise BootstrapFirmwareError(f"command {argv[0]!r} failed: {error}") from error
 
