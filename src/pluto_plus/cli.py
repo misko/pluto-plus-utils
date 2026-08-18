@@ -711,6 +711,13 @@ def radio_reboot_local(
             f"--execute requires --confirm {plan.confirmation_phrase!r}",
             2,
         )
+    if not plan.raw_usb_write_access:
+        _fail(
+            "local_reboot_usb_permission_denied",
+            f"raw USB node {plan.runtime_usb_device_node} is not writable; install "
+            "packaging/udev/70-pluto-plus-utils.rules and reconnect before execution",
+            4,
+        )
     environment = inspect_iio_environment()
     if not environment.healthy:
         _fail("local_reboot_environment_failed", environment.actionable_message, 5)

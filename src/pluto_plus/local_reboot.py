@@ -66,6 +66,8 @@ class LocalRebootPlan:
     serial: str
     usb_sysfs_path: str
     usb_interface: str
+    runtime_usb_device_node: str
+    raw_usb_write_access: bool
     ssh_host: str
     ssh_route_mode: Literal["usb_gadget", "lan"]
     known_hosts_sha256: str
@@ -157,6 +159,7 @@ def prepare_local_reboot(
         require_unambiguous_usb_ssh_route
     ),
     interface_validator: Callable[[str, str], None] = validate_bound_interface,
+    usb_access_checker: Callable[[Path], bool] = lambda path: os.access(path, os.R_OK | os.W_OK),
 ) -> LocalRebootPlan:
     """Build a read-only plan for exactly one locally attached USB radio."""
 
@@ -170,6 +173,9 @@ def prepare_local_reboot(
     local = matches[0]
     if len(local.host_network_interfaces) != 1:
         raise LocalRebootError("selected radio must expose exactly one USB network interface")
+    if local.bus_number is None or local.device_number is None:
+        raise LocalRebootError("selected radio has no current USB bus/device address")
+    usb_device_node = Path(f"/dev/bus/usb/{local.bus_number:03d}/{local.device_number:03d}")
     interface = local.host_network_interfaces[0].name
     try:
         host_address = ipaddress.ip_address(ssh_host)
@@ -185,12 +191,14 @@ def prepare_local_reboot(
         raise LocalRebootError(str(error)) from error
     known_hosts_sha256 = _private_file_sha256(known_hosts_file, "SSH known-hosts")
     return LocalRebootPlan(
-        schema_version=2,
+        schema_version=3,
         plan_id=uuid.uuid4().hex,
         created_at=_now(),
         serial=serial,
         usb_sysfs_path=str(path),
         usb_interface=interface,
+        runtime_usb_device_node=str(usb_device_node),
+        raw_usb_write_access=usb_access_checker(usb_device_node),
         ssh_host=ssh_host,
         ssh_route_mode=route_mode,
         known_hosts_sha256=known_hosts_sha256,
@@ -211,6 +219,7 @@ def execute_local_reboot(
         require_unambiguous_usb_ssh_route
     ),
     interface_validator: Callable[[str, str], None] = validate_bound_interface,
+    usb_access_checker: Callable[[Path], bool] = lambda path: os.access(path, os.R_OK | os.W_OK),
     post_reboot_usb_verifier: Callable[
         [LocalRebootPlan, LocalRebootAttestation], LocalRebootAttestation
     ] = lambda plan, before: attest_and_mute_returned_usb(plan, before),
@@ -270,11 +279,14 @@ def execute_local_reboot(
             scanner=scanner,
             route_checker=route_checker,
             interface_validator=interface_validator,
+            usb_access_checker=usb_access_checker,
         )
         if (
             fresh.serial,
             fresh.usb_sysfs_path,
             fresh.usb_interface,
+            fresh.runtime_usb_device_node,
+            fresh.raw_usb_write_access,
             fresh.ssh_host,
             fresh.ssh_route_mode,
             fresh.known_hosts_sha256,
@@ -282,11 +294,18 @@ def execute_local_reboot(
             plan.serial,
             plan.usb_sysfs_path,
             plan.usb_interface,
+            plan.runtime_usb_device_node,
+            plan.raw_usb_write_access,
             plan.ssh_host,
             plan.ssh_route_mode,
             plan.known_hosts_sha256,
         ):
             raise LocalRebootError("local reboot plan identity or SSH trust changed")
+        if not fresh.raw_usb_write_access:
+            raise LocalRebootError(
+                f"raw USB node {fresh.runtime_usb_device_node} is not writable; "
+                "post-reboot TX-safe reconciliation cannot be guaranteed"
+            )
         completed.append("local_identity_reattested")
         checkpoint()
         before = transport.attest(plan.serial)

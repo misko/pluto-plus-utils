@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import stat
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -115,6 +116,7 @@ def _plan(tmp_path: Path):
         scanner=lambda: (_radio(),),
         route_checker=lambda interface, host: ROUTE,
         interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
     )
 
 
@@ -147,6 +149,7 @@ def test_prepare_unique_lan_host_keeps_usb_identity_but_does_not_bind_usb_route(
         scanner=lambda: (_radio(),),
         route_checker=route_checker,
         interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
     )
 
     assert plan.ssh_route_mode == "lan"
@@ -167,6 +170,7 @@ def test_prepare_refuses_duplicate_or_non_private_identity(tmp_path: Path) -> No
             scanner=lambda: (_radio(),),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
         )
 
     known_hosts.chmod(0o600)
@@ -179,6 +183,7 @@ def test_prepare_refuses_duplicate_or_non_private_identity(tmp_path: Path) -> No
             scanner=lambda: (_radio(), _radio()),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
         )
 
 
@@ -199,6 +204,7 @@ def test_success_reboots_only_after_safe_state_and_attests_same_return(
         scanner=lambda: next(scans),
         route_checker=lambda interface, host: ROUTE,
         interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
         timeout_s=0.2,
         poll_interval_s=0.001,
     )
@@ -234,6 +240,28 @@ def test_refuses_confirmation_without_touching_transport(tmp_path: Path) -> None
     assert transport.events == []
 
 
+def test_unwritable_raw_usb_fails_before_radio_operation(tmp_path: Path) -> None:
+    plan = replace(_plan(tmp_path), raw_usb_write_access=False)
+    transport = FakeTransport((_attestation("before"),))
+
+    with pytest.raises(LocalRebootExecutionError) as caught:
+        execute_local_reboot(
+            plan,
+            confirmation=plan.confirmation_phrase,
+            transport=transport,
+            known_hosts_file=tmp_path / "known_hosts",
+            receipt_directory=tmp_path / "receipts",
+            scanner=lambda: (_radio(),),
+            route_checker=lambda interface, host: ROUTE,
+            interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: False,
+        )
+
+    assert caught.value.receipt.outcome == "failed_before_mutation"
+    assert "not writable" in (caught.value.receipt.error or "")
+    assert transport.events == []
+
+
 def test_wrong_return_topology_is_unknown_and_receipted(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     transport = FakeTransport((_attestation("before"),))
@@ -249,6 +277,7 @@ def test_wrong_return_topology_is_unknown_and_receipted(tmp_path: Path) -> None:
             scanner=lambda: next(scans),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
             timeout_s=0.2,
             poll_interval_s=0.001,
         )
@@ -273,6 +302,7 @@ def test_reboot_dispatch_error_is_unknown_not_safe_to_retry(tmp_path: Path) -> N
             scanner=lambda: (_radio(),),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
         )
 
     assert caught.value.receipt.outcome == "unknown"
@@ -296,6 +326,7 @@ def test_changed_firmware_never_passes_post_return_attestation(tmp_path: Path) -
             scanner=lambda: next(scans),
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
             timeout_s=0.01,
             poll_interval_s=0.001,
         )
@@ -329,6 +360,7 @@ def test_rotated_ssh_key_is_not_trusted_and_exact_usb_verifier_can_reconcile(
         scanner=lambda: next(scans),
         route_checker=lambda interface, host: ROUTE,
         interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
         post_reboot_usb_verifier=verify_usb,
         timeout_s=0.2,
         poll_interval_s=0.001,
