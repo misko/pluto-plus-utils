@@ -83,6 +83,8 @@ def ram_plan(
     usb_root = tmp_path / "usb"
     target = usb_root / "3-7"
     target.mkdir(parents=True)
+    (target / "busnum").write_text("3\n")
+    (target / "devnum").write_text("7\n")
     image = tmp_path / "candidate.dfu"
     image.write_bytes(_dfu())
     known_hosts = tmp_path / "known_hosts"
@@ -257,7 +259,7 @@ def test_execute_uses_only_exact_path_firmware_alt_and_attests_return(
         "-p",
         "3-7",
         "-d",
-        "0456:b674",
+        "0456:b673,0456:b674",
         "-a",
         "firmware.dfu",
     )
@@ -321,3 +323,78 @@ def test_execute_refuses_unwritable_raw_usb_before_transition_or_receipt(
 
     assert transition.calls == []
     assert not receipt_directory.exists()
+
+
+def test_resume_exact_dfu_boundary_revalidates_downloads_and_attests_return(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, _, _, radios = ram_plan
+    source_id = "a" * 32
+    source = tmp_path / f"{source_id}.json"
+    source.write_text(
+        json.dumps(
+            {
+                "receipt_id": source_id,
+                "outcome": "unknown",
+                "phases": [
+                    "preflight_revalidated",
+                    "dfu_util_ready",
+                    "ram_transition_dispatch_attempted",
+                    "ram_transition_dispatched",
+                    "exact_path_entered_dfu",
+                ],
+                "plan": asdict(plan),
+            }
+        )
+    )
+    source.chmod(0o600)
+    runner = RecordingRunner()
+    products = iter(("b674", "b673"))
+    muted: list[str] = []
+    monkeypatch.setattr(volatile, "mute_returned_radio", muted.append)
+
+    result = volatile.resume_ram_boot_receipt(
+        source,
+        confirmation=f"RESUME RAM BOOT {source_id}",
+        receipt_directory=tmp_path / "resume-receipts",
+        command_runner=runner,
+        scanner=lambda: radios,
+        iiod_inspector=lambda interface: _facts("candidate-v1"),
+        usb_access_checker=lambda path: True,
+        usb_product_reader=lambda path: next(products),
+        timeout_s=0.1,
+        poll_interval_s=0.001,
+    )
+
+    assert result.outcome == "success"
+    assert "0456:b673,0456:b674" in runner.commands[1]
+    assert muted == [plan.serial]
+
+
+def test_resume_rejects_receipt_after_download_phase(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+    tmp_path: Path,
+) -> None:
+    plan, _, _, _ = ram_plan
+    source_id = "b" * 32
+    source = tmp_path / f"{source_id}.json"
+    source.write_text(
+        json.dumps(
+            {
+                "receipt_id": source_id,
+                "outcome": "unknown",
+                "phases": ["exact_path_entered_dfu", "volatile_dfu_downloaded"],
+                "plan": asdict(plan),
+            }
+        )
+    )
+    source.chmod(0o600)
+
+    with pytest.raises(volatile.VolatileFirmwareError, match="resumable DFU boundary"):
+        volatile.resume_ram_boot_receipt(
+            source,
+            confirmation=f"RESUME RAM BOOT {source_id}",
+            receipt_directory=tmp_path / "resume-receipts",
+        )

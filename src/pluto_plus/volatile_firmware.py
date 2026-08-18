@@ -339,7 +339,7 @@ def execute_ram_boot_plan(
             "-p",
             plan.usb_port,
             "-d",
-            "0456:b674",
+            "0456:b673,0456:b674",
             "-a",
             "firmware.dfu",
         )
@@ -398,6 +398,166 @@ def execute_ram_boot_plan(
         )
     _write_receipt(receipt_path, started | asdict(result))
     return result
+
+
+def resume_ram_boot_receipt(
+    source_receipt: Path,
+    *,
+    confirmation: str,
+    receipt_directory: Path,
+    command_runner: DfuCommandRunner | None = None,
+    scanner: Callable[[], Sequence[LocalUsbPluto]] = scan_local_usb_plutos,
+    iiod_inspector: Callable[[str], dict[str, object]] = inspect_bound_iiod,
+    usb_access_checker: Callable[[Path], bool] = lambda path: os.access(path, os.R_OK | os.W_OK),
+    usb_product_reader: Callable[[Path], str | None] = lambda path: _usb_product(path),
+    timeout_s: float = 120,
+    poll_interval_s: float = 0.25,
+) -> VolatileFirmwareResult:
+    """Resume only a receipt proven to have stopped at the exact DFU boundary."""
+
+    source_id, plan = _load_dfu_boundary_receipt(source_receipt)
+    expected_confirmation = f"RESUME RAM BOOT {source_id}"
+    if confirmation != expected_confirmation:
+        raise VolatileFirmwareError(f"confirmation must be exactly {expected_confirmation!r}")
+    if timeout_s <= 0 or poll_interval_s <= 0:
+        raise ValueError("RAM-boot timeouts must be positive")
+    path = Path(plan.usb_sysfs_path)
+    if usb_product_reader(path) != "b674":
+        raise VolatileFirmwareError("receipt USB path is not currently the Pluto DFU device")
+    raw_node = _current_usb_device_node(path)
+    if not usb_access_checker(raw_node):
+        raise VolatileFirmwareError(f"current raw USB node {raw_node} is not writable")
+    _revalidate_plan_image(plan)
+    runner = command_runner or SubprocessDfuRunner()
+    runner.run(("dfu-util", "--version"), timeout_s=5)
+
+    receipt_id = uuid.uuid4().hex
+    receipt_path = receipt_directory / f"{receipt_id}.json"
+    phases = ["resume_preflight_revalidated", "dfu_util_ready", "exact_path_attested_dfu"]
+    started: dict[str, object] = {
+        "schema_version": 1,
+        "receipt_id": receipt_id,
+        "source_receipt_id": source_id,
+        "outcome": "started",
+        "plan": asdict(plan),
+        "phases": phases,
+        "error": None,
+    }
+    _write_receipt(receipt_path, started)
+    try:
+        common = (
+            "dfu-util",
+            "-p",
+            plan.usb_port,
+            "-d",
+            "0456:b673,0456:b674",
+            "-a",
+            "firmware.dfu",
+        )
+        runner.run((*common, "-D", plan.image_path), timeout_s=120)
+        phases.append("volatile_dfu_downloaded")
+        _write_receipt(receipt_path, started | {"phases": phases})
+        runner.run((*common, "-e"), timeout_s=30)
+        phases.append("dfu_detach_dispatched")
+        _write_receipt(receipt_path, started | {"phases": phases})
+        _wait_for_product(
+            path,
+            "b673",
+            reader=usb_product_reader,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+        )
+        phases.append("exact_path_returned_runtime")
+        serial, firmware, phy = _attest_ram_return(
+            plan,
+            scanner=scanner,
+            iiod_inspector=iiod_inspector,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+        )
+        phases.extend(("return_attested", "tx_safe_attested"))
+        result = VolatileFirmwareResult(
+            schema_version=1,
+            receipt_id=receipt_id,
+            outcome="success",
+            phases=tuple(phases),
+            receipt_path=str(receipt_path),
+            returned_serial=serial,
+            returned_firmware=firmware,
+            returned_phy=phy,
+            remediation="RAM-only image is active; QSPI remains unchanged.",
+        )
+    except BaseException as error:
+        result = VolatileFirmwareResult(
+            schema_version=1,
+            receipt_id=receipt_id,
+            outcome="unknown",
+            phases=tuple(phases),
+            receipt_path=str(receipt_path),
+            error=f"{type(error).__name__}: {error}",
+            remediation="Do not retry; reconcile the exact USB path and receipt.",
+        )
+    _write_receipt(receipt_path, started | asdict(result))
+    return result
+
+
+def _load_dfu_boundary_receipt(path: Path) -> tuple[str, VolatileFirmwarePlan]:
+    try:
+        stat_result = path.lstat()
+        data = path.read_bytes()
+    except OSError as error:
+        raise VolatileFirmwareError(f"RAM-boot receipt is not readable: {error}") from error
+    if path.is_symlink() or not path.is_file() or stat_result.st_mode & 0o077:
+        raise VolatileFirmwareError("RAM-boot receipt must be a private regular file")
+    try:
+        payload = json.loads(data)
+        receipt_id = str(payload["receipt_id"])
+        phases = tuple(str(value) for value in payload["phases"])
+        plan = VolatileFirmwarePlan(**payload["plan"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise VolatileFirmwareError("RAM-boot receipt is malformed") from error
+    expected_phases = (
+        "preflight_revalidated",
+        "dfu_util_ready",
+        "ram_transition_dispatch_attempted",
+        "ram_transition_dispatched",
+        "exact_path_entered_dfu",
+    )
+    if payload.get("outcome") != "unknown" or phases != expected_phases:
+        raise VolatileFirmwareError("receipt did not stop at the resumable DFU boundary")
+    if path.stem != receipt_id or not re.fullmatch(r"[0-9a-f]{32}", receipt_id):
+        raise VolatileFirmwareError("receipt identity does not match its filename")
+    return receipt_id, plan
+
+
+def _revalidate_plan_image(plan: VolatileFirmwarePlan) -> None:
+    profile = STANDALONE_FLASH_PROFILES.get(plan.profile_id)
+    if profile is None:
+        raise VolatileFirmwareError("receipt references an unknown RAM-boot profile")
+    try:
+        image = Path(plan.image_path).read_bytes()
+        fit = validate_dfu(image)
+    except (OSError, FirmwareImageError) as error:
+        raise VolatileFirmwareError(f"receipt image cannot be revalidated: {error}") from error
+    policy = profile.policy
+    if (
+        hashlib.sha256(image).hexdigest() != plan.image_sha256
+        or plan.image_sha256 != policy.asset_sha256
+        or hashlib.sha256(fit).hexdigest() != plan.fit_sha256
+        or plan.fit_sha256 != policy.fit_body_sha256
+        or len(fit) != plan.fit_size
+        or plan.fit_size != policy.fit_body_size
+    ):
+        raise VolatileFirmwareError("receipt image no longer matches its immutable profile")
+
+
+def _current_usb_device_node(path: Path) -> Path:
+    try:
+        bus = int((path / "busnum").read_text().strip())
+        device = int((path / "devnum").read_text().strip())
+    except (OSError, ValueError) as error:
+        raise VolatileFirmwareError("cannot resolve the current DFU raw USB node") from error
+    return Path(f"/dev/bus/usb/{bus:03d}/{device:03d}")
 
 
 def _attest_ram_return(

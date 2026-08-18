@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from pluto_plus.diagnostic_profiles import V6_TANDEM_ABI2_PROFILE
+from pluto_plus.diagnostic_profiles import V6_TANDEM_LATCH_CLEAR_RAM_PROFILE
 from pluto_plus.hardware.iio import _mute_transmit
 from pluto_plus.inventory import scan_local_usb_plutos
 from pluto_plus.tandem import (
@@ -150,7 +150,7 @@ def prepare_tandem_qualification(
         strong_tx_gain_db=strong_tx_gain_db,
         weak_tx_gain_db=weak_tx_gain_db,
         effective_attenuation_db=effective,
-        expected_firmware=V6_TANDEM_ABI2_PROFILE.firmware_version,
+        expected_firmware=V6_TANDEM_LATCH_CLEAR_RAM_PROFILE.firmware_version,
         expected_metadata_abi=2,
         confirmation_phrase=phrase,
     )

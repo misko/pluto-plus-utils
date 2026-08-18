@@ -1749,6 +1749,40 @@ def firmware_ram_boot(
         raise typer.Exit(5)
 
 
+@firmware_app.command("ram-resume")
+def firmware_ram_resume(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+    confirmation: str = typer.Option(
+        ...,
+        "--confirm",
+        help="Exact phrase RESUME RAM BOOT <source-receipt-id>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_RAM_BOOT_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for the recovery receipt.",
+    ),
+) -> None:
+    """Resume an exact guarded RAM boot that stopped at the DFU boundary."""
+
+    from pluto_plus.volatile_firmware import VolatileFirmwareError, resume_ram_boot_receipt
+
+    environment = inspect_iio_environment()
+    if not environment.healthy:
+        _fail("ram_resume_environment_failed", environment.actionable_message, 5)
+    try:
+        result = resume_ram_boot_receipt(
+            receipt.expanduser().absolute(),
+            confirmation=confirmation,
+            receipt_directory=receipt_directory.expanduser().resolve(),
+        )
+    except (VolatileFirmwareError, OSError, ValueError) as error:
+        _fail("ram_resume_failed", str(error), 4)
+    _emit(asdict(result))
+    if result.outcome != "success":
+        raise typer.Exit(5)
+
+
 @firmware_app.command("bootstrap-usb")
 @firmware_app.command("force-flash-usb")
 @firmware_app.command("force-flash")

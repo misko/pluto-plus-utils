@@ -58,6 +58,7 @@ def test_qualification_plan_is_exact_local_and_safety_bounded(
     )
 
     assert plan.effective_attenuation_db == 30
+    assert plan.expected_firmware == "v0.39-plutoplus-spf-libiio-metadata-v6-36-gab79b"
     assert plan.expected_metadata_abi == 2
     assert plan.confirmation_phrase == "QUALIFY TANDEM SERIAL_A 20DB"
 
