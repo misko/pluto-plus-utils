@@ -1508,8 +1508,11 @@ async function disconnectAndRelease() {
     } else if (state.snapshot.state === "streaming") {
       await apiRequest(`${radioPath(radioId)}/streams/current`, { method: "DELETE" });
     }
-    setStreamStatus(false, "Disconnected · control released");
     await Promise.all([loadJobs(), loadArtifacts(), loadSnapshot(radioId)]);
+    // renderSnapshot reports the steady-state label ("Stopped").  Apply the
+    // stronger release acknowledgement after the refresh so callers can
+    // observe that server-side ownership, not only streaming, was released.
+    setStreamStatus(false, "Disconnected · control released");
   } catch (error) {
     toast(describeError(error), true);
     await loadSnapshot(radioId);
