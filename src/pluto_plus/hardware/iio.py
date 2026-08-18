@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from pluto_plus.diagnostic_profiles import parse_metadata_abi
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.base import SampleBlock
 from pluto_plus.models import (
@@ -322,6 +323,7 @@ def find_usb_sysfs_path(
 
 def context_facts(context: Any) -> dict[str, object]:
     attrs = dict(getattr(context, "attrs", {}) or {})
+    metadata = parse_metadata_abi(attrs.get("iio,buffer-metadata"))
     return {
         "serial": attrs.get("hw_serial") or attrs.get("usb,serial"),
         "model": attrs.get("hw_model") or attrs.get("usb,product"),
@@ -330,7 +332,11 @@ def context_facts(context: Any) -> dict[str, object]:
         "usb_path": attrs.get("usb,path"),
         "context_uri": attrs.get("uri"),
         "phy_model": attrs.get("ad9361-phy,model"),
-        "buffer_metadata": _truthy_attribute(attrs.get("iio,buffer-metadata")),
+        "buffer_metadata": metadata.abi is not None,
+        "buffer_metadata_abi": metadata.abi,
+        "buffer_metadata_raw": metadata.raw,
+        "buffer_metadata_state": metadata.state.value,
+        "tandem_agc": _device_exists(context, "tandem-agc"),
         "rx_scan_channels": _scan_channel_ids(context, "cf-ad9361-lpc"),
     }
 
@@ -351,12 +357,9 @@ def _scan_channel_ids(context: Any, device_name: str) -> tuple[str, ...]:
     )
 
 
-def _truthy_attribute(value: object) -> bool | None:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        value = value.decode(errors="replace")
-    return str(value).strip().lower() in {"1", "true", "yes", "enabled"}
+def _device_exists(context: Any, device_name: str) -> bool:
+    find_device = getattr(context, "find_device", None)
+    return bool(callable(find_device) and find_device(device_name) is not None)
 
 
 def _mute_transmit(device: Any) -> None:

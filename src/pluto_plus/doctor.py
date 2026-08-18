@@ -11,7 +11,14 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from pluto_plus.diagnostic_profiles import (
+    DIAGNOSTIC_PROFILES,
+    MetadataAbiState,
+    parse_metadata_abi,
+    select_diagnostic_profile,
+)
 from pluto_plus.models import (
+    DiagnosticProfileSummary,
     DoctorFinding,
     DoctorRemediation,
     DoctorReport,
@@ -95,19 +102,23 @@ def diagnose_radio(
         )
 
     firmware = identity.firmware_version
+    diagnostic_profile = select_diagnostic_profile(firmware)
     findings.append(
         _comparison(
             "firmware.device_version",
-            firmware == CANONICAL_POLICY.device_firmware,
+            diagnostic_profile is not None,
             (
-                "Active firmware matches the selected canonical profile"
-                if firmware == CANONICAL_POLICY.device_firmware
-                else "Active firmware does not match the selected canonical profile"
+                f"Active firmware matches diagnostic profile {diagnostic_profile.profile_id}"
+                if diagnostic_profile is not None
+                else "Active firmware has no supported diagnostic profile"
             ),
             firmware,
-            CANONICAL_POLICY.device_firmware,
-            "fresh IIO context fw_version; this proves active bytes, not persistent QSPI",
-            remediation=_firmware_remediation(),
+            [profile.firmware_version for profile in DIAGNOSTIC_PROFILES],
+            (
+                "exact fresh IIO context fw_version; diagnostic compatibility does not "
+                "authorize flashing or prove persistent QSPI"
+            ),
+            remediation=None if diagnostic_profile is not None else _firmware_remediation(),
             unknown=firmware is None,
         )
     )
@@ -146,19 +157,52 @@ def diagnose_radio(
         )
     )
 
-    metadata = observed.get("buffer_metadata")
+    metadata_value = (
+        observed.get("buffer_metadata_abi")
+        if "buffer_metadata_abi" in observed
+        else observed.get("buffer_metadata")
+    )
+    metadata = parse_metadata_abi(metadata_value)
+    metadata_matches = (
+        diagnostic_profile is not None and metadata.abi in diagnostic_profile.metadata_abis
+    )
     findings.append(
         _comparison(
             "firmware.buffer_metadata",
-            metadata is True,
-            "Frame metadata capability is advertised"
-            if metadata is True
-            else "Frame metadata capability is unavailable",
-            metadata,
-            True,
-            "IIO context iio,buffer-metadata attribute",
-            remediation=_firmware_remediation(),
-            unknown=metadata is None,
+            metadata_matches,
+            (
+                f"Frame metadata ABI {metadata.abi} matches the diagnostic profile"
+                if metadata_matches
+                else (
+                    f"Frame metadata ABI {metadata.abi} is available but unsupported "
+                    "by the diagnostic profile"
+                    if metadata.state is MetadataAbiState.AVAILABLE
+                    else f"Frame metadata capability is {metadata.state.value}"
+                )
+            ),
+            metadata.abi if metadata.abi is not None else metadata.raw,
+            diagnostic_profile.metadata_abis if diagnostic_profile is not None else "known profile",
+            "exact IIO context iio,buffer-metadata ABI value",
+            remediation=None if diagnostic_profile is not None else _firmware_remediation(),
+            unknown=metadata.state is MetadataAbiState.ABSENT,
+        )
+    )
+
+    tandem_agc = observed.get("tandem_agc") is True
+    tandem_expected = diagnostic_profile.tandem_agc_required if diagnostic_profile else None
+    findings.append(
+        _comparison(
+            "firmware.tandem_agc",
+            diagnostic_profile is not None and tandem_agc is tandem_expected,
+            (
+                "Tandem AGC capability matches the diagnostic profile"
+                if diagnostic_profile is not None and tandem_agc is tandem_expected
+                else "Tandem AGC capability does not match the diagnostic profile"
+            ),
+            tandem_agc,
+            tandem_expected,
+            "presence of the read-only tandem-agc IIO capability device",
+            unknown=diagnostic_profile is None,
         )
     )
 
@@ -237,6 +281,17 @@ def diagnose_radio(
     return DoctorReport(
         radio_id=identity.radio_id,
         canonical_policy=CANONICAL_POLICY,
+        diagnostic_profile=(
+            DiagnosticProfileSummary(
+                profile_id=diagnostic_profile.profile_id,
+                firmware_version=diagnostic_profile.firmware_version,
+                metadata_abis=diagnostic_profile.metadata_abis,
+                tandem_agc_required=diagnostic_profile.tandem_agc_required,
+                release_status=diagnostic_profile.release_status,
+            )
+            if diagnostic_profile is not None
+            else None
+        ),
         healthy=healthy,
         findings=tuple(findings),
     )

@@ -12,6 +12,12 @@ from pluto_plus.bootstrap_firmware import (
     BootstrapFirmwareError,
     inspect_bound_iiod,
 )
+from pluto_plus.diagnostic_profiles import (
+    DIAGNOSTIC_PROFILES,
+    MetadataAbiState,
+    parse_metadata_abi,
+    select_diagnostic_profile,
+)
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 
 CheckStatus = Literal["pass", "fail", "unknown"]
@@ -37,7 +43,10 @@ class LocalDoctorRadio:
     firmware_version: str | None
     model: str | None
     phy_model: str | None
+    diagnostic_profile_id: str | None
     metadata_enabled: bool | None
+    metadata_abi: int | None
+    tandem_agc: bool | None
     overall: CheckStatus
     checks: tuple[LocalDoctorCheck, ...]
     error: str | None = None
@@ -49,6 +58,7 @@ class LocalDoctorReport:
     canonical_firmware: str
     canonical_image_sha256: str
     radios: tuple[LocalDoctorRadio, ...]
+    diagnostic_profiles: tuple[str, ...] = ()
 
 
 def diagnose_local_usb_radios(
@@ -71,6 +81,7 @@ def diagnose_local_usb_radios(
         generated_at=datetime.now(UTC).isoformat(),
         canonical_firmware=LOCAL_POLICY.device_firmware,
         canonical_image_sha256=LOCAL_POLICY.asset_sha256,
+        diagnostic_profiles=tuple(profile.profile_id for profile in DIAGNOSTIC_PROFILES),
         radios=radios,
     )
 
@@ -158,16 +169,16 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         "Live board model is Rev.C" if model_ok else "Live board model is not attested Rev.C",
     )
     firmware = str(facts.get("fw_version") or "").strip() or None
-    firmware_ok = firmware == LOCAL_POLICY.device_firmware
+    profile = select_diagnostic_profile(firmware)
     _check(
         checks,
-        "firmware.canonical_v5",
-        "pass" if firmware_ok else "fail",
+        "firmware.diagnostic_profile",
+        "pass" if profile is not None else "fail",
         firmware,
-        LOCAL_POLICY.device_firmware,
-        "Active firmware is canonical v5"
-        if firmware_ok
-        else "Active firmware does not match canonical v5",
+        tuple(item.firmware_version for item in DIAGNOSTIC_PROFILES),
+        f"Active firmware matches diagnostic profile {profile.profile_id}"
+        if profile is not None
+        else "Active firmware has no supported diagnostic profile",
     )
     phy = str(facts.get("ad9361-phy,model") or "").strip() or None
     _check(
@@ -178,16 +189,21 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         "ad9361",
         "Live PHY is AD9361" if phy == "ad9361" else "Live PHY is not AD9361",
     )
-    metadata = str(facts.get("iio,buffer-metadata") or "").strip() == "1"
+    metadata = parse_metadata_abi(facts.get("iio,buffer-metadata"))
+    metadata_ok = profile is not None and metadata.abi in profile.metadata_abis
     _check(
         checks,
         "transport.buffer_metadata",
-        "pass" if metadata else "fail",
-        metadata,
-        True,
-        "Continuous buffer metadata is enabled"
-        if metadata
-        else "Continuous buffer metadata is unavailable",
+        "pass"
+        if metadata_ok
+        else "unknown"
+        if metadata.state is MetadataAbiState.ABSENT
+        else "fail",
+        metadata.abi if metadata.abi is not None else metadata.raw,
+        profile.metadata_abis if profile is not None else "known diagnostic profile",
+        f"Continuous buffer metadata ABI {metadata.abi} matches the profile"
+        if metadata_ok
+        else f"Continuous buffer metadata is {metadata.state.value} or unsupported",
     )
     raw_device_names = facts.get("device_names", ())
     device_names = (
@@ -205,6 +221,21 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         "Paired-RX IIO devices are present"
         if paired_rx
         else "Paired-RX IIO devices are incomplete",
+    )
+    tandem_agc = "tandem-agc" in device_names
+    tandem_expected = profile.tandem_agc_required if profile is not None else None
+    tandem_ok = profile is not None and tandem_agc is tandem_expected
+    _check(
+        checks,
+        "transport.tandem_agc",
+        "pass" if tandem_ok else "unknown" if profile is None else "fail",
+        tandem_agc,
+        tandem_expected,
+        (
+            "Tandem AGC capability matches the profile"
+            if tandem_ok
+            else "Tandem AGC capability does not match the profile"
+        ),
     )
     _check(
         checks,
@@ -231,7 +262,10 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         firmware=firmware,
         model=model,
         phy=phy,
-        metadata=metadata,
+        diagnostic_profile_id=profile.profile_id if profile is not None else None,
+        metadata_enabled=metadata.abi is not None,
+        metadata_abi=metadata.abi,
+        tandem_agc=tandem_agc,
     )
 
 
@@ -239,10 +273,14 @@ def _unknown_facts(checks: list[LocalDoctorCheck]) -> None:
     for code, expected in (
         ("identity.iio_serial", "same non-empty USB serial"),
         ("hardware.rev_c", "PlutoSDR Rev.C"),
-        ("firmware.canonical_v5", LOCAL_POLICY.device_firmware),
+        (
+            "firmware.diagnostic_profile",
+            tuple(item.firmware_version for item in DIAGNOSTIC_PROFILES),
+        ),
         ("rf.phy_model", "ad9361"),
-        ("transport.buffer_metadata", True),
+        ("transport.buffer_metadata", "metadata ABI selected by a known profile"),
         ("rf.paired_rx_device", ("ad9361-phy", "cf-ad9361-lpc")),
+        ("transport.tandem_agc", "capability selected by a known profile"),
         ("firmware.qspi_boot_provenance", "fresh trusted persistent-boot evidence"),
         ("setup.uboot_ad9361_2r2t", "canonical persistent U-Boot tuple"),
     ):
@@ -270,7 +308,10 @@ def _radio_result(
     firmware: str | None = None,
     model: str | None = None,
     phy: str | None = None,
-    metadata: bool | None = None,
+    diagnostic_profile_id: str | None = None,
+    metadata_enabled: bool | None = None,
+    metadata_abi: int | None = None,
+    tandem_agc: bool | None = None,
     error: str | None = None,
 ) -> LocalDoctorRadio:
     statuses = {check.status for check in checks}
@@ -286,7 +327,10 @@ def _radio_result(
         firmware_version=firmware,
         model=model,
         phy_model=phy,
-        metadata_enabled=metadata,
+        diagnostic_profile_id=diagnostic_profile_id,
+        metadata_enabled=metadata_enabled,
+        metadata_abi=metadata_abi,
+        tandem_agc=tandem_agc,
         overall=overall,
         checks=tuple(checks),
         error=error,

@@ -441,7 +441,10 @@ function renderDoctor(report, reveal = false) {
   );
   ui["doctor-health"].className = report.healthy ? "deferred-badge doctor-pass" : "deferred-badge doctor-warn";
   const policy = report.canonical_policy;
-  setText(ui["doctor-profile"], policy.profile_id);
+  setText(
+    ui["doctor-profile"],
+    report.diagnostic_profile?.profile_id ?? "unsupported firmware profile",
+  );
   setText(ui["doctor-release"], policy.release_tag);
   setText(ui["doctor-sha"], policy.asset_sha256);
   const statusOrder = { fail: 0, warn: 1, unknown: 2, pass: 3 };

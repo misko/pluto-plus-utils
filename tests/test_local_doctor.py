@@ -46,7 +46,7 @@ def test_local_doctor_reports_fresh_canonical_and_unknown_persistence(
     radio = report.radios[0]
     statuses = {check.code: check.status for check in radio.checks}
     assert statuses["identity.iio_serial"] == "pass"
-    assert statuses["firmware.canonical_v5"] == "pass"
+    assert statuses["firmware.diagnostic_profile"] == "pass"
     assert statuses["rf.phy_model"] == "pass"
     assert statuses["firmware.qspi_boot_provenance"] == "unknown"
     assert radio.overall == "unknown"
@@ -70,9 +70,9 @@ def test_local_doctor_flags_blank_identity_old_firmware_and_wrong_phy(
     radio = local_doctor.diagnose_local_usb_radios(devices=(_device(serial=None),)).radios[0]
     statuses = {check.code: check.status for check in radio.checks}
     assert statuses["identity.usb_serial"] == "fail"
-    assert statuses["firmware.canonical_v5"] == "fail"
+    assert statuses["firmware.diagnostic_profile"] == "fail"
     assert statuses["rf.phy_model"] == "fail"
-    assert statuses["transport.buffer_metadata"] == "fail"
+    assert statuses["transport.buffer_metadata"] == "unknown"
     assert radio.overall == "fail"
 
 

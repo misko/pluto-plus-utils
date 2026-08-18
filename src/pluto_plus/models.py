@@ -329,9 +329,18 @@ class FirmwarePolicy(ApiModel):
     published_at: datetime
 
 
+class DiagnosticProfileSummary(ApiModel):
+    profile_id: str
+    firmware_version: str
+    metadata_abis: tuple[int, ...]
+    tandem_agc_required: bool
+    release_status: str
+
+
 class DoctorReport(ApiModel):
     radio_id: str
     checked_at: datetime = Field(default_factory=utc_now)
     canonical_policy: FirmwarePolicy
+    diagnostic_profile: DiagnosticProfileSummary | None = None
     healthy: bool
     findings: tuple[DoctorFinding, ...]

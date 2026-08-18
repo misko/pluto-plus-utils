@@ -302,6 +302,9 @@ def test_doctor_is_read_only_and_routes_repairs_into_guarded_firmware_plan() -> 
         "doctor-findings",
     } <= parser.ids
     assert "run-doctor" in parser.disabled_ids
+    assert "Diagnostic profile" in html
+    assert "Guarded repair target" in html
+    assert "report.diagnostic_profile?.profile_id" in javascript
     assert "prepare-doctor-fix" in parser.disabled_ids
     assert "prepare-setup-fix" in parser.disabled_ids
     assert "Persistent AD9361/2R2T provisioning" in html

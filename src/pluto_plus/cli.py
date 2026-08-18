@@ -808,19 +808,26 @@ def _local_doctor_table(report: dict[str, Any]) -> str:
                 ),
                 "SERIAL": str(radio.get("serial") or "<blank>"),
                 "FW": str(radio.get("firmware_version") or "unknown"),
+                "PROFILE": str(radio.get("diagnostic_profile_id") or "unsupported"),
                 "PHY": str(radio.get("phy_model") or "unknown"),
                 "METADATA": (
+                    f"ABI {radio['metadata_abi']}"
+                    if radio.get("metadata_abi") is not None
+                    else "unknown"
+                ),
+                "TANDEM": (
                     "yes"
-                    if radio.get("metadata_enabled") is True
+                    if radio.get("tandem_agc") is True
                     else "no"
-                    if radio.get("metadata_enabled") is False
+                    if radio.get("tandem_agc") is False
                     else "unknown"
                 ),
                 "RESULT": str(radio.get("overall") or "unknown").upper(),
                 "DETAILS": "; ".join(notes) or "all observable checks passed",
             }
         )
-    return _text_table(rows, ("USB", "SERIAL", "FW", "PHY", "METADATA", "RESULT", "DETAILS"))
+    columns = ("USB", "SERIAL", "FW", "PROFILE", "PHY", "METADATA", "TANDEM", "RESULT", "DETAILS")
+    return _text_table(rows, columns)
 
 
 def _text_table(rows: list[dict[str, str]], columns: tuple[str, ...]) -> str:

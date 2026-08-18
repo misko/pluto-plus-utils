@@ -192,16 +192,23 @@ def test_context_facts_include_live_model_metadata_and_dual_rx_scan() -> None:
             "hw_serial": "SERIAL_A",
             "fw_version": "v-test",
             "ad9361-phy,model": "ad9361",
-            "iio,buffer-metadata": "1",
+            "iio,buffer-metadata": "2",
         },
         find_device=lambda name: (
-            SimpleNamespace(channels=channels) if name == "cf-ad9361-lpc" else None
+            SimpleNamespace(channels=channels)
+            if name == "cf-ad9361-lpc"
+            else SimpleNamespace(channels=())
+            if name == "tandem-agc"
+            else None
         ),
     )
 
     facts = context_facts(context)
     assert facts["phy_model"] == "ad9361"
     assert facts["buffer_metadata"] is True
+    assert facts["buffer_metadata_abi"] == 2
+    assert facts["buffer_metadata_raw"] == "2"
+    assert facts["tandem_agc"] is True
     assert facts["rx_scan_channels"] == (
         "voltage0",
         "voltage1",
