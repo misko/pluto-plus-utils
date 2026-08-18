@@ -31,6 +31,8 @@ SAMPLE_RATE_HZ = 3_000_000
 SAMPLES_PER_CHANNEL = 65_536
 RF_BANDWIDTH_HZ = 1_500_000
 TONE_HZ = 100_000
+TONE_SCALE = 0.25
+AUTO_TONE_SCALE = 0.9
 INITIAL_GAIN_DB = 30
 ADC_FULL_SCALE = 2048.0
 WATCHDOG_FAULT = 1 << 18
@@ -214,15 +216,14 @@ def execute_tandem_qualification(
         for frequency_hz in plan.frequencies_hz:
             gain_table = _expected_gain_table(frequency_hz)
             _configure_frequency(sdr, frequency_hz)
-            report["checks"]["bands"].append(
-                {
-                    "frequency_hz": frequency_hz,
-                    "expected_gain_table_id": int(gain_table),
-                    "hold": _qualify_hold(sdr, gain_table),
-                    "tone": _qualify_tone(sdr, plan.strong_tx_gain_db, frequency_hz),
-                    "auto": _qualify_auto(sdr, plan, gain_table),
-                }
-            )
+            band_report: dict[str, Any] = {
+                "frequency_hz": frequency_hz,
+                "expected_gain_table_id": int(gain_table),
+            }
+            report["checks"]["bands"].append(band_report)
+            band_report["hold"] = _qualify_hold(sdr, gain_table)
+            band_report["tone"] = _qualify_tone(sdr, plan.strong_tx_gain_db, frequency_hz)
+            band_report["auto"] = _qualify_auto(sdr, plan, gain_table)
         if include_watchdog:
             report["checks"]["watchdog"] = _qualify_watchdog(sdr)
             report["checks"]["post_watchdog_hold"] = _qualify_hold(
@@ -329,7 +330,7 @@ def _qualify_tone(sdr: Any, strong_tx_gain_db: float, frequency_hz: int) -> dict
     _mute_transmit(sdr)
     sdr._ctrl.attrs["calib_mode"].value = "tx_quad"
     sdr.tx_hardwaregain_chan1 = strong_tx_gain_db
-    sdr.dds_single_tone(TONE_HZ, 0.25, channel=1)
+    sdr.dds_single_tone(TONE_HZ, TONE_SCALE, channel=1)
     time.sleep(0.25)
     signal = np.asarray(sdr.rx())[:, 1024:]
     sdr.rx_destroy_buffer()
@@ -412,6 +413,7 @@ def _qualify_auto(
     expected_gain_table: TandemGainTable,
 ) -> dict[str, Any]:
     receiver = _MetadataReceiver(sdr, TandemMode.AUTO)
+    sdr.dds_single_tone(TONE_HZ, AUTO_TONE_SCALE, channel=1)
     sdr.tx_hardwaregain_chan1 = plan.weak_tx_gain_db
     receiver.open()
     frames: list[RadioMetadataV4] = []
@@ -450,6 +452,7 @@ def _qualify_auto(
     if directions != {TandemEventDirection.INCREASE, TandemEventDirection.DECREASE}:
         raise TandemQualificationError(
             "AUTO did not prove bidirectional control: "
+            f"frequency_hz={int(sdr.rx_lo)} "
             f"directions={sorted(int(item) for item in directions)} attempts={attempts}"
         )
     if any(frame.tandem_state is not TandemState.ARMED_AUTO for frame in frames):

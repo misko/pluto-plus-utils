@@ -39,6 +39,10 @@ def test_tandem_request_is_exact_and_capacity_bounded() -> None:
         ).pack(65_536)
 
 
+def test_auto_stimulus_stays_within_normalized_dds_bounds() -> None:
+    assert 0 < qualification.TONE_SCALE < qualification.AUTO_TONE_SCALE <= 1
+
+
 def test_qualification_plan_is_exact_local_and_safety_bounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
