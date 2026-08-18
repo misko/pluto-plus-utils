@@ -9,6 +9,7 @@ radios must use the plan/token firmware manager instead.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -67,7 +68,7 @@ class BoundSshBootstrapTransport:
     def __init__(
         self,
         *,
-        interface: str,
+        interface: str | None,
         password: str,
         known_hosts_file: Path,
         host: str = "192.168.2.1",
@@ -116,8 +117,6 @@ class BoundSshBootstrapTransport:
             arguments = [
                 "-O",
                 "-o",
-                f"BindInterface={self._interface}",
-                "-o",
                 "BatchMode=no",
                 "-o",
                 "ConnectTimeout=5",
@@ -128,6 +127,8 @@ class BoundSshBootstrapTransport:
                 str(local_path),
                 f"{self._username}@{self._host}:/tmp/pluto-plus-utils/pluto.frm",
             ]
+            if self._interface is not None:
+                arguments[1:1] = ["-o", f"BindInterface={self._interface}"]
             child = pexpect.spawn(
                 self._scp_binary,
                 arguments,
@@ -173,9 +174,10 @@ def enroll_bound_usb_ssh_host_key(
     usb_sysfs_path: Path,
     known_hosts_file: Path,
     password: str,
+    host: str = "192.168.2.1",
     timeout_s: float = 15,
 ) -> dict[str, str]:
-    """Pin one host key only after an interface-bound serial attestation."""
+    """Pin one host key only after a USB-selected serial attestation."""
 
     target = _direct_usb_path(usb_sysfs_path)
     local = _one_local_target(target)
@@ -183,6 +185,15 @@ def enroll_bound_usb_ssh_host_key(
         raise BootstrapFirmwareError("USB path does not match the requested stable serial")
     if len(local.host_network_interfaces) != 1:
         raise BootstrapFirmwareError("SSH enrollment requires one exact USB network interface")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as error:
+        raise BootstrapFirmwareError("SSH host must be a literal IP address") from error
+    if address.version != 4 or not address.is_private:
+        raise BootstrapFirmwareError("SSH host must be a private IPv4 address")
+    interface = (
+        local.host_network_interfaces[0].name if host == "192.168.2.1" else None
+    )
     destination = known_hosts_file.expanduser().resolve()
     if destination.exists():
         raise BootstrapFirmwareError("known-hosts destination already exists; refusing overwrite")
@@ -200,11 +211,7 @@ def enroll_bound_usb_ssh_host_key(
     try:
         import pexpect
 
-        child = pexpect.spawn(
-            "ssh",
-            [
-                "-o",
-                f"BindInterface={local.host_network_interfaces[0].name}",
+        arguments = [
                 "-o",
                 "BatchMode=no",
                 "-o",
@@ -213,9 +220,14 @@ def enroll_bound_usb_ssh_host_key(
                 "StrictHostKeyChecking=accept-new",
                 "-o",
                 f"UserKnownHostsFile={temporary}",
-                "root@192.168.2.1",
+                f"root@{host}",
                 command,
-            ],
+            ]
+        if interface is not None:
+            arguments[0:0] = ["-o", f"BindInterface={interface}"]
+        child = pexpect.spawn(
+            "ssh",
+            arguments,
             encoding=None,
             timeout=timeout_s,
         )
@@ -266,6 +278,7 @@ def enroll_bound_usb_ssh_host_key(
             "serial": serial,
             "usb_sysfs_path": str(target),
             "usb_interface": local.host_network_interfaces[0].name,
+            "ssh_host": host,
             "known_hosts_file": str(destination),
             "fingerprint": fingerprint,
         }

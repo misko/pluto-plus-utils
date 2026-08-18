@@ -8,6 +8,7 @@ reboot sequences defined in this module.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -53,16 +54,20 @@ class BoundSshTransport:
         self,
         *,
         host: str,
-        interface: str,
+        interface: str | None,
         password: str,
         known_hosts_file: Path,
         username: str = "root",
         ssh_binary: str = "ssh",
     ) -> None:
-        if not _INTERFACE_PATTERN.fullmatch(interface):
+        if interface is not None and not _INTERFACE_PATTERN.fullmatch(interface):
             raise ValueError("invalid USB network interface")
-        if not host or any(character.isspace() for character in host):
-            raise ValueError("invalid SSH host")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError as error:
+            raise ValueError("SSH host must be a literal IP address") from error
+        if address.version != 4 or not address.is_private:
+            raise ValueError("SSH host must be a private IPv4 address")
         if username != "root":
             raise ValueError("canonical setup requires the radio root account")
         if not password:
@@ -96,8 +101,6 @@ class BoundSshTransport:
         except ImportError as error:  # pragma: no cover - composition guard
             raise SetupHelperError("Bound SSH setup requires pexpect") from error
         arguments = [
-            "-B",
-            self.interface,
             "-o",
             "BatchMode=no",
             "-o",
@@ -109,6 +112,8 @@ class BoundSshTransport:
             f"{self._username}@{self.host}",
             command,
         ]
+        if self.interface is not None:
+            arguments[0:0] = ["-B", self.interface]
         child = pexpect.spawn(
             self._ssh_binary,
             arguments,

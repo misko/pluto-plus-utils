@@ -1260,8 +1260,13 @@ def firmware_enroll_usb_ssh(
     password_file: Path | None = typer.Option(  # noqa: B008
         None, "--password-file", help="Optional private password file; otherwise prompt."
     ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1",
+        "--ssh-host",
+        help="Literal private IPv4 endpoint; non-default addresses use the LAN route.",
+    ),
 ) -> None:
-    """Pin an SSH host key through one serial-attested physical USB interface."""
+    """Pin an SSH host key after USB-selected remote serial attestation."""
 
     phrase = f"TRUST USB SSH {serial}"
     matches = [
@@ -1280,6 +1285,7 @@ def firmware_enroll_usb_ssh(
         "usb_sysfs_path": str(usb_sysfs_path),
         "usb_interface": matches[0].host_network_interfaces[0].name,
         "known_hosts_file": str(known_hosts_file.expanduser().resolve()),
+        "ssh_host": ssh_host,
         "confirmation_phrase": phrase,
     }
     if not execute:
@@ -1313,6 +1319,7 @@ def firmware_enroll_usb_ssh(
             usb_sysfs_path=usb_sysfs_path,
             known_hosts_file=known_hosts_file,
             password=password,
+            host=ssh_host,
         )
     except (BootstrapFirmwareError, OSError, ValueError) as error:
         _fail("usb_ssh_enrollment_failed", str(error), 4)
@@ -1356,6 +1363,11 @@ def firmware_flash_usb(
     ssh_password_file: Path | None = typer.Option(  # noqa: B008
         None, "--ssh-password-file", help="Optional mode-private password file; otherwise prompt."
     ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1",
+        "--ssh-host",
+        help="Literal private IPv4 endpoint; non-default addresses use the LAN route.",
+    ),
 ) -> None:
     """Flash one exact qualified profile onto a serial-attested local USB Pluto."""
 
@@ -1369,6 +1381,7 @@ def firmware_flash_usb(
         transport=transport,
         ssh_known_hosts_file=ssh_known_hosts_file,
         ssh_password_file=ssh_password_file,
+        ssh_host=ssh_host,
         mutation_profile_id=profile,
     )
 
@@ -1407,6 +1420,11 @@ def firmware_force_flash_usb(
     ssh_password_file: Path | None = typer.Option(  # noqa: B008
         None, "--ssh-password-file", help="Optional mode-private password file; otherwise prompt."
     ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1",
+        "--ssh-host",
+        help="Literal private IPv4 endpoint; non-default addresses use the LAN route.",
+    ),
 ) -> None:
     """Bootstrap canonical firmware onto one path-bound blank-serial Pluto."""
 
@@ -1420,6 +1438,7 @@ def firmware_force_flash_usb(
         transport=transport,
         ssh_known_hosts_file=ssh_known_hosts_file,
         ssh_password_file=ssh_password_file,
+        ssh_host=ssh_host,
         mutation_profile_id="libiio-continuous-metadata",
     )
 
@@ -1435,6 +1454,7 @@ def _standalone_usb_flash(
     transport: str,
     ssh_known_hosts_file: Path | None,
     ssh_password_file: Path | None,
+    ssh_host: str,
     mutation_profile_id: str,
 ) -> None:
     """Plan or execute one canonical local USB firmware operation."""
@@ -1455,7 +1475,9 @@ def _standalone_usb_flash(
             2,
         )
     if normalized_transport == "mass-storage" and (
-        ssh_known_hosts_file is not None or ssh_password_file is not None
+        ssh_known_hosts_file is not None
+        or ssh_password_file is not None
+        or ssh_host != "192.168.2.1"
     ):
         _fail(
             "incompatible_standalone_flash_options",
@@ -1519,9 +1541,10 @@ def _standalone_usb_flash(
                 except UnicodeDecodeError:
                     _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
             ssh_transport = BoundSshBootstrapTransport(
-                interface=plan.usb_interface,
+                interface=(plan.usb_interface if ssh_host == "192.168.2.1" else None),
                 password=password,
                 known_hosts_file=ssh_known_hosts_file.expanduser().resolve(),
+                host=ssh_host,
             )
             result = execute_usb_flash_plan_ssh(
                 plan,

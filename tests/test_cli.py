@@ -1077,6 +1077,98 @@ def test_usb_bootstrap_cli_requires_and_passes_exact_confirmation(
     assert confirmations == ["BOOTSTRAP 3-11"]
 
 
+def test_usb_flash_cli_routes_explicit_lan_host_without_usb_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pluto_plus.bootstrap_firmware import BootstrapPlan, BootstrapResult
+
+    image = tmp_path / "canonical.dfu"
+    image.write_bytes(b"qualified")
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    plan = BootstrapPlan(
+        plan_id="plan-lan",
+        usb_sysfs_path="/sys/bus/usb/devices/3-8",
+        usb_port="3-8",
+        usb_interface="enx001",
+        block_device="/dev/sdb",
+        partition="/dev/sdb1",
+        before_firmware="v0.32",
+        before_model="PlutoSDR Rev.C",
+        before_phy="ad9363a",
+        image_path=str(image),
+        image_sha256="1" * 64,
+        fit_sha256="2" * 64,
+        fit_size=100,
+        frm_sha256="3" * 64,
+        expected_firmware="v6",
+        confirmation_phrase="FLASH SERIAL_A",
+        target_serial="SERIAL_A",
+    )
+    transports: list[object] = []
+
+    class RecordingSshTransport:
+        def __init__(self, **kwargs: object) -> None:
+            transports.append(kwargs)
+
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.prepare_usb_flash_plan",
+        lambda *args, **kwargs: (plan, b"frm"),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.BoundSshBootstrapTransport",
+        RecordingSshTransport,
+    )
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.execute_usb_flash_plan_ssh",
+        lambda *args, **kwargs: BootstrapResult(
+            receipt_id="receipt-lan",
+            outcome="success",
+            phases=("return_attested",),
+            receipt_path=str(tmp_path / "receipt.json"),
+            returned_serial="SERIAL_A",
+            returned_firmware="v6",
+            returned_phy="ad9361",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "flash",
+            str(image),
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--transport",
+            "ssh",
+            "--ssh-host",
+            "192.168.1.14",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--execute",
+            "--confirm",
+            "FLASH SERIAL_A",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert transports == [
+        {
+            "interface": None,
+            "password": "analog",
+            "known_hosts_file": known_hosts.resolve(),
+            "host": "192.168.1.14",
+        }
+    ]
+
+
 def test_doctor_defaults_to_standalone_local_usb_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

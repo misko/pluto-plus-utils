@@ -13,10 +13,44 @@ from pluto_plus.setup import (
     SetupPlan,
 )
 from pluto_plus.setup_helper import (
+    BoundSshTransport,
     FixedSshSetupExecutor,
     SetupHelperError,
     SetupTransport,
 )
+
+
+def test_bound_ssh_transport_supports_private_lan_without_usb_bind(
+    tmp_path: Path,
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+
+    transport = BoundSshTransport(
+        host="192.168.1.14",
+        interface=None,
+        password="analog",
+        known_hosts_file=known_hosts,
+    )
+
+    assert transport.host == "192.168.1.14"
+    assert transport.interface is None
+
+
+def test_bound_ssh_transport_rejects_public_or_named_hosts(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+
+    for host in ("example.com", "8.8.8.8"):
+        with pytest.raises(ValueError):
+            BoundSshTransport(
+                host=host,
+                interface=None,
+                password="analog",
+                known_hosts_file=known_hosts,
+            )
 
 
 class RecordingTransport(SetupTransport):
