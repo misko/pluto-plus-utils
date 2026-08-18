@@ -6,6 +6,7 @@ from pluto_plus.diagnostic_profiles import (
     V5_PROFILE,
     V6_PROFILE,
     V6_TANDEM_ABI2_PROFILE,
+    V6_TANDEM_LATCH_CLEAR_RAM_PROFILE,
     DiagnosticProfile,
     MetadataAbiState,
     parse_metadata_abi,
@@ -51,6 +52,7 @@ def test_metadata_abi_preserves_exact_observation(
         (V5_PROFILE, 1, False),
         (V6_PROFILE, 1, False),
         (V6_TANDEM_ABI2_PROFILE, 2, True),
+        (V6_TANDEM_LATCH_CLEAR_RAM_PROFILE, 2, True),
     ],
 )
 def test_known_profiles_are_accepted_without_changing_mutation_policy(
@@ -96,7 +98,7 @@ def test_known_profiles_are_accepted_without_changing_mutation_policy(
     assert findings["firmware.device_version"].status is DoctorStatus.PASS
     assert findings["firmware.buffer_metadata"].status is DoctorStatus.PASS
     assert findings["firmware.tandem_agc"].status is DoctorStatus.PASS
-    assert report.canonical_policy.device_firmware == V5_PROFILE.firmware_version
+    assert report.canonical_policy.device_firmware == V6_PROFILE.firmware_version
 
 
 def test_unknown_future_metadata_abi_is_available_but_not_profile_compatible() -> None:

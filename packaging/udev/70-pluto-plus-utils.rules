@@ -1,0 +1,3 @@
+# Runtime Pluto/Pluto+ (b673) and its DFU mode (b674). Group write access is
+# required for libusb/dfu-util; TAG+="uaccess" covers active local sessions.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0456", ATTR{idProduct}=="b67[34]", GROUP="plugdev", MODE="0660", TAG+="uaccess"

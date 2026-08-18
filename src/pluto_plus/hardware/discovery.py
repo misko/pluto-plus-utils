@@ -154,6 +154,19 @@ def _facts_from_context_xml(payload: bytes) -> Mapping[str, object]:
     facts["device_names"] = tuple(
         name for device in root.findall("device") if (name := device.get("name")) is not None
     )
+    for device in root.findall("device"):
+        name = device.get("name")
+        if not name:
+            continue
+        scan_channels = tuple(
+            channel_id
+            for channel in device.findall("channel")
+            if channel.get("type") == "input"
+            and channel.find("scan-element") is not None
+            and (channel_id := channel.get("id")) is not None
+        )
+        if scan_channels:
+            facts[f"{name},scan_channels"] = scan_channels
     return facts
 
 

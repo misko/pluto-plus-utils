@@ -15,13 +15,14 @@ SERIAL = "SERIAL_A"
 
 def _plan() -> LocalRebootPlan:
     return LocalRebootPlan(
-        schema_version=1,
+        schema_version=2,
         plan_id="plan-a",
         created_at="2026-08-18T00:00:00+00:00",
         serial=SERIAL,
         usb_sysfs_path="/sys/bus/usb/devices/3-8",
         usb_interface="enx001",
         ssh_host="192.168.2.1",
+        ssh_route_mode="usb_gadget",
         known_hosts_sha256="a" * 64,
         route_observation=UsbSshRouteObservation(
             interface_addresses=(("enx001", ("192.168.2.10",)),),

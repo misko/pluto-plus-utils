@@ -7,6 +7,7 @@ import ipaddress
 import re
 import socket
 import struct
+import subprocess
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,14 +29,35 @@ class HostNetworkInterface(ApiModel):
     ipv4_addresses: tuple[str, ...] = ()
 
 
+class UsbLinkFaultSummary(ApiModel):
+    """Bounded, port-scoped kernel observations; never electrical telemetry."""
+
+    observation_window: str
+    error_count: int = Field(ge=0)
+    disconnect_count: int = Field(ge=0)
+    port_power_cycle_count: int = Field(ge=0)
+    recent_messages: tuple[str, ...] = ()
+
+
 class LocalUsbPluto(ApiModel):
     usb_path: str
     bus_number: int | None
     device_number: int | None
     product: str
     serial: str | None
-    speed_mbps: int | None
+    speed_mbps: float | None
     interface_count: int | None
+    usb_spec_version: str | None = None
+    advertised_max_power_ma: int | None = None
+    runtime_power_status: str | None = None
+    runtime_power_control: str | None = None
+    resolved_parent_path: str | None = None
+    direct_to_root_hub: bool | None = None
+    intermediate_hub_count: int | None = None
+    root_controller_pci_address: str | None = None
+    root_controller_vendor_id: str | None = None
+    root_controller_device_id: str | None = None
+    link_faults: UsbLinkFaultSummary | None = None
     host_network_interfaces: tuple[HostNetworkInterface, ...] = ()
     terminal_devices: tuple[str, ...] = ()
     storage_devices: tuple[str, ...] = ()
@@ -65,8 +87,19 @@ class RadioInventoryRecord(ApiModel):
     radio_ip: str | None
     usb_path: str | None
     usb_bus_device: str | None
-    usb_speed_mbps: int | None
+    usb_speed_mbps: float | None
     usb_interface_count: int | None
+    usb_spec_version: str | None = None
+    usb_advertised_max_power_ma: int | None = None
+    usb_runtime_power_status: str | None = None
+    usb_runtime_power_control: str | None = None
+    usb_resolved_parent_path: str | None = None
+    usb_direct_to_root_hub: bool | None = None
+    usb_intermediate_hub_count: int | None = None
+    usb_root_controller_pci_address: str | None = None
+    usb_root_controller_vendor_id: str | None = None
+    usb_root_controller_device_id: str | None = None
+    usb_link_faults: UsbLinkFaultSummary | None = None
     host_network_interfaces: tuple[HostNetworkInterface, ...] = ()
     terminal_devices: tuple[str, ...] = ()
     storage_devices: tuple[str, ...] = ()
@@ -86,18 +119,20 @@ def scan_local_usb_plutos(
     block_root: Path = Path("/sys/class/block"),
     udev_data_root: Path = Path("/run/udev/data"),
     ipv4_reader: Callable[[str], tuple[str, ...]] | None = None,
+    kernel_log_reader: Callable[[], str | None] | None = None,
 ) -> tuple[LocalUsbPluto, ...]:
     """Inventory runtime Plutos from cached topology without opening the radio.
 
-    USB string descriptors and descriptor-backed sysfs attributes are deliberately
-    avoided: a sick device can block a reader indefinitely inside the kernel.
-    ``uevent`` and the udev database contain the already-enumerated facts needed by
-    inventory without issuing another USB control transfer.
+    USB strings come from udev. Small cached link/power attributes are read in
+    disposable, tightly time-bounded child processes so a sick USB device cannot
+    block inventory inside the kernel. No USB control transfer or IIOD connection
+    is initiated.
     """
 
     if not usb_root.is_dir():
         return ()
     address_reader = ipv4_reader or _interface_ipv4_addresses
+    log_text = (kernel_log_reader or _recent_kernel_usb_log)()
     devices: list[LocalUsbPluto] = []
     for candidate in sorted(usb_root.iterdir(), key=lambda item: item.name):
         event = _key_value_lines(_read(candidate / "uevent"))
@@ -153,6 +188,12 @@ def scan_local_usb_plutos(
         )
         raw_serial = properties.get("ID_SERIAL_SHORT", "").strip()
         product_name = _decode_udev_text(properties.get("ID_MODEL_ENC", ""))
+        resolved_path = str(resolved)
+        controller_path = _nearest_pci_controller(resolved)
+        speed = _optional_float(_bounded_sysfs_read(candidate / "speed"))
+        usb_version = _normalized_optional(_bounded_sysfs_read(candidate / "version"))
+        advertised_power = _parse_milliamps(_bounded_sysfs_read(candidate / "bMaxPower"))
+        port_name = candidate.name
         devices.append(
             LocalUsbPluto(
                 usb_path=str(candidate),
@@ -167,8 +208,33 @@ def scan_local_usb_plutos(
                     )
                 ),
                 serial=raw_serial or None,
-                speed_mbps=None,
+                speed_mbps=speed,
                 interface_count=interface_count,
+                usb_spec_version=usb_version,
+                advertised_max_power_ma=advertised_power,
+                runtime_power_status=_normalized_optional(
+                    _bounded_sysfs_read(candidate / "power" / "runtime_status")
+                ),
+                runtime_power_control=_normalized_optional(
+                    _bounded_sysfs_read(candidate / "power" / "control")
+                ),
+                resolved_parent_path=resolved_path,
+                direct_to_root_hub=_direct_to_root_hub(port_name),
+                intermediate_hub_count=_intermediate_hub_count(port_name),
+                root_controller_pci_address=(
+                    None if controller_path is None else controller_path.name
+                ),
+                root_controller_vendor_id=(
+                    None
+                    if controller_path is None
+                    else _normalized_hex_id(_read(controller_path / "vendor"))
+                ),
+                root_controller_device_id=(
+                    None
+                    if controller_path is None
+                    else _normalized_hex_id(_read(controller_path / "device"))
+                ),
+                link_faults=_usb_link_fault_summary(log_text, port_name),
                 host_network_interfaces=interfaces,
                 terminal_devices=terminals,
                 storage_devices=tuple(f"/dev/{name}" for name in storage_names),
@@ -318,6 +384,23 @@ def _record(
         usb_bus_device=bus_device,
         usb_speed_mbps=None if device is None else device.speed_mbps,
         usb_interface_count=None if device is None else device.interface_count,
+        usb_spec_version=None if device is None else device.usb_spec_version,
+        usb_advertised_max_power_ma=(None if device is None else device.advertised_max_power_ma),
+        usb_runtime_power_status=None if device is None else device.runtime_power_status,
+        usb_runtime_power_control=None if device is None else device.runtime_power_control,
+        usb_resolved_parent_path=None if device is None else device.resolved_parent_path,
+        usb_direct_to_root_hub=None if device is None else device.direct_to_root_hub,
+        usb_intermediate_hub_count=(None if device is None else device.intermediate_hub_count),
+        usb_root_controller_pci_address=(
+            None if device is None else device.root_controller_pci_address
+        ),
+        usb_root_controller_vendor_id=(
+            None if device is None else device.root_controller_vendor_id
+        ),
+        usb_root_controller_device_id=(
+            None if device is None else device.root_controller_device_id
+        ),
+        usb_link_faults=None if device is None else device.link_faults,
         host_network_interfaces=(() if device is None else device.host_network_interfaces),
         terminal_devices=() if device is None else device.terminal_devices,
         storage_devices=() if device is None else device.storage_devices,
@@ -470,3 +553,132 @@ def _optional_decimal(value: str | None) -> int | None:
     if value is None or not value.isdecimal():
         return None
     return int(value, 10)
+
+
+def _optional_float(value: str) -> float | None:
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _normalized_optional(value: str) -> str | None:
+    normalized = value.strip()
+    return normalized or None
+
+
+def _parse_milliamps(value: str) -> int | None:
+    match = re.fullmatch(r"\s*(\d+)\s*mA\s*", value, flags=re.IGNORECASE)
+    return None if match is None else int(match.group(1), 10)
+
+
+def _bounded_sysfs_read(path: Path) -> str:
+    """Read one cached attribute without allowing a wedged device to hang us."""
+
+    try:
+        completed = subprocess.run(
+            ("cat", "--", str(path)),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=0.25,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if completed.returncode != 0 or len(completed.stdout) > 256:
+        return ""
+    return completed.stdout.strip()
+
+
+def _direct_to_root_hub(port_name: str) -> bool | None:
+    if not re.fullmatch(r"\d+-\d+(?:\.\d+)*", port_name):
+        return None
+    return "." not in port_name
+
+
+def _intermediate_hub_count(port_name: str) -> int | None:
+    direct = _direct_to_root_hub(port_name)
+    return None if direct is None else port_name.count(".")
+
+
+_PCI_ADDRESS = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$")
+
+
+def _nearest_pci_controller(device_path: Path) -> Path | None:
+    for parent in device_path.parents:
+        if _PCI_ADDRESS.fullmatch(parent.name):
+            return parent
+    return None
+
+
+def _normalized_hex_id(value: str) -> str | None:
+    normalized = value.strip().lower().removeprefix("0x")
+    if not re.fullmatch(r"[0-9a-f]{4}", normalized):
+        return None
+    return normalized
+
+
+_KERNEL_LOG_WINDOW = "current boot, last 1000 kernel messages"
+_USB_ERROR_TERMS = re.compile(
+    r"(?:error\s+-\d+|device descriptor read|device not accepting address|unable to enumerate)",
+    flags=re.IGNORECASE,
+)
+
+
+def _recent_kernel_usb_log() -> str | None:
+    try:
+        completed = subprocess.run(
+            ("journalctl", "--dmesg", "--boot", "-n", "1000", "--no-pager", "-o", "cat"),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout[-1_000_000:]
+
+
+def _usb_link_fault_summary(log_text: str | None, port_name: str) -> UsbLinkFaultSummary | None:
+    if log_text is None:
+        return None
+    # Kernel messages name a device as "usb 5-1:" and a root-hub port as
+    # "usb usb5-port1:". The latter is safely attributable only for a direct
+    # child. Intermediate-hub port messages are intentionally not guessed.
+    device_pattern = re.compile(rf"\busb\s+{re.escape(port_name)}(?::|\s)", re.IGNORECASE)
+    root_port_pattern: re.Pattern[str] | None = None
+    direct_match = re.fullmatch(r"(\d+)-(\d+)", port_name)
+    if direct_match is not None:
+        root_port_pattern = re.compile(
+            rf"\busb\s+usb{direct_match.group(1)}-port{direct_match.group(2)}(?::|\s)",
+            re.IGNORECASE,
+        )
+    scoped = [
+        line.strip()
+        for line in log_text.splitlines()
+        if device_pattern.search(line)
+        or (root_port_pattern is not None and root_port_pattern.search(line))
+    ]
+    interesting = [
+        line
+        for line in scoped
+        if _USB_ERROR_TERMS.search(line)
+        or "disconnect" in line.lower()
+        or "power cycle" in line.lower()
+    ]
+    if not interesting:
+        return UsbLinkFaultSummary(
+            observation_window=_KERNEL_LOG_WINDOW,
+            error_count=0,
+            disconnect_count=0,
+            port_power_cycle_count=0,
+        )
+    return UsbLinkFaultSummary(
+        observation_window=_KERNEL_LOG_WINDOW,
+        error_count=sum(bool(_USB_ERROR_TERMS.search(line)) for line in interesting),
+        disconnect_count=sum("disconnect" in line.lower() for line in interesting),
+        port_power_cycle_count=sum("power cycle" in line.lower() for line in interesting),
+        recent_messages=tuple(interesting[-8:]),
+    )

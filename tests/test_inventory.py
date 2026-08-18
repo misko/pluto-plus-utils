@@ -108,6 +108,12 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
         bus=3,
         device_number=11,
     )
+    _attribute(plus, "speed", "480")
+    _attribute(plus, "version", " 2.00")
+    _attribute(plus, "bMaxPower", "500mA")
+    (plus / "power").mkdir()
+    _attribute(plus / "power", "runtime_status", "active")
+    _attribute(plus / "power", "control", "on")
     network_function = plus / "3-8:1.0"
     terminal_function = plus / "3-8:1.3"
     storage_partition = plus / "3-8:1.2" / "host" / "block" / "sdb" / "sdb1"
@@ -138,6 +144,12 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
         block_root=block_root,
         udev_data_root=udev_root,
         ipv4_reader=lambda name: ("192.168.2.10",) if name == "enx001" else (),
+        kernel_log_reader=lambda: (
+            "usb 3-8: device descriptor read/64, error -71\n"
+            "usb usb3-port8: attempt power cycle\n"
+            "usb 3-8: USB disconnect, device number 10\n"
+            "usb 3-7: unrelated error -71\n"
+        ),
     )
 
     assert len(devices) == 2
@@ -147,7 +159,54 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
     assert devices[0].host_network_interfaces[0].ipv4_addresses == ("192.168.2.10",)
     assert devices[0].terminal_devices == ("/dev/ttyACM0",)
     assert devices[0].storage_devices == ("/dev/sdb1",)
+    assert devices[0].speed_mbps == 480
+    assert devices[0].usb_spec_version == "2.00"
+    assert devices[0].advertised_max_power_ma == 500
+    assert devices[0].runtime_power_status == "active"
+    assert devices[0].runtime_power_control == "on"
+    assert devices[0].direct_to_root_hub is True
+    assert devices[0].intermediate_hub_count == 0
+    assert devices[0].link_faults is not None
+    assert devices[0].link_faults.error_count == 1
+    assert devices[0].link_faults.disconnect_count == 1
+    assert devices[0].link_faults.port_power_cycle_count == 1
     assert devices[1].serial is None
+
+
+def test_sysfs_scan_reports_intermediate_hub_and_nearest_pci_controller(
+    tmp_path: Path,
+) -> None:
+    usb_root = tmp_path / "usb"
+    usb_root.mkdir()
+    udev_root = tmp_path / "udev"
+    controller = tmp_path / "devices" / "pci0000:00" / "0000:00:1d.0"
+    hub = controller / "usb5" / "5-2"
+    physical = _usb_device(
+        hub,
+        udev_root,
+        "5-2.4",
+        serial="SERIAL_HUBBED",
+        product="PlutoSDR+ with timestamp support",
+        bus=5,
+        device_number=9,
+    )
+    controller.mkdir(parents=True, exist_ok=True)
+    _attribute(controller, "vendor", "0x1b21")
+    _attribute(controller, "device", "0x2426")
+    (usb_root / "5-2.4").symlink_to(physical, target_is_directory=True)
+
+    (device,) = scan_local_usb_plutos(
+        usb_root,
+        udev_data_root=udev_root,
+        kernel_log_reader=lambda: "",
+    )
+
+    assert device.direct_to_root_hub is False
+    assert device.intermediate_hub_count == 1
+    assert device.resolved_parent_path == str(physical)
+    assert device.root_controller_pci_address == "0000:00:1d.0"
+    assert device.root_controller_vendor_id == "1b21"
+    assert device.root_controller_device_id == "2426"
 
 
 def test_sysfs_scan_rejects_stale_zero_address_usb_device(tmp_path: Path) -> None:

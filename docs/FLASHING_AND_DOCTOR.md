@@ -12,19 +12,19 @@ automatic upgrade or downgrade decision.
 
 | Consumer | Selected profile | Persistent release |
 | --- | --- | --- |
-| Pluto+ Utils standard libiio USB/IP | `libiio-continuous-metadata` | `v0.38-plutoplus-spf-libiio-metadata-v5` |
+| Pluto+ Utils standard libiio USB/IP | `libiio-continuous-metadata` | `v0.39-plutoplus-spf-libiio-metadata-v6` |
 | Rover direct-USB V7 production | Rover YAML policy | currently RC16; do not use this as Pluto+ Utils' latest |
 
-The Pluto+ Utils canonical release was published on 2026-08-12 and is the current
+The Pluto+ Utils canonical release was published on 2026-08-17 and is the current
 non-prerelease GitHub release as of this policy review:
 
-- DFU: `plutoplus-spf-libiio-metadata-v5-d7c87a9a2809-pluto.dfu`
-- SHA-256: `948b46506febacb087f3955be86015e074f8c0e3370a9dfc6a942e735d97f882`
-- expected `fw_version`: `v0.38-plutoplus-spf-libiio-metadata-v5`
-- source commit: `d7c87a9a28094ee6f0b23cb47df9ff737b5a69d8`
-- release: <https://github.com/misko/plutosdr-fw/releases/tag/v0.38-plutoplus-spf-libiio-metadata-v5>
+- DFU: `plutoplus-spf-libiio-metadata-v6-e3700cc72681-pluto.dfu`
+- SHA-256: `8ffbb0bf0912285636ddbcf0b00e12deaca0f55612faf7d29efa067b22e61352`
+- expected `fw_version`: `v0.39-plutoplus-spf-libiio-metadata-v6`
+- source commit: `e3700cc7268132eb6baa4bc88d8f3320dc7148b9`
+- release: <https://github.com/misko/plutosdr-fw/releases/tag/v0.39-plutoplus-spf-libiio-metadata-v6>
 
-The release manifest says the exact bytes were persistently tested on two radios and
+The release manifest says the exact bytes were persistently tested on four radios and
 survived QSPI reboot. The radio advertises `iio,buffer-metadata=1`; consuming the new
 metadata records also requires one of the separately patched host libiio builds.
 Ordinary IQ reads remain compatible.
@@ -163,9 +163,40 @@ Guarded CLI primitives are:
 ```console
 pluto --admin-token-file /private/admin.token firmware upload ./IMAGE.dfu
 pluto --admin-token-file /private/admin.token firmware plan RADIO_ID IMAGE_ID --mode volatile_dfu \
-  --expected-version v0.38-plutoplus-spf-libiio-metadata-v5
+  --expected-version v0.39-plutoplus-spf-libiio-metadata-v6
 pluto --admin-token-file /private/admin.token firmware execute PLAN_ID --token 'ONE_TIME_TOKEN'
 ```
+
+For a hardware-unqualified candidate, use the standalone RAM-only gate. It
+defaults to dry run, accepts only the exact immutable profile hash, selects one
+stable serial and USB sysfs path, enters only the `firmware.dfu` alternate, and
+never writes QSPI:
+
+```bash
+uv run pluto firmware ram-boot ./CANDIDATE.dfu \
+  --usb-sysfs-path /sys/bus/usb/devices/5-2 \
+  --profile libiio-metadata-v6-tandem-latch-clear-ram \
+  --ssh-host 192.168.1.15 \
+  --ssh-known-hosts-file /private/759d.known_hosts
+```
+
+Execution additionally requires `--execute --confirm 'RAM BOOT <serial>'`.
+After loading, the command requires the exact serial/path to return with the
+profile firmware, ABI, tandem capability, AD9361 PHY, and TX-safe readback.
+Power cycling returns to the unchanged QSPI image. Persistent promotion always
+requires a separate profile whose manifest is hardware-qualified.
+
+The dry-run plan reports `raw_usb_write_access`. If it is false, install the
+repository rule and reconnect the radios before execution:
+
+```bash
+sudo install -m 0644 packaging/udev/70-pluto-plus-utils.rules \
+  /etc/udev/rules.d/70-pluto-plus-utils.rules
+sudo udevadm control --reload-rules
+```
+
+Do not enter DFU until the runtime `/dev/bus/usb/...` node is writable; the
+command repeats this check immediately before mutation.
 
 For a serial-attested local USB radio, `firmware flash` is the standalone
 canonical-image workflow. It binds the USB and IIOD serials, physical sysfs

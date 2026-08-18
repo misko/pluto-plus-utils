@@ -41,6 +41,10 @@ class SetupHelperError(SetupUnavailableError):
     """The fixed helper could not safely inspect or provision the selected radio."""
 
 
+class SetupSshHostKeyChangedError(SetupHelperError):
+    """Pinned SSH trust changed; callers must use an independent trust anchor."""
+
+
 class SetupTransport(Protocol):
     def run(
         self,
@@ -158,8 +162,10 @@ class BoundSshTransport:
         exit_status = child.exitstatus
         signal_status = child.signalstatus
         output = bytes(transcript).decode(errors="replace").replace("\r", "")
+        if "REMOTE HOST IDENTIFICATION HAS CHANGED" in output:
+            raise SetupSshHostKeyChangedError("pinned radio SSH host key changed after reboot")
         # A reboot intentionally tears down SSH before it can return a status.
-        rebooting = "device_reboot reset" in command
+        rebooting = "/usr/sbin/device_reboot " in command
         if not rebooting and (exit_status not in {0, None} or signal_status is not None):
             raise SetupHelperError(
                 f"radio SSH operation failed ({exit_status=}, {signal_status=}): {output[-500:]}"

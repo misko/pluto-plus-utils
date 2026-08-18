@@ -24,7 +24,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
-from pluto_plus.doctor import CANONICAL_POLICY, TANDEM_V6_DEVELOPMENT_POLICY
+from pluto_plus.doctor import (
+    CANONICAL_POLICY,
+    TANDEM_V6_DEVELOPMENT_POLICY,
+    TANDEM_V6_LATCH_CLEAR_RAM_POLICY,
+)
 from pluto_plus.firmware import FirmwareImageError, generate_frm, validate_frm
 from pluto_plus.hardware.discovery import _facts_from_context_xml
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
@@ -47,12 +51,16 @@ class StandaloneFlashProfile:
     policy: Any
     metadata_abi: int
     tandem_agc: bool
+    persistent_allowed: bool = True
 
 
 STANDALONE_FLASH_PROFILES = {
     CANONICAL_POLICY.profile_id: StandaloneFlashProfile(CANONICAL_POLICY, 1, False),
     TANDEM_V6_DEVELOPMENT_POLICY.profile_id: StandaloneFlashProfile(
         TANDEM_V6_DEVELOPMENT_POLICY, 2, True
+    ),
+    TANDEM_V6_LATCH_CLEAR_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        TANDEM_V6_LATCH_CLEAR_RAM_POLICY, 2, True, persistent_allowed=False
     ),
 }
 
@@ -231,9 +239,7 @@ def enroll_bound_usb_ssh_host_key(
         raise BootstrapFirmwareError("SSH host must be a literal IP address") from error
     if address.version != 4 or not address.is_private:
         raise BootstrapFirmwareError("SSH host must be a private IPv4 address")
-    interface = (
-        local.host_network_interfaces[0].name if host == "192.168.2.1" else None
-    )
+    interface = local.host_network_interfaces[0].name if host == "192.168.2.1" else None
     if interface is not None:
         _require_usb_ssh_route(interface, host)
     destination = known_hosts_file.expanduser().resolve()
@@ -254,17 +260,17 @@ def enroll_bound_usb_ssh_host_key(
         import pexpect
 
         arguments = [
-                "-o",
-                "BatchMode=no",
-                "-o",
-                "ConnectTimeout=5",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                f"UserKnownHostsFile={temporary}",
-                f"root@{host}",
-                command,
-            ]
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"UserKnownHostsFile={temporary}",
+            f"root@{host}",
+            command,
+        ]
         if interface is not None:
             arguments[0:0] = ["-o", f"BindInterface={interface}"]
         child = pexpect.spawn(
@@ -402,6 +408,10 @@ def prepare_usb_flash_plan(
         raise BootstrapFirmwareError(
             f"unknown standalone mutation profile {mutation_profile_id!r}; expected one of "
             f"{sorted(STANDALONE_FLASH_PROFILES)}"
+        )
+    if not profile.persistent_allowed:
+        raise BootstrapFirmwareError(
+            f"profile {mutation_profile_id!r} is RAM-only and cannot be written persistently"
         )
     if force_blank_serial and mutation_profile_id != CANONICAL_POLICY.profile_id:
         raise BootstrapFirmwareError("blank-serial recovery accepts only the canonical policy")
@@ -896,11 +906,11 @@ def _attest_return(plan: BootstrapPlan) -> tuple[str | None, str, str]:
             f"returned tandem capability is {observed_tandem}, expected {plan.expected_tandem_agc}"
         )
     if plan.target_serial is not None:
-        _mute_returned_radio(plan.target_serial)
+        mute_returned_radio(plan.target_serial)
     return returned_serial, returned_firmware, returned_phy
 
 
-def _mute_returned_radio(serial: str) -> None:
+def mute_returned_radio(serial: str) -> None:
     """Mute and read back one exact returned USB-IIO radio."""
 
     try:
@@ -1046,8 +1056,7 @@ def _mount_partition(partition: Path) -> Path:
         with suppress(UdisksFailure):
             _run_udisks("unmount", partition, timeout_s=30)
         raise BootstrapFirmwareError(
-            "updater mount omitted required safety options: "
-            + ", ".join(sorted(missing_options))
+            "updater mount omitted required safety options: " + ", ".join(sorted(missing_options))
         )
     return mountpoint
 
