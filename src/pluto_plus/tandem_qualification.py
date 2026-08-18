@@ -61,7 +61,7 @@ class _MetadataReceiver:
         self.buffer: Any | None = None
 
     def open(self) -> None:
-        import iio  # type: ignore[import-untyped]
+        import iio
 
         metadata_buffer = getattr(iio, "MetadataBuffer", None)
         if metadata_buffer is None:
@@ -177,7 +177,7 @@ def execute_tandem_qualification(
     if fresh != plan:
         raise TandemQualificationError("qualification plan changed before execution")
 
-    import adi  # type: ignore[import-untyped]
+    import adi
     import iio
 
     uris = [

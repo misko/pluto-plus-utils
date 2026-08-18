@@ -805,8 +805,8 @@ def _mute_returned_radio(serial: str) -> None:
     """Mute and read back one exact returned USB-IIO radio."""
 
     try:
-        import adi  # type: ignore[import-untyped]
-        import iio  # type: ignore[import-untyped]
+        import adi
+        import iio
 
         from pluto_plus.hardware.iio import _mute_transmit
 

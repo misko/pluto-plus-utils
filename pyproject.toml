@@ -62,3 +62,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.11"
 strict = true
 packages = ["pluto_plus"]
+
+[[tool.mypy.overrides]]
+module = ["adi", "iio"]
+ignore_missing_imports = true
