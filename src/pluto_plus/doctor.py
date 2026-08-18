@@ -55,16 +55,16 @@ CANONICAL_POLICY = FirmwarePolicy(
 # recognition from silently authorizing a firmware write.
 TANDEM_V6_DEVELOPMENT_POLICY = FirmwarePolicy(
     profile_id="libiio-metadata-v6-tandem-abi2-development",
-    release_tag="tandem-agc-v2-da46979faccd",
-    device_firmware="v0.39-plutoplus-spf-libiio-metadata-v6-34-gda46",
-    asset_name="plutoplus-spf-tandem-agc-v2-da46979faccd-pluto.dfu",
-    asset_sha256="43401c5d850608fea115ddf4bb15ce3b1dffe1f758798db795f73a50ae86b20e",
-    release_url="https://github.com/misko/pluto-plus-utils/issues/2",
-    source_commit="da46979faccd",
-    fit_body_sha256="ed129308226fafaa0b2432dd7fefdd7efc4b7c55698e492ac0c330805ce0c889",
-    fit_body_size=12_776_787,
+    release_tag="tandem-agc-v2-7f812fe63c96",
+    device_firmware="v0.39-plutoplus-spf-libiio-metadata-v6-35-g7f812",
+    asset_name="plutoplus-spf-tandem-agc-v2-7f812fe63c96-pluto.dfu",
+    asset_sha256="8e324b6ce77d657925355fcb4a17eb7392ec6a187a41e40c8fd63ccfba40caf0",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/32170709605",
+    source_commit="7f812fe63c96eaf091550ab8804fd867dcb43fe2",
+    fit_body_sha256="a3879aaa73cd69c5225c7f4775033868aac7414db576eb3545bfc9e29f31c70e",
+    fit_body_size=12_776_899,
     hardware_qualified=False,
-    published_at=datetime(2026, 8, 18, tzinfo=UTC),
+    published_at=datetime(2026, 8, 18, 18, 39, 52, tzinfo=UTC),
 )
 
 

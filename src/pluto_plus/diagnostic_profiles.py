@@ -50,7 +50,7 @@ V6_PROFILE = DiagnosticProfile(
 
 V6_TANDEM_ABI2_PROFILE = DiagnosticProfile(
     profile_id="libiio-metadata-v6-tandem-abi2-development",
-    firmware_version="v0.39-plutoplus-spf-libiio-metadata-v6-34-gda46",
+    firmware_version="v0.39-plutoplus-spf-libiio-metadata-v6-35-g7f812",
     metadata_abis=(2,),
     tandem_agc_required=True,
     release_status="recognized development build; diagnostic-only",
