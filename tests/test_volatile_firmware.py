@@ -19,6 +19,7 @@ from pluto_plus.firmware import (
     PLUTO_FRM_MAGIC,
 )
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
+from pluto_plus.local_reboot import LocalRebootAttestation, LocalRebootCapabilities
 
 
 def _fit() -> bytes:
@@ -166,6 +167,58 @@ class RecordingRunner:
         command = tuple(argv)
         self.commands.append(command)
         return "dfu-util 0.11"
+
+
+class RecordingSshTransport:
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    def run(
+        self, command: str, *, stdin: bytes | None = None, timeout_s: float = 15
+    ) -> str:
+        self.commands.append(command)
+        return ""
+
+
+class FixedAttestationRadio:
+    def __init__(self, attestation: LocalRebootAttestation) -> None:
+        self.attestation = attestation
+        self.muted: list[str] = []
+
+    def attest(self, serial: str) -> LocalRebootAttestation:
+        assert serial == self.attestation.serial
+        return self.attestation
+
+    def ensure_tx_safe(self, serial: str) -> None:
+        self.muted.append(serial)
+
+
+def test_ssh_transition_accepts_equivalent_rev_c_models_from_iiod_and_device_tree(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+) -> None:
+    plan, _, _, _ = ram_plan
+    transport = RecordingSshTransport()
+    transition = volatile.SshRamBootTransition(transport)  # type: ignore[arg-type]
+    radio = FixedAttestationRadio(
+        LocalRebootAttestation(
+            serial=plan.serial,
+            firmware=plan.before_firmware,
+            boot_id="boot-a",
+            capabilities=LocalRebootCapabilities(
+                board_model="Analog Devices PlutoSDR Rev.C (Z7010/AD9363)",
+                phy_model=plan.before_phy,
+                rx_scan_channels=("voltage0", "voltage1"),
+                tandem_agc=False,
+            ),
+        )
+    )
+    transition._radio = radio  # type: ignore[assignment]
+
+    transition.enter_ram(plan)
+
+    assert radio.muted == [plan.serial]
+    assert len(transport.commands) == 1
+    assert "/usr/sbin/device_reboot ram" in transport.commands[0]
 
 
 def test_execute_uses_only_exact_path_firmware_alt_and_attests_return(

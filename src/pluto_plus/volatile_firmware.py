@@ -117,7 +117,8 @@ class SshRamBootTransition:
         before = self._radio.attest(plan.serial)
         if (
             before.firmware != plan.before_firmware
-            or before.capabilities.board_model != plan.before_model
+            or not _is_plutosdr_rev_c(plan.before_model)
+            or not _is_plutosdr_rev_c(before.capabilities.board_model)
             or before.capabilities.phy_model != plan.before_phy
         ):
             raise VolatileFirmwareError("remote SSH facts changed from the USB-bound plan")
@@ -129,6 +130,12 @@ class SshRamBootTransition:
             "/bin/sync; /usr/sbin/device_reboot ram",
             timeout_s=15,
         )
+
+
+def _is_plutosdr_rev_c(model: str) -> bool:
+    """Match the stable board identity across IIOD and device-tree spellings."""
+
+    return "plutosdr rev.c" in model.casefold()
 
 
 def prepare_ram_boot_plan(
