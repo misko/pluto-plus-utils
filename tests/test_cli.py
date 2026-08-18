@@ -18,6 +18,7 @@ from pluto_plus.cli import (
     _read_ssh_firmware_enrollment,
     app,
 )
+from pluto_plus.inventory import LocalUsbPluto
 from pluto_plus.models import Transport
 
 runner = CliRunner()
@@ -103,8 +104,7 @@ def api_transport(
         if request.method == "POST" and path.endswith("/firmware/images"):
             return httpx.Response(201, json={"image_id": "image-1"})
         if request.method == "POST" and (
-            path.endswith("/firmware/plans")
-            or path.endswith("/doctor/firmware-plans")
+            path.endswith("/firmware/plans") or path.endswith("/doctor/firmware-plans")
         ):
             return httpx.Response(201, json={"plan": {"plan_id": "plan-1"}})
         if request.method == "POST" and path.endswith("/firmware/executions"):
@@ -148,10 +148,33 @@ def test_radio_list_emits_json_and_uses_versioned_route(api_transport: Any) -> N
 
 def test_radio_inventory_defaults_to_full_table_and_supports_json(
     api_transport: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requests, _ = api_transport
+    monkeypatch.setattr(
+        "pluto_plus.cli.scan_local_usb_plutos",
+        lambda: (
+            LocalUsbPluto(
+                usb_path="/sys/bus/usb/devices/3-8",
+                bus_number=3,
+                device_number=11,
+                product="PlutoSDR+ with timestamp support",
+                serial="SERIAL_LOCAL",
+                speed_mbps=480,
+                interface_count=7,
+                terminal_devices=("/dev/ttyACM0",),
+                storage_devices=("/dev/sdb1",),
+            ),
+        ),
+    )
     result = runner.invoke(app, ["radio", "inventory"])
 
+    assert result.exit_code == 0, result.output
+    assert "SERIAL_LOCAL" in result.stdout
+    assert "attached/unmanaged" in result.stdout
+    assert requests == []
+
+    result = runner.invoke(app, ["radio", "inventory", "--daemon"])
     assert result.exit_code == 0, result.output
     for value in (
         "SERIAL_A",
@@ -165,9 +188,80 @@ def test_radio_inventory_defaults_to_full_table_and_supports_json(
         assert value in result.stdout
     assert requests[-1].url.path == "/api/v1/inventory"
 
-    result = runner.invoke(app, ["radio", "inventory", "--format", "json"])
+    result = runner.invoke(app, ["radio", "inventory", "--daemon", "--format", "json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["records"][0]["serial"] == "SERIAL_A"
+
+
+def test_radio_inventory_network_discovery_is_explicit_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.models import (
+        RadioCapabilities,
+        RadioIdentity,
+        RadioSettings,
+        RadioSnapshot,
+        RadioState,
+    )
+
+    requested: list[list[str]] = []
+    network_snapshot = RadioSnapshot(
+        identity=RadioIdentity(
+            radio_id="SERIAL_NETWORK",
+            serial="SERIAL_NETWORK",
+            uri="ip:192.168.1.165",
+            transport=Transport.IIO_IP,
+            model="Analog Devices PlutoSDR Rev.C",
+            firmware_version="v5",
+        ),
+        capabilities=RadioCapabilities(receiver_channels=(0, 1)),
+        managed=False,
+        state=RadioState.OFFLINE,
+        revision=0,
+        requested_settings=RadioSettings(),
+        actual_settings=RadioSettings(),
+    )
+
+    def discover(
+        networks: list[str], managed: list[str]
+    ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+        requested.append(networks)
+        assert managed == []
+        return (), (network_snapshot,)
+
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: ())
+    monkeypatch.setattr(
+        "pluto_plus.cli.local_ipv4_discovery_networks",
+        lambda *, exclude_interfaces: ("192.168.1.0/24",),
+    )
+    monkeypatch.setattr("pluto_plus.cli._network_iio_inventory", discover)
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "inventory",
+            "--network",
+            "--network-cidr",
+            "192.168.50.0/24",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert requested == [["192.168.50.0/24", "192.168.1.0/24"]]
+    record = json.loads(result.stdout)["records"][0]
+    assert record["serial"] == "SERIAL_NETWORK"
+    assert record["state"] == "discovered"
+    assert record["sources"] == ["standalone_discovered", "network"]
+
+
+def test_radio_inventory_rejects_daemon_with_standalone_network_options() -> None:
+    result = runner.invoke(app, ["radio", "inventory", "--daemon", "--network"])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stderr)["error"]["code"] == "incompatible_inventory_options"
 
 
 def test_radio_inventory_rejects_unknown_output_format(api_transport: Any) -> None:
@@ -727,9 +821,7 @@ def test_ssh_firmware_cli_sends_transport_confirmation_and_reconcile(
     )
     assert plan.exit_code == 0, plan.output
     assert _body(requests[-1])["transport"] == "ssh_frm"
-    assert requests[-1].url.path.endswith(
-        "/radios/SERIAL_A/doctor/firmware-plans"
-    )
+    assert requests[-1].url.path.endswith("/radios/SERIAL_A/doctor/firmware-plans")
 
     rejected = runner.invoke(
         app,
@@ -821,7 +913,183 @@ def test_ssh_firmware_enrollment_file_is_private_and_strict(tmp_path: Path) -> N
         ],
     )
     assert wrong_transport.exit_code == 2
-    assert (
-        json.loads(wrong_transport.stderr)["error"]["code"]
-        == "invalid_ssh_firmware_enrollment"
+    assert json.loads(wrong_transport.stderr)["error"]["code"] == "invalid_ssh_firmware_enrollment"
+
+
+def test_usb_bootstrap_cli_is_dry_run_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pluto_plus.bootstrap_firmware import BootstrapPlan
+
+    image = tmp_path / "canonical.dfu"
+    image.write_bytes(b"qualified")
+    plan = BootstrapPlan(
+        plan_id="plan-1",
+        usb_sysfs_path="/sys/bus/usb/devices/3-11",
+        usb_port="3-11",
+        usb_interface="enx001",
+        block_device="/dev/sdb",
+        partition="/dev/sdb1",
+        before_firmware="v0.32",
+        before_model="PlutoSDR Rev.C",
+        before_phy="ad9363a",
+        image_path=str(image),
+        image_sha256="1" * 64,
+        fit_sha256="2" * 64,
+        fit_size=100,
+        frm_sha256="3" * 64,
+        expected_firmware="v5",
+        confirmation_phrase="BOOTSTRAP 3-11",
     )
+    execute_calls: list[object] = []
+    force_modes: list[bool] = []
+
+    def prepare(
+        image: Path, usb_sysfs_path: Path, force_blank_serial: bool
+    ) -> tuple[object, bytes]:
+        del image, usb_sysfs_path
+        force_modes.append(force_blank_serial)
+        return plan, b"frm"
+
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.prepare_usb_flash_plan",
+        prepare,
+    )
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.execute_usb_flash_plan",
+        lambda *args, **kwargs: execute_calls.append((args, kwargs)),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "force-flash-usb",
+            str(image),
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-11",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "dry_run"
+    assert payload["will_write"] is False
+    assert payload["plan"]["confirmation_phrase"] == "BOOTSTRAP 3-11"
+    assert execute_calls == []
+    assert force_modes == [True]
+
+    normal = runner.invoke(
+        app,
+        [
+            "firmware",
+            "flash",
+            str(image),
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-11",
+        ],
+    )
+    assert normal.exit_code == 0, normal.output
+    assert force_modes == [True, False]
+
+
+def test_usb_bootstrap_cli_requires_and_passes_exact_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pluto_plus.bootstrap_firmware import BootstrapPlan, BootstrapResult
+
+    image = tmp_path / "canonical.dfu"
+    image.write_bytes(b"qualified")
+    plan = BootstrapPlan(
+        plan_id="plan-1",
+        usb_sysfs_path="/sys/bus/usb/devices/3-11",
+        usb_port="3-11",
+        usb_interface="enx001",
+        block_device="/dev/sdb",
+        partition="/dev/sdb1",
+        before_firmware="v0.32",
+        before_model="PlutoSDR Rev.C",
+        before_phy="ad9363a",
+        image_path=str(image),
+        image_sha256="1" * 64,
+        fit_sha256="2" * 64,
+        fit_size=100,
+        frm_sha256="3" * 64,
+        expected_firmware="v5",
+        confirmation_phrase="BOOTSTRAP 3-11",
+    )
+    confirmations: list[str] = []
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.prepare_usb_flash_plan",
+        lambda image, usb_sysfs_path, force_blank_serial: (plan, b"frm"),
+    )
+
+    def execute(plan: object, frm: bytes, **kwargs: Any) -> BootstrapResult:
+        del plan, frm
+        confirmations.append(cast(str, kwargs["confirmation"]))
+        return BootstrapResult(
+            receipt_id="receipt-1",
+            outcome="success",
+            phases=("return_attested",),
+            receipt_path=str(tmp_path / "receipt.json"),
+            returned_serial="SERIAL_NEW",
+            returned_firmware="v5",
+            returned_phy="ad9363a",
+        )
+
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.execute_usb_flash_plan",
+        execute,
+    )
+
+    missing = runner.invoke(
+        app,
+        [
+            "firmware",
+            "bootstrap-usb",
+            str(image),
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-11",
+            "--execute",
+        ],
+    )
+    assert missing.exit_code == 2
+    assert json.loads(missing.stderr)["error"]["code"] == "bootstrap_confirmation_required"
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "bootstrap-usb",
+            str(image),
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-11",
+            "--execute",
+            "--confirm",
+            "BOOTSTRAP 3-11",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["returned_serial"] == "SERIAL_NEW"
+    assert confirmations == ["BOOTSTRAP 3-11"]
+
+
+def test_doctor_defaults_to_standalone_local_usb_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.local_doctor import LocalDoctorReport
+
+    monkeypatch.setattr(
+        "pluto_plus.local_doctor.diagnose_local_usb_radios",
+        lambda path: LocalDoctorReport(
+            generated_at="2026-08-16T12:00:00+00:00",
+            canonical_firmware="v5",
+            canonical_image_sha256="a" * 64,
+            radios=(),
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["canonical_firmware"] == "v5"

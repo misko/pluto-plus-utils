@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 from urllib.request import Request, urlopen
@@ -43,6 +44,18 @@ def _canvas_has_rendered_pixels(page: Any, selector: str) -> bool:
             }"""
         )
     )
+
+
+def _wait_for_radio_state(origin: str, expected: str, timeout: float = 10) -> None:
+    deadline = time.monotonic() + timeout
+    observed = "unknown"
+    while time.monotonic() < deadline:
+        with urlopen(f"{origin}/api/v1/radios/fake-001", timeout=1) as response:  # noqa: S310
+            observed = str(json.loads(response.read())["state"])
+        if observed == expected:
+            return
+        time.sleep(0.05)
+    pytest.fail(f"radio remained {observed!r}, expected {expected!r}")
 
 
 def test_page_loaded_during_existing_stream_auto_attaches_and_reports_diagnostics(
@@ -98,6 +111,28 @@ def test_page_loaded_during_existing_stream_auto_attaches_and_reports_diagnostic
         )
         with urlopen(request, timeout=5) as stopped:  # noqa: S310
             assert stopped.status == 200
+
+
+def test_closing_page_releases_only_the_preview_created_by_that_page(
+    browser_page: Any,
+    fake_daemon_origin: str,
+) -> None:
+    page = browser_page
+    response = page.goto(fake_daemon_origin, wait_until="networkidle")
+    assert response is not None and response.ok
+    page.wait_for_function("document.querySelector('#radio-state').textContent === 'ready'")
+    with page.expect_response(
+        lambda reply: (
+            reply.request.method == "POST"
+            and reply.url.endswith("/api/v1/radios/fake-001/streams")
+        )
+    ):
+        page.locator("#start-preview").click()
+    page.wait_for_function("document.querySelector('#radio-state').textContent === 'streaming'")
+
+    page.close()
+
+    _wait_for_radio_state(fake_daemon_origin, "ready")
 
 
 def test_complete_fake_radio_browser_workflow(browser_page: Any, fake_daemon_origin: str) -> None:
@@ -179,8 +214,9 @@ def test_complete_fake_radio_browser_workflow(browser_page: Any, fake_daemon_ori
     assert canvas_sizes["waterfall-rx1"]["css"][1] >= 280
     assert canvas_sizes["waterfall-rx0"]["pixels"][0] <= 1_024
     assert canvas_sizes["waterfall-rx1"]["pixels"][0] <= 1_024
-    page.locator("#stop-preview").click()
+    page.locator("#disconnect-radio").click()
     page.wait_for_function("document.querySelector('#radio-state').textContent === 'ready'")
+    assert page.locator("#stream-status").text_content() == "Disconnected · control released"
 
     # Persist a genuinely bounded capture, then select its artifact and run an
     # analyzer through the browser UI.

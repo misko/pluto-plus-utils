@@ -287,6 +287,26 @@ class RadioController:
             )
         return self.get_job(job_id)
 
+    def release_preview(self, job_id: str) -> bool:
+        """Stop only the exact active non-persistent preview owned by a UI page.
+
+        The idempotent false result is deliberate: a delayed page-unload beacon
+        must never stop a newer preview or a bounded persistent capture.
+        """
+
+        with self._lock:
+            active = self._active
+            if active is None or active.job_id != job_id or active.request.persist:
+                return False
+            active.stop.set()
+            thread = active.thread
+        thread.join(timeout=self._shutdown_timeout_s)
+        if thread.is_alive():
+            raise RadioBusyError(
+                f"radio preview did not stop within {self._shutdown_timeout_s:g} seconds"
+            )
+        return True
+
     def get_job(self, job_id: str) -> StreamJob:
         with self._lock:
             job = self._jobs.get(job_id)

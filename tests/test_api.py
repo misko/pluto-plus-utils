@@ -320,6 +320,30 @@ def test_waterfall_websocket_streams_spectrum_frames(
     assert stopped.status_code == 200
 
 
+def test_page_release_endpoint_is_exact_idempotent_and_preview_only(
+    api: tuple[TestClient, PlutoService, FakeRadioDevice],
+) -> None:
+    client, _service, _device = api
+    started = client.post(
+        f"{API_PREFIX}/radios/fake-001/streams",
+        json={"block_size": 4096, "fft_size": 256},
+    ).json()
+
+    stale = client.post(
+        f"{API_PREFIX}/radios/fake-001/streams/stale-job/release",
+        content=b"",
+    )
+    assert stale.status_code == 204
+    assert client.get(f"{API_PREFIX}/radios/fake-001").json()["state"] == "streaming"
+
+    released = client.post(
+        f"{API_PREFIX}/radios/fake-001/streams/{started['job_id']}/release",
+        content=b"",
+    )
+    assert released.status_code == 204
+    assert client.get(f"{API_PREFIX}/radios/fake-001").json()["state"] == "ready"
+
+
 def test_waterfall_websocket_rate_is_bounded_for_browser_responsiveness(
     api: tuple[TestClient, PlutoService, FakeRadioDevice],
 ) -> None:

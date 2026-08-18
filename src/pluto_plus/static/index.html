@@ -48,7 +48,10 @@
           <div><dt>Activity</dt><dd id="radio-activity">Idle</dd></div>
         </dl>
         <p id="radio-error" class="inline-error" role="alert" hidden></p>
-        <button id="recover-radio" class="button secondary" type="button" disabled>Recover radio</button>
+        <div class="actions">
+          <button id="recover-radio" class="button secondary" type="button" disabled>Recover radio</button>
+          <button id="disconnect-radio" class="button danger" type="button" disabled>Disconnect &amp; release</button>
+        </div>
       </section>
 
       <section class="panel settings-panel" aria-labelledby="settings-heading">
@@ -131,7 +134,7 @@
             </select>
           </div>
           <button id="start-preview" class="button primary" type="button" disabled>Start preview</button>
-          <button id="stop-preview" class="button danger" type="button" disabled>Stop</button>
+          <button id="stop-preview" class="button danger" type="button" disabled>Stop preview</button>
         </div>
 
         <div class="waterfall-grid">

@@ -205,6 +205,31 @@ class IioRadioDevice:
             )
         return SampleBlock(utc_ns=(before + after) // 2, samples=values.astype(np.complex64))
 
+    def configure_kernel_buffers(self, count: int) -> None:
+        """Set the libiio RX kernel-buffer count before creating a userspace buffer."""
+
+        if count < 1 or count > 64:
+            raise ValueError("kernel buffer count must be between 1 and 64")
+        device = self._require_device()
+        device.rx_destroy_buffer()
+        self._buffer_size = None
+        rx_device = getattr(device, "_rxadc", None)
+        setter = getattr(rx_device, "set_kernel_buffers_count", None)
+        if not callable(setter):
+            raise RadioConfigurationError(
+                "installed libiio binding cannot configure RX kernel buffers"
+            )
+        result = setter(count)
+        if isinstance(result, int) and result < 0:
+            raise RadioConfigurationError(
+                f"libiio rejected RX kernel buffer count {count}: error {result}"
+            )
+        actual = getattr(rx_device, "kernel_buffers_count", None)
+        if actual is not None and int(actual) != count:
+            raise RadioConfigurationError(
+                f"RX kernel buffer read-back is {actual}, expected {count}"
+            )
+
     def diagnostic_facts(self) -> Mapping[str, object]:
         """Return passive facts captured when the exact IIO context was opened."""
 
@@ -251,10 +276,15 @@ def discover_usb_serials(usb_root: Path = Path("/sys/bus/usb/devices")) -> list[
         try:
             vendor = (device / "idVendor").read_text().strip().lower()
             product = (device / "idProduct").read_text().strip().lower()
-            serial = (device / "serial").read_text().strip()
         except OSError:
             continue
-        if vendor == PLUTO_USB_VENDOR and product == PLUTO_RUNTIME_PRODUCT and serial:
+        if vendor != PLUTO_USB_VENDOR or product != PLUTO_RUNTIME_PRODUCT:
+            continue
+        try:
+            serial = (device / "serial").read_text().strip()
+        except (OSError, UnicodeError):
+            continue
+        if serial:
             serials.append(serial)
     if len(serials) != len(set(serials)):
         raise RadioConfigurationError(f"duplicate Pluto USB serials: {serials}")
@@ -273,14 +303,15 @@ def find_usb_sysfs_path(
         try:
             vendor = (device / "idVendor").read_text().strip().lower()
             product = (device / "idProduct").read_text().strip().lower()
-            candidate_serial = (device / "serial").read_text().strip()
         except OSError:
             continue
-        if (
-            vendor == PLUTO_USB_VENDOR
-            and product == PLUTO_RUNTIME_PRODUCT
-            and candidate_serial == serial
-        ):
+        if vendor != PLUTO_USB_VENDOR or product != PLUTO_RUNTIME_PRODUCT:
+            continue
+        try:
+            candidate_serial = (device / "serial").read_text().strip()
+        except (OSError, UnicodeError):
+            continue
+        if candidate_serial == serial:
             matches.append(device)
     if len(matches) > 1:
         raise RadioConfigurationError(

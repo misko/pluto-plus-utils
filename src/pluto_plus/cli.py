@@ -7,7 +7,7 @@ import os
 import stat
 import sys
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib import import_module
 from ipaddress import ip_address
 from pathlib import Path
@@ -17,11 +17,24 @@ from urllib.parse import urlsplit
 import httpx
 import typer
 
+from pluto_plus.inventory import (
+    LocalUsbPluto,
+    RadioInventoryReport,
+    build_radio_inventory,
+    local_ipv4_discovery_networks,
+    scan_local_usb_plutos,
+)
+from pluto_plus.ladder import DEFAULT_RATE_LADDER, LadderReport, parse_rate_ladder, run_iio_ladder
+
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
 DEFAULT_STATE_ROOT = Path(os.environ.get("PLUTO_STATE_ROOT", "./pluto-state"))
+DEFAULT_BOOTSTRAP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/bootstrap-receipts"
 API_PREFIX = "api/v1"
 
-app = typer.Typer(no_args_is_help=True, help="Control Pluto+ radios through plutod.")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Inspect Pluto+ radios directly and control them through plutod.",
+)
 radio_app = typer.Typer(no_args_is_help=True, help="Inspect and configure radios.")
 settings_app = typer.Typer(no_args_is_help=True, help="Read or update radio settings.")
 stream_app = typer.Typer(no_args_is_help=True, help="Manage live radio streams.")
@@ -217,6 +230,7 @@ def _inventory_table(report: Any) -> str:
     class_labels = {
         "confirmed_pluto_plus": "Pluto+",
         "daemon_attested_pluto": "Pluto",
+        "network_attested_pluto": "Pluto",
         "pluto_class_ambiguous": "Ambiguous",
         "simulated": "Simulated",
     }
@@ -230,16 +244,12 @@ def _inventory_table(report: Any) -> str:
                 continue
             addresses = interface.get("ipv4_addresses") or []
             address_text = ",".join(str(value) for value in addresses) or "no-ip"
-            host_network.append(
-                f"{interface.get('name', '?')}={address_text}"
-            )
+            host_network.append(f"{interface.get('name', '?')}={address_text}")
         notes = [str(value) for value in (item.get("notes") or [])]
         model = str(item.get("model") or "—")
         details = model if not notes else f"{model}; {'; '.join(notes)}"
         usb_parts = [
-            str(value)
-            for value in (item.get("usb_bus_device"), item.get("usb_path"))
-            if value
+            str(value) for value in (item.get("usb_bus_device"), item.get("usb_path")) if value
         ]
         managed = "managed" if item.get("managed") else "unmanaged"
         rows.append(
@@ -252,26 +262,74 @@ def _inventory_table(report: Any) -> str:
                 "endpoint": str(item.get("radio_ip") or item.get("iio_uri") or "—"),
                 "firmware": str(item.get("firmware_version") or "unknown"),
                 "usb": " ".join(usb_parts) or "—",
-                "terminal": ",".join(
-                    str(value) for value in (item.get("terminal_devices") or [])
-                ) or "—",
+                "terminal": ",".join(str(value) for value in (item.get("terminal_devices") or []))
+                or "—",
                 "host_net": ",".join(host_network) or "—",
-                "storage": ",".join(
-                    str(value) for value in (item.get("storage_devices") or [])
-                ) or "—",
+                "storage": ",".join(str(value) for value in (item.get("storage_devices") or []))
+                or "—",
                 "details": details,
             }
         )
     if not rows:
         return "No Pluto radios found."
-    widths = {
-        key: max(len(title), *(len(row[key]) for row in rows))
-        for title, key in columns
-    }
+    widths = {key: max(len(title), *(len(row[key]) for row in rows)) for title, key in columns}
     header = "  ".join(title.ljust(widths[key]) for title, key in columns)
     separator = "  ".join("-" * widths[key] for _title, key in columns)
     body = ["  ".join(row[key].ljust(widths[key]) for _title, key in columns) for row in rows]
     return "\n".join((header, separator, *body))
+
+
+def _ladder_table(report: LadderReport) -> str:
+    columns = (
+        ("RATE", "rate"),
+        ("OFFERED", "offered"),
+        ("ACHIEVED", "achieved"),
+        ("TRANSFER/MIN", "per_minute"),
+        ("EFFECTIVE", "effective"),
+        ("DELIVERY", "delivery"),
+        ("P50", "p50"),
+        ("P95", "p95"),
+        ("RESULT", "result"),
+    )
+    rows = [
+        {
+            "rate": f"{cell.sample_rate_hz / 1_000_000:g} MS/s",
+            "offered": f"{cell.offered_payload_mbps:.2f} MB/s",
+            "achieved": f"{cell.achieved_payload_mbps:.2f} MB/s",
+            "per_minute": f"{cell.transferred_mb_per_minute:.0f} MB/min",
+            "effective": f"{cell.delivered_sample_rate_sps / 1_000_000:.3f} MS/s",
+            "delivery": f"{cell.delivery_fraction * 100:.1f}%",
+            "p50": f"{cell.latency_p50_ms:.1f} ms",
+            "p95": f"{cell.latency_p95_ms:.1f} ms",
+            "result": "kept pace" if cell.kept_pace else "link-limited",
+        }
+        for cell in report.cells
+    ]
+    rows.extend(
+        {
+            "rate": f"{failure.sample_rate_hz / 1_000_000:g} MS/s",
+            "offered": "—",
+            "achieved": "—",
+            "per_minute": "—",
+            "effective": "—",
+            "delivery": "—",
+            "p50": "—",
+            "p95": "—",
+            "result": f"ERROR: {failure.message}",
+        }
+        for failure in report.failures
+    )
+    widths = {key: max(len(title), *(len(row[key]) for row in rows)) for title, key in columns}
+    header = "  ".join(title.ljust(widths[key]) for title, key in columns)
+    separator = "  ".join("-" * widths[key] for _title, key in columns)
+    body = ["  ".join(row[key].ljust(widths[key]) for _title, key in columns) for row in rows]
+    identity = (
+        f"Radio {report.serial} · {report.uri} · {report.model} · "
+        f"firmware {report.firmware_version or 'unknown'} · "
+        f"kernel buffers {report.kernel_buffers}"
+    )
+    restore = "Original RX settings restored: yes"
+    return "\n".join((identity, header, separator, *body, restore, report.continuity_claim))
 
 
 def _fail(code: str, message: str, exit_code: int) -> NoReturn:
@@ -404,8 +462,7 @@ def _read_ssh_firmware_enrollment(path: Path) -> _SshFirmwareEnrollmentConfig:
         private_key_file, label="SSH firmware private key", maximum_bytes=1024 * 1024
     )
     if any(
-        stat.S_IMODE(path.lstat().st_mode) != 0o600
-        for path in (known_hosts_file, private_key_file)
+        stat.S_IMODE(path.lstat().st_mode) != 0o600 for path in (known_hosts_file, private_key_file)
     ):
         _fail(
             "invalid_ssh_firmware_enrollment",
@@ -432,17 +489,170 @@ def radio_inventory(
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Output format: table or json."
     ),
+    network: bool = typer.Option(
+        False,
+        "--network",
+        help="Also scan bounded private/link-local networks attached to this host.",
+    ),
+    network_cidr: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--network-cidr",
+        help="Also scan this exact bounded IPv4 CIDR (repeatable).",
+    ),
+    daemon: bool = typer.Option(
+        False,
+        "--daemon",
+        help="Query plutod instead of performing standalone discovery.",
+    ),
 ) -> None:
-    """Print attached USB and daemon-known network Pluto radios."""
+    """Print a standalone local USB and optional network radio inventory."""
 
     normalized = output_format.strip().lower()
     if normalized not in {"json", "table"}:
         _fail("invalid_inventory_format", "inventory format must be table or json", 2)
-    report = _api(ctx).request("GET", "inventory")
+    requested_networks = list(network_cidr or [])
+    if daemon and (network or requested_networks):
+        _fail(
+            "incompatible_inventory_options",
+            "--daemon cannot be combined with --network or --network-cidr",
+            2,
+        )
+    if daemon:
+        report: Any = _api(ctx).request("GET", "inventory")
+    else:
+        local_devices = scan_local_usb_plutos()
+        if network:
+            usb_network_interfaces = {
+                interface.name
+                for device in local_devices
+                for interface in device.host_network_interfaces
+            }
+            requested_networks.extend(
+                local_ipv4_discovery_networks(
+                    exclude_interfaces=usb_network_interfaces,
+                )
+            )
+        report = _standalone_radio_inventory(
+            requested_networks,
+            local_devices=local_devices,
+        ).model_dump(mode="json")
     if normalized == "json":
         _emit(report)
     else:
         typer.echo(_inventory_table(report))
+
+
+def _standalone_radio_inventory(
+    networks: list[str],
+    *,
+    local_devices: tuple[LocalUsbPluto, ...] | None = None,
+) -> RadioInventoryReport:
+    snapshots: tuple[Any, ...] = ()
+    if networks:
+        _managed, snapshots = _network_iio_inventory(list(dict.fromkeys(networks)), [])
+    return build_radio_inventory(
+        snapshots,
+        scan_local_usb_plutos() if local_devices is None else local_devices,
+        snapshot_origin="standalone",
+    )
+
+
+@radio_app.command("ladder")
+def radio_ladder(
+    target: str = typer.Argument(
+        ...,
+        help="USB serial when --transport=usb, or a literal IPv4 address when using IP.",
+    ),
+    transport: str = typer.Option(
+        "usb", "--transport", "-t", help="Standard libiio transport: usb or ip."
+    ),
+    expect_serial: str | None = typer.Option(
+        None,
+        "--expect-serial",
+        help="Require this exact radio serial (recommended for IP).",
+    ),
+    rates: str = typer.Option(
+        DEFAULT_RATE_LADDER,
+        "--rates",
+        help="Strictly increasing comma-separated Hz/K/M/G sample-rate rungs.",
+    ),
+    samples: int = typer.Option(
+        262_144,
+        "--samples",
+        min=16_384,
+        max=4_194_304,
+        help="Samples per channel in each paired-RX frame.",
+    ),
+    frames: int = typer.Option(
+        12, "--frames", min=1, max=100, help="Timed frames captured at each rung."
+    ),
+    warmup_frames: int = typer.Option(
+        2,
+        "--warmup-frames",
+        min=0,
+        max=20,
+        help="Discarded frames before timing each rung.",
+    ),
+    kernel_buffers: int = typer.Option(
+        8,
+        "--kernel-buffers",
+        min=1,
+        max=64,
+        help="Explicit libiio RX kernel-buffer count.",
+    ),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table or json."
+    ),
+) -> None:
+    """Directly ladder-test paired-RX USB or IP throughput without plutod."""
+
+    normalized_transport = transport.strip().lower()
+    uri: str
+    serial: str | None
+    if normalized_transport == "usb":
+        if expect_serial is not None and expect_serial != target:
+            _fail(
+                "radio_identity_mismatch",
+                "for USB, TARGET is the serial and must equal --expect-serial",
+                2,
+            )
+        uri = "usb:"
+        serial = target
+    elif normalized_transport == "ip":
+        candidate = target.removeprefix("ip:")
+        try:
+            address = ip_address(candidate)
+        except ValueError:
+            _fail("invalid_radio_target", "IP ladder target must be a literal IP address", 2)
+        if address.version != 4:
+            _fail("invalid_radio_target", "IP ladder currently supports IPv4 targets", 2)
+        uri = f"ip:{address}"
+        serial = expect_serial
+    else:
+        _fail("invalid_ladder_transport", "ladder transport must be usb or ip", 2)
+
+    normalized_format = output_format.strip().lower()
+    if normalized_format not in {"table", "json"}:
+        _fail("invalid_ladder_format", "ladder format must be table or json", 2)
+    try:
+        parsed_rates = parse_rate_ladder(rates)
+        report = run_iio_ladder(
+            uri=uri,
+            serial=serial,
+            rates_hz=parsed_rates,
+            samples_per_channel=samples,
+            frames=frames,
+            warmup_frames=warmup_frames,
+            kernel_buffers=kernel_buffers,
+        )
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("ladder_failed", str(error), 5)
+    if normalized_format == "json":
+        _emit(report.model_dump(mode="json"))
+    else:
+        typer.echo(_ladder_table(report))
+    if report.failures:
+        raise typer.Exit(5)
 
 
 @radio_app.command("status")
@@ -531,11 +741,99 @@ def config_receipt_list(ctx: typer.Context) -> None:
 def doctor(
     ctx: typer.Context,
     radio_id: str | None = typer.Argument(None),
+    usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--usb-sysfs-path",
+        help="Inspect one exact locally attached USB Pluto without plutod.",
+    ),
+    daemon: bool = typer.Option(
+        False,
+        "--daemon",
+        help="Use plutod for all-radio doctor instead of standalone local USB inspection.",
+    ),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Standalone output format: table or json."
+    ),
 ) -> None:
-    """Check one or all radios against the selected canonical setup profile."""
+    """Check local USB radios directly, or one managed radio through plutod."""
 
-    path = "doctor" if radio_id is None else f"radios/{radio_id}/doctor"
-    _emit(_api(ctx).request("GET", path))
+    if radio_id is not None or daemon:
+        if usb_sysfs_path is not None:
+            _fail(
+                "incompatible_doctor_options",
+                "--usb-sysfs-path cannot be combined with a daemon radio ID or --daemon",
+                2,
+            )
+        path = "doctor" if radio_id is None else f"radios/{radio_id}/doctor"
+        _emit(_api(ctx).request("GET", path))
+        return
+    normalized = output_format.strip().lower()
+    if normalized not in {"table", "json"}:
+        _fail("invalid_doctor_format", "doctor format must be table or json", 2)
+    from pluto_plus.local_doctor import diagnose_local_usb_radios
+
+    try:
+        report = diagnose_local_usb_radios(usb_sysfs_path)
+    except ValueError as error:
+        _fail("local_doctor_target_not_found", str(error), 4)
+    payload = asdict(report)
+    if normalized == "json":
+        _emit(payload)
+    else:
+        typer.echo(_local_doctor_table(payload))
+
+
+def _local_doctor_table(report: dict[str, Any]) -> str:
+    rows: list[dict[str, str]] = []
+    for radio in report.get("radios", []):
+        checks = radio.get("checks", [])
+        failed = [item["code"] for item in checks if item.get("status") == "fail"]
+        unknown = [item["code"] for item in checks if item.get("status") == "unknown"]
+        notes = []
+        if failed:
+            notes.append("FAIL: " + ",".join(failed))
+        if unknown:
+            notes.append("UNKNOWN: " + ",".join(unknown))
+        if radio.get("error"):
+            notes.append(str(radio["error"]))
+        rows.append(
+            {
+                "USB": " ".join(
+                    value
+                    for value in (
+                        str(radio.get("usb_bus_device") or ""),
+                        str(radio.get("usb_sysfs_path") or ""),
+                    )
+                    if value
+                ),
+                "SERIAL": str(radio.get("serial") or "<blank>"),
+                "FW": str(radio.get("firmware_version") or "unknown"),
+                "PHY": str(radio.get("phy_model") or "unknown"),
+                "METADATA": (
+                    "yes"
+                    if radio.get("metadata_enabled") is True
+                    else "no"
+                    if radio.get("metadata_enabled") is False
+                    else "unknown"
+                ),
+                "RESULT": str(radio.get("overall") or "unknown").upper(),
+                "DETAILS": "; ".join(notes) or "all observable checks passed",
+            }
+        )
+    return _text_table(rows, ("USB", "SERIAL", "FW", "PHY", "METADATA", "RESULT", "DETAILS"))
+
+
+def _text_table(rows: list[dict[str, str]], columns: tuple[str, ...]) -> str:
+    widths = {
+        column: max([len(column), *(len(row.get(column, "")) for row in rows)])
+        for column in columns
+    }
+    header = "  ".join(column.ljust(widths[column]) for column in columns)
+    separator = "  ".join("-" * widths[column] for column in columns)
+    body = [
+        "  ".join(row.get(column, "").ljust(widths[column]) for column in columns) for row in rows
+    ]
+    return "\n".join((header, separator, *body))
 
 
 @settings_app.command("get")
@@ -838,16 +1136,219 @@ def firmware_receipt_list(ctx: typer.Context) -> None:
 
 
 @firmware_app.command("reconcile")
-def firmware_reconcile(
-    ctx: typer.Context, receipt_id: str = typer.Argument(...)
-) -> None:
+def firmware_reconcile(ctx: typer.Context, receipt_id: str = typer.Argument(...)) -> None:
     """Read-only re-attest an uncertain firmware attempt; never retry it."""
 
-    _emit(
-        _api(ctx).request(
-            "POST", f"firmware/receipts/{receipt_id}/reconcile", json_body={}
-        )
+    _emit(_api(ctx).request("POST", f"firmware/receipts/{receipt_id}/reconcile", json_body={}))
+
+
+@firmware_app.command("flash")
+def firmware_flash_usb(
+    image: Path = typer.Argument(...),  # noqa: B008
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ...,
+        "--usb-sysfs-path",
+        help="Exact direct runtime USB node for one serial-attested Pluto.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Perform the planned write; omission is a read-only dry run.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase FLASH <serial>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_BOOTSTRAP_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for durable standalone flash receipts.",
+    ),
+    transport: str = typer.Option(
+        "mass-storage", "--transport", help="Execution transport: mass-storage or ssh."
+    ),
+    ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None, "--ssh-known-hosts-file", help="Pinned mode-private known_hosts for bound SSH."
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None, "--ssh-password-file", help="Optional mode-private password file; otherwise prompt."
+    ),
+) -> None:
+    """Flash canonical v5 onto one serial-attested local USB Pluto."""
+
+    _standalone_usb_flash(
+        image,
+        usb_sysfs_path,
+        execute=execute,
+        confirmation=confirmation,
+        receipt_directory=receipt_directory,
+        force_blank_serial=False,
+        transport=transport,
+        ssh_known_hosts_file=ssh_known_hosts_file,
+        ssh_password_file=ssh_password_file,
     )
+
+
+@firmware_app.command("bootstrap-usb")
+@firmware_app.command("force-flash-usb")
+@firmware_app.command("force-flash")
+def firmware_force_flash_usb(
+    image: Path = typer.Argument(...),  # noqa: B008
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ...,
+        "--usb-sysfs-path",
+        help="Exact direct runtime USB node for one blank-serial Pluto.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Perform the planned write; omission is a read-only dry run.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase BOOTSTRAP <usb-port>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_BOOTSTRAP_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for durable bootstrap receipts.",
+    ),
+    transport: str = typer.Option(
+        "mass-storage", "--transport", help="Execution transport: mass-storage or ssh."
+    ),
+    ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None, "--ssh-known-hosts-file", help="Pinned mode-private known_hosts for bound SSH."
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None, "--ssh-password-file", help="Optional mode-private password file; otherwise prompt."
+    ),
+) -> None:
+    """Bootstrap canonical firmware onto one path-bound blank-serial Pluto."""
+
+    _standalone_usb_flash(
+        image,
+        usb_sysfs_path,
+        execute=execute,
+        confirmation=confirmation,
+        receipt_directory=receipt_directory,
+        force_blank_serial=True,
+        transport=transport,
+        ssh_known_hosts_file=ssh_known_hosts_file,
+        ssh_password_file=ssh_password_file,
+    )
+
+
+def _standalone_usb_flash(
+    image: Path,
+    usb_sysfs_path: Path,
+    *,
+    execute: bool,
+    confirmation: str | None,
+    receipt_directory: Path,
+    force_blank_serial: bool,
+    transport: str,
+    ssh_known_hosts_file: Path | None,
+    ssh_password_file: Path | None,
+) -> None:
+    """Plan or execute one canonical local USB firmware operation."""
+
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapFirmwareError,
+        BoundSshBootstrapTransport,
+        execute_usb_flash_plan,
+        execute_usb_flash_plan_ssh,
+        prepare_usb_flash_plan,
+    )
+
+    normalized_transport = transport.strip().lower()
+    if normalized_transport not in {"mass-storage", "ssh"}:
+        _fail(
+            "invalid_standalone_flash_transport",
+            "--transport must be mass-storage or ssh",
+            2,
+        )
+    if normalized_transport == "mass-storage" and (
+        ssh_known_hosts_file is not None or ssh_password_file is not None
+    ):
+        _fail(
+            "incompatible_standalone_flash_options",
+            "SSH credential options require --transport ssh",
+            2,
+        )
+
+    try:
+        plan, frm = prepare_usb_flash_plan(
+            image,
+            usb_sysfs_path,
+            force_blank_serial=force_blank_serial,
+        )
+        if not execute:
+            _emit(
+                {
+                    "mode": "dry_run",
+                    "will_write": False,
+                    "plan": asdict(plan),
+                    "next_command": (
+                        "repeat with --execute and "
+                        f"--confirm {json.dumps(plan.confirmation_phrase)}"
+                    ),
+                }
+            )
+            return
+        if confirmation is None:
+            _fail(
+                "bootstrap_confirmation_required",
+                f"--execute requires --confirm {plan.confirmation_phrase!r}",
+                2,
+            )
+        if normalized_transport == "mass-storage":
+            result = execute_usb_flash_plan(
+                plan,
+                frm,
+                confirmation=confirmation,
+                receipt_directory=receipt_directory.expanduser().resolve(),
+            )
+        else:
+            if ssh_known_hosts_file is None:
+                _fail(
+                    "ssh_known_hosts_required",
+                    "--transport ssh requires --ssh-known-hosts-file",
+                    2,
+                )
+            if ssh_password_file is None:
+                password = typer.prompt("Radio SSH password", hide_input=True)
+            else:
+                try:
+                    password = (
+                        _read_private_file_bytes(
+                            ssh_password_file,
+                            label="radio SSH password",
+                            maximum_bytes=4096,
+                        )
+                        .decode("utf-8")
+                        .strip()
+                    )
+                except UnicodeDecodeError:
+                    _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
+            ssh_transport = BoundSshBootstrapTransport(
+                interface=plan.usb_interface,
+                password=password,
+                known_hosts_file=ssh_known_hosts_file.expanduser().resolve(),
+            )
+            result = execute_usb_flash_plan_ssh(
+                plan,
+                frm,
+                confirmation=confirmation,
+                receipt_directory=receipt_directory.expanduser().resolve(),
+                transport=ssh_transport,
+            )
+    except (BootstrapFirmwareError, ValueError) as error:
+        _fail("bootstrap_firmware_failed", str(error), 4)
+    _emit(asdict(result))
+    if result.outcome != "success":
+        raise typer.Exit(5)
 
 
 @setup_app.command("status")
@@ -1225,8 +1726,7 @@ def serve(
         _fail("no_radios", "no fake radios requested and no hardware radios discovered", 2)
 
     ssh_enrollments = tuple(
-        _read_ssh_firmware_enrollment(path)
-        for path in (ssh_firmware_enrollment or [])
+        _read_ssh_firmware_enrollment(path) for path in (ssh_firmware_enrollment or [])
     )
     if ssh_enrollments and admin_policy is None:
         _fail(
@@ -1301,9 +1801,7 @@ def serve(
                 2,
             )
         matches = [
-            device.identity
-            for device in devices
-            if device.identity.serial == selected_serial
+            device.identity for device in devices if device.identity.serial == selected_serial
         ]
         if len(matches) != 1:
             _fail(
@@ -1454,8 +1952,7 @@ def serve(
                 initial_attestation = transport.attest()
                 if (
                     initial_attestation.serial != enrollment.serial
-                    or initial_attestation.active_firmware
-                    != radio_identity.firmware_version
+                    or initial_attestation.active_firmware != radio_identity.firmware_version
                 ):
                     raise ValueError(
                         "initial pinned-SSH identity does not match managed network-IIO state"
@@ -1518,8 +2015,7 @@ def serve(
                             observed.serial == enrolled_serial
                             and observed.transport is Transport.IIO_IP
                             and observed.uri == f"ip:{enrolled_host}"
-                            and observed.firmware_version
-                            == CANONICAL_POLICY.device_firmware
+                            and observed.firmware_version == CANONICAL_POLICY.device_firmware
                         )
                     except Exception:
                         return False
@@ -1548,11 +2044,7 @@ def serve(
                     FirmwareManager(
                         staging_directory=(state_root / "firmware" / "staging").absolute(),
                         receipt_directory=(
-                            state_root
-                            / "firmware"
-                            / "receipts"
-                            / "ssh_frm"
-                            / enrollment.serial
+                            state_root / "firmware" / "receipts" / "ssh_frm" / enrollment.serial
                         ).absolute(),
                         identity_probe=ip_executor.identity_probe,
                         executor=ip_executor,
@@ -1569,10 +2061,7 @@ def serve(
                         ),
                         backend=transport,
                         receipt_directory=(
-                            state_root
-                            / "network-config"
-                            / "receipts"
-                            / enrollment.serial
+                            state_root / "network-config" / "receipts" / enrollment.serial
                         ).absolute(),
                     ),
                 )

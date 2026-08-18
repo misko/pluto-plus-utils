@@ -1,8 +1,9 @@
 # Pluto+ Utils
 
-Standalone control, capture, analysis, scanning, firmware, and web tooling for
-one or more Pluto+ radios. `plutod` is the sole hardware owner; both the `pluto`
-CLI and embedded browser UI use its versioned API.
+Standalone discovery plus coordinated control, capture, analysis, scanning,
+firmware, and web tooling for one or more Pluto+ radios. `pluto radio inventory`
+runs directly on the host; stateful control commands and the embedded browser UI
+use `plutod` as the sole hardware owner.
 
 ## Quick start
 
@@ -59,12 +60,16 @@ streamed until their serial is explicitly promoted at daemon startup.
 
 ### Full radio inventory table
 
-`radio inventory` prints a fresh correlation of the daemon host's USB/sysfs
-topology and every managed or startup-discovered network radio:
+`radio inventory` is daemon-independent by default and reads the local USB/sysfs
+topology without opening a radio. Network discovery is explicit, bounded, and
+read-only:
 
 ```bash
 uv run pluto radio inventory
+uv run pluto radio inventory --network
+uv run pluto radio inventory --network-cidr 192.168.1.0/24
 uv run pluto radio inventory --format json
+uv run pluto radio inventory --daemon
 ```
 
 The default table includes the complete serial, classification, managed state,
@@ -73,10 +78,54 @@ terminal, USB-network interface and host IP, mass-storage node, model, and any
 identity warning. Unique serials are the only correlation key. Blank or duplicate
 USB serials remain separate and are marked ambiguous rather than guessed.
 
-USB topology is read fresh on every command. “Network” covers radios already known
-to `plutod`; start the daemon with bounded `--discover-iio-network CIDR` options when
-the table should include passive LAN inventory beyond explicitly configured
-`--iio-ip` targets. The command never opens an unmanaged radio or changes hardware.
+USB topology is read fresh on every command. `--network` scans private, shared, and
+link-local IPv4 networks directly attached to the host, clipping every automatic
+range to at most the host's `/24`; `--network-cidr` selects repeatable exact ranges.
+Automatic LAN discovery excludes USB-gadget interfaces because multiple attached
+Plutos commonly share `192.168.2.1`; those devices are already listed from sysfs.
+The aggregate discovery safety limit is 4,096 hosts. Network candidates must pass
+serial, model, firmware, PHY, and paired-RX IIOD metadata attestation. Use `--daemon`
+when you specifically want managed/discovered daemon state correlated into the
+table. Standalone discovery never tunes, captures, or writes radio state and does
+not require native libiio.
+
+### Standalone USB/IP speed ladder
+
+`radio ladder` opens one exact radio directly and does not require `plutod`. It
+uses ordinary standard-libiio paired-RX buffers, never enables TX, and restores
+the original RX settings before returning. USB targets are serial numbers; IP
+targets are literal IPv4 addresses, with an exact expected serial strongly
+recommended:
+
+```bash
+uv run pluto radio ladder 104000b29905000e17000800065934759d --transport usb
+uv run pluto radio ladder 192.168.1.15 --transport ip \
+  --expect-serial 104000b29905000e17000800065934759d
+uv run pluto radio ladder 192.168.1.15 --transport ip \
+  --rates 1M,2M,3M,5M --frames 12 --samples 262144 \
+  --kernel-buffers 8 --format json
+```
+
+The default ladder is `1M,1.5M,2M,2.5M,3M,5M,10M,20M,30M`. The table reports
+offered wire payload, achieved MB/s and MB/min, effective sample rate, delivery
+fraction, and per-frame latency. A `kept pace` result means observed host delivery
+was at least 90% of the configured sample rate. It is deliberately not described
+as gapless: ordinary libiio buffers lack the FPGA sequence metadata needed to
+prove continuity. Stop any daemon or other process that owns the selected radio
+before running a direct ladder. The ladder explicitly configures 8 RX kernel
+buffers by default; use `--kernel-buffers` to compare another bounded count.
+
+`pluto doctor` is also standalone by default. It reads fresh IIOD facts through
+each exact USB-gadget network interface and reports identity, Rev.C model,
+canonical v5 firmware, AD9361 PHY, paired-RX devices, metadata, and facts that
+remain unprovable without the authenticated setup inspector:
+
+```bash
+uv run pluto doctor
+uv run pluto doctor --usb-sysfs-path /sys/bus/usb/devices/3-11 --format json
+uv run pluto doctor MANAGED_RADIO_ID  # explicitly uses plutod
+uv run pluto doctor --daemon          # all daemon-managed radios
+```
 
 Loopback is the safe default. Setup and firmware mutations have a separately configured
 bearer-token and strict browser-Origin boundary, but ordinary tune/stream/capture routes
@@ -208,6 +257,70 @@ enumerator is a hardware deployment checkpoint, not an offline-safe default.
 Once that separately installed helper is listening on a protected Unix socket,
 compose the client boundary explicitly with
 `plutod --firmware-helper-socket /run/pluto-plus/firmware-helper.sock ...`.
+
+### Blank-serial USB bootstrap
+
+For a normal serial-attested local USB radio, `firmware flash` provides a
+standalone preview/execute flow and requires the exact `FLASH <serial>` phrase:
+
+```bash
+uv run pluto firmware flash /absolute/path/to/qualified-pluto.dfu \
+  --usb-sysfs-path /sys/bus/usb/devices/3-8
+uv run pluto firmware flash /absolute/path/to/qualified-pluto.dfu \
+  --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --execute --confirm 'FLASH EXACT_SERIAL'
+```
+
+`firmware force-flash` (aliases `bootstrap-usb` and `force-flash-usb`) is an exceptional,
+daemon-independent recovery command for a directly attached Pluto whose USB and
+IIOD serials are both blank. It is not a generic validation bypass: it accepts
+only the exact hardware-qualified canonical DFU digest, requires one explicit
+direct USB sysfs port, verifies the live Rev.C model and USB network/storage
+topology, and refuses a radio that already has a stable serial.
+
+Run it once without `--execute` to get a read-only plan:
+
+```bash
+uv run pluto firmware force-flash /absolute/path/to/qualified-pluto.dfu \
+  --usb-sysfs-path /sys/bus/usb/devices/3-11
+```
+
+Review every path, hash, and the generated confirmation phrase. Execute that
+same target only by adding both flags printed by the preview:
+
+```bash
+uv run pluto firmware force-flash /absolute/path/to/qualified-pluto.dfu \
+  --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --execute --confirm 'BOOTSTRAP 3-11'
+```
+
+Execution re-runs all preconditions, converts the DFU deterministically, mounts
+the correlated updater partition through UDisks, writes only `pluto.frm`, syncs,
+unmounts, ejects, and then requires the same physical port to return with
+matching USB/IIOD identity plus the expected firmware and metadata. A force-flashed
+unit whose hardware cannot derive a serial may remain consistently blank; the
+firmware result can still be verified, but `doctor` keeps identity failed. Do not
+unplug the radio during the update. A failure after `pluto.frm` is written is recorded as
+`outcome: unknown`; do not retry it until the radio and durable receipt have
+been reconciled.
+
+If the host UDisks service is unavailable, the same local command can use the
+radio's fixed updater over SSH while remaining bound to the selected USB network
+interface. The radio host key must already be pinned in a private `known_hosts`
+file; there is no trust-on-first-use during execution. Omit the password-file
+option to receive a hidden prompt:
+
+```bash
+uv run pluto firmware force-flash /absolute/path/to/qualified-pluto.dfu \
+  --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --transport ssh --ssh-known-hosts-file /private/radio.known_hosts \
+  --execute --confirm 'BOOTSTRAP 3-11'
+```
+
+This path verifies the staged FRM hash, requires an unambiguous updater `Done`,
+independently hashes the exact FIT bytes in `mtd3`, removes the stage, reboots,
+and retries post-return IIOD attestation while services start. It never exposes
+an arbitrary remote command or updater path.
 
 ### Experimental pinned-SSH radio administration
 

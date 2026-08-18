@@ -1,0 +1,293 @@
+"""Daemon-independent, read-only diagnostics for locally attached Pluto radios."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
+
+from pluto_plus.bootstrap_firmware import (
+    BOOTSTRAP_POLICY,
+    BootstrapFirmwareError,
+    inspect_bound_iiod,
+)
+from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
+
+CheckStatus = Literal["pass", "fail", "unknown"]
+LOCAL_POLICY = BOOTSTRAP_POLICY
+
+
+@dataclass(frozen=True, slots=True)
+class LocalDoctorCheck:
+    code: str
+    status: CheckStatus
+    actual: object
+    expected: object
+    summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class LocalDoctorRadio:
+    usb_sysfs_path: str
+    usb_bus_device: str | None
+    serial: str | None
+    usb_interface: str | None
+    storage_partition: str | None
+    firmware_version: str | None
+    model: str | None
+    phy_model: str | None
+    metadata_enabled: bool | None
+    overall: CheckStatus
+    checks: tuple[LocalDoctorCheck, ...]
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LocalDoctorReport:
+    generated_at: str
+    canonical_firmware: str
+    canonical_image_sha256: str
+    radios: tuple[LocalDoctorRadio, ...]
+
+
+def diagnose_local_usb_radios(
+    usb_sysfs_path: Path | None = None,
+    *,
+    devices: tuple[LocalUsbPluto, ...] | None = None,
+) -> LocalDoctorReport:
+    """Freshly inspect each selected USB Pluto without opening an IIO buffer."""
+
+    selected = scan_local_usb_plutos() if devices is None else devices
+    if usb_sysfs_path is not None:
+        requested = str(usb_sysfs_path)
+        selected = tuple(device for device in selected if device.usb_path == requested)
+        if len(selected) != 1:
+            raise ValueError(
+                f"expected exactly one local Pluto at {usb_sysfs_path}, found {len(selected)}"
+            )
+    radios = tuple(_diagnose_radio(device) for device in selected)
+    return LocalDoctorReport(
+        generated_at=datetime.now(UTC).isoformat(),
+        canonical_firmware=LOCAL_POLICY.device_firmware,
+        canonical_image_sha256=LOCAL_POLICY.asset_sha256,
+        radios=radios,
+    )
+
+
+def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
+    checks: list[LocalDoctorCheck] = []
+    usb_bus_device = (
+        f"{device.bus_number:03d}:{device.device_number:03d}"
+        if device.bus_number is not None and device.device_number is not None
+        else None
+    )
+    _check(
+        checks,
+        "identity.usb_serial",
+        "pass" if device.serial else "fail",
+        device.serial,
+        "one non-empty stable serial",
+        "USB serial is stable" if device.serial else "USB serial is blank",
+    )
+    interface = (
+        device.host_network_interfaces[0].name if len(device.host_network_interfaces) == 1 else None
+    )
+    _check(
+        checks,
+        "transport.usb_network",
+        "pass" if interface else "fail",
+        tuple(item.name for item in device.host_network_interfaces),
+        "exactly one USB network interface",
+        "USB network transport is unambiguous"
+        if interface
+        else "USB network transport is missing or ambiguous",
+    )
+    storage = device.storage_devices[0] if len(device.storage_devices) == 1 else None
+    _check(
+        checks,
+        "transport.updater_storage",
+        "pass" if storage else "fail",
+        device.storage_devices,
+        "exactly one updater partition",
+        "Updater storage is unambiguous" if storage else "Updater storage is missing or ambiguous",
+    )
+    if interface is None:
+        _unknown_facts(checks)
+        return _radio_result(
+            device,
+            usb_bus_device,
+            interface,
+            storage,
+            checks,
+            error="cannot inspect IIOD without one exact USB network interface",
+        )
+    try:
+        facts = inspect_bound_iiod(interface)
+    except BootstrapFirmwareError as error:
+        _unknown_facts(checks)
+        return _radio_result(
+            device,
+            usb_bus_device,
+            interface,
+            storage,
+            checks,
+            error=str(error),
+        )
+
+    live_serial = str(facts.get("hw_serial") or "").strip() or None
+    identity_ok = device.serial is not None and live_serial == device.serial
+    _check(
+        checks,
+        "identity.iio_serial",
+        "pass" if identity_ok else "fail",
+        live_serial,
+        device.serial or "same non-empty USB serial",
+        "USB and IIOD serials match"
+        if identity_ok
+        else "IIOD identity is blank or does not match USB",
+    )
+    model = str(facts.get("hw_model") or "").strip() or None
+    model_ok = model is not None and "plutosdr rev.c" in model.lower()
+    _check(
+        checks,
+        "hardware.rev_c",
+        "pass" if model_ok else "fail",
+        model,
+        "PlutoSDR Rev.C",
+        "Live board model is Rev.C" if model_ok else "Live board model is not attested Rev.C",
+    )
+    firmware = str(facts.get("fw_version") or "").strip() or None
+    firmware_ok = firmware == LOCAL_POLICY.device_firmware
+    _check(
+        checks,
+        "firmware.canonical_v5",
+        "pass" if firmware_ok else "fail",
+        firmware,
+        LOCAL_POLICY.device_firmware,
+        "Active firmware is canonical v5"
+        if firmware_ok
+        else "Active firmware does not match canonical v5",
+    )
+    phy = str(facts.get("ad9361-phy,model") or "").strip() or None
+    _check(
+        checks,
+        "rf.phy_model",
+        "pass" if phy == "ad9361" else "fail",
+        phy,
+        "ad9361",
+        "Live PHY is AD9361" if phy == "ad9361" else "Live PHY is not AD9361",
+    )
+    metadata = str(facts.get("iio,buffer-metadata") or "").strip() == "1"
+    _check(
+        checks,
+        "transport.buffer_metadata",
+        "pass" if metadata else "fail",
+        metadata,
+        True,
+        "Continuous buffer metadata is enabled"
+        if metadata
+        else "Continuous buffer metadata is unavailable",
+    )
+    raw_device_names = facts.get("device_names", ())
+    device_names = (
+        {str(value) for value in raw_device_names}
+        if isinstance(raw_device_names, (tuple, list, set, frozenset))
+        else set()
+    )
+    paired_rx = {"ad9361-phy", "cf-ad9361-lpc"} <= device_names
+    _check(
+        checks,
+        "rf.paired_rx_device",
+        "pass" if paired_rx else "fail",
+        tuple(sorted(device_names)),
+        ("ad9361-phy", "cf-ad9361-lpc"),
+        "Paired-RX IIO devices are present"
+        if paired_rx
+        else "Paired-RX IIO devices are incomplete",
+    )
+    _check(
+        checks,
+        "firmware.qspi_boot_provenance",
+        "unknown",
+        None,
+        "fresh trusted persistent-boot evidence",
+        "Standalone USB IIOD inspection cannot prove QSPI boot provenance",
+    )
+    _check(
+        checks,
+        "setup.uboot_ad9361_2r2t",
+        "unknown",
+        None,
+        "attr_name=compatible, attr_val=ad9361, compatible=ad9361, mode=2r2t",
+        "Persistent U-Boot values require the authenticated setup inspector",
+    )
+    return _radio_result(
+        device,
+        usb_bus_device,
+        interface,
+        storage,
+        checks,
+        firmware=firmware,
+        model=model,
+        phy=phy,
+        metadata=metadata,
+    )
+
+
+def _unknown_facts(checks: list[LocalDoctorCheck]) -> None:
+    for code, expected in (
+        ("identity.iio_serial", "same non-empty USB serial"),
+        ("hardware.rev_c", "PlutoSDR Rev.C"),
+        ("firmware.canonical_v5", LOCAL_POLICY.device_firmware),
+        ("rf.phy_model", "ad9361"),
+        ("transport.buffer_metadata", True),
+        ("rf.paired_rx_device", ("ad9361-phy", "cf-ad9361-lpc")),
+        ("firmware.qspi_boot_provenance", "fresh trusted persistent-boot evidence"),
+        ("setup.uboot_ad9361_2r2t", "canonical persistent U-Boot tuple"),
+    ):
+        _check(checks, code, "unknown", None, expected, "Fresh fact is unavailable")
+
+
+def _check(
+    checks: list[LocalDoctorCheck],
+    code: str,
+    status: CheckStatus,
+    actual: object,
+    expected: object,
+    summary: str,
+) -> None:
+    checks.append(LocalDoctorCheck(code, status, actual, expected, summary))
+
+
+def _radio_result(
+    device: LocalUsbPluto,
+    usb_bus_device: str | None,
+    interface: str | None,
+    storage: str | None,
+    checks: list[LocalDoctorCheck],
+    *,
+    firmware: str | None = None,
+    model: str | None = None,
+    phy: str | None = None,
+    metadata: bool | None = None,
+    error: str | None = None,
+) -> LocalDoctorRadio:
+    statuses = {check.status for check in checks}
+    overall: CheckStatus = (
+        "fail" if "fail" in statuses else "unknown" if "unknown" in statuses else "pass"
+    )
+    return LocalDoctorRadio(
+        usb_sysfs_path=device.usb_path,
+        usb_bus_device=usb_bus_device,
+        serial=device.serial,
+        usb_interface=interface,
+        storage_partition=storage,
+        firmware_version=firmware,
+        model=model,
+        phy_model=phy,
+        metadata_enabled=metadata,
+        overall=overall,
+        checks=tuple(checks),
+        error=error,
+    )

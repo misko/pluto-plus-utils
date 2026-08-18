@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from pluto_plus.hardware.discovery import discover_devices, discover_network_iio
+from pluto_plus.hardware.discovery import (
+    _facts_from_context_xml,
+    discover_devices,
+    discover_network_iio,
+)
 
 
 def test_discovery_builds_serial_pinned_devices(tmp_path) -> None:
@@ -57,6 +61,41 @@ def test_network_discovery_attests_and_sorts_read_only_pluto_contexts() -> None:
     promoted = observations[0].device()
     assert promoted.identity.radio_id == "SERIAL_A"
     assert promoted.identity.uri == "ip:192.0.2.4"
+
+
+def test_network_context_xml_inventory_needs_no_native_libiio() -> None:
+    facts = _facts_from_context_xml(
+        b"""<?xml version="1.0"?>
+        <context name="local">
+          <context-attribute name="hw_serial" value="SERIAL_A" />
+          <context-attribute name="hw_model" value="Analog Devices PlutoSDR Rev.C" />
+          <context-attribute name="fw_version" value="v5" />
+          <context-attribute name="ad9361-phy,model" value="ad9361" />
+          <device id="iio:device0" name="ad9361-phy" />
+          <device id="iio:device1" name="cf-ad9361-lpc" />
+        </context>"""
+    )
+
+    assert facts == {
+        "hw_serial": "SERIAL_A",
+        "hw_model": "Analog Devices PlutoSDR Rev.C",
+        "fw_version": "v5",
+        "ad9361-phy,model": "ad9361",
+        "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"<not-context />",
+        b"<context>",
+        b'<!DOCTYPE context [<!ENTITY x "unsafe">]><context>&x;</context>',
+    ],
+)
+def test_network_context_xml_rejects_malformed_or_entity_input(payload: bytes) -> None:
+    with pytest.raises(ValueError):
+        _facts_from_context_xml(payload)
 
 
 def test_network_discovery_is_bounded_and_rejects_duplicate_serials() -> None:

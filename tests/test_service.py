@@ -167,6 +167,32 @@ def test_only_one_stream_can_own_a_radio(tmp_path) -> None:
         service.close()
 
 
+def test_page_release_stops_only_its_exact_nonpersistent_preview(tmp_path) -> None:
+    service = PlutoService(tmp_path, (FakeRadioDevice("fake-a", realtime=True),))
+    try:
+        preview = service.start_stream("fake-a", StreamRequest(block_size=1024, fft_size=1024))
+        assert service.release_preview("fake-a", "stale-page-job") is False
+        assert service.get_radio("fake-a").state is RadioState.STREAMING
+        assert service.release_preview("fake-a", preview.job_id) is True
+        assert service.get_job(preview.job_id).state is JobState.CANCELED
+        assert service.get_radio("fake-a").state is RadioState.READY
+
+        capture = service.start_stream(
+            "fake-a",
+            StreamRequest(
+                duration_s=2,
+                block_size=1024,
+                fft_size=1024,
+                persist=True,
+            ),
+        )
+        assert service.release_preview("fake-a", capture.job_id) is False
+        assert service.get_radio("fake-a").state is RadioState.STREAMING
+        service.stop_stream("fake-a")
+    finally:
+        service.close()
+
+
 def test_preview_can_tune_but_persistent_capture_locks_frequency_axes(tmp_path) -> None:
     service = PlutoService(tmp_path, (FakeRadioDevice("fake-a", realtime=True),))
     try:

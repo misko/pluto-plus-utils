@@ -6,6 +6,7 @@ from pathlib import Path
 from pluto_plus.inventory import (
     LocalUsbPluto,
     build_radio_inventory,
+    local_ipv4_discovery_networks,
     scan_local_usb_plutos,
 )
 from pluto_plus.models import (
@@ -24,6 +25,7 @@ def _attribute(device: Path, name: str, value: str) -> None:
 
 def _usb_device(
     root: Path,
+    udev_root: Path,
     name: str,
     *,
     serial: str,
@@ -33,17 +35,23 @@ def _usb_device(
 ) -> Path:
     device = root / name
     device.mkdir(parents=True)
-    for key, value in {
-        "idVendor": "0456",
-        "idProduct": "b673",
-        "serial": serial,
-        "product": product,
-        "busnum": str(bus),
-        "devnum": str(device_number),
-        "speed": "480",
-        "bNumInterfaces": "7" if "+" in product else "6",
-    }.items():
-        _attribute(device, key, value)
+    minor = bus * 100 + device_number
+    (device / "uevent").write_text(
+        f"MAJOR=189\nMINOR={minor}\nDEVTYPE=usb_device\nPRODUCT=456/b673/515\n"
+        f"BUSNUM={bus:03d}\nDEVNUM={device_number:03d}\n"
+    )
+    udev_root.mkdir(parents=True, exist_ok=True)
+    interfaces = ":0202ff:0a0000:080650:020201:020000:"
+    if "+" in product:
+        interfaces += "ff0000:"
+    encoded_product = product.replace(" ", "\\x20")
+    properties = [
+        f"E:ID_MODEL_ENC={encoded_product}",
+        f"E:ID_USB_INTERFACES={interfaces}",
+    ]
+    if serial:
+        properties.append(f"E:ID_SERIAL_SHORT={serial}")
+    (udev_root / f"c189:{minor}").write_text("\n".join(properties) + "\n")
     return device
 
 
@@ -90,8 +98,10 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
     net_root = tmp_path / "net"
     tty_root = tmp_path / "tty"
     block_root = tmp_path / "block"
+    udev_root = tmp_path / "udev"
     plus = _usb_device(
         usb_root,
+        udev_root,
         "3-8",
         serial="SERIAL_PLUS",
         product="PlutoSDR+ with timestamp support",
@@ -110,6 +120,7 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
     _class_device(block_root, "sdb1", storage_partition, device_link=False)
     _usb_device(
         usb_root,
+        udev_root,
         "5-1",
         serial="",
         product="PlutoSDR (ADALM-PLUTO)",
@@ -118,14 +129,14 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
     )
     unrelated = usb_root / "not-pluto"
     unrelated.mkdir()
-    _attribute(unrelated, "idVendor", "1234")
-    _attribute(unrelated, "idProduct", "5678")
+    _attribute(unrelated, "uevent", "PRODUCT=1234/5678/1")
 
     devices = scan_local_usb_plutos(
         usb_root,
         net_root=net_root,
         tty_root=tty_root,
         block_root=block_root,
+        udev_data_root=udev_root,
         ipv4_reader=lambda name: ("192.168.2.10",) if name == "enx001" else (),
     )
 
@@ -137,6 +148,48 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
     assert devices[0].terminal_devices == ("/dev/ttyACM0",)
     assert devices[0].storage_devices == ("/dev/sdb1",)
     assert devices[1].serial is None
+
+
+def test_sysfs_scan_rejects_stale_zero_address_usb_device(tmp_path: Path) -> None:
+    usb_root = tmp_path / "usb"
+    udev_root = tmp_path / "udev"
+    _usb_device(
+        usb_root,
+        udev_root,
+        "5-1",
+        serial="",
+        product="PlutoSDR (ADALM-PLUTO)",
+        bus=5,
+        device_number=0,
+    )
+
+    assert scan_local_usb_plutos(usb_root, udev_data_root=udev_root) == ()
+
+
+def test_automatic_networks_are_private_local_and_never_broader_than_24(
+    tmp_path: Path,
+) -> None:
+    net_root = tmp_path / "net"
+    for name in ("lo", "eth0", "eth1", "tailscale0", "public0", "invalid0"):
+        (net_root / name).mkdir(parents=True)
+    values = {
+        "eth0": ("192.168.1.142", "255.255.0.0"),
+        "eth1": ("192.168.2.130", "255.255.255.128"),
+        "tailscale0": ("100.105.69.63", "255.255.255.255"),
+        "public0": ("8.8.8.8", "255.255.255.0"),
+        "invalid0": ("not-an-address", "255.255.255.0"),
+    }
+
+    networks = local_ipv4_discovery_networks(
+        net_root,
+        interface_reader=lambda name: values.get(name),
+        exclude_interfaces=("eth1",),
+    )
+
+    assert networks == (
+        "100.105.69.63/32",
+        "192.168.1.0/24",
+    )
 
 
 def test_inventory_merges_unique_usb_and_network_identity_and_keeps_ambiguous() -> None:
@@ -201,9 +254,7 @@ def test_duplicate_usb_serials_are_never_collapsed_into_daemon_identity() -> Non
         speed_mbps=480,
         interface_count=7,
     )
-    second = first.model_copy(
-        update={"usb_path": "/sys/bus/usb/devices/5-2", "bus_number": 5}
-    )
+    second = first.model_copy(update={"usb_path": "/sys/bus/usb/devices/5-2", "bus_number": 5})
     report = build_radio_inventory(
         (
             _snapshot(

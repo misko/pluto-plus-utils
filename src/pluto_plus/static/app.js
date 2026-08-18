@@ -14,7 +14,7 @@ const ui = Object.fromEntries(
   [
     "connection-dot", "connection-status", "refresh-radios", "radio-select", "radio-state",
     "radio-serial", "radio-transport", "radio-firmware", "radio-revision", "radio-activity",
-    "radio-error", "recover-radio", "settings-form", "settings-fieldset", "settings-revision", "center-frequency",
+    "radio-error", "recover-radio", "disconnect-radio", "settings-form", "settings-fieldset", "settings-revision", "center-frequency",
     "sample-rate", "bandwidth", "gain-mode", "gain-db", "settings-validation", "reset-settings",
     "requested-settings", "actual-settings", "fft-size", "start-preview", "stop-preview",
     "stream-dot", "stream-status", "spectrum-canvas", "spectrum-range", "waterfall-rx0",
@@ -52,6 +52,7 @@ const state = {
   socketReconnectTimer: null,
   socketReconnectAttempts: 0,
   streaming: false,
+  previewJobId: null,
   artifacts: [],
   analyzers: [],
   latestFrame: null,
@@ -356,6 +357,7 @@ async function loadSnapshot(radioId = ui["radio-select"].value) {
 
 function clearRadio() {
   state.snapshot = null;
+  state.previewJobId = null;
   state.settingsDirty = false;
   ["radio-state", "radio-serial", "radio-transport", "radio-firmware", "radio-revision"].forEach(
     (id) => setText(ui[id], null),
@@ -368,6 +370,7 @@ function clearRadio() {
   ui["scan-fieldset"].disabled = true;
   ui["stop-scan"].disabled = true;
   ui["recover-radio"].disabled = true;
+  ui["disconnect-radio"].disabled = true;
   ui["run-doctor"].disabled = true;
   setText(ui["run-doctor"], "Run doctor");
   ui["prepare-doctor-fix"].disabled = true;
@@ -404,6 +407,7 @@ function renderSnapshot(snapshot, populateForm = true) {
   ui["settings-fieldset"].disabled = !configurable;
   ui["capture-fieldset"].disabled = !ready;
   state.streaming = managed && snapshot.state === "streaming";
+  if (!state.streaming) state.previewJobId = null;
   state.scanning = managed && snapshot.state === "scanning";
   if (wasStreaming && !state.streaming && state.socket) disconnectWaterfall();
   if (state.streaming && !state.socket && !state.socketReconnectTimer) {
@@ -415,6 +419,7 @@ function renderSnapshot(snapshot, populateForm = true) {
   }
   ui["start-preview"].disabled = !ready;
   ui["stop-preview"].disabled = !state.streaming;
+  ui["disconnect-radio"].disabled = !state.streaming;
   ui["scan-fieldset"].disabled = !(ready || state.scanning);
   ui["start-scan"].disabled = !ready;
   ui["stop-scan"].disabled = !state.scanning;
@@ -1468,6 +1473,7 @@ async function startPreview() {
       body: JSON.stringify(streamPayload(false)),
     });
     state.streaming = true;
+    state.previewJobId = job.job_id;
     setStreamStatus(true, `Preview · ${shortId(job.job_id)}`);
     ui["start-preview"].disabled = true;
     ui["stop-preview"].disabled = false;
@@ -1479,18 +1485,53 @@ async function startPreview() {
 }
 
 async function stopPreview() {
+  await disconnectAndRelease();
+}
+
+async function disconnectAndRelease() {
   if (!state.snapshot) return;
   const radioId = state.snapshot.identity.radio_id;
+  const previewJobId = state.previewJobId;
   ui["stop-preview"].disabled = true;
+  ui["disconnect-radio"].disabled = true;
+  state.streaming = false;
+  state.previewJobId = null;
+  disconnectWaterfall();
   try {
-    await apiRequest(`${radioPath(radioId)}/streams/current`, { method: "DELETE" });
-    disconnectWaterfall();
-    state.streaming = false;
-    setStreamStatus(false, "Stopped");
+    if (previewJobId) {
+      await apiRequest(`${radioPath(radioId)}/streams/${encodeURIComponent(previewJobId)}/release`, {
+        method: "POST",
+      });
+    } else if (state.snapshot.state === "streaming") {
+      await apiRequest(`${radioPath(radioId)}/streams/current`, { method: "DELETE" });
+    }
+    setStreamStatus(false, "Disconnected · control released");
     await Promise.all([loadJobs(), loadArtifacts(), loadSnapshot(radioId)]);
   } catch (error) {
     toast(describeError(error), true);
     await loadSnapshot(radioId);
+  }
+}
+
+function releaseOwnedPreviewForPageExit() {
+  const radioId = state.snapshot?.identity?.radio_id;
+  const previewJobId = state.previewJobId;
+  if (!radioId || !previewJobId) {
+    disconnectWaterfall();
+    return;
+  }
+  state.previewJobId = null;
+  state.streaming = false;
+  disconnectWaterfall();
+  const path = `${API_ROOT}${radioPath(radioId)}/streams/${encodeURIComponent(previewJobId)}/release`;
+  let beaconAccepted = false;
+  try {
+    beaconAccepted = navigator.sendBeacon(path);
+  } catch (_error) {
+    beaconAccepted = false;
+  }
+  if (!beaconAccepted) {
+    void fetch(path, { method: "POST", keepalive: true }).catch(() => {});
   }
 }
 
@@ -1504,6 +1545,7 @@ async function startCapture(event) {
       method: "POST",
       body: JSON.stringify(streamPayload(true)),
     });
+    state.previewJobId = null;
     setText(ui["capture-message"], `Capture ${shortId(job.job_id)} started. It will stop at its configured bound.`);
     state.streaming = true;
     connectWaterfall(radioId);
@@ -1984,9 +2026,12 @@ async function runAnalysis(event) {
 function installEventHandlers() {
   ui["refresh-radios"].addEventListener("click", loadRadios);
   ui["recover-radio"].addEventListener("click", recoverRadio);
+  ui["disconnect-radio"].addEventListener("click", disconnectAndRelease);
   ui["radio-select"].addEventListener("change", async () => {
-    disconnectWaterfall();
+    if (state.previewJobId) await disconnectAndRelease();
+    else disconnectWaterfall();
     state.streaming = false;
+    state.previewJobId = null;
     state.settingsDirty = false;
     state.firmwarePlan = null;
     clearFirmwareUncertainty();
@@ -2066,8 +2111,9 @@ function installEventHandlers() {
     state.uncertainFirmwareReceipt = null;
     state.networkConfigPlan = null;
     ui["setup-admin-token"].value = "";
-    disconnectWaterfall();
+    releaseOwnedPreviewForPageExit();
   });
+  window.addEventListener("pagehide", releaseOwnedPreviewForPageExit);
 }
 
 async function initialize() {

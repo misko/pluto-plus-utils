@@ -258,6 +258,9 @@ class PlutoService:
     def stop_stream(self, radio_id: str) -> StreamJob:
         return self._controller(radio_id).stop_stream()
 
+    def release_preview(self, radio_id: str, job_id: str) -> bool:
+        return self._controller(radio_id).release_preview(job_id)
+
     def list_jobs(self, radio_id: str | None = None) -> list[StreamJob]:
         if radio_id is not None:
             return self._controller(radio_id).list_jobs()

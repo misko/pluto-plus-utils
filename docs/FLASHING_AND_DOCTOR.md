@@ -167,6 +167,31 @@ pluto --admin-token-file /private/admin.token firmware plan RADIO_ID IMAGE_ID --
 pluto --admin-token-file /private/admin.token firmware execute PLAN_ID --token 'ONE_TIME_TOKEN'
 ```
 
+For a serial-attested local USB radio, `firmware flash` is the standalone
+canonical-image workflow. It binds the USB and IIOD serials, physical sysfs
+path, updater partition, current firmware, and exact image hashes before asking
+for `FLASH <serial>` confirmation.
+
+For the narrower blank-serial recovery case, the standalone CLI has a
+daemon-independent `firmware force-flash` command. It accepts only the
+canonical qualified image hash and an exact direct USB sysfs path, defaults to
+a read-only plan, and refuses serial-attested radios. It never accepts an
+arbitrary target filename or validation override:
+
+```bash
+pluto firmware force-flash ./QUALIFIED.dfu \
+  --usb-sysfs-path /sys/bus/usb/devices/3-11
+pluto firmware force-flash ./QUALIFIED.dfu \
+  --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --execute --confirm 'BOOTSTRAP 3-11'
+```
+
+The second command writes only `pluto.frm` to the serial-correlated updater
+volume and records a durable local receipt. Once a stable serial exists, all
+subsequent firmware operations must use the normal serial-attested plan/token
+workflow. Never retry an `unknown` bootstrap receipt without read-only
+reconciliation.
+
 After the volatile checkpoint, repeat `plan` with `--mode persistent_qspi`. These
 commands fail closed unless the daemon has a separately configured privileged helper
 and an exact USB identity. The web Firmware panel uses precisely the same upload,

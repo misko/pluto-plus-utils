@@ -16,6 +16,15 @@ from pluto_plus.hardware.iio import (
 from pluto_plus.models import GainMode, RadioSettings, Transport
 
 
+class FakeRxAdc:
+    def __init__(self) -> None:
+        self.kernel_buffers_count = 4
+
+    def set_kernel_buffers_count(self, count: int) -> int:
+        self.kernel_buffers_count = count
+        return 0
+
+
 class FakeAd9361:
     def __init__(self, uri: str, serial: str = "SERIAL_A") -> None:
         self.uri = uri
@@ -42,6 +51,7 @@ class FakeAd9361:
         self.dds_scales = [0.5] * 8
         self.dds_enabled = [1] * 8
         self.destroy_count = 0
+        self._rxadc = FakeRxAdc()
 
     def rx_destroy_buffer(self) -> None:
         self.destroy_count += 1
@@ -121,6 +131,8 @@ def test_iio_adapter_applies_reads_back_and_captures_paired_rx() -> None:
         assert module.device.tx_hardwaregain_chan1 == -80.0
         assert module.device.dds_scales == [0.0] * 8
         assert module.device.dds_enabled == [0] * 8
+        radio.configure_kernel_buffers(8)
+        assert module.device._rxadc.kernel_buffers_count == 8
     finally:
         radio.close()
 
@@ -148,6 +160,13 @@ def test_iio_adapter_fails_closed_when_dds_mute_does_not_read_back() -> None:
 
 
 def test_sysfs_discovery_is_stable_and_filtered(tmp_path) -> None:
+    root_hub = tmp_path / "usb3"
+    root_hub.mkdir()
+    (root_hub / "idVendor").write_text("1d6b\n")
+    (root_hub / "idProduct").write_text("0002\n")
+    # Non-Pluto serial attributes must never be touched; some host controllers
+    # can block inside the kernel while rendering these descriptors.
+    (root_hub / "serial").write_bytes(b"\xff")
     pluto = tmp_path / "1-1"
     pluto.mkdir()
     (pluto / "idVendor").write_text("0456\n")

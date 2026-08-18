@@ -65,6 +65,7 @@ def test_ui_exposes_required_radio_settings_and_capture_controls() -> None:
         "radio-transport",
         "radio-firmware",
         "recover-radio",
+        "disconnect-radio",
         "requested-settings",
         "actual-settings",
         "settings-form",
@@ -92,6 +93,19 @@ def test_ui_exposes_required_radio_settings_and_capture_controls() -> None:
         "capture-duration",
         "capture-label",
     } <= parser.labels_for
+
+
+def test_ui_explicitly_releases_page_owned_preview_control() -> None:
+    html, javascript, _, parser = _assets()
+
+    assert "disconnect-radio" in parser.ids
+    assert "Disconnect &amp; release" in html
+    assert "releaseOwnedPreviewForPageExit" in javascript
+    assert 'window.addEventListener("pagehide", releaseOwnedPreviewForPageExit)' in javascript
+    assert "navigator.sendBeacon(path)" in javascript
+    assert 'fetch(path, { method: "POST", keepalive: true })' in javascript
+    assert "/streams/${encodeURIComponent(previewJobId)}/release" in javascript
+    assert 'ui["disconnect-radio"].addEventListener("click", disconnectAndRelease)' in javascript
 
 
 def test_ui_exposes_dual_rx_visualization_and_analysis_controls() -> None:

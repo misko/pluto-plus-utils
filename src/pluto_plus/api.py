@@ -512,6 +512,13 @@ def create_app(
         return service.stop_stream(radio_id)
 
     @router.post(
+        "/radios/{radio_id}/streams/{job_id}/release",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def release_preview(radio_id: str, job_id: str) -> None:
+        service.release_preview(radio_id, job_id)
+
+    @router.post(
         "/radios/{radio_id}/scans",
         response_model=ScanJob,
         status_code=status.HTTP_201_CREATED,
