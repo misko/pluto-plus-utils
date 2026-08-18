@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+import pluto_plus.bootstrap_firmware as bootstrap
+import pluto_plus.local_reboot as local_reboot
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.ip_firmware import UsbSshRouteObservation
 from pluto_plus.local_reboot import (
@@ -372,3 +374,44 @@ def test_rotated_ssh_key_is_not_trusted_and_exact_usb_verifier_can_reconcile(
     # The verifier owns the independent TX mute/readback, so rotated SSH is
     # never used again after it fails host-key authentication.
     assert transport.events[-1] == f"attest:{SERIAL}"
+
+
+def test_usb_return_accepts_equivalent_rev_c_models_from_ssh_and_iiod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan(tmp_path)
+    before = LocalRebootAttestation(
+        serial=SERIAL,
+        firmware="v6",
+        boot_id="before",
+        capabilities=LocalRebootCapabilities(
+            board_model="Analog Devices PlutoSDR Rev.C (Z7010/AD9363)",
+            phy_model="ad9361",
+            rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
+            tandem_agc=True,
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "inspect_bound_iiod",
+        lambda interface: {
+            "hw_serial": SERIAL,
+            "hw_model": "Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
+            "fw_version": "v6",
+            "ad9361-phy,model": "ad9361",
+            "device_names": ("cf-ad9361-lpc", "tandem-agc"),
+            "cf-ad9361-lpc,scan_channels": (
+                "voltage0",
+                "voltage1",
+                "voltage2",
+                "voltage3",
+            ),
+        },
+    )
+    muted: list[str] = []
+    monkeypatch.setattr(bootstrap, "mute_returned_radio", muted.append)
+
+    after = local_reboot.attest_and_mute_returned_usb(plan, before)
+
+    assert after.capabilities.board_model.endswith("(Z7010-AD9361)")
+    assert muted == [SERIAL]

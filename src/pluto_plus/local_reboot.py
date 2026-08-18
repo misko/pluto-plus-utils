@@ -418,10 +418,23 @@ def attest_and_mute_returned_usb(
             tandem_agc="tandem-agc" in names,
         ),
     )
-    if candidate.firmware != before.firmware or candidate.capabilities != before.capabilities:
+    if (
+        candidate.firmware != before.firmware
+        or not _is_plutosdr_rev_c(before.capabilities.board_model)
+        or not _is_plutosdr_rev_c(candidate.capabilities.board_model)
+        or candidate.capabilities.phy_model != before.capabilities.phy_model
+        or candidate.capabilities.rx_scan_channels != before.capabilities.rx_scan_channels
+        or candidate.capabilities.tandem_agc is not before.capabilities.tandem_agc
+    ):
         raise LocalRebootError("returned USB-IIO firmware or capabilities changed across reboot")
     mute_returned_radio(plan.serial)
     return candidate
+
+
+def _is_plutosdr_rev_c(model: str) -> bool:
+    """Match the stable board identity across device-tree and IIOD spellings."""
+
+    return "plutosdr rev.c" in model.casefold()
 
 
 def _wait_for_same_topology(
