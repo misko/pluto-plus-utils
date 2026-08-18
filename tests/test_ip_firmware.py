@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -24,6 +24,8 @@ from pluto_plus.ip_firmware import (
     IpFirmwareStagedFile,
     PinnedSshFirmwareTransport,
     SshCommandResult,
+    UsbSshRouteAmbiguous,
+    require_unambiguous_usb_ssh_route,
 )
 from pluto_plus.network_config import (
     NetworkAddressMode,
@@ -49,6 +51,77 @@ def _frm() -> bytes:
 
 
 FINGERPRINT = "SHA256:" + "A" * 43
+
+
+def _ip_json_reader(
+    *,
+    addresses: dict[str, tuple[str, ...]],
+    routes: tuple[tuple[str, str], ...],
+) -> Callable[[Sequence[str]], str]:
+    address_json = json.dumps(
+        [
+            {
+                "ifname": name,
+                "addr_info": [
+                    {"family": "inet", "local": address, "prefixlen": 24}
+                    for address in values
+                ],
+            }
+            for name, values in addresses.items()
+        ]
+    )
+    route_json = json.dumps([{"dev": dev, "dst": dst} for dev, dst in routes])
+
+    def read(argv: Sequence[str]) -> str:
+        return address_json if "address" in argv else route_json
+
+    return read
+
+
+def test_usb_ssh_route_accepts_one_unique_interface_and_route() -> None:
+    observation = require_unambiguous_usb_ssh_route(
+        "enx_path_a",
+        "192.168.2.1",
+        ip_json_reader=_ip_json_reader(
+            addresses={"enx_path_a": ("192.168.2.10",), "eth0": ("192.168.1.10",)},
+            routes=(("enx_path_a", "192.168.2.0/24"),),
+        ),
+    )
+
+    assert observation.destination_routes == (("enx_path_a", "192.168.2.0/24"),)
+
+
+def test_usb_path_a_refuses_duplicate_source_address_that_can_reach_path_b() -> None:
+    with pytest.raises(UsbSshRouteAmbiguous, match="BindInterface alone"):
+        require_unambiguous_usb_ssh_route(
+            "enx_path_a",
+            "192.168.2.1",
+            ip_json_reader=_ip_json_reader(
+                addresses={
+                    "enx_path_a": ("192.168.2.10",),
+                    "enx_path_b": ("192.168.2.10",),
+                },
+                routes=(
+                    ("enx_path_a", "192.168.2.0/24"),
+                    ("enx_path_b", "192.168.2.0/24"),
+                ),
+            ),
+        )
+
+
+def test_usb_ssh_route_refuses_competing_overlapping_lan_route() -> None:
+    with pytest.raises(UsbSshRouteAmbiguous, match=r"192\.168\.0\.0/22 via eth0"):
+        require_unambiguous_usb_ssh_route(
+            "enx_path_a",
+            "192.168.2.1",
+            ip_json_reader=_ip_json_reader(
+                addresses={"enx_path_a": ("192.168.2.10",), "eth0": ("192.168.1.10",)},
+                routes=(
+                    ("enx_path_a", "192.168.2.0/24"),
+                    ("eth0", "192.168.0.0/22"),
+                ),
+            ),
+        )
 
 
 def _enrollment() -> IpFirmwareEnrollment:

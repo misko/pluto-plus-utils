@@ -138,6 +138,54 @@ def test_prepare_refuses_to_bypass_normal_serial_flow(
         bootstrap.prepare_bootstrap_plan(Path(plan.image_path), target)
 
 
+def test_usb_ssh_enrollment_for_path_a_never_accepts_serial_b(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    usb_root = tmp_path / "usb"
+    target = usb_root / "3-8"
+    target.mkdir(parents=True)
+    monkeypatch.setattr(bootstrap, "_USB_ROOT", usb_root)
+    monkeypatch.setattr(
+        bootstrap,
+        "_one_local_target",
+        lambda path: _local(target, serial="SERIAL_A"),
+    )
+    monkeypatch.setattr(bootstrap, "_require_usb_ssh_route", lambda interface, host: None)
+
+    class WrongRadioChild:
+        before = b"serial=SERIAL_B\n"
+        exitstatus = 0
+        signalstatus = None
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            return 1
+
+        def sendline(self, value: bytes) -> None:
+            del value
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", lambda *args, **kwargs: WrongRadioChild())
+    destination = tmp_path / "SERIAL_A.known_hosts"
+
+    with pytest.raises(
+        bootstrap.BootstrapFirmwareError,
+        match="attested serial 'SERIAL_B', expected 'SERIAL_A'",
+    ):
+        bootstrap.enroll_bound_usb_ssh_host_key(
+            serial="SERIAL_A",
+            usb_sysfs_path=target,
+            known_hosts_file=destination,
+            password="unused",
+        )
+
+    assert not destination.exists()
+
+
 def test_selected_forward_profile_is_exact_and_blank_recovery_stays_canonical(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -264,6 +312,7 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
         "prepare_usb_flash_plan",
         lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
+    monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
     monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
     monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: commands.append(tuple(argv)))
     monkeypatch.setattr(bootstrap, "_wait_for_path", lambda path, present, timeout_s: None)
@@ -318,6 +367,7 @@ def test_failure_after_write_is_unknown_and_durably_receipted(
         "prepare_usb_flash_plan",
         lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
+    monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
     monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
 
     def fail_sync(argv: tuple[str, ...], *, timeout_s: float) -> None:
@@ -335,8 +385,259 @@ def test_failure_after_write_is_unknown_and_durably_receipted(
     )
 
     assert result.outcome == "unknown"
+    assert result.retryable is False
+    assert result.failure_phase == "sync"
     assert "sync failed" in (result.error or "")
     assert json.loads(Path(result.receipt_path).read_text())["outcome"] == "unknown"
+
+
+def test_udisks_preflight_succeeds_before_attempt_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    partition = tmp_path / "sdb1"
+    block_device = tmp_path / "sdb"
+    partition.touch()
+    block_device.touch()
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(bootstrap, "_mountpoint_for", lambda path: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_run",
+        lambda argv, timeout_s: calls.append(tuple(argv)),
+    )
+
+    bootstrap._preflight_udisks(partition=partition, block_device=block_device)
+
+    assert calls == [("udisksctl", "status")]
+
+
+@pytest.mark.parametrize(
+    ("detail", "classification"),
+    (
+        ("Error connecting to the udisks daemon: service unavailable", "daemon_unavailable"),
+        ("Error connecting to the udisks daemon: Timeout was reached", "daemon_timeout"),
+        ("GDBus.Error: Not authorized to perform operation", "authorization_denied"),
+    ),
+)
+def test_udisks_preflight_classifies_daemon_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    detail: str,
+    classification: str,
+) -> None:
+    partition = tmp_path / "sdb1"
+    block_device = tmp_path / "sdb"
+    partition.touch()
+    block_device.touch()
+    monkeypatch.setattr(bootstrap, "_mountpoint_for", lambda path: None)
+
+    def fail(argv: tuple[str, ...], *, timeout_s: float) -> None:
+        del argv, timeout_s
+        raise bootstrap.BootstrapFirmwareError(detail)
+
+    monkeypatch.setattr(bootstrap, "_run", fail)
+
+    with pytest.raises(bootstrap.UdisksFailure) as caught:
+        bootstrap._preflight_udisks(partition=partition, block_device=block_device)
+
+    assert caught.value.classification == classification
+    assert "Remediation:" in str(caught.value)
+
+
+def test_udisks_preflight_classifies_already_mounted_and_disappeared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    partition = tmp_path / "sdb1"
+    block_device = tmp_path / "sdb"
+    partition.touch()
+    block_device.touch()
+    monkeypatch.setattr(bootstrap, "_mountpoint_for", lambda path: tmp_path / "mount")
+
+    with pytest.raises(bootstrap.UdisksFailure) as mounted:
+        bootstrap._preflight_udisks(partition=partition, block_device=block_device)
+    assert mounted.value.classification == "already_mounted"
+
+    partition.unlink()
+    with pytest.raises(bootstrap.UdisksFailure) as disappeared:
+        bootstrap._preflight_udisks(partition=partition, block_device=block_device)
+    assert disappeared.value.classification == "device_disappeared"
+
+
+def test_failed_udisks_preflight_does_not_create_or_consume_receipt(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, frm, _ = planned
+    receipts = tmp_path / "receipts"
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_usb_flash_plan",
+        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
+    )
+
+    def fail(**kwargs: object) -> None:
+        del kwargs
+        raise bootstrap.UdisksFailure(
+            "daemon_timeout",
+            "status timed out",
+            "Restore udisks2.service and retry.",
+        )
+
+    monkeypatch.setattr(bootstrap, "_preflight_udisks", fail)
+
+    with pytest.raises(bootstrap.UdisksFailure, match="daemon_timeout"):
+        bootstrap.execute_bootstrap_plan(
+            plan,
+            frm,
+            confirmation=plan.confirmation_phrase,
+            receipt_directory=receipts,
+        )
+
+    assert not receipts.exists()
+
+
+def test_mount_failure_is_failed_and_receipt_allows_retry(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, frm, _ = planned
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_usb_flash_plan",
+        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
+    )
+    monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
+
+    def fail_mount(partition: Path) -> Path:
+        del partition
+        raise bootstrap.UdisksFailure(
+            "authorization_denied",
+            "mount denied",
+            "Correct the host policy and retry.",
+        )
+
+    monkeypatch.setattr(bootstrap, "_mount_partition", fail_mount)
+
+    result = bootstrap.execute_bootstrap_plan(
+        plan,
+        frm,
+        confirmation=plan.confirmation_phrase,
+        receipt_directory=tmp_path / "receipts",
+    )
+
+    assert result.outcome == "failed"
+    assert result.failure_phase == "mount"
+    assert result.failure_classification == "authorization_denied"
+    assert result.retryable is True
+    receipt = json.loads(Path(result.receipt_path).read_text())
+    assert receipt["retryable"] is True
+    assert "pluto_frm_written" not in receipt["phases"]
+
+
+@pytest.mark.parametrize(
+    ("detail", "classification"),
+    (
+        ("Error connecting to the udisks daemon: unavailable", "daemon_unavailable"),
+        ("Error connecting to the udisks daemon: Timeout was reached", "daemon_timeout"),
+        ("GDBus.Error: Not authorized", "authorization_denied"),
+    ),
+)
+def test_mount_command_faults_are_classified_without_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    detail: str,
+    classification: str,
+) -> None:
+    partition = tmp_path / "sdb1"
+    partition.touch()
+    monkeypatch.setattr(bootstrap, "_mountpoint_for", lambda path: None)
+
+    def fail(argv: tuple[str, ...], *, timeout_s: float) -> None:
+        del argv, timeout_s
+        raise bootstrap.BootstrapFirmwareError(detail)
+
+    monkeypatch.setattr(bootstrap, "_run", fail)
+
+    with pytest.raises(bootstrap.UdisksFailure) as caught:
+        bootstrap._mount_partition(partition)
+
+    assert caught.value.classification == classification
+
+
+def test_mount_partition_enforces_requested_safety_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    partition = tmp_path / "sdb1"
+    mountpoint = tmp_path / "mount"
+    partition.touch()
+    mountpoint.mkdir()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        bootstrap,
+        "_run_udisks",
+        lambda operation, device, timeout_s: calls.append(operation),
+    )
+    monkeypatch.setattr(bootstrap, "_mount_options_for", lambda path: {"nodev", "nosuid"})
+
+    # The initial mounted check and post-command check need distinct results.
+    mount_checks = iter((None, mountpoint))
+    monkeypatch.setattr(bootstrap, "_mountpoint_for", lambda path: next(mount_checks))
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="noexec"):
+        bootstrap._mount_partition(partition)
+
+    assert calls == ["mount", "unmount"]
+
+
+@pytest.mark.parametrize(
+    ("failed_operation", "expected_phase"),
+    (("unmount", "unmount"), ("power-off", "power_off")),
+)
+def test_post_write_udisks_failures_are_unknown_and_not_retryable(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_operation: str,
+    expected_phase: str,
+) -> None:
+    plan, frm, _ = planned
+    mountpoint = tmp_path / "mount"
+    mountpoint.mkdir()
+    (mountpoint / "info.html").write_text("Pluto")
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_usb_flash_plan",
+        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
+    )
+    monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
+    monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
+
+    def udisks(operation: str, device: Path | None, *, timeout_s: float) -> None:
+        del device, timeout_s
+        if operation == failed_operation:
+            raise bootstrap.UdisksFailure(
+                "daemon_timeout",
+                f"{operation} timed out",
+                "Restore udisks2.service; reconcile before retrying.",
+            )
+
+    monkeypatch.setattr(bootstrap, "_run_udisks", udisks)
+    monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: None)
+
+    result = bootstrap.execute_bootstrap_plan(
+        plan,
+        frm,
+        confirmation=plan.confirmation_phrase,
+        receipt_directory=tmp_path / "receipts",
+    )
+
+    assert result.outcome == "unknown"
+    assert result.failure_phase == expected_phase
+    assert result.failure_classification == "daemon_timeout"
+    assert result.retryable is False
+    assert "pluto_frm_written" in result.phases
 
 
 class FakeSshTransport:

@@ -14,11 +14,15 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol, cast
 
 from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
+from pluto_plus.ip_firmware import (
+    UsbSshRouteAmbiguous,
+    require_unambiguous_usb_ssh_route,
+)
 from pluto_plus.setup import (
     SetupExecutionResult,
     SetupExecutorFailure,
@@ -59,6 +63,7 @@ class BoundSshTransport:
         known_hosts_file: Path,
         username: str = "root",
         ssh_binary: str = "ssh",
+        route_preflight: Callable[[], None] | None = None,
     ) -> None:
         if interface is not None and not _INTERFACE_PATTERN.fullmatch(interface):
             raise ValueError("invalid USB network interface")
@@ -80,12 +85,22 @@ class BoundSshTransport:
             raise ValueError("setup known-hosts path must be a regular non-symlink file")
         if known_hosts_mode & 0o077:
             raise ValueError("setup known-hosts file must not be group/other accessible")
+        selected_route_preflight = route_preflight or (
+            (lambda: _require_usb_ssh_route(interface, host))
+            if interface is not None
+            else (lambda: None)
+        )
+        try:
+            selected_route_preflight()
+        except SetupHelperError as error:
+            raise ValueError(str(error)) from error
         self.host = host
         self.interface = interface
         self._password = password
         self._username = username
         self._ssh_binary = ssh_binary
         self._known_hosts_file = known_hosts_file
+        self._route_preflight = selected_route_preflight
 
     def run(
         self,
@@ -94,6 +109,7 @@ class BoundSshTransport:
         stdin: bytes | None = None,
         timeout_s: float = 15,
     ) -> str:
+        self._route_preflight()
         if "\x00" in command or "\n" in command:
             raise SetupHelperError("invalid fixed SSH command")
         try:
@@ -149,6 +165,13 @@ class BoundSshTransport:
                 f"radio SSH operation failed ({exit_status=}, {signal_status=}): {output[-500:]}"
             )
         return output
+
+
+def _require_usb_ssh_route(interface: str, host: str) -> None:
+    try:
+        require_unambiguous_usb_ssh_route(interface, host)
+    except UsbSshRouteAmbiguous as error:
+        raise SetupHelperError(str(error)) from error
 
 
 class FixedSshSetupExecutor:

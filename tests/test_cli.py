@@ -999,7 +999,11 @@ def test_usb_bootstrap_cli_is_dry_run_by_default(
 def test_usb_bootstrap_cli_requires_and_passes_exact_confirmation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pluto_plus.bootstrap_firmware import BootstrapPlan, BootstrapResult
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapPlan,
+        BootstrapResult,
+        UdisksFailure,
+    )
 
     image = tmp_path / "canonical.dfu"
     image.write_bytes(b"qualified")
@@ -1075,6 +1079,34 @@ def test_usb_bootstrap_cli_requires_and_passes_exact_confirmation(
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["returned_serial"] == "SERIAL_NEW"
     assert confirmations == ["BOOTSTRAP 3-11"]
+
+    def unavailable(*args: object, **kwargs: object) -> BootstrapResult:
+        del args, kwargs
+        raise UdisksFailure(
+            "daemon_timeout",
+            "status timed out",
+            "Restore udisks2.service and retry.",
+        )
+
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.execute_usb_flash_plan",
+        unavailable,
+    )
+    failed = runner.invoke(
+        app,
+        [
+            "firmware",
+            "bootstrap-usb",
+            str(image),
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-11",
+            "--execute",
+            "--confirm",
+            "BOOTSTRAP 3-11",
+        ],
+    )
+    assert failed.exit_code == 4
+    assert json.loads(failed.stderr)["error"]["code"] == "bootstrap_udisks_daemon_timeout"
 
 
 def test_usb_flash_cli_routes_explicit_lan_host_without_usb_bind(

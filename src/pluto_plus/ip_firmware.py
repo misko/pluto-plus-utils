@@ -59,6 +59,139 @@ class IpFirmwareHostKeyChanged(IpFirmwareError):
     """The enrolled SSH host key no longer authenticates the endpoint."""
 
 
+class UsbSshRouteAmbiguous(IpFirmwareError):
+    """The host cannot prove that a USB-bound SSH endpoint uses one interface."""
+
+
+@dataclass(frozen=True, slots=True)
+class UsbSshRouteObservation:
+    """Minimal read-only host routing facts used by the USB SSH safety gate."""
+
+    interface_addresses: tuple[tuple[str, tuple[str, ...]], ...]
+    destination_routes: tuple[tuple[str, str], ...]
+
+
+IpJsonReader = Callable[[Sequence[str]], str]
+
+
+def require_unambiguous_usb_ssh_route(
+    interface: str,
+    endpoint: str,
+    *,
+    ip_json_reader: IpJsonReader | None = None,
+) -> UsbSshRouteObservation:
+    """Refuse USB-bound SSH unless one interface uniquely owns the path.
+
+    OpenSSH ``BindInterface`` selects a local interface/address, but that is not
+    physical endpoint isolation when multiple USB gadgets expose identical host
+    addresses and destination subnets.  This read-only gate intentionally does
+    not alter policy routing or network namespaces.
+    """
+
+    if not interface or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", interface):
+        raise UsbSshRouteAmbiguous("USB-bound SSH requires one valid interface name")
+    try:
+        target = ipaddress.ip_address(endpoint)
+    except ValueError as error:
+        raise UsbSshRouteAmbiguous("USB-bound SSH endpoint must be a literal IP address") from error
+    if target.version != 4:
+        raise UsbSshRouteAmbiguous("USB-bound SSH route isolation currently requires IPv4")
+
+    reader = ip_json_reader or _read_ip_json
+    try:
+        addresses_document = json.loads(reader(("ip", "-j", "-4", "address", "show")))
+        routes_document = json.loads(
+            reader(("ip", "-j", "-4", "route", "show", "table", "all"))
+        )
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        raise UsbSshRouteAmbiguous(
+            f"cannot verify USB-bound SSH routing for {interface}: {error}"
+        ) from error
+    if not isinstance(addresses_document, list) or not isinstance(routes_document, list):
+        raise UsbSshRouteAmbiguous("cannot verify USB-bound SSH routing: malformed ip JSON")
+
+    interface_addresses: list[tuple[str, tuple[str, ...]]] = []
+    addresses_by_interface: dict[str, tuple[str, ...]] = {}
+    for item in addresses_document:
+        if not isinstance(item, dict) or not isinstance(item.get("ifname"), str):
+            continue
+        values = tuple(
+            str(info["local"])
+            for info in item.get("addr_info", ())
+            if isinstance(info, dict)
+            and info.get("family") == "inet"
+            and isinstance(info.get("local"), str)
+        )
+        addresses_by_interface[item["ifname"]] = values
+        interface_addresses.append((item["ifname"], values))
+
+    selected_addresses = addresses_by_interface.get(interface, ())
+    if not selected_addresses:
+        raise UsbSshRouteAmbiguous(
+            f"USB-bound SSH interface {interface!r} has no observed IPv4 address"
+        )
+    duplicates = sorted(
+        (name, address)
+        for name, values in addresses_by_interface.items()
+        if name != interface
+        for address in set(selected_addresses).intersection(values)
+    )
+    if duplicates:
+        detail = ", ".join(f"{address} on {name}" for name, address in duplicates)
+        raise UsbSshRouteAmbiguous(
+            f"USB-bound SSH interface {interface!r} is ambiguous: its source address is also "
+            f"configured as {detail}. Disconnect the other Pluto USB network interfaces or "
+            "assign unique USB host/radio addresses; BindInterface alone is not endpoint isolation."
+        )
+
+    destination_routes: list[tuple[str, str]] = []
+    competing: list[tuple[str, str]] = []
+    selected_route = False
+    for item in routes_document:
+        if not isinstance(item, dict) or not isinstance(item.get("dev"), str):
+            continue
+        raw_destination = item.get("dst")
+        if not isinstance(raw_destination, str) or raw_destination == "default":
+            continue
+        try:
+            network = ipaddress.ip_network(raw_destination, strict=False)
+        except ValueError:
+            continue
+        if target not in network:
+            continue
+        route = (item["dev"], str(network))
+        destination_routes.append(route)
+        if item["dev"] == interface:
+            selected_route = True
+        else:
+            competing.append(route)
+    if not selected_route:
+        raise UsbSshRouteAmbiguous(
+            f"USB-bound SSH endpoint {endpoint} has no observed route through {interface!r}"
+        )
+    if competing:
+        detail = ", ".join(f"{network} via {name}" for name, network in sorted(competing))
+        raise UsbSshRouteAmbiguous(
+            f"USB-bound SSH endpoint {endpoint} is covered by competing routes ({detail}). "
+            "Disconnect or readdress the overlapping interface; refusing enrollment or mutation."
+        )
+    return UsbSshRouteObservation(
+        interface_addresses=tuple(sorted(interface_addresses)),
+        destination_routes=tuple(sorted(destination_routes)),
+    )
+
+
+def _read_ip_json(argv: Sequence[str]) -> str:
+    completed = subprocess.run(  # noqa: S603
+        argv,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return completed.stdout
+
+
 @dataclass(frozen=True, slots=True)
 class IpFirmwareEnrollment:
     """Immutable trust and initial-state record for one IP-attached radio."""

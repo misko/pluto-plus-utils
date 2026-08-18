@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -27,6 +28,10 @@ from pluto_plus.doctor import CANONICAL_POLICY, TANDEM_V6_DEVELOPMENT_POLICY
 from pluto_plus.firmware import FirmwareImageError, generate_frm, validate_frm
 from pluto_plus.hardware.discovery import _facts_from_context_xml
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
+from pluto_plus.ip_firmware import (
+    UsbSshRouteAmbiguous,
+    require_unambiguous_usb_ssh_route,
+)
 from pluto_plus.setup_helper import BoundSshTransport, SetupTransport
 
 _USB_ROOT = Path("/sys/bus/usb/devices")
@@ -56,6 +61,30 @@ class BootstrapFirmwareError(RuntimeError):
     """A bootstrap precondition or execution failed."""
 
 
+UdisksFailureKind = Literal[
+    "daemon_unavailable",
+    "daemon_timeout",
+    "authorization_denied",
+    "already_mounted",
+    "device_disappeared",
+    "operation_failed",
+]
+
+
+class UdisksFailure(BootstrapFirmwareError):
+    """A classified, fail-closed udisks operation failure."""
+
+    def __init__(
+        self,
+        classification: UdisksFailureKind,
+        message: str,
+        remediation: str,
+    ) -> None:
+        super().__init__(f"udisks {classification}: {message} Remediation: {remediation}")
+        self.classification = classification
+        self.remediation = remediation
+
+
 class BootstrapSshTransport(SetupTransport, Protocol):
     """Fixed remote commands plus an exact binary FRM upload operation."""
 
@@ -74,13 +103,21 @@ class BoundSshBootstrapTransport:
         host: str = "192.168.2.1",
         username: str = "root",
         scp_binary: str = "scp",
+        route_preflight: Callable[[], None] | None = None,
     ) -> None:
+        selected_route_preflight = route_preflight or (
+            (lambda: _require_usb_ssh_route(interface, host))
+            if interface is not None
+            else (lambda: None)
+        )
+        selected_route_preflight()
         self._commands = BoundSshTransport(
             host=host,
             interface=interface,
             password=password,
             known_hosts_file=known_hosts_file,
             username=username,
+            route_preflight=lambda: None,
         )
         self._interface = interface
         self._password = password
@@ -88,6 +125,7 @@ class BoundSshBootstrapTransport:
         self._host = host
         self._username = username
         self._scp_binary = scp_binary
+        self._route_preflight = selected_route_preflight
 
     def run(
         self,
@@ -96,11 +134,13 @@ class BoundSshBootstrapTransport:
         stdin: bytes | None = None,
         timeout_s: float = 15,
     ) -> str:
+        self._route_preflight()
         return self._commands.run(command, stdin=stdin, timeout_s=timeout_s)
 
     def upload_frm(self, data: bytes, *, timeout_s: float = 120) -> None:
         """Upload binary bytes with SCP; the PTY carries only the password prompt."""
 
+        self._route_preflight()
         try:
             import pexpect
         except ImportError as error:  # pragma: no cover - composition guard
@@ -194,6 +234,8 @@ def enroll_bound_usb_ssh_host_key(
     interface = (
         local.host_network_interfaces[0].name if host == "192.168.2.1" else None
     )
+    if interface is not None:
+        _require_usb_ssh_route(interface, host)
     destination = known_hosts_file.expanduser().resolve()
     if destination.exists():
         raise BootstrapFirmwareError("known-hosts destination already exists; refusing overwrite")
@@ -288,6 +330,13 @@ def enroll_bound_usb_ssh_host_key(
         temporary.unlink(missing_ok=True)
 
 
+def _require_usb_ssh_route(interface: str, host: str) -> None:
+    try:
+        require_unambiguous_usb_ssh_route(interface, host)
+    except UsbSshRouteAmbiguous as error:
+        raise BootstrapFirmwareError(str(error)) from error
+
+
 @dataclass(frozen=True, slots=True)
 class BootstrapPlan:
     plan_id: str
@@ -323,6 +372,10 @@ class BootstrapResult:
     returned_firmware: str | None = None
     returned_phy: str | None = None
     error: str | None = None
+    failure_phase: str | None = None
+    failure_classification: str | None = None
+    retryable: bool | None = None
+    remediation: str | None = None
 
 
 def prepare_bootstrap_plan(
@@ -492,6 +545,14 @@ def execute_bootstrap_plan(
     if fresh_frm != frm:
         raise BootstrapFirmwareError("deterministic FRM changed during revalidation")
 
+    # Prove the daemon and exact device nodes are ready before an execution
+    # attempt or durable receipt is created. A failed readiness check is not a
+    # consumed mutation attempt because no updater volume was mounted or written.
+    _preflight_udisks(
+        partition=Path(plan.partition),
+        block_device=Path(plan.block_device),
+    )
+
     receipt_id = str(uuid.uuid4())
     receipt_path = receipt_directory / f"{receipt_id}.json"
     phases: list[str] = ["preflight_revalidated"]
@@ -523,10 +584,10 @@ def execute_bootstrap_plan(
         _run(("sync", "-f", str(destination)), timeout_s=30)
         phases.append("synced")
         _update_receipt(receipt_path, receipt, phases)
-        _run(("udisksctl", "unmount", "--block-device", plan.partition), timeout_s=30)
+        _run_udisks("unmount", Path(plan.partition), timeout_s=30)
         phases.append("unmounted")
         _update_receipt(receipt_path, receipt, phases)
-        _run(("udisksctl", "power-off", "--block-device", plan.block_device), timeout_s=30)
+        _run_udisks("power-off", Path(plan.block_device), timeout_s=30)
         phases.append("ejected")
         _update_receipt(receipt_path, receipt, phases)
         _wait_for_path(Path(plan.usb_sysfs_path), present=False, timeout_s=30)
@@ -555,19 +616,34 @@ def execute_bootstrap_plan(
         # If mounting succeeded but writing did not, make a bounded cleanup attempt.
         if "mounted" in phases and "unmounted" not in phases:
             try:
-                _run(
-                    ("udisksctl", "unmount", "--block-device", plan.partition),
-                    timeout_s=30,
-                )
+                _run_udisks("unmount", Path(plan.partition), timeout_s=30)
                 phases.append("cleanup_unmounted")
             except Exception:
                 phases.append("cleanup_unmount_failed")
+        classification = (
+            error.classification
+            if isinstance(error, UdisksFailure)
+            else ("post_write_uncertain" if wrote_image else "pre_write_failure")
+        )
+        remediation = (
+            error.remediation
+            if isinstance(error, UdisksFailure)
+            else (
+                "Do not retry automatically; reconcile the radio and this receipt first."
+                if wrote_image
+                else "This receipt proves no pluto.frm write began; correct the error and re-plan."
+            )
+        )
         result = BootstrapResult(
             receipt_id=receipt_id,
             outcome=outcome,
             phases=tuple(phases),
             receipt_path=str(receipt_path),
             error=f"{type(error).__name__}: {error}",
+            failure_phase=_bootstrap_failure_phase(phases),
+            failure_classification=classification,
+            retryable=not wrote_image,
+            remediation=remediation,
         )
     receipt.update(asdict(result))
     _write_receipt(receipt_path, receipt)
@@ -947,28 +1023,168 @@ def _attest_partition(target: Path, partition: Path) -> Path:
 
 
 def _mount_partition(partition: Path) -> Path:
+    _require_udisks_device(partition)
     if _mountpoint_for(partition) is not None:
-        raise BootstrapFirmwareError("updater partition is already mounted")
-    _run(
-        (
+        raise _udisks_already_mounted(partition)
+    try:
+        _run_udisks("mount", partition, timeout_s=30)
+    except UdisksFailure:
+        # A timed-out daemon call can have completed the mount without returning
+        # a response. Never write in that ambiguous state; make one exact-device
+        # cleanup attempt and preserve the original classification.
+        if _mountpoint_for(partition) is not None:
+            with suppress(UdisksFailure):
+                _run_udisks("unmount", partition, timeout_s=30)
+        raise
+    mountpoint = _mountpoint_for(partition)
+    if mountpoint is None or mountpoint.is_symlink() or not mountpoint.is_dir():
+        with suppress(UdisksFailure):
+            _run_udisks("unmount", partition, timeout_s=30)
+        raise BootstrapFirmwareError("udisks did not create a verifiable mountpoint")
+    missing_options = {"nodev", "nosuid", "noexec"} - _mount_options_for(partition)
+    if missing_options:
+        with suppress(UdisksFailure):
+            _run_udisks("unmount", partition, timeout_s=30)
+        raise BootstrapFirmwareError(
+            "updater mount omitted required safety options: "
+            + ", ".join(sorted(missing_options))
+        )
+    return mountpoint
+
+
+def _preflight_udisks(*, partition: Path, block_device: Path) -> None:
+    """Require a responsive daemon and unchanged, unmounted exact target."""
+
+    _require_udisks_device(partition)
+    _require_udisks_device(block_device)
+    if _mountpoint_for(partition) is not None:
+        raise _udisks_already_mounted(partition)
+    _run_udisks("status", None, timeout_s=5)
+    _require_udisks_device(partition)
+    _require_udisks_device(block_device)
+    if _mountpoint_for(partition) is not None:
+        raise _udisks_already_mounted(partition)
+
+
+def _run_udisks(operation: str, device: Path | None, *, timeout_s: float) -> None:
+    argv: tuple[str, ...]
+    if operation == "status":
+        argv = ("udisksctl", "status")
+    elif operation == "mount" and device is not None:
+        argv = (
             "udisksctl",
             "mount",
             "--block-device",
-            str(partition),
+            str(device),
             "--options",
             "rw,nodev,nosuid,noexec",
-        ),
-        timeout_s=30,
+        )
+    elif operation in {"unmount", "power-off"} and device is not None:
+        argv = ("udisksctl", operation, "--block-device", str(device))
+    else:  # pragma: no cover - internal programming guard
+        raise ValueError(f"invalid udisks operation: {operation}")
+    try:
+        _run(argv, timeout_s=timeout_s)
+    except BootstrapFirmwareError as error:
+        if device is not None and not device.exists():
+            raise UdisksFailure(
+                "device_disappeared",
+                f"exact device {device} disappeared during {operation}",
+                "Reconnect the radio and create a fresh path-bound flash plan.",
+            ) from error
+        raise _classify_udisks_failure(error, operation=operation, device=device) from error
+
+
+def _require_udisks_device(device: Path) -> None:
+    if not device.exists():
+        raise UdisksFailure(
+            "device_disappeared",
+            f"exact device {device} is unavailable",
+            "Reconnect the radio and create a fresh path-bound flash plan.",
+        )
+
+
+def _udisks_already_mounted(partition: Path) -> UdisksFailure:
+    return UdisksFailure(
+        "already_mounted",
+        f"exact updater partition {partition} is already mounted",
+        "Inspect the exact updater volume, remove or reconcile any existing pluto.frm, "
+        f"then unmount it with `udisksctl unmount --block-device {partition}` and re-plan.",
     )
-    mountpoint = _mountpoint_for(partition)
-    if mountpoint is None or mountpoint.is_symlink() or not mountpoint.is_dir():
-        with suppress(BootstrapFirmwareError):
-            _run(
-                ("udisksctl", "unmount", "--block-device", str(partition)),
-                timeout_s=30,
-            )
-        raise BootstrapFirmwareError("udisks did not create a verifiable mountpoint")
-    return mountpoint
+
+
+def _classify_udisks_failure(
+    error: BootstrapFirmwareError,
+    *,
+    operation: str,
+    device: Path | None,
+) -> UdisksFailure:
+    detail = str(error)
+    lowered = detail.lower()
+    target = "udisks daemon" if device is None else f"exact device {device}"
+    if "timeout" in lowered or "timed out" in lowered:
+        return UdisksFailure(
+            "daemon_timeout",
+            f"{operation} timed out for {target}",
+            "Restore or restart udisks2.service, verify `udisksctl status`, then retry.",
+        )
+    if any(
+        marker in lowered
+        for marker in (
+            "not authorized",
+            "authorization",
+            "authentication",
+            "access denied",
+            "permission denied",
+            "not permitted",
+            "polkit",
+        )
+    ):
+        return UdisksFailure(
+            "authorization_denied",
+            f"{operation} was denied for {target}",
+            "Use an authorized local session or correct the host udisks/polkit policy; "
+            "no privileged mount fallback is used.",
+        )
+    if "already mounted" in lowered:
+        assert device is not None
+        return _udisks_already_mounted(device)
+    if any(
+        marker in lowered
+        for marker in (
+            "error connecting to the udisks daemon",
+            "udisks daemon",
+            "serviceunknown",
+            "service unknown",
+            "connection refused",
+            "no such file or directory",
+            "not found",
+        )
+    ):
+        return UdisksFailure(
+            "daemon_unavailable",
+            f"{operation} could not reach the udisks daemon",
+            "Start or restore udisks2.service, verify `udisksctl status`, then retry.",
+        )
+    return UdisksFailure(
+        "operation_failed",
+        f"{operation} failed for {target}: {detail}",
+        "Inspect the host udisks2 service and logs, verify the exact device, then re-plan.",
+    )
+
+
+def _bootstrap_failure_phase(phases: list[str]) -> str:
+    if "mounted" not in phases:
+        return "mount"
+    if "pluto_frm_written" not in phases:
+        return "pre_write_validation"
+    if "synced" not in phases:
+        return "sync"
+    if "unmounted" not in phases:
+        return "unmount"
+    if "ejected" not in phases:
+        return "power_off"
+    return "return_attestation"
 
 
 def _mountpoint_for(partition: Path) -> Path | None:
@@ -989,6 +1205,25 @@ def _mountpoint_for(partition: Path) -> Path | None:
                 value = value.replace(encoded, decoded)
             return Path(value)
     return None
+
+
+def _mount_options_for(partition: Path) -> set[str]:
+    try:
+        device = partition.stat().st_rdev
+        lines = Path("/proc/self/mountinfo").read_text().splitlines()
+    except OSError:
+        return set()
+    needle = f"{os.major(device)}:{os.minor(device)}"
+    for line in lines:
+        fields = line.split()
+        if len(fields) <= 6 or fields[2] != needle or "-" not in fields:
+            continue
+        separator = fields.index("-")
+        options = set(fields[5].split(","))
+        if len(fields) > separator + 3:
+            options.update(fields[separator + 3].split(","))
+        return options
+    return set()
 
 
 def _write_fat_atomic(destination: Path, data: bytes) -> None:

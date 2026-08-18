@@ -3,12 +3,33 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 from pluto_plus.cli import app
+from pluto_plus.hardware.preflight import IioEnvironmentReport, IioEnvironmentStatus
 from pluto_plus.ladder import LadderCell, LadderReport
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _healthy_environment(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda **_kwargs: IioEnvironmentReport(
+            healthy=True,
+            status=IioEnvironmentStatus.READY,
+            message="ready",
+            python_executable="/venv/python",
+            pyadi_path="/venv/adi/__init__.py",
+            pylibiio_path="/venv/iio.py",
+            native_libiio_candidate="libiio.so.0",
+            native_libiio_path="/usr/lib/libiio.so.0",
+            libiio_version="0.25",
+            backends=("ip", "usb"),
+        ),
+    )
 
 
 def _report(uri: str, serial: str) -> LadderReport:

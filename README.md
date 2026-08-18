@@ -28,12 +28,29 @@ uv run pluto artifact list
 uv run pluto analyze ARTIFACT_ID --analyzer spectrum --parameters '{"fft_size":4096}'
 ```
 
-Use `--hardware` to discover serial-pinned USB IIO radios. Native dependencies
-live in the `hardware` extra and are imported only by the daemon:
+Use `--hardware` to discover serial-pinned USB IIO radios. The `hardware` extra
+installs the Python packages, but it cannot install the native libiio shared
+library. Check both layers and the required USB backend before opening a radio:
 
 ```bash
+uv sync --extra hardware
+uv run pluto environment
+uv run pluto environment --format json
 uv run pluto serve --hardware --state-root /var/lib/pluto-plus
 ```
+
+The supported native host library is the SPF libiio 0.25 line at immutable tag
+`spf-frame-metadata-source/v0.25-final-v3` (commit
+`c26258bfa33098c2b215e19cf85d448e89499b1a`), built with
+`WITH_USB_BACKEND=ON`. On Debian 12 `amd64`/`arm64`, prefer one matching
+`libiio-artifacts-v0.25-spfmeta3.*` release bundle from
+[`misko/spf`](https://github.com/misko/spf/releases) and its checksum-verifying
+`install_spf_libiio_artifacts.sh`. The supported source-build fallback is
+[`install_spf_libiio.sh`](https://github.com/misko/spf/blob/main/install_spf_libiio.sh)
+with `--series 0.25` and
+`--python /path/to/pluto-plus-utils/.venv/bin/python`. Install the matching native
+package and generated `pylibiio` wheel into this environment together; an
+unmodified PyPI `pylibiio` installation does not provide native libiio.
 
 Standard network/libiio radios are explicit and may optionally be pinned to a
 known serial:
@@ -105,6 +122,11 @@ uv run pluto radio ladder 192.168.1.15 --transport ip \
   --rates 1M,2M,3M,5M --frames 12 --samples 262144 \
   --kernel-buffers 8 --format json
 ```
+
+The ladder runs the same passive environment preflight before opening its exact
+target. Missing Python hardware packages, missing native libiio, an incompatible
+native/Python ABI, and a missing USB backend have distinct JSON error codes and
+include the underlying import error plus remediation where applicable.
 
 The default ladder is `1M,1.5M,2M,2.5M,3M,5M,10M,20M,30M`. The table reports
 offered wire payload, achieved MB/s and MB/min, effective sample rate, delivery
@@ -362,6 +384,29 @@ and records durable phases. A disconnect after updater dispatch is an unknown
 outcome and must be reconciled, never replayed. A rebooted radio that presents a
 new SSH host key is locked out until that key is verified and re-enrolled out of
 band. See [ADR 0004](docs/adr/0004-ssh-staged-firmware.md).
+
+### Serial-scoped local USB reboot
+
+Use a guarded reboot when qualification needs a fresh boot epoch without another
+QSPI write. The standalone command requires one exact local USB serial, sysfs
+topology, USB network interface, and previously enrolled private `known_hosts`
+file. Its default is a read-only plan:
+
+```bash
+uv run pluto radio reboot-local EXACT_SERIAL \
+  --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --ssh-known-hosts-file /private/EXACT_SERIAL.known_hosts
+```
+
+Review the plan, then repeat with `--execute --confirm 'REBOOT EXACT_SERIAL'`.
+Use `--ssh-password-file /private/radio.password` or enter the password at the
+hidden prompt. Before dispatch, the command re-attests the local topology and
+remote serial and mutes TX1/TX2 to -80 dB with DDS and TX buffers disabled. It
+accepts return only after the same USB topology disappears and reappears with a
+new boot identity and unchanged serial, firmware, and capabilities, then repeats
+the TX mute/readback. Every dispatched attempt gets an atomic mode-0600 receipt
+under `~/.local/state/pluto-plus-utils/reboot-receipts`. USB route ambiguity is a
+hard refusal; the command never falls back to network discovery or another radio.
 
 ## Direct transport status
 

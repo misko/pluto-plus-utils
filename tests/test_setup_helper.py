@@ -53,6 +53,52 @@ def test_bound_ssh_transport_rejects_public_or_named_hosts(tmp_path: Path) -> No
             )
 
 
+def test_bound_ssh_transport_refuses_route_ambiguity_before_setup(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+
+    def ambiguous() -> None:
+        raise SetupHelperError(
+            "USB-bound SSH interface 'enx_path_a' is ambiguous; BindInterface alone is unsafe"
+        )
+
+    with pytest.raises(ValueError, match="BindInterface alone"):
+        BoundSshTransport(
+            host="192.168.2.1",
+            interface="enx_path_a",
+            password="analog",
+            known_hosts_file=known_hosts,
+            route_preflight=ambiguous,
+        )
+
+
+def test_bound_ssh_transport_rechecks_route_before_each_operation(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    checks = 0
+
+    def topology_changes_after_enrollment() -> None:
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            raise SetupHelperError("competing route appeared; refusing mutation")
+
+    transport = BoundSshTransport(
+        host="192.168.2.1",
+        interface="enx_path_a",
+        password="analog",
+        known_hosts_file=known_hosts,
+        route_preflight=topology_changes_after_enrollment,
+    )
+
+    with pytest.raises(SetupHelperError, match="refusing mutation"):
+        transport.run("fw_printenv mode")
+
+    assert checks == 2
+
+
 class RecordingTransport(SetupTransport):
     def __init__(self) -> None:
         self.commands: list[tuple[str, bytes | None]] = []

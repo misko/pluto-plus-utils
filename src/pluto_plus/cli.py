@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 import httpx
 import typer
 
+from pluto_plus.hardware.preflight import IioEnvironmentReport, inspect_iio_environment
 from pluto_plus.inventory import (
     LocalUsbPluto,
     RadioInventoryReport,
@@ -31,6 +32,7 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
 DEFAULT_STATE_ROOT = Path(os.environ.get("PLUTO_STATE_ROOT", "./pluto-state"))
 DEFAULT_BOOTSTRAP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/bootstrap-receipts"
 DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qualification-reports"
+DEFAULT_LOCAL_REBOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/reboot-receipts"
 API_PREFIX = "api/v1"
 
 app = typer.Typer(
@@ -334,6 +336,29 @@ def _ladder_table(report: LadderReport) -> str:
     return "\n".join((identity, header, separator, *body, restore, report.continuity_claim))
 
 
+def _environment_table(report: IioEnvironmentReport) -> str:
+    values: list[tuple[str, str]] = [
+        ("Status", report.status.value),
+        ("Ready", "yes" if report.healthy else "no"),
+        ("Python", report.python_executable),
+        ("pyadi-iio", report.pyadi_path or "not found"),
+        ("pylibiio", report.pylibiio_path or "not found"),
+        (
+            "Native libiio",
+            report.native_libiio_path or report.native_libiio_candidate or "not found",
+        ),
+        ("libiio version", report.libiio_version or "unavailable"),
+        ("Backends", ", ".join(report.backends) or "none"),
+        ("Message", report.message),
+    ]
+    if report.underlying_error:
+        values.append(("Underlying error", report.underlying_error))
+    if report.remediation:
+        values.append(("Remediation", report.remediation))
+    width = max(len(label) for label, _value in values)
+    return "\n".join(f"{label.ljust(width)}  {value}" for label, value in values)
+
+
 def _fail(code: str, message: str, exit_code: int) -> NoReturn:
     typer.echo(json.dumps({"error": {"code": code, "message": message}}, sort_keys=True), err=True)
     raise typer.Exit(exit_code)
@@ -559,6 +584,142 @@ def _standalone_radio_inventory(
     )
 
 
+@radio_app.command("reboot-local")
+def radio_reboot_local(
+    serial: str = typer.Argument(..., help="Exact stable serial of the local USB radio."),
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ...,
+        "--usb-sysfs-path",
+        help="Exact direct /sys/bus/usb/devices path for the selected radio.",
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--ssh-known-hosts-file",
+        help="Previously enrolled private known_hosts file for this exact radio.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Private radio password file; otherwise execution prompts without echo.",
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1",
+        "--ssh-host",
+        help="Literal USB gadget IPv4 address; the route must resolve only through this radio.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Dispatch the guarded reboot; omission produces a read-only plan.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase REBOOT <serial>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_LOCAL_REBOOT_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for durable local reboot receipts.",
+    ),
+) -> None:
+    """Plan or execute one serial/path-scoped local USB reboot."""
+
+    from pluto_plus.local_reboot import (
+        FixedSshLocalRebootTransport,
+        LocalRebootError,
+        LocalRebootExecutionError,
+        execute_local_reboot,
+        prepare_local_reboot,
+    )
+    from pluto_plus.setup_helper import BoundSshTransport
+
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    try:
+        plan = prepare_local_reboot(
+            serial,
+            usb_sysfs_path,
+            ssh_host=ssh_host,
+            known_hosts_file=selected_known_hosts,
+        )
+    except (LocalRebootError, OSError, ValueError) as error:
+        _fail("local_reboot_preflight_failed", str(error), 4)
+    if not execute:
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_reboot": False,
+                "plan": asdict(plan),
+                "next_command": (
+                    "repeat with --execute and "
+                    f"--confirm {json.dumps(plan.confirmation_phrase)}"
+                ),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "local_reboot_confirmation_required",
+            f"--execute requires --confirm {plan.confirmation_phrase!r}",
+            2,
+        )
+    if ssh_password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        try:
+            password = (
+                _read_private_file_bytes(
+                    ssh_password_file,
+                    label="radio SSH password",
+                    maximum_bytes=4096,
+                )
+                .decode("utf-8")
+                .strip()
+            )
+        except UnicodeDecodeError:
+            _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
+    try:
+        ssh = BoundSshTransport(
+            host=plan.ssh_host,
+            interface=plan.usb_interface,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+        receipt = execute_local_reboot(
+            plan,
+            confirmation=confirmation,
+            transport=FixedSshLocalRebootTransport(ssh),
+            known_hosts_file=selected_known_hosts,
+            receipt_directory=receipt_directory.expanduser().resolve(),
+        )
+    except LocalRebootExecutionError as error:
+        _emit(asdict(error.receipt))
+        raise typer.Exit(5) from error
+    except (LocalRebootError, OSError, ValueError) as error:
+        _fail("local_reboot_failed", str(error), 4)
+    _emit(asdict(receipt))
+
+
+@app.command("environment")
+def environment_preflight(
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table or json."
+    ),
+) -> None:
+    """Check host pyadi/libiio/USB readiness without opening a radio."""
+
+    normalized_format = output_format.strip().lower()
+    if normalized_format not in {"table", "json"}:
+        _fail("invalid_environment_format", "environment format must be table or json", 2)
+    report = inspect_iio_environment()
+    if normalized_format == "json":
+        _emit(report.model_dump(mode="json"))
+    else:
+        typer.echo(_environment_table(report))
+    if not report.healthy:
+        raise typer.Exit(5)
+
+
 @radio_app.command("ladder")
 def radio_ladder(
     target: str = typer.Argument(
@@ -638,6 +799,12 @@ def radio_ladder(
         _fail("invalid_ladder_format", "ladder format must be table or json", 2)
     try:
         parsed_rates = parse_rate_ladder(rates)
+    except ValueError as error:
+        _fail("ladder_failed", str(error), 5)
+    environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
         report = run_iio_ladder(
             uri=uri,
             serial=serial,
@@ -1462,6 +1629,7 @@ def _standalone_usb_flash(
     from pluto_plus.bootstrap_firmware import (
         BootstrapFirmwareError,
         BoundSshBootstrapTransport,
+        UdisksFailure,
         execute_usb_flash_plan,
         execute_usb_flash_plan_ssh,
         prepare_usb_flash_plan,
@@ -1553,6 +1721,8 @@ def _standalone_usb_flash(
                 receipt_directory=receipt_directory.expanduser().resolve(),
                 transport=ssh_transport,
             )
+    except UdisksFailure as error:
+        _fail(f"bootstrap_udisks_{error.classification}", str(error), 4)
     except (BootstrapFirmwareError, ValueError) as error:
         _fail("bootstrap_firmware_failed", str(error), 4)
     _emit(asdict(result))

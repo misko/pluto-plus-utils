@@ -29,6 +29,7 @@ dev = [
 ]
 hardware = [
   "pyadi-iio>=0.0.21",
+  "pylibiio>=0.25,<0.27",
   "libusb1>=3.1",
 ]
 browser = [

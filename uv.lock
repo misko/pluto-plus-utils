@@ -863,6 +863,7 @@ dev = [
 hardware = [
     { name = "libusb1" },
     { name = "pyadi-iio" },
+    { name = "pylibiio" },
 ]
 
 [package.metadata]
@@ -876,6 +877,7 @@ requires-dist = [
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.49,<2" },
     { name = "pyadi-iio", marker = "extra == 'hardware'", specifier = ">=0.0.21" },
     { name = "pydantic", specifier = ">=2.9" },
+    { name = "pylibiio", marker = "extra == 'hardware'", specifier = ">=0.25,<0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
