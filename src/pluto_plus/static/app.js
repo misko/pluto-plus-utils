@@ -52,6 +52,7 @@ const state = {
   socketReconnectTimer: null,
   socketReconnectAttempts: 0,
   streaming: false,
+  releasingStream: false,
   previewJobId: null,
   artifacts: [],
   analyzers: [],
@@ -423,7 +424,14 @@ function renderSnapshot(snapshot, populateForm = true) {
   ui["scan-fieldset"].disabled = !(ready || state.scanning);
   ui["start-scan"].disabled = !ready;
   ui["stop-scan"].disabled = !state.scanning;
-  setStreamStatus(state.streaming, state.streaming ? "Streaming" : "Stopped");
+  setStreamStatus(
+    state.streaming,
+    state.streaming
+      ? "Streaming"
+      : state.releasingStream
+        ? "Disconnected · control released"
+        : "Stopped",
+  );
   updateFirmwareEnabled();
   updateSetupEnabled();
   updateNetworkConfigEnabled();
@@ -1498,6 +1506,7 @@ async function disconnectAndRelease() {
   ui["stop-preview"].disabled = true;
   ui["disconnect-radio"].disabled = true;
   state.streaming = false;
+  state.releasingStream = true;
   state.previewJobId = null;
   disconnectWaterfall();
   try {
@@ -1513,7 +1522,9 @@ async function disconnectAndRelease() {
     // stronger release acknowledgement after the refresh so callers can
     // observe that server-side ownership, not only streaming, was released.
     setStreamStatus(false, "Disconnected · control released");
+    state.releasingStream = false;
   } catch (error) {
+    state.releasingStream = false;
     toast(describeError(error), true);
     await loadSnapshot(radioId);
   }

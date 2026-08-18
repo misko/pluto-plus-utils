@@ -237,9 +237,19 @@ def enroll_bound_usb_ssh_host_key(
         finally:
             child.close(force=True)
         output = bytes(transcript).decode(errors="replace").replace("\r", "")
-        if child.exitstatus != 0 or f"serial={serial}" not in output.splitlines():
+        serial_lines = [
+            line.removeprefix("serial=").strip()
+            for line in output.splitlines()
+            if line.startswith("serial=")
+        ]
+        if child.exitstatus != 0:
             raise BootstrapFirmwareError(
-                "USB-bound SSH endpoint did not attest the selected serial"
+                f"USB-bound SSH serial attestation exited with status {child.exitstatus}"
+            )
+        if serial_lines != [serial]:
+            observed = serial_lines[0] if len(serial_lines) == 1 else None
+            raise BootstrapFirmwareError(
+                f"USB-bound SSH endpoint attested serial {observed!r}, expected {serial!r}"
             )
         if not temporary.is_file() or temporary.stat().st_size == 0:
             raise BootstrapFirmwareError("SSH did not record a host key")
