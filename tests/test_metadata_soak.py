@@ -176,8 +176,17 @@ def test_ssh_health_probe_uses_fixed_script_and_strict_parser() -> None:
 def test_live_phase_errors_preserve_slot_frequency_and_refill() -> None:
     with pytest.raises(
         MetadataSoakError,
-        match=r"slot=2 phase=metadata_refill frequency_hz=915000000 refill=3: OSError",
-    ), _metadata_phase(2, "metadata_refill", frequency=915_000_000, refill=3):
+        match=(
+            r"slot=2 phase=metadata_refill frequency_hz=915000000 refill=3 "
+            r"operation=buffer_refill: OSError"
+        ),
+    ), _metadata_phase(
+        2,
+        "metadata_refill",
+        frequency=915_000_000,
+        refill=3,
+        operation="buffer_refill",
+    ):
         raise OSError(16, "Device or resource busy")
 
 

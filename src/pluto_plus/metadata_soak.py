@@ -277,9 +277,26 @@ def _execute_live_metadata_slot(
             else tuple(reversed(plan.lo_frequencies_hz))
         )
         for frequency in frequencies:
-            with _metadata_phase(slot, "retune_and_prime", frequency=frequency):
+            with _metadata_phase(
+                slot,
+                "retune_and_prime",
+                frequency=frequency,
+                operation="destroy_before_retune",
+            ):
                 sdr.rx_destroy_buffer()
+            with _metadata_phase(
+                slot,
+                "retune_and_prime",
+                frequency=frequency,
+                operation="lo_write",
+            ):
                 sdr.rx_lo = frequency
+            with _metadata_phase(
+                slot,
+                "retune_and_prime",
+                frequency=frequency,
+                operation="lo_readback",
+            ):
                 actual_frequency = int(sdr.rx_lo)
                 lo_readbacks.append(actual_frequency)
                 if abs(actual_frequency - frequency) > MAX_LO_ERROR_HZ:
@@ -287,8 +304,26 @@ def _execute_live_metadata_slot(
                         "RX LO readback exceeded the quantization tolerance: "
                         f"requested={frequency} actual={actual_frequency}"
                     )
+            with _metadata_phase(
+                slot,
+                "retune_and_prime",
+                frequency=frequency,
+                operation="ordinary_prime_refill",
+            ):
                 prime = sdr.rx()
+            with _metadata_phase(
+                slot,
+                "retune_and_prime",
+                frequency=frequency,
+                operation="destroy_after_prime",
+            ):
                 sdr.rx_destroy_buffer()
+            with _metadata_phase(
+                slot,
+                "retune_and_prime",
+                frequency=frequency,
+                operation="prime_shape_validation",
+            ):
                 if len(prime) != 2 or any(
                     len(channel) != cell.samples_per_refill for channel in prime
                 ):
@@ -364,6 +399,7 @@ def _metadata_phase(
     *,
     frequency: int | None = None,
     refill: int | None = None,
+    operation: str | None = None,
 ) -> Any:
     try:
         yield
@@ -373,6 +409,8 @@ def _metadata_phase(
             details.append(f"frequency_hz={frequency}")
         if refill is not None:
             details.append(f"refill={refill}")
+        if operation is not None:
+            details.append(f"operation={operation}")
         raise MetadataSoakError(
             f"{' '.join(details)}: {type(error).__name__}: {error}"
         ) from error
