@@ -19,6 +19,7 @@ from pydantic import Field
 
 from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
 from pluto_plus.doctor import TANDEM_AGC_V7_RAM_POLICY
+from pluto_plus.hardware.preflight import inspect_iio_environment
 from pluto_plus.models import ApiModel
 from pluto_plus.setup_helper import SetupTransport
 from pluto_plus.tandem import RadioMetadataV4, TandemMode, TandemSessionRequestV1, TandemState
@@ -218,6 +219,12 @@ def _metadata_slot_worker(
     connection: Any,
 ) -> None:
     try:
+        environment = inspect_iio_environment(require_usb=False)
+        if not environment.healthy:
+            raise MetadataSoakError(
+                f"metadata slot worker IIO environment failed: "
+                f"{environment.actionable_message}"
+            )
         result = _execute_live_metadata_slot(
             MetadataSoakPlan.model_validate(raw_plan),
             MetadataMatrixCell.model_validate(raw_cell),

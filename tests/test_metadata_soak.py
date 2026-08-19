@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import pluto_plus.metadata_soak as metadata_soak
 from pluto_plus.metadata_soak import (
     MetadataHealth,
     MetadataMatrixCell,
@@ -189,6 +191,50 @@ def test_live_phase_errors_preserve_slot_frequency_and_refill() -> None:
         operation="buffer_refill",
     ):
         raise OSError(16, "Device or resource busy")
+
+
+def test_spawn_worker_preloads_validated_iio_before_radio_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages: list[dict[str, object]] = []
+
+    class Connection:
+        def send(self, message: dict[str, object]) -> None:
+            messages.append(message)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        metadata_soak,
+        "inspect_iio_environment",
+        lambda **_kwargs: SimpleNamespace(
+            healthy=False,
+            actionable_message="explicit native libiio could not be loaded",
+        ),
+    )
+
+    def unexpected_radio_access(*_args: object) -> MetadataSlotResult:
+        raise AssertionError("radio access must follow child IIO preflight")
+
+    monkeypatch.setattr(metadata_soak, "_execute_live_metadata_slot", unexpected_radio_access)
+    plan = prepare_metadata_soak("192.168.1.15", SERIAL, slots=1)
+    metadata_soak._metadata_slot_worker(
+        plan.model_dump(mode="json"),
+        plan.matrix[0].model_dump(mode="json"),
+        0,
+        Connection(),
+    )
+
+    assert messages == [
+        {
+            "outcome": "fail",
+            "error": (
+                "MetadataSoakError: metadata slot worker IIO environment failed: "
+                "explicit native libiio could not be loaded"
+            ),
+        }
+    ]
 
 
 def test_restore_errors_preserve_exact_operation() -> None:
