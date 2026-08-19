@@ -15,6 +15,7 @@ digests before beginning.
 | H7 | Volatile firmware canary | Exact image/serial/path, RAM boot, expected version, cold rollback | Yes, volatile |
 | H8 | Persistent firmware canary | Qualified H7 image, `pluto.frm` only, receipt, expected version | Yes, persistent |
 | H9 | Soak | 8–24 h capture/preview, bounded memory/queues, no corrupt artifacts | No |
+| H10 | Metadata lifecycle | Absolute-paced context/eight-retune ABI-2 matrix; stable boot/iiOD identity; safe cleanup | Yes, reversible |
 
 ## Offline and read-only commands
 
@@ -28,6 +29,13 @@ The current marked tests are read-only discovery/status checks. Capture, direct
 transport, RAM firmware, and persistent firmware gates require site-specific
 fixtures and remain explicit pending evidence. Never promote a persistent image
 that has not passed the volatile canary on the same hardware revision.
+
+For H10, use `pluto radio soak-metadata` first with the nine-slot practical
+matrix on at least two exact release-candidate radios. Preserve the JSON reports.
+Any boot-ID, iiOD process/generation, metadata, close-deadline, ownership,
+fault/overflow, settings-restoration, or TX-safe failure is a release failure.
+The 936-slot campaign is a separate long-soak checkpoint and must retain the
+fixed absolute slot schedule without catch-up bursts.
 
 For direct transport qualification, start only the daemon composition matching
 the named serial:

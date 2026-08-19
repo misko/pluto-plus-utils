@@ -153,6 +153,37 @@ prove continuity. Stop any daemon or other process that owns the selected radio
 before running a direct ladder. The ladder explicitly configures 8 RX kernel
 buffers by default; use `--kernel-buffers` to compare another bounded count.
 
+### Metadata lifecycle soak
+
+`radio soak-metadata` reproduces the bounded context/retune/buffer lifecycle
+matrix used by the firmware release gate. It is deliberately separate from the
+ordinary-buffer speed ladder: each absolute 30.769230769-second slot opens one
+network context, alternates the order of eight LO retunes, and creates fresh
+ABI-2 tandem-HOLD metadata buffers for the 1.25/2.5/5 MS/s by 40/80/160 ms
+matrix. It refuses catch-up bursts and runs each live slot in a killable child
+with a 30-second wall-clock bound.
+
+The command is a dry run unless `--execute` and its exact confirmation phrase
+are supplied. Execution also requires a serial-specific pinned SSH host-key file
+so it can prove unchanged Linux boot ID, iiOD PID/start time/generation, zero
+buffer ownership, zero tandem fault/overflow, and TX1/TX2 `-80 dB` after every
+slot. It restores RX settings and writes an atomic mode-0600 JSON report on both
+pass and failure:
+
+```bash
+uv run pluto radio soak-metadata 192.168.1.15 \
+  --expect-serial 104000b29905000e17000800065934759d --slots 9
+uv run pluto radio soak-metadata 192.168.1.15 \
+  --expect-serial 104000b29905000e17000800065934759d --slots 9 \
+  --ssh-known-hosts-file /private/radio.known_hosts \
+  --ssh-password-file /private/radio.password --report /private/soak.json \
+  --execute --confirm 'SOAK METADATA 104000b29905000e17000800065934759d 9'
+```
+
+The nine-slot matrix is the practical release regression. The full `--slots
+936` campaign remains the long-soak gate and takes eight hours at the fixed
+period. Stop any competing owner before execution.
+
 `pluto doctor` is also standalone by default. It reads fresh IIOD facts through
 each exact USB-gadget network interface and reports identity, Rev.C model,
 canonical v5 firmware, AD9361 PHY, paired-RX devices, metadata, and facts that

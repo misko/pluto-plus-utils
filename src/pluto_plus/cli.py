@@ -28,6 +28,15 @@ from pluto_plus.inventory import (
     scan_local_usb_plutos,
 )
 from pluto_plus.ladder import DEFAULT_RATE_LADDER, LadderReport, parse_rate_ladder, run_iio_ladder
+from pluto_plus.metadata_soak import (
+    MAX_SLOTS,
+    MetadataSoakError,
+    SshMetadataHealthProbe,
+    execute_metadata_soak,
+    prepare_metadata_soak,
+    run_live_metadata_slot,
+)
+from pluto_plus.setup_helper import BoundSshTransport
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
 DEFAULT_STATE_ROOT = Path(os.environ.get("PLUTO_STATE_ROOT", "./pluto-state"))
@@ -35,6 +44,7 @@ DEFAULT_BOOTSTRAP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/bootst
 DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qualification-reports"
 DEFAULT_LOCAL_REBOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/reboot-receipts"
 DEFAULT_RAM_BOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/ram-boot-receipts"
+DEFAULT_METADATA_SOAK_REPORTS = Path.home() / ".local/state/pluto-plus-utils/metadata-soak-reports"
 DEFAULT_HOST_ISOLATION_RECEIPTS = (
     Path.home() / ".local/state/pluto-plus-utils/host-isolation-receipts"
 )
@@ -978,6 +988,121 @@ def radio_ladder(
         typer.echo(_ladder_table(report))
     if report.failures:
         raise typer.Exit(5)
+
+
+@radio_app.command("soak-metadata")
+def radio_soak_metadata(
+    target: str = typer.Argument(..., help="Literal private IPv4 address of one radio."),
+    expect_serial: str = typer.Option(
+        ..., "--expect-serial", help="Require this exact radio serial over IIO and SSH."
+    ),
+    slots: int = typer.Option(
+        9,
+        "--slots",
+        min=1,
+        max=MAX_SLOTS,
+        help="Bounded context slots; the full long-soak maximum is 936.",
+    ),
+    profile_id: str = typer.Option(
+        "tandem-agc-v7-release-ram",
+        "--profile",
+        help="Exact immutable ABI-2 tandem firmware profile.",
+    ),
+    ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts file pinned to this exact radio and endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Optional private one-line radio password file; otherwise prompt.",
+    ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None, "--report", help="Durable atomic JSON report path."
+    ),
+    execute: bool = typer.Option(False, "--execute", help="Run the bounded live workload."),
+    confirmation: str | None = typer.Option(
+        None, "--confirm", help="With --execute, the exact phrase printed by the dry run."
+    ),
+) -> None:
+    """Soak repeated ABI-2 metadata context/retune/buffer lifecycles."""
+
+    try:
+        plan = prepare_metadata_soak(
+            target,
+            expect_serial,
+            slots=slots,
+            profile_id=profile_id,
+        )
+    except MetadataSoakError as error:
+        _fail("metadata_soak_plan_failed", str(error), 2)
+    selected_report = (
+        DEFAULT_METADATA_SOAK_REPORTS / f"metadata-{plan.serial}-{time.time_ns()}.json"
+        if report_path is None
+        else report_path.expanduser().resolve()
+    )
+    if not execute:
+        _emit(
+            {
+                "execute": False,
+                "plan": plan.model_dump(mode="json"),
+                "confirmation_phrase": plan.confirmation_phrase,
+                "report_path": str(selected_report),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "metadata_soak_confirmation_required",
+            f"--confirm must be exactly {plan.confirmation_phrase!r}",
+            2,
+        )
+    if ssh_known_hosts_file is None:
+        _fail(
+            "metadata_soak_known_hosts_required",
+            "--execute requires --ssh-known-hosts-file",
+            2,
+        )
+    if selected_report.exists():
+        _fail(
+            "metadata_soak_report_exists",
+            "refusing to replace an existing metadata soak report",
+            2,
+        )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().resolve()
+    _read_private_file_bytes(
+        selected_known_hosts,
+        label="metadata soak SSH known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    password = (
+        typer.prompt("Radio root password", hide_input=True)
+        if ssh_password_file is None
+        else _read_private_text_file(
+            ssh_password_file.expanduser().resolve(), label="metadata soak SSH password"
+        )
+    )
+    environment = inspect_iio_environment()
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        transport = BoundSshTransport(
+            host=plan.target,
+            interface=None,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+        probe = SshMetadataHealthProbe(transport, serial=plan.serial)
+        report = execute_metadata_soak(
+            plan,
+            report_path=selected_report,
+            health_probe=probe,
+            slot_runner=run_live_metadata_slot,
+        )
+    except (ImportError, MetadataSoakError, OSError, RuntimeError, ValueError) as error:
+        _fail("metadata_soak_failed", str(error), 5)
+    _emit(report.model_dump(mode="json"))
 
 
 @radio_app.command("qualify-tandem")
