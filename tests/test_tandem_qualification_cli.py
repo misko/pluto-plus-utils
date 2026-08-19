@@ -75,6 +75,30 @@ def test_qualify_tandem_dry_run_does_not_require_host_environment(
     assert document["plan"]["confirmation_phrase"] == "QUALIFY TANDEM SERIAL_A 20DB"
 
 
+def test_qualify_tandem_forwards_exact_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected: list[str] = []
+
+    def prepare(*args: object, **kwargs: object) -> TandemQualificationPlan:
+        del args
+        selected.append(str(kwargs["profile_id"]))
+        return _plan()
+
+    monkeypatch.setattr(
+        "pluto_plus.tandem_qualification.prepare_tandem_qualification",
+        prepare,
+    )
+
+    result = runner.invoke(
+        app,
+        [*_arguments(), "--profile", "exact-candidate-profile"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert selected == ["exact-candidate-profile"]
+
+
 def test_qualify_tandem_execute_preflights_usb_before_confirmation_or_hardware(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
