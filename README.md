@@ -30,6 +30,14 @@ uv run pluto analyze ARTIFACT_ID --analyzer spectrum --parameters '{"fft_size":4
 
 ### Recovering clock and LNB errors from an observed frequency ladder
 
+> **⚠️ Closed, conducted paths only.** The example below uses 10.7-11.5 GHz,
+> which is satellite downlink spectrum. These are theoretical bench procedures
+> and must **never be performed over open air** -- terrestrial transmission
+> there is prohibited in essentially every jurisdiction and interferes with
+> satellite reception well beyond your own site. This host only *listens*, but
+> whoever operates the transmitter must keep it conducted: coax, attenuation,
+> shielding, and no antenna on either end.
+
 A transmitter that this host does not control can publish a duration-coded
 frequency ladder: rung `n` of `N` transmits for `n * total_seconds / (N * (N +
 1))` seconds and then stays quiet for as long again, so a burst's *duration*
@@ -49,7 +57,8 @@ nominal LO 9.750 GHz. Five rungs from 10.7 to 11.5 GHz, one pass every 30 s, so
 | 4 | 4 s | 11.300 GHz | 1550 MHz |
 | 5 | 5 s | 11.500 GHz | 1750 MHz |
 
-**Transmit side.** Not this tool -- the ladder comes from whatever generates it.
+**Transmit side.** Not this tool -- the ladder comes from whatever generates it,
+and whoever runs it is responsible for keeping it off the air.
 With an ADF5355 driven by [`adf5355_tester`](https://github.com/misko/adf5355_tester),
 start it looping first and leave it running for the whole receive session:
 
