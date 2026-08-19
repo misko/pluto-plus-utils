@@ -479,7 +479,7 @@ class PlutoService:
         manager = self._require_setup()
         controller = self._controller(radio_id)
         snapshot = controller.snapshot()
-        if snapshot.state is not RadioState.READY:
+        if snapshot.state is not RadioState.READY and not controller.setup_required:
             raise RadioBusyError(f"radio cannot plan setup while {snapshot.state}")
         identity = snapshot.identity
         if identity.usb_path is None or identity.firmware_version is None:
@@ -506,7 +506,7 @@ class PlutoService:
         return manager.execute(
             plan,
             confirmation_token,
-            before_mutation=controller.prepare_radio_mutation,
+            before_mutation=controller.prepare_setup_mutation,
             after_mutation=lambda: controller.recover_after_radio_mutation(
                 require_paired_rx=True
             ),

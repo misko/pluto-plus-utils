@@ -8,7 +8,7 @@ import shutil
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +17,12 @@ import numpy as np
 
 from pluto_plus.artifacts import CaptureWriter
 from pluto_plus.catalog import Catalog
-from pluto_plus.errors import RadioBusyError, RadioConfigurationError, RevisionConflictError
+from pluto_plus.errors import (
+    RadioBusyError,
+    RadioConfigurationError,
+    RadioSetupRequiredError,
+    RevisionConflictError,
+)
 from pluto_plus.hardware.base import RadioDevice, SampleBlock
 from pluto_plus.models import (
     JobState,
@@ -143,6 +148,8 @@ class RadioController:
         self._requested = RadioSettings()
         self._actual = RadioSettings()
         self._last_error: str | None = None
+        self._setup_required = False
+        self._setup_diagnostic_facts: dict[str, object] = {}
         self._active: _ActiveStream | None = None
         self._active_scan: _ActiveScan | None = None
         self._jobs = {
@@ -188,11 +195,21 @@ class RadioController:
     def diagnostic_facts(self) -> dict[str, object]:
         """Return device-specific passive facts without changing radio state."""
 
+        with self._lock:
+            if self._setup_required:
+                return dict(self._setup_diagnostic_facts)
         reader = getattr(self._device, "diagnostic_facts", None)
         if not callable(reader):
             return {}
         facts = reader()
         return dict(facts) if isinstance(facts, dict) else dict(facts)
+
+    @property
+    def setup_required(self) -> bool:
+        """Whether startup safely identified a radio needing canonical setup."""
+
+        with self._lock:
+            return self._setup_required
 
     def update_settings(self, patch: SettingsPatch) -> RadioSnapshot:
         with self._lock:
@@ -396,6 +413,20 @@ class RadioController:
                 self._last_error = f"{type(error).__name__}: {error}"
             raise
 
+    def prepare_setup_mutation(self) -> None:
+        """Quiesce a ready radio or one degraded solely for canonical setup."""
+
+        with self._lock:
+            if self._state is RadioState.READY:
+                pass
+            elif self._state is RadioState.ERROR and self._setup_required:
+                self._state = RadioState.FLASHING
+                self._last_error = None
+                return
+            else:
+                raise RadioBusyError(f"radio cannot enter setup mode while {self._state}")
+        self.prepare_radio_mutation()
+
     def recover_after_firmware_mutation(self) -> None:
         """Reopen and re-attest the radio after any authorized mutation attempt."""
 
@@ -440,6 +471,8 @@ class RadioController:
             self._revision += 1
             self._state = RadioState.READY
             self._last_error = None
+            self._setup_required = False
+            self._setup_diagnostic_facts = {}
 
     def recover(self) -> RadioSnapshot:
         """Close stale resources and reopen an errored/offline radio by exact identity."""
@@ -472,6 +505,8 @@ class RadioController:
             self._revision += 1
             self._state = RadioState.READY
             self._last_error = None
+            self._setup_required = False
+            self._setup_diagnostic_facts = {}
             return self.snapshot()
 
     def close(self) -> None:
@@ -512,6 +547,18 @@ class RadioController:
             with self._device_lock:
                 self._device.open()
                 settings = self._device.read_settings()
+        except RadioSetupRequiredError as error:
+            reader = getattr(self._device, "diagnostic_facts", None)
+            facts = reader() if callable(reader) else {}
+            self._setup_diagnostic_facts = (
+                dict(facts) if isinstance(facts, Mapping) else {}
+            )
+            with suppress(Exception), self._device_lock:
+                self._device.close()
+            self._state = RadioState.ERROR
+            self._last_error = f"{type(error).__name__}: {error}"
+            self._setup_required = True
+            return
         except Exception as error:
             with suppress(Exception), self._device_lock:
                 self._device.close()
@@ -521,6 +568,8 @@ class RadioController:
         self._requested = settings
         self._actual = settings
         self._state = RadioState.READY
+        self._setup_required = False
+        self._setup_diagnostic_facts = {}
 
     def _run_stream(self, job_id: str, request: StreamRequest, stop: threading.Event) -> None:
         writer: CaptureWriter | None = None

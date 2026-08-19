@@ -153,8 +153,10 @@ The staged flow is intentionally two-phase:
 5. Create a new, separately confirmed **persistent QSPI** plan. Pluto+ Utils converts
    a valid DFU into firmware-only `pluto.frm` by removing the 16-byte DFU suffix and
    appending lowercase FIT MD5 plus newline. The mass-storage helper maps the block
-   device by `ID_SERIAL_SHORT`, copies only `pluto.frm`, syncs, unmounts, ejects, and
-   waits for the exact serial to re-enumerate.
+   device by `ID_SERIAL_SHORT`, copies only `pluto.frm`, syncs, unmounts, asks
+   UDisks to issue SCSI `LOEJ`, proves that the mass-storage LUN was removed while
+   the composite USB device remained present, and then waits for the exact serial
+   to re-enumerate. It never powers off the USB device or hub port.
 6. Remove all power, reconnect the same radio, rerun doctor, and repeat the paired-RX
    and TX-safe-state checks. A soft reboot is not persistence proof.
 
@@ -214,7 +216,7 @@ pluto firmware force-flash ./QUALIFIED.dfu \
   --usb-sysfs-path /sys/bus/usb/devices/3-11
 pluto firmware force-flash ./QUALIFIED.dfu \
   --usb-sysfs-path /sys/bus/usb/devices/3-11 \
-  --execute --confirm 'BOOTSTRAP 3-11'
+  --execute --confirm 'BOOTSTRAP 3-11' --return-timeout 420
 ```
 
 The second command writes only `pluto.frm` to the serial-correlated updater
@@ -222,6 +224,37 @@ volume and records a durable local receipt. Once a stable serial exists, all
 subsequent firmware operations must use the normal serial-attested plan/token
 workflow. Never retry an `unknown` bootstrap receipt without read-only
 reconciliation.
+
+`--return-timeout` is bounded to 30–1800 seconds and defaults to 180. A failure
+before the SCSI eject request is a known `qspi_write_not_started` result: the FIT
+may be staged on FAT, but the radio-side QSPI updater was never triggered. A
+failure after the eject request is dispatched remains `unknown` unless LUN
+removal and the returning radio can be attested. In particular, disappearance of
+the whole composite USB device is not accepted as proof of media eject.
+
+### Headless UDisks/polkit setup
+
+Mounting and ejecting an updater volume uses UDisks; Pluto+ Utils has no `sudo`
+fallback. On a headless session, UDisks can select the `*-other-seat` actions.
+After reviewing the group and drive identity checks, an administrator may install
+the repository's narrow example rule:
+
+```bash
+sudo install -m 0644 packaging/polkit/50-pluto-plus-utils.rules \
+  /etc/polkit-1/rules.d/50-pluto-plus-utils.rules
+```
+
+The example grants only mount, unmount-others, and media-eject actions to members
+of `plugdev`, and only for removable USB drives whose UDisks model identifies a
+Pluto or Linux File-Stor Gadget. Verify the exact host strings first:
+
+```bash
+udisksctl info --block-device /dev/sdX
+```
+
+Do not broaden the rule to `drive-power-off`: UDisks documents that USB power-off
+deconfigures the device and may disable its upstream hub port, which bypasses the
+Pluto updater's SCSI media-removal trigger.
 
 After the volatile checkpoint, repeat `plan` with `--mode persistent_qspi`. These
 commands fail closed unless the daemon has a separately configured privileged helper
@@ -267,7 +300,7 @@ runs `pluto firmware reconcile RECEIPT_ID` after restarting the daemon.
 | Read-only doctor | deterministic pass/fail/unknown fixtures and API/CLI/UI parity |
 | Plan | token binds serial, sysfs path, active firmware, mode, image bytes, SHA, and expiry |
 | Volatile canary | exact DFU alternate, re-enumeration, current profile, dual RX, tuning, TX muted |
-| Persistent write | only validated `pluto.frm`; mount/copy/sync/eject fault injection |
+| Persistent write | only validated `pluto.frm`; mount/copy/sync/SCSI-LOEJ fault injection; LUN-removal proof |
 | Cold verification | physical power cycle, same serial/path, version and setup reread |
 | Recovery | interrupted jobs retain durable failure receipts; never fall back to boot images |
 

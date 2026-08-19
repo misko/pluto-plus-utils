@@ -1025,7 +1025,7 @@ def test_usb_bootstrap_cli_requires_and_passes_exact_confirmation(
         expected_firmware="v5",
         confirmation_phrase="BOOTSTRAP 3-11",
     )
-    confirmations: list[str] = []
+    executions: list[tuple[str, float]] = []
     monkeypatch.setattr(
         "pluto_plus.bootstrap_firmware.prepare_usb_flash_plan",
         lambda image, usb_sysfs_path, force_blank_serial, **kwargs: (plan, b"frm"),
@@ -1033,7 +1033,12 @@ def test_usb_bootstrap_cli_requires_and_passes_exact_confirmation(
 
     def execute(plan: object, frm: bytes, **kwargs: Any) -> BootstrapResult:
         del plan, frm
-        confirmations.append(cast(str, kwargs["confirmation"]))
+        executions.append(
+            (
+                cast(str, kwargs["confirmation"]),
+                cast(float, kwargs["return_timeout_s"]),
+            )
+        )
         return BootstrapResult(
             receipt_id="receipt-1",
             outcome="success",
@@ -1078,7 +1083,40 @@ def test_usb_bootstrap_cli_requires_and_passes_exact_confirmation(
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["returned_serial"] == "SERIAL_NEW"
-    assert confirmations == ["BOOTSTRAP 3-11"]
+    assert executions == [("BOOTSTRAP 3-11", 180)]
+
+    explicit_timeout = runner.invoke(
+        app,
+        [
+            "firmware",
+            "bootstrap-usb",
+            str(image),
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-11",
+            "--return-timeout",
+            "420",
+            "--execute",
+            "--confirm",
+            "BOOTSTRAP 3-11",
+        ],
+    )
+    assert explicit_timeout.exit_code == 0, explicit_timeout.output
+    assert executions[-1] == ("BOOTSTRAP 3-11", 420)
+
+    for invalid_timeout in ("29", "1801"):
+        invalid = runner.invoke(
+            app,
+            [
+                "firmware",
+                "bootstrap-usb",
+                str(image),
+                "--usb-sysfs-path",
+                "/sys/bus/usb/devices/3-11",
+                "--return-timeout",
+                invalid_timeout,
+            ],
+        )
+        assert invalid.exit_code == 2
 
     def unavailable(*args: object, **kwargs: object) -> BootstrapResult:
         del args, kwargs

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from pluto_plus.errors import RadioConfigurationError
+from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
 from pluto_plus.hardware.iio import (
     IioRadioDevice,
     context_facts,
@@ -92,6 +92,73 @@ class UnsafeFakeAdi(FakeAdi):
         return self.device
 
 
+class OneRxFakeAd9361(FakeAd9361):
+    def __init__(self, uri: str, serial: str = "SERIAL_A") -> None:
+        self._missing_chan1 = False
+        super().__init__(uri, serial)
+        self._missing_chan1 = True
+        self.ctx = SimpleNamespace(
+            attrs={
+                "hw_serial": serial,
+                "hw_model": "Pluto+ 1R1T",
+                "fw_version": "v-test",
+                "ad9361-phy,model": "ad9363a",
+            },
+            find_device=lambda name: (
+                SimpleNamespace(
+                    channels=(
+                        SimpleNamespace(id="voltage0", scan_element=True),
+                        SimpleNamespace(id="voltage1", scan_element=True),
+                    )
+                )
+                if name == "cf-ad9361-lpc"
+                else None
+            ),
+            close=lambda: None,
+        )
+        self.tx_enabled_channels = [0]
+
+    @property
+    def tx_hardwaregain_chan1(self) -> float:
+        if not self._missing_chan1:
+            return self._initial_chan1_gain
+        raise Exception("No channel found with name: voltage1")
+
+    @tx_hardwaregain_chan1.setter
+    def tx_hardwaregain_chan1(self, value: float) -> None:
+        if not self._missing_chan1:
+            self._initial_chan1_gain = value
+            return
+        raise Exception("No channel found with name: voltage1")
+
+
+class OneRxFakeAdi(FakeAdi):
+    def ad9361(self, uri: str) -> FakeAd9361:
+        self.device = OneRxFakeAd9361(uri, self.serial)
+        return self.device
+
+
+class BrokenProbeFakeAd9361(OneRxFakeAd9361):
+    @property
+    def tx_hardwaregain_chan1(self) -> float:
+        if not self._missing_chan1:
+            return self._initial_chan1_gain
+        raise OSError("IIO transport disconnected")
+
+    @tx_hardwaregain_chan1.setter
+    def tx_hardwaregain_chan1(self, value: float) -> None:
+        if not self._missing_chan1:
+            self._initial_chan1_gain = value
+            return
+        raise OSError("IIO transport disconnected")
+
+
+class BrokenProbeFakeAdi(FakeAdi):
+    def ad9361(self, uri: str) -> FakeAd9361:
+        self.device = BrokenProbeFakeAd9361(uri, self.serial)
+        return self.device
+
+
 def test_usb_uri_resolution_requires_one_serial_match() -> None:
     contexts = {
         "usb:1.2.3": "PlutoSDR serial=SERIAL_A",
@@ -135,6 +202,7 @@ def test_iio_adapter_applies_reads_back_and_captures_paired_rx() -> None:
         assert module.device._rxadc.kernel_buffers_count == 8
     finally:
         radio.close()
+    assert radio.diagnostic_facts() == {}
 
 
 def test_iio_adapter_fails_closed_on_wrong_opened_serial() -> None:
@@ -157,6 +225,43 @@ def test_iio_adapter_fails_closed_when_dds_mute_does_not_read_back() -> None:
     )
     with pytest.raises(RadioConfigurationError, match="DDS source remained enabled"):
         radio.open()
+
+
+def test_iio_adapter_retains_facts_and_types_noncanonical_1r1t() -> None:
+    module = OneRxFakeAdi()
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        adi_module=module,
+        iio_contexts={"usb:1": "serial=SERIAL_A"},
+    )
+
+    with pytest.raises(RadioSetupRequiredError, match="AD9361/2R2T"):
+        radio.open()
+
+    assert radio.identity.serial == "SERIAL_A"
+    assert radio.identity.firmware_version == "v-test"
+    assert radio.diagnostic_facts()["phy_model"] == "ad9363a"
+    assert radio.diagnostic_facts()["rx_scan_channels"] == ("voltage0", "voltage1")
+    assert module.device is not None
+    assert module.device.tx_hardwaregain_chan0 == -80.0
+    assert module.device.tx_enabled_channels == []
+
+
+def test_iio_adapter_does_not_hide_genuine_tx_probe_io_error() -> None:
+    module = BrokenProbeFakeAdi()
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        adi_module=module,
+        iio_contexts={"usb:1": "serial=SERIAL_A"},
+    )
+
+    with pytest.raises(OSError, match="transport disconnected"):
+        radio.open()
+
+    assert module.device is not None
+    assert module.device.tx_hardwaregain_chan0 == -80.0
 
 
 def test_sysfs_discovery_is_stable_and_filtered(tmp_path) -> None:

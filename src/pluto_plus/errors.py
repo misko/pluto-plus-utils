@@ -21,6 +21,10 @@ class RadioConfigurationError(PlutoPlusError):
     pass
 
 
+class RadioSetupRequiredError(RadioConfigurationError):
+    """The radio is safely identified but requires canonical hardware setup."""
+
+
 class ArtifactNotFoundError(PlutoPlusError):
     pass
 

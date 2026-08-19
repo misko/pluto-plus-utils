@@ -79,6 +79,9 @@ UdisksFailureKind = Literal[
     "authorization_denied",
     "already_mounted",
     "device_disappeared",
+    "drive_mapping_invalid",
+    "composite_disappeared",
+    "media_removal_timeout",
     "operation_failed",
 ]
 
@@ -566,6 +569,7 @@ def execute_bootstrap_plan(
         partition=Path(plan.partition),
         block_device=Path(plan.block_device),
     )
+    drive_object = _resolve_udisks_drive(Path(plan.block_device))
 
     receipt_id = str(uuid.uuid4())
     receipt_path = receipt_directory / f"{receipt_id}.json"
@@ -580,6 +584,7 @@ def execute_bootstrap_plan(
     }
     _write_receipt(receipt_path, receipt)
     wrote_image = False
+    eject_requested = False
     try:
         mountpoint = _mount_partition(Path(plan.partition))
         phases.append("mounted")
@@ -601,8 +606,25 @@ def execute_bootstrap_plan(
         _run_udisks("unmount", Path(plan.partition), timeout_s=30)
         phases.append("unmounted")
         _update_receipt(receipt_path, receipt, phases)
-        _run_udisks("power-off", Path(plan.block_device), timeout_s=30)
-        phases.append("ejected")
+        if _resolve_udisks_drive(Path(plan.block_device)) != drive_object:
+            raise BootstrapFirmwareError("UDisks drive mapping changed before SCSI eject")
+        _validate_scsi_eject_target(
+            drive_object=drive_object,
+            usb_sysfs_path=Path(plan.usb_sysfs_path),
+            block_device=Path(plan.block_device),
+            partition=Path(plan.partition),
+        )
+        phases.append("eject_requested")
+        _update_receipt(receipt_path, receipt, phases)
+        eject_requested = True
+        _eject_scsi_media(
+            drive_object=drive_object,
+            usb_sysfs_path=Path(plan.usb_sysfs_path),
+            block_device=Path(plan.block_device),
+            partition=Path(plan.partition),
+            timeout_s=30,
+        )
+        phases.append("media_ejected")
         _update_receipt(receipt_path, receipt, phases)
         _wait_for_path(Path(plan.usb_sysfs_path), present=False, timeout_s=30)
         phases.append("disappeared")
@@ -626,7 +648,11 @@ def execute_bootstrap_plan(
             returned_phy=returned_phy,
         )
     except Exception as error:
-        outcome: Literal["failed", "unknown"] = "unknown" if wrote_image else "failed"
+        # Staging pluto.frm does not write QSPI. The radio-side updater is
+        # triggered only by SCSI media removal, so failures before the eject
+        # request are provable no-write failures. Once Eject has been
+        # dispatched, a missing acknowledgement is genuinely uncertain.
+        outcome: Literal["failed", "unknown"] = "unknown" if eject_requested else "failed"
         # If mounting succeeded but writing did not, make a bounded cleanup attempt.
         if "mounted" in phases and "unmounted" not in phases:
             try:
@@ -637,15 +663,27 @@ def execute_bootstrap_plan(
         classification = (
             error.classification
             if isinstance(error, UdisksFailure)
-            else ("post_write_uncertain" if wrote_image else "pre_write_failure")
+            else (
+                "post_eject_uncertain"
+                if eject_requested
+                else ("qspi_write_not_started" if wrote_image else "pre_write_failure")
+            )
         )
         remediation = (
             error.remediation
             if isinstance(error, UdisksFailure)
             else (
                 "Do not retry automatically; reconcile the radio and this receipt first."
-                if wrote_image
-                else "This receipt proves no pluto.frm write began; correct the error and re-plan."
+                if eject_requested
+                else (
+                    "No SCSI eject was requested, so no QSPI write began. Reconcile or remove "
+                    "the staged pluto.frm from the exact updater volume, then re-plan."
+                    if wrote_image
+                    else (
+                        "This receipt proves no pluto.frm write began; "
+                        "correct the error and re-plan."
+                    )
+                )
             )
         )
         result = BootstrapResult(
@@ -656,7 +694,7 @@ def execute_bootstrap_plan(
             error=f"{type(error).__name__}: {error}",
             failure_phase=_bootstrap_failure_phase(phases),
             failure_classification=classification,
-            retryable=not wrote_image,
+            retryable=not eject_requested,
             remediation=remediation,
         )
     receipt.update(asdict(result))
@@ -1079,6 +1117,132 @@ def _preflight_udisks(*, partition: Path, block_device: Path) -> None:
         raise _udisks_already_mounted(partition)
 
 
+_UDISKS_DRIVE_PATH = re.compile(r"/org/freedesktop/UDisks2/drives/[A-Za-z0-9_]+")
+_UDISKS_DRIVE_LINE = re.compile(
+    r"^\s*Drive:\s*'?(/org/freedesktop/UDisks2/drives/[A-Za-z0-9_]+)'?\s*$"
+)
+
+
+def _resolve_udisks_drive(block_device: Path) -> str:
+    """Resolve one exact block node to its UDisks drive object."""
+
+    _require_udisks_device(block_device)
+    try:
+        output = _run_output(
+            ("udisksctl", "info", "--block-device", str(block_device)), timeout_s=10
+        )
+    except BootstrapFirmwareError as error:
+        raise _classify_udisks_failure(
+            error, operation="drive lookup", device=block_device
+        ) from error
+    matches = [
+        match.group(1)
+        for line in output.splitlines()
+        for match in [_UDISKS_DRIVE_LINE.fullmatch(line)]
+        if match is not None
+    ]
+    if len(matches) != 1:
+        raise UdisksFailure(
+            "drive_mapping_invalid",
+            f"exact block device {block_device} resolved to {len(matches)} UDisks drives",
+            "Inspect `udisksctl info --block-device` for the exact device and re-plan.",
+        )
+    return matches[0]
+
+
+def _eject_scsi_media(
+    *,
+    drive_object: str,
+    usb_sysfs_path: Path,
+    block_device: Path,
+    partition: Path,
+    timeout_s: float,
+) -> None:
+    """Issue UDisks Drive.Eject and prove media removal without USB power-off."""
+
+    # The caller validates all local paths before recording that dispatch has
+    # begun. From this point onward, failures are conservatively uncertain.
+    try:
+        _run(
+            (
+                "gdbus",
+                "call",
+                "--system",
+                "--dest",
+                "org.freedesktop.UDisks2",
+                "--object-path",
+                drive_object,
+                "--method",
+                "org.freedesktop.UDisks2.Drive.Eject",
+                "{}",
+            ),
+            timeout_s=timeout_s,
+        )
+    except BootstrapFirmwareError as error:
+        raise _classify_udisks_failure(
+            error, operation="SCSI media eject", device=block_device
+        ) from error
+    _wait_for_scsi_media_removal(
+        usb_sysfs_path=usb_sysfs_path,
+        block_device=block_device,
+        partition=partition,
+        timeout_s=timeout_s,
+    )
+
+
+def _validate_scsi_eject_target(
+    *,
+    drive_object: str,
+    usb_sysfs_path: Path,
+    block_device: Path,
+    partition: Path,
+) -> None:
+    """Validate every local eject target before dispatch can become uncertain."""
+
+    if _UDISKS_DRIVE_PATH.fullmatch(drive_object) is None:
+        raise BootstrapFirmwareError("refusing an invalid UDisks drive object path")
+    _require_udisks_device(block_device)
+    _require_udisks_device(partition)
+    if not usb_sysfs_path.exists():
+        raise UdisksFailure(
+            "device_disappeared",
+            f"exact USB target {usb_sysfs_path} disappeared before SCSI eject",
+            "Reconnect the radio and create a fresh path-bound flash plan.",
+        )
+
+
+def _wait_for_scsi_media_removal(
+    *,
+    usb_sysfs_path: Path,
+    block_device: Path,
+    partition: Path,
+    timeout_s: float,
+) -> None:
+    """Require the LUN to vanish or reach size zero while composite USB remains."""
+
+    deadline = time.monotonic() + timeout_s
+    size_path = _BLOCK_ROOT / block_device.name / "size"
+    while time.monotonic() < deadline:
+        if not usb_sysfs_path.exists():
+            raise UdisksFailure(
+                "composite_disappeared",
+                "the composite USB device disappeared before SCSI media removal was proven",
+                "Do not retry automatically; reconnect and reconcile the staged updater volume.",
+            )
+        block_missing = not block_device.exists()
+        size_zero = False
+        with suppress(OSError, ValueError):
+            size_zero = int(size_path.read_text().strip()) == 0
+        if not partition.exists() and (block_missing or size_zero):
+            return
+        time.sleep(0.1)
+    raise UdisksFailure(
+        "media_removal_timeout",
+        f"SCSI media removal was not proven for exact device {block_device}",
+        "Do not retry automatically; inspect the exact updater LUN and receipt.",
+    )
+
+
 def _run_udisks(operation: str, device: Path | None, *, timeout_s: float) -> None:
     argv: tuple[str, ...]
     if operation == "status":
@@ -1092,7 +1256,7 @@ def _run_udisks(operation: str, device: Path | None, *, timeout_s: float) -> Non
             "--options",
             "rw,nodev,nosuid,noexec",
         )
-    elif operation in {"unmount", "power-off"} and device is not None:
+    elif operation == "unmount" and device is not None:
         argv = ("udisksctl", operation, "--block-device", str(device))
     else:  # pragma: no cover - internal programming guard
         raise ValueError(f"invalid udisks operation: {operation}")
@@ -1195,8 +1359,8 @@ def _bootstrap_failure_phase(phases: list[str]) -> str:
         return "sync"
     if "unmounted" not in phases:
         return "unmount"
-    if "ejected" not in phases:
-        return "power_off"
+    if "media_ejected" not in phases:
+        return "scsi_eject"
     return "return_attestation"
 
 

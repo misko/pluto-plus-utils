@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from pluto_plus.diagnostic_profiles import parse_metadata_abi
-from pluto_plus.errors import RadioConfigurationError
+from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
 from pluto_plus.hardware.base import SampleBlock
 from pluto_plus.models import (
     GainMode,
@@ -74,6 +74,7 @@ class IioRadioDevice:
     def open(self) -> None:
         if self._device is not None:
             raise RuntimeError("IIO radio is already open")
+        self._diagnostic_facts = {}
         module = self._adi_module
         if module is None:
             try:
@@ -90,7 +91,6 @@ class IioRadioDevice:
         device = module.ad9361(uri=uri)
         try:
             device.rx_destroy_buffer()
-            _mute_transmit(device)
             facts = context_facts(device.ctx)
             detected_serial = str(facts.get("serial") or "")
             if self._requested_serial and detected_serial != self._requested_serial:
@@ -126,6 +126,11 @@ class IioRadioDevice:
                 "boot_provenance": None,
                 "uboot": None,
             }
+            # Capture identity and passive context facts before accessing any
+            # per-channel pyadi properties. A 1R1T device raises a bare Exception
+            # from those getters rather than AttributeError.
+            _mute_transmit(device)
+            _require_canonical_rx_layout(facts)
             self._device = device
         except Exception:
             _release_device(device)
@@ -365,41 +370,80 @@ def _device_exists(context: Any, device_name: str) -> bool:
 def _mute_transmit(device: Any) -> None:
     # Attenuate first so a later buffer/DDS selector transition cannot briefly
     # expose a previously configured waveform at useful power.
-    gain_attributes = tuple(
-        name
-        for name in ("tx_hardwaregain_chan0", "tx_hardwaregain_chan1")
-        if hasattr(device, name)
-    )
-    for name in gain_attributes:
-        setattr(device, name, -80.0)
+    gain_attributes: list[str] = []
+    for name in ("tx_hardwaregain_chan0", "tx_hardwaregain_chan1"):
+        present, _ = _optional_attribute(device, name)
+        if present:
+            setattr(device, name, -80.0)
+            gain_attributes.append(name)
 
     close_tx = getattr(device, "tx_destroy_buffer", None)
     if callable(close_tx):
         close_tx()
-    if hasattr(device, "tx_enabled_channels"):
+    has_tx_channels, _ = _optional_attribute(device, "tx_enabled_channels")
+    if has_tx_channels:
         device.tx_enabled_channels = []
 
-    scales = getattr(device, "dds_scales", None)
-    if scales is not None:
+    has_scales, scales = _optional_attribute(device, "dds_scales")
+    if has_scales and scales is not None:
         device.dds_scales = [0.0] * len(scales)
     disable_dds = getattr(device, "disable_dds", None)
     if callable(disable_dds):
         # Keep this last: changing TX scan selection can select DDS internally.
         disable_dds()
 
-    if hasattr(device, "tx_enabled_channels") and list(device.tx_enabled_channels):
+    has_tx_channels, tx_channels = _optional_attribute(device, "tx_enabled_channels")
+    if has_tx_channels and list(tx_channels):
         raise RadioConfigurationError("TX channels remained enabled after mute")
     for name in gain_attributes:
         if float(getattr(device, name)) > -80.0:
             raise RadioConfigurationError(f"{name} did not reach the -80 dB safety limit")
-    muted_scales = getattr(device, "dds_scales", None)
-    if muted_scales is not None and any(float(value) != 0.0 for value in muted_scales):
+    has_muted_scales, muted_scales = _optional_attribute(device, "dds_scales")
+    if has_muted_scales and muted_scales is not None and any(
+        float(value) != 0.0 for value in muted_scales
+    ):
         raise RadioConfigurationError("DDS scale remained nonzero after mute")
-    dds_enabled = getattr(device, "dds_enabled", None)
-    if dds_enabled is not None and any(
+    has_dds_enabled, dds_enabled = _optional_attribute(device, "dds_enabled")
+    if has_dds_enabled and dds_enabled is not None and any(
         str(value).strip().lower() not in {"0", "false"} for value in dds_enabled
     ):
         raise RadioConfigurationError("DDS source remained enabled after mute")
+
+
+def _optional_attribute(device: Any, name: str) -> tuple[bool, Any]:
+    """Probe a pyadi property without disguising transport or I/O failures."""
+
+    try:
+        return True, getattr(device, name)
+    except AttributeError:
+        return False, None
+    except Exception as error:
+        # pyadi raises a bare Exception for a property backed by an absent IIO
+        # channel. This is absence, not an I/O failure. Everything else remains
+        # fail-closed and propagates to the caller.
+        if "no channel found with name:" in str(error).lower():
+            return False, None
+        raise
+
+
+def _require_canonical_rx_layout(facts: Mapping[str, object]) -> None:
+    """Raise a typed, diagnosable failure for a conclusive non-2R2T context."""
+
+    phy_model = _optional_string(facts.get("phy_model"))
+    raw_scan_channels = facts.get("rx_scan_channels")
+    scan_channels = (
+        tuple(str(item) for item in raw_scan_channels)
+        if isinstance(raw_scan_channels, (tuple, list, set, frozenset))
+        else ()
+    )
+    required = {"voltage0", "voltage1", "voltage2", "voltage3"}
+    wrong_phy = phy_model is not None and phy_model != "ad9361"
+    incomplete_scan = bool(scan_channels) and not required.issubset(scan_channels)
+    if wrong_phy or incomplete_scan:
+        raise RadioSetupRequiredError(
+            "radio requires canonical AD9361/2R2T setup "
+            f"(phy_model={phy_model or 'unknown'}, rx_scan_channels={scan_channels})"
+        )
 
 
 def _release_device(device: Any) -> None:

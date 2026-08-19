@@ -1,0 +1,25 @@
+/*
+ * Optional headless-host policy for Pluto/Pluto+ updater volumes.
+ * Install as root in /etc/polkit-1/rules.d/ after reviewing the local group
+ * and UDisks drive identity reported by `udisksctl info --block-device`.
+ */
+polkit.addRule(function(action, subject) {
+    var allowed = [
+        "org.freedesktop.udisks2.filesystem-mount",
+        "org.freedesktop.udisks2.filesystem-mount-other-seat",
+        "org.freedesktop.udisks2.filesystem-unmount-others",
+        "org.freedesktop.udisks2.eject-media",
+        "org.freedesktop.udisks2.eject-media-other-seat"
+    ];
+    var model = action.lookup("drive.model") || "";
+    var bus = action.lookup("drive.removable.bus") || "";
+
+    if (allowed.indexOf(action.id) < 0 || !subject.isInGroup("plugdev")) {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (bus === "usb" &&
+        (model.indexOf("File-Stor Gadget") >= 0 || model.indexOf("PlutoSDR") >= 0)) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

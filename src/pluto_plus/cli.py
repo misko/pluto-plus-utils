@@ -1039,29 +1039,35 @@ def radio_qualify_tandem(
             strong_tx_gain_db=strong_tx_gain_db,
             weak_tx_gain_db=weak_tx_gain_db,
         )
-        selected_report = report_path or (
-            DEFAULT_QUALIFICATION_REPORTS / f"tandem-{serial}-{time.time_ns()}.json"
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("tandem_qualification_failed", str(error), 5)
+    selected_report = report_path or (
+        DEFAULT_QUALIFICATION_REPORTS / f"tandem-{serial}-{time.time_ns()}.json"
+    )
+    if not execute:
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_enable_tx2": False,
+                "plan": asdict(plan),
+                "report_path": str(selected_report.expanduser().resolve()),
+                "next_command": (
+                    "repeat with --execute and "
+                    f"--confirm {json.dumps(plan.confirmation_phrase)}"
+                ),
+            }
         )
-        if not execute:
-            _emit(
-                {
-                    "mode": "dry_run",
-                    "will_enable_tx2": False,
-                    "plan": asdict(plan),
-                    "report_path": str(selected_report.expanduser().resolve()),
-                    "next_command": (
-                        "repeat with --execute and "
-                        f"--confirm {json.dumps(plan.confirmation_phrase)}"
-                    ),
-                }
-            )
-            return
-        if confirmation is None:
-            _fail(
-                "tandem_confirmation_required",
-                f"--execute requires --confirm {plan.confirmation_phrase!r}",
-                2,
-            )
+        return
+    environment = inspect_iio_environment(require_usb=True)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    if confirmation is None:
+        _fail(
+            "tandem_confirmation_required",
+            f"--execute requires --confirm {plan.confirmation_phrase!r}",
+            2,
+        )
+    try:
         report = execute_tandem_qualification(
             plan,
             confirmation=confirmation,
@@ -1769,6 +1775,13 @@ def firmware_flash_usb(
         "--ssh-host",
         help="Literal private IPv4 endpoint; non-default addresses use the LAN route.",
     ),
+    return_timeout_s: float = typer.Option(
+        180,
+        "--return-timeout",
+        min=30,
+        max=1800,
+        help="Seconds to wait for the exact radio to return after flashing.",
+    ),
 ) -> None:
     """Flash one exact qualified profile onto a serial-attested local USB Pluto."""
 
@@ -1783,6 +1796,7 @@ def firmware_flash_usb(
         ssh_known_hosts_file=ssh_known_hosts_file,
         ssh_password_file=ssh_password_file,
         ssh_host=ssh_host,
+        return_timeout_s=return_timeout_s,
         mutation_profile_id=profile,
     )
 
@@ -1998,6 +2012,13 @@ def firmware_force_flash_usb(
         "--ssh-host",
         help="Literal private IPv4 endpoint; non-default addresses use the LAN route.",
     ),
+    return_timeout_s: float = typer.Option(
+        180,
+        "--return-timeout",
+        min=30,
+        max=1800,
+        help="Seconds to wait for the exact radio to return after flashing.",
+    ),
 ) -> None:
     """Bootstrap canonical firmware onto one path-bound blank-serial Pluto."""
 
@@ -2012,6 +2033,7 @@ def firmware_force_flash_usb(
         ssh_known_hosts_file=ssh_known_hosts_file,
         ssh_password_file=ssh_password_file,
         ssh_host=ssh_host,
+        return_timeout_s=return_timeout_s,
         mutation_profile_id="libiio-continuous-metadata",
     )
 
@@ -2028,6 +2050,7 @@ def _standalone_usb_flash(
     ssh_known_hosts_file: Path | None,
     ssh_password_file: Path | None,
     ssh_host: str,
+    return_timeout_s: float,
     mutation_profile_id: str,
 ) -> None:
     """Plan or execute one canonical local USB firmware operation."""
@@ -2091,6 +2114,7 @@ def _standalone_usb_flash(
                 frm,
                 confirmation=confirmation,
                 receipt_directory=receipt_directory.expanduser().resolve(),
+                return_timeout_s=return_timeout_s,
             )
         else:
             if ssh_known_hosts_file is None:
@@ -2126,6 +2150,7 @@ def _standalone_usb_flash(
                 confirmation=confirmation,
                 receipt_directory=receipt_directory.expanduser().resolve(),
                 transport=ssh_transport,
+                return_timeout_s=return_timeout_s,
             )
     except UdisksFailure as error:
         _fail(f"bootstrap_udisks_{error.classification}", str(error), 4)

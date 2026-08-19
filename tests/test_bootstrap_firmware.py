@@ -331,8 +331,11 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
         lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
     monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
+    monkeypatch.setattr(bootstrap, "_resolve_udisks_drive", lambda device: "/drives/pluto")
     monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
     monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: commands.append(tuple(argv)))
+    monkeypatch.setattr(bootstrap, "_validate_scsi_eject_target", lambda **kwargs: None)
+    monkeypatch.setattr(bootstrap, "_eject_scsi_media", lambda **kwargs: None)
     monkeypatch.setattr(bootstrap, "_wait_for_path", lambda path, present, timeout_s: None)
     monkeypatch.setattr(
         bootstrap,
@@ -364,14 +367,14 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
     assert commands == [
         ("sync", "-f", str(mountpoint / "pluto.frm")),
         ("udisksctl", "unmount", "--block-device", "/dev/sdb1"),
-        ("udisksctl", "power-off", "--block-device", "/dev/sdb"),
     ]
+    assert "media_ejected" in result.phases
     receipt_path = Path(result.receipt_path)
     assert receipt_path.stat().st_mode & 0o777 == 0o600
     assert json.loads(receipt_path.read_text())["outcome"] == "success"
 
 
-def test_failure_after_write_is_unknown_and_durably_receipted(
+def test_failure_after_staging_proves_qspi_write_never_started(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -386,6 +389,7 @@ def test_failure_after_write_is_unknown_and_durably_receipted(
         lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
     monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
+    monkeypatch.setattr(bootstrap, "_resolve_udisks_drive", lambda device: "/drives/pluto")
     monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
 
     def fail_sync(argv: tuple[str, ...], *, timeout_s: float) -> None:
@@ -402,11 +406,107 @@ def test_failure_after_write_is_unknown_and_durably_receipted(
         receipt_directory=tmp_path / "receipts",
     )
 
-    assert result.outcome == "unknown"
-    assert result.retryable is False
+    assert result.outcome == "failed"
+    assert result.retryable is True
     assert result.failure_phase == "sync"
+    assert result.failure_classification == "qspi_write_not_started"
     assert "sync failed" in (result.error or "")
-    assert json.loads(Path(result.receipt_path).read_text())["outcome"] == "unknown"
+    assert json.loads(Path(result.receipt_path).read_text())["outcome"] == "failed"
+
+
+def test_resolve_udisks_drive_requires_one_exact_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    block = tmp_path / "sdb"
+    block.touch()
+    output = """/org/freedesktop/UDisks2/block_devices/sdb:
+  org.freedesktop.UDisks2.Block:
+    Drive: '/org/freedesktop/UDisks2/drives/Linux_File_Stor_Gadget_123'
+"""
+    monkeypatch.setattr(bootstrap, "_run_output", lambda argv, timeout_s: output)
+
+    assert bootstrap._resolve_udisks_drive(block) == (
+        "/org/freedesktop/UDisks2/drives/Linux_File_Stor_Gadget_123"
+    )
+
+    monkeypatch.setattr(bootstrap, "_run_output", lambda argv, timeout_s: "Drive: '/'\n")
+    with pytest.raises(bootstrap.UdisksFailure) as caught:
+        bootstrap._resolve_udisks_drive(block)
+    assert caught.value.classification == "drive_mapping_invalid"
+
+
+def test_scsi_eject_uses_drive_api_and_proves_lun_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "usb" / "3-11"
+    target.mkdir(parents=True)
+    block = tmp_path / "sdb"
+    partition = tmp_path / "sdb1"
+    block.touch()
+    partition.touch()
+    block_root = tmp_path / "block"
+    (block_root / "sdb").mkdir(parents=True)
+    size = block_root / "sdb" / "size"
+    size.write_text("4096\n")
+    monkeypatch.setattr(bootstrap, "_BLOCK_ROOT", block_root)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        bootstrap, "_run", lambda argv, timeout_s: calls.append(tuple(argv))
+    )
+
+    def media_removed(duration: float) -> None:
+        del duration
+        partition.unlink(missing_ok=True)
+        size.write_text("0\n")
+
+    monkeypatch.setattr(bootstrap.time, "sleep", media_removed)
+
+    drive = "/org/freedesktop/UDisks2/drives/Linux_File_Stor_Gadget_123"
+    bootstrap._eject_scsi_media(
+        drive_object=drive,
+        usb_sysfs_path=target,
+        block_device=block,
+        partition=partition,
+        timeout_s=2,
+    )
+
+    assert calls == [
+        (
+            "gdbus",
+            "call",
+            "--system",
+            "--dest",
+            "org.freedesktop.UDisks2",
+            "--object-path",
+            drive,
+            "--method",
+            "org.freedesktop.UDisks2.Drive.Eject",
+            "{}",
+        )
+    ]
+
+
+def test_scsi_eject_rejects_composite_disconnect_without_media_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "usb" / "3-11"
+    target.mkdir(parents=True)
+    block = tmp_path / "sdb"
+    partition = tmp_path / "sdb1"
+    block.touch()
+    partition.touch()
+    monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: target.rmdir())
+
+    with pytest.raises(bootstrap.UdisksFailure) as caught:
+        bootstrap._eject_scsi_media(
+            drive_object="/org/freedesktop/UDisks2/drives/Linux_File_Stor_Gadget_123",
+            usb_sysfs_path=target,
+            block_device=block,
+            partition=partition,
+            timeout_s=2,
+        )
+
+    assert caught.value.classification == "composite_disappeared"
 
 
 def test_udisks_preflight_succeeds_before_attempt_creation(
@@ -527,6 +627,7 @@ def test_mount_failure_is_failed_and_receipt_allows_retry(
         lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
     monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
+    monkeypatch.setattr(bootstrap, "_resolve_udisks_drive", lambda device: "/drives/pluto")
 
     def fail_mount(partition: Path) -> Path:
         del partition
@@ -609,16 +710,12 @@ def test_mount_partition_enforces_requested_safety_options(
     assert calls == ["mount", "unmount"]
 
 
-@pytest.mark.parametrize(
-    ("failed_operation", "expected_phase"),
-    (("unmount", "unmount"), ("power-off", "power_off")),
-)
-def test_post_write_udisks_failures_are_unknown_and_not_retryable(
+@pytest.mark.parametrize("failed_operation", ("unmount", "pre-eject", "eject"))
+def test_post_staging_classification_tracks_eject_dispatch(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failed_operation: str,
-    expected_phase: str,
 ) -> None:
     plan, frm, _ = planned
     mountpoint = tmp_path / "mount"
@@ -630,6 +727,7 @@ def test_post_write_udisks_failures_are_unknown_and_not_retryable(
         lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
     monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
+    monkeypatch.setattr(bootstrap, "_resolve_udisks_drive", lambda device: "/drives/pluto")
     monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
 
     def udisks(operation: str, device: Path | None, *, timeout_s: float) -> None:
@@ -644,6 +742,28 @@ def test_post_write_udisks_failures_are_unknown_and_not_retryable(
     monkeypatch.setattr(bootstrap, "_run_udisks", udisks)
     monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: None)
 
+    def validate(**kwargs: object) -> None:
+        del kwargs
+        if failed_operation == "pre-eject":
+            raise bootstrap.UdisksFailure(
+                "device_disappeared",
+                "target disappeared before eject",
+                "Reconnect and re-plan.",
+            )
+
+    monkeypatch.setattr(bootstrap, "_validate_scsi_eject_target", validate)
+
+    def eject(**kwargs: object) -> None:
+        del kwargs
+        if failed_operation == "eject":
+            raise bootstrap.UdisksFailure(
+                "media_removal_timeout",
+                "media removal timed out",
+                "Reconcile before retrying.",
+            )
+
+    monkeypatch.setattr(bootstrap, "_eject_scsi_media", eject)
+
     result = bootstrap.execute_bootstrap_plan(
         plan,
         frm,
@@ -651,10 +771,21 @@ def test_post_write_udisks_failures_are_unknown_and_not_retryable(
         receipt_directory=tmp_path / "receipts",
     )
 
-    assert result.outcome == "unknown"
-    assert result.failure_phase == expected_phase
-    assert result.failure_classification == "daemon_timeout"
-    assert result.retryable is False
+    if failed_operation == "unmount":
+        assert result.outcome == "failed"
+        assert result.failure_phase == "unmount"
+        assert result.failure_classification == "daemon_timeout"
+        assert result.retryable is True
+    elif failed_operation == "pre-eject":
+        assert result.outcome == "failed"
+        assert result.failure_phase == "scsi_eject"
+        assert result.failure_classification == "device_disappeared"
+        assert result.retryable is True
+    else:
+        assert result.outcome == "unknown"
+        assert result.failure_phase == "scsi_eject"
+        assert result.failure_classification == "media_removal_timeout"
+        assert result.retryable is False
     assert "pluto_frm_written" in result.phases
 
 

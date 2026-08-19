@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from pluto_plus.admin import AdminMutationPolicy
 from pluto_plus.api import API_PREFIX, create_app
 from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
+from pluto_plus.errors import RadioSetupRequiredError
 from pluto_plus.hardware.fake import FakeRadioDevice
 from pluto_plus.models import RadioIdentity, Transport
 from pluto_plus.service import PlutoService
@@ -82,6 +83,28 @@ class RepairableFakeRadio(FakeRadioDevice):
         self._canonical = True
 
 
+class StartupDegradedRepairableRadio(RepairableFakeRadio):
+    def __init__(self) -> None:
+        super().__init__()
+        self._facts_available = False
+
+    def open(self) -> None:
+        super().open()
+        self._facts_available = True
+        if not self._canonical:
+            raise RadioSetupRequiredError(
+                "radio requires canonical AD9361/2R2T setup "
+                "(phy_model=ad9363a, rx_scan_channels=('voltage0', 'voltage1'))"
+            )
+
+    def close(self) -> None:
+        super().close()
+        self._facts_available = False
+
+    def diagnostic_facts(self) -> Mapping[str, object]:
+        return super().diagnostic_facts() if self._facts_available else {}
+
+
 class SetupBackend:
     def __init__(self, radio: RepairableFakeRadio, *, fail: bool = False) -> None:
         self.radio = radio
@@ -117,7 +140,11 @@ class SetupBackend:
             versions_sha256="2" * 64,
             qspi_firmware_sha256=CANONICAL_POLICY.fit_body_sha256,
             boot_provenance=("qspi_reboot_verified" if canonical else "qspi_image_verified"),
-            rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
+            rx_scan_channels=(
+                ("voltage0", "voltage1", "voltage2", "voltage3")
+                if canonical
+                else ("voltage0", "voltage1")
+            ),
             tx_safe=True,
         )
 
@@ -338,6 +365,37 @@ def test_setup_api_plan_execute_receipt_and_fresh_doctor(tmp_path: Path) -> None
         )
         assert receipts.status_code == 200
         assert [item["receipt_id"] for item in receipts.json()] == [receipt["receipt_id"]]
+
+
+def test_setup_required_radio_does_not_hide_healthy_radios_and_can_be_repaired(
+    tmp_path: Path,
+) -> None:
+    radio = StartupDegradedRepairableRadio()
+    backend = SetupBackend(radio)
+    service = PlutoService(
+        tmp_path / "state",
+        (radio, FakeRadioDevice("healthy")),
+        setup_manager=_manager(tmp_path, backend),
+    )
+    try:
+        snapshots = {item.identity.radio_id: item for item in service.list_radios()}
+        assert snapshots["healthy"].state.value == "ready"
+        assert snapshots["SERIAL_A"].state.value == "error"
+        assert "RadioSetupRequiredError" in (snapshots["SERIAL_A"].last_error or "")
+
+        report = service.doctor("SERIAL_A")
+        findings = {item.code: item for item in report.findings}
+        assert findings["rf.phy_model"].status.value == "fail"
+        assert findings["rf.dual_rx_scan"].status.value == "fail"
+
+        planned = service.create_canonical_setup_plan("SERIAL_A")
+        receipt = service.execute_setup_plan(
+            planned.plan.plan_id, planned.confirmation_token
+        )
+        assert receipt.success is True
+        assert service.get_radio("SERIAL_A").state.value == "ready"
+    finally:
+        service.close()
 
 
 def test_setup_execution_failure_is_receipted_and_controller_recovers(tmp_path: Path) -> None:
