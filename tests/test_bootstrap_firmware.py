@@ -1068,6 +1068,32 @@ def test_standalone_reconciliation_rejects_profile_mismatch_before_remote_access
     assert transport.calls == []
 
 
+def test_standalone_reconciliation_rejects_untrusted_receipt_serial(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
+        planned, tmp_path, monkeypatch
+    )
+    receipt_path = receipt_directory / f"{receipt_id}.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["plan"]["target_serial"] = "SERIAL_A;reboot"
+    bootstrap._write_receipt(receipt_path, receipt)
+    transport = ReadOnlyReconciliationTransport(plan)
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="invalid radio serial"):
+        bootstrap.reconcile_usb_flash_receipt(
+            receipt_id,
+            receipt_directory=receipt_directory,
+            usb_sysfs_path=Path(plan.usb_sysfs_path),
+            mutation_profile_id=plan.mutation_profile_id,
+            transport=transport,
+        )
+
+    assert transport.calls == []
+
+
 def test_force_flash_can_verify_v5_when_hardware_serial_remains_blank(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     monkeypatch: pytest.MonkeyPatch,

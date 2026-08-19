@@ -15,6 +15,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -46,6 +47,7 @@ from pluto_plus.setup_helper import BoundSshTransport, SetupTransport
 _USB_ROOT = Path("/sys/bus/usb/devices")
 _BLOCK_ROOT = Path("/sys/class/block")
 _IIOD_PORT = 30_431
+_SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 BOOTSTRAP_POLICY = CANONICAL_POLICY
 
 
@@ -876,7 +878,11 @@ def reconcile_usb_flash_receipt(
     function never stages an image, writes QSPI, changes RF state, or reboots.
     """
 
-    if not re.fullmatch(r"[0-9a-fA-F-]{36}", receipt_id):
+    try:
+        canonical_receipt_id = str(uuid.UUID(receipt_id))
+    except ValueError as error:
+        raise BootstrapFirmwareError("invalid standalone receipt ID") from error
+    if receipt_id != canonical_receipt_id:
         raise BootstrapFirmwareError("invalid standalone receipt ID")
     receipt_path = receipt_directory / f"{receipt_id}.json"
     receipt = _read_receipt(receipt_path)
@@ -895,6 +901,8 @@ def reconcile_usb_flash_receipt(
         raise BootstrapFirmwareError("standalone receipt plan is invalid") from error
     if plan.operation != "flash" or not plan.target_serial:
         raise BootstrapFirmwareError("receipt is not serial-bound standalone flash evidence")
+    if not _SERIAL_PATTERN.fullmatch(plan.target_serial):
+        raise BootstrapFirmwareError("receipt contains an invalid radio serial")
     if plan.usb_sysfs_path != str(usb_sysfs_path):
         raise BootstrapFirmwareError("requested USB path does not match the receipt")
     if plan.mutation_profile_id != mutation_profile_id:
@@ -1722,6 +1730,13 @@ def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
 def _read_receipt(path: Path) -> dict[str, Any]:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+            os.close(descriptor)
+            raise BootstrapFirmwareError("standalone receipt is not a bounded regular file")
+        if metadata.st_mode & 0o077:
+            os.close(descriptor)
+            raise BootstrapFirmwareError("standalone receipt permissions are not private")
         with os.fdopen(descriptor, encoding="utf-8") as stream:
             payload = json.load(stream)
     except (OSError, json.JSONDecodeError) as error:
