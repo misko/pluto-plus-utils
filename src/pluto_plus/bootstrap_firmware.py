@@ -26,6 +26,7 @@ from typing import Any, Literal, Protocol, cast
 
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
+    TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
     TANDEM_V6_DEVELOPMENT_POLICY,
     TANDEM_V6_LATCH_CLEAR_PERSISTENT_POLICY,
@@ -69,6 +70,9 @@ STANDALONE_FLASH_PROFILES = {
     ),
     TANDEM_AGC_V7_RAM_POLICY.profile_id: StandaloneFlashProfile(
         TANDEM_AGC_V7_RAM_POLICY, 2, True, persistent_allowed=False
+    ),
+    TANDEM_AGC_V7_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
+        TANDEM_AGC_V7_PERSISTENT_POLICY, 2, True
     ),
 }
 

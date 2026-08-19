@@ -69,7 +69,7 @@ TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE = DiagnosticProfile(
     firmware_version="v0.40-plutoplus-spf-tandem-agc-v7",
     metadata_abis=(2,),
     tandem_agc_required=True,
-    release_status="RAM-only release candidate; persistence forbidden",
+    release_status="hardware-qualified release candidate; persistence qualified",
 )
 
 DIAGNOSTIC_PROFILES = (

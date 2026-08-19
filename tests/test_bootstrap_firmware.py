@@ -257,9 +257,12 @@ def test_latch_clear_persistence_requires_distinct_promotion_profile() -> None:
     assert promotion.tandem_agc is ram.tandem_agc is True
 
 
-def test_tandem_v7_candidate_is_exactly_ram_only_before_promotion() -> None:
+def test_tandem_v7_ram_profile_remains_distinct_from_persistent_promotion() -> None:
     policy = bootstrap.TANDEM_AGC_V7_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "tandem-agc-v7-release-persistent-promotion"
+    ]
 
     assert policy.release_tag == "v0.40-plutoplus-spf-tandem-agc-v7"
     assert policy.device_firmware == policy.release_tag
@@ -275,10 +278,14 @@ def test_tandem_v7_candidate_is_exactly_ram_only_before_promotion() -> None:
     assert profile.metadata_abi == 2
     assert profile.tandem_agc is True
     assert profile.persistent_allowed is False
-    assert not any(
-        item.policy.device_firmware == policy.device_firmware and item.persistent_allowed
-        for item in bootstrap.STANDALONE_FLASH_PROFILES.values()
-    )
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.profile_id != policy.profile_id
+    assert promotion.policy.asset_sha256 == policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == policy.fit_body_sha256
+    assert promotion.policy.source_commit == policy.source_commit
+    assert promotion.policy.hardware_qualified is True
+    assert promotion.metadata_abi == profile.metadata_abi == 2
+    assert promotion.tandem_agc is profile.tandem_agc is True
 
 
 def test_normal_flash_requires_matching_stable_usb_and_iiod_serial(

@@ -112,6 +112,16 @@ TANDEM_AGC_V7_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 19, 4, 32, 25, tzinfo=UTC),
 )
 
+# The same attested bytes receive a separate QSPI authorization only after the
+# four-radio RAM matrix passed. Keeping this identity distinct preserves the
+# rule that selecting the RAM diagnostic profile can never authorize a write.
+TANDEM_AGC_V7_PERSISTENT_POLICY = TANDEM_AGC_V7_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "tandem-agc-v7-release-persistent-promotion",
+        "hardware_qualified": True,
+    }
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,
