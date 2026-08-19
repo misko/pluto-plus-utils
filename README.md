@@ -59,16 +59,22 @@ driven by [`adf5355_tester`](https://github.com/misko/adf5355_tester):
 
 ```bash
 adf5355 hop --seed 0xC0FFEE --start-ghz 11.0 --stop-ghz 11.00171 \
-            --points 20 --min-hop-ms 10 --cycles 100 --power 0 --enable-rf
+            --points 20 --min-hop-ms 10 --cycles 300 --power 0 --enable-rf
 ```
 
 **Receive side.** One capture is enough: the whole span must fit the receiver's
 instantaneous bandwidth so a single tuning hears every point. Tune to the span
-midpoint minus the nominal LNB LO (here 11.000855 - 9.750 = 1.250855 GHz, less
-any LO error already known), capture, then decode:
+midpoint, minus the nominal LNB LO, minus the LO error already known -- here
+11.000855 - 9.750 GHz = 1.250855 GHz, less the 94 kHz this LNB measures high, so
+1.250761 GHz. Skipping that last term is not cosmetic: it slides the whole comb
+94 kHz down the passband and leaves the lowest point about 960 kHz off centre, at
+the edge of what 2.5 MS/s actually resolves. Pin the analog bandwidth too, so a
+narrower setting left over from an earlier session cannot quietly filter the
+outer points:
 
 ```bash
-uv run pluto radio settings set RADIO --frequency 1250855000 --sample-rate 2500000
+uv run pluto radio settings set RADIO \
+  --frequency 1250761000 --sample-rate 2500000 --bandwidth 2500000
 uv run pluto capture start RADIO --duration 8
 
 uv run pluto calibrate seeded-hop ARTIFACT_ID \
@@ -86,7 +92,7 @@ alignment a uniform grid search.
 The decode reports its own confidence and never hides a weak result. `comb`
 carries the bulk offset of the whole comb - the LNB local-oscillator error,
 about -106 kHz at a 1.25 GHz IF on this bench - with a sharpness figure that ran
-38x to 422x on real captures. `epoch` carries the alignment and how far it stood
+37x to 422x on real captures. `epoch` carries the alignment and how far it stood
 above every other shift. A capture that decodes weakly comes back with
 `confident: false` and named warnings, and points with too few strong frames
 report a null measurement instead of a median of noise. The same analyzer is

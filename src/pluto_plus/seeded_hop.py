@@ -14,13 +14,14 @@ The only unknown left is the epoch - where in the pattern the capture happens to
 start - and that is a single one-dimensional search. After it, every frame's
 point is known exactly.
 
-This is the whole reason the method works. The predecessor
-(:mod:`pluto_plus.freq_ladder`) encoded identity in *burst duration*: rung ``n``
-keyed for ``n`` time units, so the decoder had to measure a length. Duration
-estimation needs threshold hysteresis, gap merging and a rounding tolerance, and
-it collapses when several points share the capture band, because then the
-envelope never returns to the floor between them and the bursts merge. Measured
-on this bench, over identical hardware and equal capture time:
+This is the whole reason the method works. The predecessor - a duration-coded
+frequency ladder, developed on the same bench as a companion change and not part
+of this module - encoded identity in *burst duration*: rung ``n`` keyed for ``n``
+time units, so the decoder had to measure a length. Duration estimation needs
+threshold hysteresis, gap merging and a rounding tolerance, and it collapses when
+several points share the capture band, because then the envelope never returns to
+the floor between them and the bursts merge. Measured on this bench, over
+identical hardware and equal capture time:
 
 ===================================  =========================================
 duration-coded ladder                never identified more than 1 burst in 95
@@ -71,7 +72,7 @@ transmitted points form a comb of *known* spacing, the offset can be recovered
 before any point is identified: slide the expected comb across the time-averaged
 spectrum and keep the shift that maximises summed energy at the expected bins.
 The reported sharpness (peak over median of that search) is the confidence, and
-it ran 38x to 422x on real captures. Recovered offsets of -105.6 to -106.6 kHz
+it ran 37x to 422x on real captures. Recovered offsets of -105.6 to -106.6 kHz
 agree with the -105.9 kHz the older duration-coded ladder measured independently.
 
 Why a per-point envelope, not one broadband envelope
@@ -137,9 +138,18 @@ MINIMUM_COMB_SHIFTS = 3
 EPOCH_STEPS_PER_FRAME = 2
 MINIMUM_STRONG_FRAMES = 5
 MINIMUM_ALIGNMENT_REFERENCE = 8
-CONFIDENT_COMB_SHARPNESS = 4.0
+# These two floors are shared with the transmitter of record's own decoder,
+# adf5355_tester's tools/hop_decode.py (MIN_COMB_SHARPNESS, MIN_EPOCH_SIGMA),
+# which computes the identical two statistics. They have to agree: two ends that
+# score the same capture the same way but disagree about whether to believe it
+# turn a decode rejected at one end into a published number at the other. The
+# floors sit where that bench measured the failures - pure noise scores under 2x
+# comb sharpness and a wrong seed under 5 sigma, while every run that worked sat
+# at 37x to 422x and hundreds of sigma - so there is a wide gap on both sides
+# rather than a threshold resting on top of the noise.
+CONFIDENT_COMB_SHARPNESS = 8.0
 MAXIMUM_COMB_SHARPNESS = 1.0e6
-CONFIDENT_EPOCH_SIGMA = 6.0
+CONFIDENT_EPOCH_SIGMA = 10.0
 CONFIDENT_POINT_FRACTION = 0.5
 LOW_COMB_SHARPNESS = "comb_search_is_flat"
 LOW_EPOCH_SHARPNESS = "epoch_alignment_does_not_stand_out"

@@ -9,12 +9,14 @@ import pytest
 
 from pluto_plus.seeded_hop import (
     CONFIDENT_COMB_SHARPNESS,
+    CONFIDENT_EPOCH_SIGMA,
     DEFAULT_JITTER,
     DEFAULT_PERIOD_CYCLES,
     DEFAULT_SEED,
     FEW_POINTS,
     LOW_COMB_SHARPNESS,
     LOW_EPOCH_SHARPNESS,
+    PointEnvelope,
     SplitMix64,
     align_epoch,
     assigned_points,
@@ -25,6 +27,7 @@ from pluto_plus.seeded_hop import (
     envelope_db,
     estimate_comb_offset,
     iter_blocks,
+    measure_points,
     plan_frequencies,
     slot_bounds,
     slot_half_width_hz,
@@ -36,7 +39,7 @@ from pluto_plus.seeded_hop import (
 SPLITMIX64_SEED_ZERO = (0xE220A8397B1DCDAF, 0x6E789E6AA1B965F4, 0x06C45D188009454F)
 
 # Visiting order emitted by the transmitter of record, adf5355_tester's
-# adf5355/hopper.py at 5e2c47f, for the recommended 20-point plan.
+# adf5355/hopper.py at 5be028d, for the recommended 20-point plan.
 REFERENCE_ORDERS = {
     0: (10, 14, 4, 6, 18, 5, 12, 3, 9, 13, 7, 19, 8, 17, 0, 11, 2, 1, 16, 15),
     1: (1, 14, 10, 3, 19, 4, 6, 16, 15, 13, 2, 0, 11, 7, 18, 9, 17, 12, 8, 5),
@@ -56,6 +59,20 @@ REFERENCE_JITTER_DWELLS = (
 
 RECOMMENDED_START_HZ = 11_000_000_000
 RECOMMENDED_STOP_HZ = 11_001_710_000
+# The first eight of the 40-point plan over the same span, where the step is
+# 43846.153... Hz rather than a whole number of Hertz. Emitted by the same
+# transmitter of record; pinned because rounding-to-nearest is part of the shared
+# protocol and a truncating plan differs from it at over half the points.
+FRACTIONAL_STEP_PLAN = (
+    11_000_000_000,
+    11_000_043_846,
+    11_000_087_692,
+    11_000_131_538,
+    11_000_175_385,
+    11_000_219_231,
+    11_000_263_077,
+    11_000_306_923,
+)
 
 # A bench-shaped but test-sized link: eight points 20 kHz apart behind a
 # downconverter, captured at 200 kS/s so the whole comb fits one tuning.
@@ -229,6 +246,28 @@ def test_plan_frequencies_rounds_like_the_transmitter_and_rejects_bad_spans() ->
         plan_frequencies(STOP_HZ, START_HZ, 4)
 
 
+def test_plan_frequencies_rounds_a_fractional_step_the_transmitter_way() -> None:
+    """A whole-Hertz step hides how the plan rounds; the 40-point span does not.
+
+    The recommended 20-point plan steps by exactly 90 kHz, so rounding is a no-op
+    and any rounding rule at all reproduces it. Forty points over the same span
+    step by 43846.153... Hz, where truncating instead of rounding to nearest
+    shifts more than half the points by a Hertz - a silent one-Hertz disagreement
+    between the two ends' idea of what was transmitted. These are the values the
+    transmitter of record emits.
+    """
+
+    plan = plan_frequencies(RECOMMENDED_START_HZ, RECOMMENDED_STOP_HZ, 40)
+
+    assert plan[:8] == FRACTIONAL_STEP_PLAN
+    assert plan[-1] == RECOMMENDED_STOP_HZ
+    truncated = tuple(
+        int(RECOMMENDED_START_HZ + i * (RECOMMENDED_STOP_HZ - RECOMMENDED_START_HZ) / 39)
+        for i in range(8)
+    )
+    assert plan[:8] != truncated
+
+
 def test_build_schedule_rejects_parameters_the_transmitter_would_reject() -> None:
     with pytest.raises(ValueError, match="hop_seconds"):
         reference_schedule(hop_seconds=0)
@@ -394,6 +433,70 @@ def test_every_point_recovers_the_injected_frequency_offset() -> None:
     assert result.plan.period_cycles == DEFAULT_PERIOD_CYCLES
 
 
+def test_a_receiver_dc_offset_does_not_capture_the_slot_that_straddles_baseband() -> None:
+    """Every real receiver has a DC offset, and one slot always sits on top of it.
+
+    A hardware DC offset is a permanent spike at baseband zero. In this plan
+    point 4 lands 5 kHz below centre with a 6 kHz slot, so that spike is inside
+    its slot on every single frame: without removing each frame's mean first the
+    spike outranks the transmitted carrier whenever it is elsewhere, the comb
+    search locks onto the spike instead of the comb, and the point stops being
+    measurable. Nothing in a synthetic capture supplies that offset unless a test
+    puts it there deliberately.
+    """
+
+    schedule = reference_schedule()
+    baseband_hz = schedule.intermediate_frequencies_hz(LO_HZ) + OFFSET_HZ - CENTER_HZ
+    straddling = int(np.argmin(np.abs(baseband_hz)))
+    half_width_hz = slot_half_width_hz(schedule.spacing_hz)
+    assert abs(baseband_hz[straddling]) < half_width_hz
+
+    clean = decode(hop_samples(schedule), schedule)
+    offset = decode(hop_samples(schedule) + 2_000.0 * (1 + 0.6j), schedule)
+
+    assert offset.comb.offset_hz == pytest.approx(clean.comb.offset_hz)
+    assert offset.comb.offset_hz == pytest.approx(OFFSET_HZ, abs=1_000.0)
+    assert offset.measured_point_count == POINTS
+    assert offset.points[straddling].measured is True
+    assert offset.median_frequency_error_hz == pytest.approx(OFFSET_HZ, abs=100.0)
+    assert offset.confident is True
+
+
+def test_a_minority_of_stale_frames_cannot_move_a_point_off_its_frequency() -> None:
+    """The retune lands inside the dwell it precedes, so early frames are stale.
+
+    The first frames of a dwell can still hold the previous point, which is why
+    the reported frequency is the median of the strong frames and not their mean.
+    Here three frames in ten carry the neighbouring point, one whole spacing
+    away: the median ignores them, while a mean would report the point 30% of a
+    spacing off - an error six times the scatter this method is trying to measure.
+    """
+
+    schedule = reference_schedule()
+    stale, total = 3, 10
+    frame_count = POINTS * total
+    assigned = np.repeat(np.arange(POINTS), total)
+    nominal_if = schedule.intermediate_frequencies_hz(LO_HZ)
+    peak_hz = np.empty((POINTS, frame_count), dtype=float)
+    for point in range(POINTS):
+        peak_hz[point] = nominal_if[point] + OFFSET_HZ
+        window = np.flatnonzero(assigned == point)[:stale]
+        peak_hz[point, window] += schedule.spacing_hz
+    envelope = PointEnvelope(power=np.ones((POINTS, frame_count)), peak_hz=peak_hz)
+    levels = np.full((POINTS, frame_count), 30.0)
+
+    rows = measure_points(
+        envelope, levels, schedule=schedule, lo_hz=LO_HZ, assigned=assigned
+    )
+
+    contaminated = OFFSET_HZ + schedule.spacing_hz * stale / total
+    for row in rows:
+        assert row.measured is True
+        assert row.strong_frame_count == total
+        assert row.frequency_error_hz == pytest.approx(OFFSET_HZ)
+        assert row.frequency_error_hz != pytest.approx(contaminated, abs=1.0)
+
+
 def test_noise_is_reported_as_low_confidence_rather_than_answered() -> None:
     schedule = reference_schedule()
     random = np.random.default_rng(4)
@@ -410,17 +513,28 @@ def test_noise_is_reported_as_low_confidence_rather_than_answered() -> None:
     assert all(row.rejection is not None for row in result.points)
 
 
-def test_the_wrong_seed_decodes_to_low_confidence_not_a_wrong_answer() -> None:
+@pytest.mark.parametrize("wrong_seed", [DEFAULT_SEED + 1, DEFAULT_SEED + 2, 0xDEADBEEF])
+def test_the_wrong_seed_decodes_to_low_confidence_not_a_wrong_answer(wrong_seed: int) -> None:
+    """A listener holding the wrong seed must not be able to align at all.
+
+    This is the failure that has to stay loud: the comb is seed-independent, so
+    it still lands and the decode still *looks* like it is working. Only the
+    alignment can tell, so the epoch itself has to be reported unconfident, not
+    merely accompanied by a thin points count. A wrong seed scores a few sigma
+    here, well under ``CONFIDENT_EPOCH_SIGMA``, which is the margin that floor
+    exists to keep.
+    """
+
     transmitted = reference_schedule(seed=DEFAULT_SEED)
-    listener = reference_schedule(seed=DEFAULT_SEED + 1)
-    samples = hop_samples(transmitted)
+    listener = reference_schedule(seed=wrong_seed)
 
-    result = decode(samples, listener)
+    result = decode(hop_samples(transmitted), listener)
 
-    # The comb is seed-independent, so its offset still lands; identity does not.
     assert result.comb.confident is True
+    assert result.epoch.confident is False
+    assert result.epoch.sharpness_sigma < CONFIDENT_EPOCH_SIGMA
     assert result.confident is False
-    assert LOW_EPOCH_SHARPNESS in result.warnings or FEW_POINTS in result.warnings
+    assert LOW_EPOCH_SHARPNESS in result.warnings
     assert result.measured_point_count < POINTS
 
 

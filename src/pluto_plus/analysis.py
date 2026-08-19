@@ -357,8 +357,9 @@ class SeededHopAnalyzer:
     The transmitter is not controlled from here. Both ends already share a seed,
     so the visiting order of the frequency points is regenerated rather than
     inferred: the only quantity estimated from the signal itself is the epoch.
-    That is what supersedes :class:`FreqLadderAnalyzer`, which had to recover a
-    point's identity by measuring how long its burst lasted - on this bench that
+    That is what supersedes the duration-coded frequency ladder that preceded it
+    (a companion change, not present here), which had to recover a point's
+    identity by measuring how long its burst lasted - on this bench that
     identified at most one burst in ninety-five, while a seeded hop identified
     every transmitted point in every configuration tried. See
     :mod:`pluto_plus.seeded_hop` for the physics, the comb-offset search, and why
