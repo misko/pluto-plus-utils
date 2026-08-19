@@ -19,6 +19,18 @@ from urllib.parse import urlsplit
 import httpx
 import typer
 
+from pluto_plus.freq_ladder import (
+    DEFAULT_DC_NOTCH_HZ,
+    DEFAULT_FRAME_SIZE,
+    DEFAULT_HYSTERESIS_DB,
+    DEFAULT_MERGE_GAP_FRACTION,
+    DEFAULT_RUNG_TOLERANCE,
+    DEFAULT_SEARCH_HALF_WIDTH_HZ,
+    DEFAULT_THRESHOLD_DB,
+    burst_rows_from_results,
+    fit_freq_ladder,
+    usable_bursts,
+)
 from pluto_plus.hardware.preflight import IioEnvironmentReport, inspect_iio_environment
 from pluto_plus.inventory import (
     LocalUsbPluto,
@@ -59,6 +71,10 @@ config_app = typer.Typer(
     no_args_is_help=True,
     help="Read redacted config.txt and plan validated static-IP changes.",
 )
+calibrate_app = typer.Typer(
+    no_args_is_help=True,
+    help="Recover reference errors from captures of an observed frequency ladder.",
+)
 
 app.add_typer(radio_app, name="radio")
 radio_app.add_typer(settings_app, name="settings")
@@ -70,6 +86,7 @@ app.add_typer(scan_app, name="scan")
 app.add_typer(firmware_app, name="firmware")
 app.add_typer(setup_app, name="setup")
 app.add_typer(config_app, name="config")
+app.add_typer(calibrate_app, name="calibrate")
 
 
 @dataclass
@@ -2230,6 +2247,131 @@ def analyze(
         _fail("invalid_parameters", "parameters must decode to a JSON object", 2)
     body = {"artifact_id": artifact_id, "analyzer": analyzer, "parameters": decoded}
     _emit(_api(ctx).request("POST", "analyses", json_body=body))
+
+
+@calibrate_app.command("freq-ladder")
+def calibrate_freq_ladder(
+    ctx: typer.Context,
+    artifact_ids: list[str] = typer.Argument(  # noqa: B008
+        ...,
+        help="Capture artifacts that observed the ladder, usually one per rung.",
+    ),
+    rung_start_hz: float = typer.Option(
+        ..., "--rung-start-hz", help="Published transmitted frequency of rung 1."
+    ),
+    rung_stop_hz: float = typer.Option(
+        ..., "--rung-stop-hz", help="Published transmitted frequency of the last rung."
+    ),
+    rung_count: int = typer.Option(..., "--rung-count", help="Published number of ladder rungs."),
+    total_seconds: float = typer.Option(
+        ..., "--total-seconds", help="Published duration of one complete ladder pass."
+    ),
+    lo_hz: float = typer.Option(
+        ..., "--lo-hz", help="Nominal LNB local-oscillator frequency, for example 9.75e9."
+    ),
+    frame_size: int = typer.Option(DEFAULT_FRAME_SIZE, "--frame-size", help="Samples per frame."),
+    threshold_db: float = typer.Option(
+        DEFAULT_THRESHOLD_DB, "--threshold-db", help="SNR that starts a burst detection."
+    ),
+    hysteresis_db: float = typer.Option(
+        DEFAULT_HYSTERESIS_DB, "--hysteresis-db", help="Extra dB a burst must lose to end."
+    ),
+    dc_notch_hz: float = typer.Option(
+        DEFAULT_DC_NOTCH_HZ, "--dc-notch-hz", help="Half-width of the baseband DC notch."
+    ),
+    search_half_width_hz: float = typer.Option(
+        DEFAULT_SEARCH_HALF_WIDTH_HZ,
+        "--search-half-width-hz",
+        help="Half-width of the peak search around each expected rung frequency.",
+    ),
+    merge_gap_fraction: float = typer.Option(
+        DEFAULT_MERGE_GAP_FRACTION,
+        "--merge-gap-fraction",
+        help="Fraction of one duration unit below which detections are merged.",
+    ),
+    rung_tolerance: float = typer.Option(
+        DEFAULT_RUNG_TOLERANCE,
+        "--rung-tolerance",
+        help="Largest accepted distance from an integer rung multiple.",
+    ),
+    receiver: int = typer.Option(0, "--receiver", help="Receiver index to analyse."),
+    drift: str = typer.Option(
+        "auto",
+        "--drift",
+        help="Nuisance drift term: auto (only across multiple passes), on, or off.",
+    ),
+) -> None:
+    """Fit receiver clock error and LNB LO error across observed ladder captures.
+
+    Each capture is analysed by plutod, then the identified bursts of every
+    capture are merged so the frequency slope (receiver clock error) and the
+    constant intercept (LNB LO error) can be separated in one fit.
+    """
+
+    unique: list[str] = []
+    for raw_artifact_id in artifact_ids:
+        artifact_id = raw_artifact_id.strip()
+        if not artifact_id or artifact_id != raw_artifact_id:
+            _fail(
+                "invalid_artifact_id",
+                "each artifact ID must be non-empty and without surrounding spaces",
+                2,
+            )
+        if artifact_id in unique:
+            _fail("duplicate_artifact_id", f"artifact {artifact_id} was given twice", 2)
+        unique.append(artifact_id)
+    normalized_drift = drift.strip().lower()
+    if normalized_drift not in {"auto", "on", "off"}:
+        _fail("invalid_drift_mode", "drift must be auto, on, or off", 2)
+    include_drift = None if normalized_drift == "auto" else normalized_drift == "on"
+
+    parameters = {
+        "rung_start_hz": rung_start_hz,
+        "rung_stop_hz": rung_stop_hz,
+        "rung_count": rung_count,
+        "total_seconds": total_seconds,
+        "lo_hz": lo_hz,
+        "frame_size": frame_size,
+        "threshold_db": threshold_db,
+        "hysteresis_db": hysteresis_db,
+        "dc_notch_hz": dc_notch_hz,
+        "search_half_width_hz": search_half_width_hz,
+        "merge_gap_fraction": merge_gap_fraction,
+        "rung_tolerance": rung_tolerance,
+        "receiver": receiver,
+    }
+    client = _api(ctx)
+    documents: list[dict[str, Any]] = []
+    for artifact_id in unique:
+        document = client.request(
+            "POST",
+            "analyses",
+            json_body={
+                "artifact_id": artifact_id,
+                "analyzer": "freq_ladder",
+                "parameters": parameters,
+            },
+        )
+        if not isinstance(document, dict):
+            _fail("invalid_daemon_response", "plutod returned an invalid analysis document", 5)
+        documents.append(document)
+    try:
+        rows = burst_rows_from_results(documents)
+        identified = usable_bursts(rows)
+        fit = fit_freq_ladder(identified, lo_hz=lo_hz, include_drift=include_drift)
+    except ValueError as error:
+        _fail("freq_ladder_fit_failed", str(error), 4)
+    _emit(
+        {
+            "analyzer": "freq_ladder",
+            "artifact_ids": unique,
+            "analysis_ids": [document.get("analysis_id") for document in documents],
+            "burst_count": len(rows),
+            "identified_burst_count": len(identified),
+            "rungs": sorted({row.rung for row in identified if row.rung is not None}),
+            "fit": fit.model_dump(mode="json"),
+        }
+    )
 
 
 def _discover_production_devices() -> tuple[Any, ...]:

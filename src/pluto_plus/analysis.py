@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -12,6 +12,24 @@ import numpy as np
 
 from pluto_plus.artifacts import data_path
 from pluto_plus.errors import AnalyzerNotFoundError
+from pluto_plus.freq_ladder import (
+    DEFAULT_DC_NOTCH_HZ,
+    DEFAULT_FRAME_SIZE,
+    DEFAULT_HYSTERESIS_DB,
+    DEFAULT_MERGE_GAP_FRACTION,
+    DEFAULT_RUNG_TOLERANCE,
+    DEFAULT_SEARCH_HALF_WIDTH_HZ,
+    DEFAULT_THRESHOLD_DB,
+    MINIMUM_FIT_RUNGS,
+    CaptureContext,
+    FreqLadderSchedule,
+    build_bursts,
+    fit_freq_ladder,
+    measure_frames,
+    summarize_identification,
+    usable_bursts,
+    visible_rungs,
+)
 from pluto_plus.models import AnalysisResult, ArtifactSummary, utc_now
 
 
@@ -341,6 +359,176 @@ def _delay_aligned(
     return first, second
 
 
+class FreqLadderAnalyzer:
+    """Recover receiver clock error and LNB LO error from an observed ladder.
+
+    The transmitter is not controlled from here. Each burst is identified purely
+    by its duration against the published schedule, mapped back to that rung's
+    nominal RF and intermediate frequency, and its frequency error recorded.
+    Because the capture is a stored contiguous artifact, a frame's time is exactly
+    ``frame_index * frame_size / sample_rate_hz`` rather than a wall-clock guess,
+    which is what makes the durations - and therefore the rung identities -
+    trustworthy. See :mod:`pluto_plus.freq_ladder` for the physics, the slope
+    versus intercept separation, and why the reported uncertainty is a resample.
+    """
+
+    name = "freq_ladder"
+    version = "1"
+
+    def run(self, artifact: ArtifactSummary, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        required = ("rung_start_hz", "rung_stop_hz", "rung_count", "total_seconds", "lo_hz")
+        missing = [name for name in required if parameters.get(name) is None]
+        if missing:
+            raise ValueError(f"freq_ladder requires {', '.join(missing)}")
+        rung_start_hz = float(parameters["rung_start_hz"])
+        rung_stop_hz = float(parameters["rung_stop_hz"])
+        rung_count = int(parameters["rung_count"])
+        total_seconds = float(parameters["total_seconds"])
+        lo_hz = float(parameters["lo_hz"])
+        frame_size = int(parameters.get("frame_size", DEFAULT_FRAME_SIZE))
+        threshold_db = float(parameters.get("threshold_db", DEFAULT_THRESHOLD_DB))
+        hysteresis_db = float(parameters.get("hysteresis_db", DEFAULT_HYSTERESIS_DB))
+        dc_notch_hz = float(parameters.get("dc_notch_hz", DEFAULT_DC_NOTCH_HZ))
+        search_half_width_hz = float(
+            parameters.get("search_half_width_hz", DEFAULT_SEARCH_HALF_WIDTH_HZ)
+        )
+        merge_gap_fraction = float(
+            parameters.get("merge_gap_fraction", DEFAULT_MERGE_GAP_FRACTION)
+        )
+        rung_tolerance = float(parameters.get("rung_tolerance", DEFAULT_RUNG_TOLERANCE))
+        receiver = int(parameters.get("receiver", 0))
+
+        if rung_start_hz <= 0:
+            raise ValueError("rung_start_hz must be positive")
+        if rung_stop_hz <= rung_start_hz:
+            raise ValueError("rung_stop_hz must be above rung_start_hz")
+        if rung_count < 2:
+            raise ValueError("rung_count must be at least two")
+        if total_seconds <= 0:
+            raise ValueError("total_seconds must be positive")
+        if lo_hz <= 0:
+            raise ValueError("lo_hz must be positive")
+        if lo_hz >= rung_start_hz:
+            raise ValueError("lo_hz must be below rung_start_hz so every rung has a positive IF")
+        if frame_size < 256 or frame_size & (frame_size - 1):
+            raise ValueError("frame_size must be a power of two of at least 256")
+        if artifact.sample_count < frame_size:
+            raise ValueError("capture is shorter than frame_size")
+        if threshold_db <= 0:
+            raise ValueError("threshold_db must be positive")
+        if not 0 <= hysteresis_db < threshold_db:
+            raise ValueError("hysteresis_db must be at least zero and below threshold_db")
+        if dc_notch_hz < 0:
+            raise ValueError("dc_notch_hz cannot be negative")
+        if dc_notch_hz >= artifact.sample_rate_hz / 2:
+            raise ValueError("dc_notch_hz must be below half the sample rate")
+        if not 0 < search_half_width_hz <= artifact.sample_rate_hz / 2:
+            raise ValueError("search_half_width_hz must be positive and at most half the rate")
+        if not 0 <= merge_gap_fraction <= 0.5:
+            raise ValueError("merge_gap_fraction must be between zero and one half")
+        if not 0 < rung_tolerance <= 0.5:
+            raise ValueError("rung_tolerance must be between zero and one half")
+        if not 0 <= receiver < artifact.receiver_count:
+            raise ValueError("receiver is outside the capture")
+
+        schedule = FreqLadderSchedule(
+            rung_start_hz=rung_start_hz,
+            rung_stop_hz=rung_stop_hz,
+            rung_count=rung_count,
+            total_seconds=total_seconds,
+        )
+        visible = visible_rungs(
+            schedule,
+            lo_hz=lo_hz,
+            center_frequency_hz=artifact.center_frequency_hz,
+            sample_rate_hz=artifact.sample_rate_hz,
+        )
+        if not visible:
+            raise ValueError(
+                "no ladder rung has a nominal intermediate frequency inside this capture; "
+                "check lo_hz against the capture centre frequency"
+            )
+
+        raw = _samples(artifact)
+        frame_count = artifact.sample_count // frame_size
+
+        def frames() -> Iterator[np.ndarray]:
+            for index in range(frame_count):
+                block = raw[index * frame_size : (index + 1) * frame_size, receiver]
+                yield block[:, 0].astype(np.float64) + 1j * block[:, 1].astype(np.float64)
+
+        series = measure_frames(
+            frames(),
+            sample_rate_hz=artifact.sample_rate_hz,
+            center_frequency_hz=artifact.center_frequency_hz,
+            frame_size=frame_size,
+            search_centers_hz=[schedule.rung_frequency_hz(rung) - lo_hz for rung in visible],
+            search_half_width_hz=search_half_width_hz,
+            dc_notch_hz=dc_notch_hz,
+        )
+        bursts = build_bursts(
+            series,
+            schedule=schedule,
+            context=CaptureContext(
+                artifact_id=artifact.artifact_id,
+                receiver=receiver,
+                epoch_seconds=artifact.created_at.timestamp(),
+            ),
+            lo_hz=lo_hz,
+            threshold_db=threshold_db,
+            hysteresis_db=hysteresis_db,
+            merge_gap_fraction=merge_gap_fraction,
+            rung_tolerance=rung_tolerance,
+        )
+        usable = usable_bursts(bursts)
+        identified_rungs = sorted({row.rung for row in usable if row.rung is not None})
+        fit: dict[str, Any] | None = None
+        if len(identified_rungs) >= MINIMUM_FIT_RUNGS:
+            fit = fit_freq_ladder(usable, lo_hz=lo_hz).model_dump(mode="json")
+            fit_status = "fitted"
+        else:
+            fit_status = (
+                f"a fit needs at least {MINIMUM_FIT_RUNGS} distinct rungs; this capture "
+                f"identified {len(identified_rungs)}"
+            )
+        return {
+            "receiver": receiver,
+            "lo_hz": lo_hz,
+            "schedule": {
+                "rung_start_hz": rung_start_hz,
+                "rung_stop_hz": rung_stop_hz,
+                "rung_count": rung_count,
+                "total_seconds": total_seconds,
+                "unit_seconds": schedule.unit_seconds,
+                "rung_frequencies_hz": [
+                    schedule.rung_frequency_hz(rung) for rung in schedule.rungs
+                ],
+                "rung_intermediate_frequencies_hz": [
+                    schedule.rung_frequency_hz(rung) - lo_hz for rung in schedule.rungs
+                ],
+            },
+            "frame_size": frame_size,
+            "frame_seconds": series.frame_seconds,
+            "frame_count": series.frame_count,
+            "capture_epoch_seconds": artifact.created_at.timestamp(),
+            "threshold_db": threshold_db,
+            "hysteresis_db": hysteresis_db,
+            "dc_notch_hz": dc_notch_hz,
+            "search_half_width_hz": search_half_width_hz,
+            "searched_bin_count": series.searched_bin_count,
+            "merge_gap_fraction": merge_gap_fraction,
+            "rung_tolerance": rung_tolerance,
+            "visible_rungs": list(visible),
+            "identified_rungs": identified_rungs,
+            "identification": summarize_identification(bursts, rung_tolerance).model_dump(
+                mode="json"
+            ),
+            "bursts": [row.model_dump(mode="json") for row in bursts],
+            "fit": fit,
+            "fit_status": fit_status,
+        }
+
+
 class AnalysisService:
     def __init__(self, root: Path, analyzers: tuple[Analyzer, ...] | None = None) -> None:
         self.root = root
@@ -350,6 +538,7 @@ class AnalysisService:
             OccupancyAnalyzer(),
             SignalQualityAnalyzer(),
             DualReceiverAnalyzer(),
+            FreqLadderAnalyzer(),
         )
         self._analyzers = {analyzer.name: analyzer for analyzer in selected}
 

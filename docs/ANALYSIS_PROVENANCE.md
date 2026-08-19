@@ -21,6 +21,14 @@ Two analyzers were implemented independently from standard DSP definitions:
   delay search. At the best delay it reports the least-squares complex gain,
   relative phase, residual-power fraction, ordinary coherence, and a conjugate
   coherence diagnostic. A positive delay means receiver B lags receiver A.
+- `freq_ladder` was added later, also independently. It segments bursts from a
+  per-frame SNR series, identifies each burst's rung from its duration against a
+  published schedule, and fits `Df = a * f_IF + b * t + c` so the receiver clock
+  error (slope) separates from the LNB local-oscillator error (intercept). Its
+  numerical constants - a 35 dB detection threshold, 6 dB of hysteresis, a
+  +/-300 kHz search window, and the +8.94 ppm / +94.0 kHz sanity values quoted in
+  its tests - are measurements taken on this project's own bench, not values
+  imported from another repository.
 
 The tests generate deterministic tones, sparse clipped samples, and seeded
 QPSK-like paired data in memory, then pass them through this repository's CI16

@@ -28,6 +28,35 @@ uv run pluto artifact list
 uv run pluto analyze ARTIFACT_ID --analyzer spectrum --parameters '{"fft_size":4096}'
 ```
 
+### Recovering clock and LNB errors from an observed frequency ladder
+
+A transmitter that this host does not control can publish a duration-coded
+frequency ladder: rung `n` of `N` transmits for `n * total_seconds / (N * (N +
+1))` seconds and then stays quiet for as long again, so a burst's *duration*
+identifies which rung - and therefore which frequency - it was. Capture one
+artifact per rung at that rung's nominal intermediate frequency, then fit them
+together:
+
+```bash
+# Once per rung: tune to that rung's nominal IF (f_RF - f_LO) and capture for
+# longer than one full ladder pass, so a complete burst is guaranteed to land
+# inside the capture whatever the keying phase happens to be.
+uv run pluto radio settings set fake-001 --frequency 550000000
+uv run pluto capture start fake-001 --duration 75
+# ... repeat for 650000000, 750000000, 850000000, 950000000 ...
+uv run pluto calibrate freq-ladder ART_1 ART_2 ART_3 ART_4 ART_5 \
+  --rung-start-hz 10.30e9 --rung-stop-hz 10.70e9 --rung-count 5 \
+  --total-seconds 60 --lo-hz 9.75e9
+```
+
+The receiver's own clock error scales with the intermediate frequency while the
+LNB local-oscillator error is constant, so the fitted slope is the receiver clock
+error in ppm and the fitted intercept is the LNB LO error in Hz. One tone cannot
+separate them; the ladder can. The reported uncertainty is a leave-one-rung-out
+resample rather than the least-squares covariance, which understates the
+receiver's tuning-dependent systematic by more than ten times. The same analyzer
+is reachable as `pluto analyze ARTIFACT_ID --analyzer freq_ladder`.
+
 Use `--hardware` to discover serial-pinned USB IIO radios. The `hardware` extra
 installs the Python packages, but it cannot install the native libiio shared
 library. Check both layers and the required USB backend before opening a radio:
@@ -187,8 +216,9 @@ uv run pluto --endpoint unix:///run/pluto-plus/plutod.sock radio list
 - Preview streams can tune live. Persistent captures lock frequency, sample
   rate, bandwidth, and channel axes so an analysis never silently combines
   incompatible epochs.
-- Spectrum, carrier, occupancy, CI16 quality, and dual-receiver
-  delay/coherence/phase analyzers operate only on immutable artifacts.
+- Spectrum, carrier, occupancy, CI16 quality, dual-receiver
+  delay/coherence/phase, and observed frequency-ladder reference-offset analyzers
+  operate only on immutable artifacts.
 
 State is stored below `--state-root`: SQLite catalog, captures, scan results,
 analysis documents, firmware staging, and firmware receipts.
