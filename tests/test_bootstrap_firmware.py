@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -922,6 +923,149 @@ def test_bound_ssh_ambiguous_updater_result_is_unknown(
 
     assert result.outcome == "unknown"
     assert "unambiguous Done" in (result.error or "")
+
+
+class ReadOnlyReconciliationTransport:
+    def __init__(self, plan: bootstrap.BootstrapPlan) -> None:
+        self.plan = plan
+        self.calls: list[tuple[str, bytes | None]] = []
+
+    def upload_frm(self, data: bytes, *, timeout_s: float = 120) -> None:
+        del data, timeout_s
+        pytest.fail("reconciliation must never upload firmware")
+
+    def run(
+        self,
+        command: str,
+        *,
+        stdin: bytes | None = None,
+        timeout_s: float = 15,
+    ) -> str:
+        del timeout_s
+        self.calls.append((command, stdin))
+        return (
+            f"PPU\tserial\t{self.plan.target_serial}\n"
+            f"PPU\tfirmware\t{self.plan.expected_firmware}\n"
+            f"PPU\tfit_sha256\t{self.plan.fit_sha256}\n"
+            "PPU\ttx_hardwaregain_db\t-80,-80\n"
+            "PPU\ttx_buffer_enable\t0\n"
+            "PPU\ttx_scan_enable\t0,0,0,0\n"
+            "PPU\ttx_dds_raw\t0,0,0,0,0,0,0,0\n"
+            "PPU\ttx_dds_scale\t0,0,0,0,0,0,0,0\n"
+        )
+
+
+def _uncertain_serial_receipt(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[bootstrap.BootstrapPlan, Path, str]:
+    source, _, target = planned
+    profile_id = "test-persistent-profile"
+    policy = bootstrap.BOOTSTRAP_POLICY.model_copy(
+        update={
+            "profile_id": profile_id,
+            "asset_sha256": source.image_sha256,
+            "fit_body_sha256": source.fit_sha256,
+            "fit_body_size": source.fit_size,
+            "device_firmware": source.expected_firmware,
+            "hardware_qualified": True,
+        }
+    )
+    monkeypatch.setitem(
+        bootstrap.STANDALONE_FLASH_PROFILES,
+        profile_id,
+        bootstrap.StandaloneFlashProfile(policy, 2, True),
+    )
+    plan = replace(
+        source,
+        mutation_profile_id=profile_id,
+        expected_metadata_abi=2,
+        expected_tandem_agc=True,
+        operation="flash",
+        target_serial="SERIAL_A",
+    )
+    monkeypatch.setattr(
+        bootstrap, "_one_local_target", lambda path: _local(target, serial="SERIAL_A")
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "inspect_bound_iiod",
+        lambda interface: {
+            "hw_serial": "SERIAL_A",
+            "fw_version": plan.expected_firmware,
+            "iio,buffer-metadata": "2",
+            "device_names": ("ad9361-phy", "tandem-agc"),
+        },
+    )
+    receipt_id = "11111111-2222-3333-4444-555555555555"
+    receipt_directory = tmp_path / "receipts"
+    bootstrap._write_receipt(
+        receipt_directory / f"{receipt_id}.json",
+        {
+            "schema_version": 1,
+            "receipt_id": receipt_id,
+            "transport": "bound_ssh_frm",
+            "outcome": "unknown",
+            "plan": asdict(plan),
+            "phases": ["reboot_dispatched", "reappeared"],
+        },
+    )
+    return plan, receipt_directory, receipt_id
+
+
+def test_standalone_reconciliation_is_read_only_and_verifies_exact_fit(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
+        planned, tmp_path, monkeypatch
+    )
+    transport = ReadOnlyReconciliationTransport(plan)
+
+    result = bootstrap.reconcile_usb_flash_receipt(
+        receipt_id,
+        receipt_directory=receipt_directory,
+        usb_sysfs_path=Path(plan.usb_sysfs_path),
+        mutation_profile_id=plan.mutation_profile_id,
+        transport=transport,
+    )
+
+    assert result.outcome == "reconciled_verified"
+    assert result.tx_safe is True
+    assert result.fit_sha256 == plan.fit_sha256
+    assert len(transport.calls) == 1
+    command, script = transport.calls[0]
+    assert command == f"sh -s -- SERIAL_A {plan.fit_size}"
+    assert script == bootstrap._REMOTE_RECONCILE_SCRIPT
+    assert b"update_frm" not in (script or b"")
+    assert b"device_reboot" not in (script or b"")
+    persisted = json.loads((receipt_directory / f"{receipt_id}.json").read_text())
+    assert persisted["original_outcome"] == "unknown"
+    assert persisted["outcome"] == "reconciled_verified"
+
+
+def test_standalone_reconciliation_rejects_profile_mismatch_before_remote_access(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
+        planned, tmp_path, monkeypatch
+    )
+    transport = ReadOnlyReconciliationTransport(plan)
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="profile does not match"):
+        bootstrap.reconcile_usb_flash_receipt(
+            receipt_id,
+            receipt_directory=receipt_directory,
+            usb_sysfs_path=Path(plan.usb_sysfs_path),
+            mutation_profile_id="wrong-profile",
+            transport=transport,
+        )
+
+    assert transport.calls == []
 
 
 def test_force_flash_can_verify_v5_when_hardware_serial_remains_blank(

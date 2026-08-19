@@ -225,6 +225,15 @@ subsequent firmware operations must use the normal serial-attested plan/token
 workflow. Never retry an `unknown` bootstrap receipt without read-only
 reconciliation.
 
+An uncertain serial-attested standalone SSH receipt is reconciled independently
+of the daemon with `pluto firmware reconcile-local RECEIPT_ID`. Supply the exact
+recorded `--usb-sysfs-path`, persistent `--profile`, pinned
+`--ssh-known-hosts-file`, and endpoint. The command performs only readback: it
+validates the durable receipt and qualified profile, correlates USB and IIOD
+identity, verifies the active firmware and TX/DDS safe state, and hashes exactly
+the recorded FIT length from `mtd3`. It has no updater, QSPI-write, RF-write, or
+reboot operation; any mismatch remains unresolved and must not trigger a retry.
+
 `--return-timeout` is bounded to 30–1800 seconds and defaults to 180. A failure
 before the SCSI eject request is a known `qspi_write_not_started` result: the FIT
 may be staged on FAT, but the radio-side QSPI updater was never triggered. A

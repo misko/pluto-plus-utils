@@ -9,6 +9,7 @@ radios must use the plan/token firmware manager instead.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -398,6 +399,20 @@ class BootstrapResult:
     failure_classification: str | None = None
     retryable: bool | None = None
     remediation: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StandaloneReconciliationResult:
+    """Read-only result for one uncertain standalone persistent flash."""
+
+    receipt_id: str
+    outcome: Literal["reconciled_verified"]
+    phases: tuple[str, ...]
+    receipt_path: str
+    returned_serial: str
+    returned_firmware: str
+    fit_sha256: str
+    tx_safe: bool
 
 
 def prepare_bootstrap_plan(
@@ -846,6 +861,139 @@ def execute_usb_flash_plan_ssh(
     return result
 
 
+def reconcile_usb_flash_receipt(
+    receipt_id: str,
+    *,
+    receipt_directory: Path,
+    usb_sysfs_path: Path,
+    mutation_profile_id: str,
+    transport: BootstrapSshTransport,
+) -> StandaloneReconciliationResult:
+    """Read-only re-attest one uncertain standalone flash receipt.
+
+    The source receipt, immutable profile, current USB/IIO identity, remote
+    firmware, TX-safe state, and exact recorded FIT bytes must all agree.  This
+    function never stages an image, writes QSPI, changes RF state, or reboots.
+    """
+
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", receipt_id):
+        raise BootstrapFirmwareError("invalid standalone receipt ID")
+    receipt_path = receipt_directory / f"{receipt_id}.json"
+    receipt = _read_receipt(receipt_path)
+    if receipt.get("schema_version") != 1 or receipt.get("receipt_id") != receipt_id:
+        raise BootstrapFirmwareError("standalone receipt identity or schema is invalid")
+    if receipt.get("outcome") != "unknown":
+        raise BootstrapFirmwareError("only an unknown standalone flash may be reconciled")
+    if receipt.get("transport") != "bound_ssh_frm":
+        raise BootstrapFirmwareError("standalone reconciliation requires a bound SSH receipt")
+    raw_plan = receipt.get("plan")
+    if not isinstance(raw_plan, dict):
+        raise BootstrapFirmwareError("standalone receipt has no valid plan")
+    try:
+        plan = BootstrapPlan(**raw_plan)
+    except (TypeError, ValueError) as error:
+        raise BootstrapFirmwareError("standalone receipt plan is invalid") from error
+    if plan.operation != "flash" or not plan.target_serial:
+        raise BootstrapFirmwareError("receipt is not serial-bound standalone flash evidence")
+    if plan.usb_sysfs_path != str(usb_sysfs_path):
+        raise BootstrapFirmwareError("requested USB path does not match the receipt")
+    if plan.mutation_profile_id != mutation_profile_id:
+        raise BootstrapFirmwareError("requested profile does not match the receipt")
+    profile = STANDALONE_FLASH_PROFILES.get(mutation_profile_id)
+    if profile is None or not profile.persistent_allowed:
+        raise BootstrapFirmwareError("receipt does not select a persistent qualified profile")
+    policy = profile.policy
+    expected = (
+        (plan.image_sha256, policy.asset_sha256, "DFU SHA-256"),
+        (plan.fit_sha256, policy.fit_body_sha256, "FIT SHA-256"),
+        (plan.fit_size, policy.fit_body_size, "FIT size"),
+        (plan.expected_firmware, policy.device_firmware, "firmware identity"),
+    )
+    for recorded, qualified, label in expected:
+        if recorded != qualified:
+            raise BootstrapFirmwareError(f"receipt {label} is outside the selected profile")
+
+    returned = _one_local_target(_direct_usb_path(usb_sysfs_path))
+    if returned.serial != plan.target_serial or len(returned.host_network_interfaces) != 1:
+        raise BootstrapFirmwareError("current USB identity does not match the receipt")
+    facts = inspect_bound_iiod(returned.host_network_interfaces[0].name)
+    if str(facts.get("hw_serial") or "").strip() != plan.target_serial:
+        raise BootstrapFirmwareError("current IIOD serial does not match the receipt")
+    if str(facts.get("fw_version") or "").strip() != plan.expected_firmware:
+        raise BootstrapFirmwareError("current IIOD firmware does not match the receipt")
+    if str(facts.get("iio,buffer-metadata") or "").strip() != str(
+        plan.expected_metadata_abi
+    ):
+        raise BootstrapFirmwareError("current metadata ABI does not match the receipt")
+    raw_names = facts.get("device_names", ())
+    device_names = (
+        {str(value) for value in raw_names}
+        if isinstance(raw_names, (tuple, list, set, frozenset))
+        else set()
+    )
+    if ("tandem-agc" in device_names) is not plan.expected_tandem_agc:
+        raise BootstrapFirmwareError("current tandem capability does not match the receipt")
+
+    output = transport.run(
+        f"sh -s -- {plan.target_serial} {plan.fit_size}",
+        stdin=_REMOTE_RECONCILE_SCRIPT,
+        timeout_s=120,
+    )
+    fields = _parse_reconciliation_report(output)
+    if fields.get("serial") != plan.target_serial:
+        raise BootstrapFirmwareError("remote serial does not match the receipt")
+    if fields.get("firmware") != plan.expected_firmware:
+        raise BootstrapFirmwareError("remote firmware does not match the receipt")
+    remote_fit = fields.get("fit_sha256", "")
+    if not hmac.compare_digest(remote_fit, plan.fit_sha256):
+        raise BootstrapFirmwareError("remote mtd3 FIT does not match the receipt")
+    try:
+        gains = tuple(float(value) for value in fields["tx_hardwaregain_db"].split(","))
+        buffers = tuple(float(value) for value in fields["tx_buffer_enable"].split(","))
+        scans = tuple(float(value) for value in fields["tx_scan_enable"].split(","))
+        raws = tuple(float(value) for value in fields["tx_dds_raw"].split(","))
+        scales = tuple(float(value) for value in fields["tx_dds_scale"].split(","))
+    except (KeyError, ValueError) as error:
+        raise BootstrapFirmwareError("remote TX-safe report is invalid") from error
+    tx_safe = (
+        len(gains) == 2
+        and all(value <= -80 for value in gains)
+        and buffers == (0,)
+        and len(scans) == 4
+        and all(value == 0 for value in scans)
+        and len(raws) == 8
+        and all(value == 0 for value in raws)
+        and len(scales) == 8
+        and all(value == 0 for value in scales)
+    )
+    if not tx_safe:
+        raise BootstrapFirmwareError("remote TX-safe readback was not affirmative")
+
+    phases = (
+        "receipt_validated",
+        "qualified_profile_validated",
+        "usb_iiod_identity_attested",
+        "remote_identity_attested",
+        "tx_safe_read_only_attested",
+        "mtd3_fit_verified",
+    )
+    result = StandaloneReconciliationResult(
+        receipt_id=receipt_id,
+        outcome="reconciled_verified",
+        phases=phases,
+        receipt_path=str(receipt_path),
+        returned_serial=plan.target_serial,
+        returned_firmware=plan.expected_firmware,
+        fit_sha256=remote_fit,
+        tx_safe=True,
+    )
+    receipt["original_outcome"] = "unknown"
+    receipt["outcome"] = result.outcome
+    receipt["reconciliation"] = asdict(result)
+    _write_receipt(receipt_path, receipt)
+    return result
+
+
 _REMOTE_ATTEST_COMMAND = (
     "printf 'serial='; cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/"
     "serialnumber 2>/dev/null || true; printf '\\nmodel='; tr -d '\\000' </proc/device-tree/"
@@ -859,6 +1007,49 @@ _REMOTE_STAGE_HASH_COMMAND = "sha256sum /tmp/pluto-plus-utils/pluto.frm"
 _REMOTE_UPDATE_COMMAND = "/sbin/update_frm.sh /tmp/pluto-plus-utils/pluto.frm"
 _REMOTE_CLEANUP_COMMAND = "rm -f /tmp/pluto-plus-utils/pluto.frm && sync"
 _REMOTE_REBOOT_COMMAND = "/usr/sbin/device_reboot reset"
+
+_REMOTE_RECONCILE_SCRIPT = rb"""set -eu
+serial_expected="$1"
+fit_size="$2"
+emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
+serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
+firmware=$(awk '$1 == "device-fw" {print $2; exit}' /opt/VERSIONS)
+fit_sha256=$(head -c "$fit_size" /dev/mtdblock3 | sha256sum | awk '{print $1}')
+test "$serial" = "$serial_expected"
+phy=''; dds=''
+for d in /sys/bus/iio/devices/iio:device*; do
+  case "$(cat "$d/name" 2>/dev/null || true)" in
+    ad9361-phy) phy="$d" ;;
+    cf-ad9361-dds-core-lpc) dds="$d" ;;
+  esac
+done
+test -n "$phy" && test -n "$dds"
+gains=''; scans=''; raws=''; scales=''
+for f in "$phy"/out_voltage0_hardwaregain "$phy"/out_voltage1_hardwaregain; do
+  value=$(awk '{print $1}' "$f")
+  gains="${gains}${gains:+,}${value}"
+done
+for f in "$dds"/scan_elements/out_voltage[0-3]_en; do
+  value=$(cat "$f")
+  scans="${scans}${scans:+,}${value}"
+done
+for f in "$dds"/out_altvoltage*_raw; do
+  value=$(cat "$f")
+  raws="${raws}${raws:+,}${value}"
+done
+for f in "$dds"/out_altvoltage*_scale; do
+  value=$(cat "$f")
+  scales="${scales}${scales:+,}${value}"
+done
+emit serial "$serial"
+emit firmware "$firmware"
+emit fit_sha256 "$fit_sha256"
+emit tx_hardwaregain_db "$gains"
+emit tx_buffer_enable "$(cat "$dds/buffer/enable")"
+emit tx_scan_enable "$scans"
+emit tx_dds_raw "$raws"
+emit tx_dds_scale "$scales"
+"""
 
 
 def _remote_attestation(output: str) -> dict[str, str]:
@@ -876,6 +1067,27 @@ def _one_sha256(output: str) -> str:
     if len(matches) != 1:
         raise BootstrapFirmwareError("remote hash command did not return exactly one SHA-256")
     return str(matches[0])
+
+
+def _parse_reconciliation_report(output: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3 and parts[0] == "PPU" and parts[1] not in fields:
+            fields[parts[1]] = parts[2]
+    required = {
+        "serial",
+        "firmware",
+        "fit_sha256",
+        "tx_hardwaregain_db",
+        "tx_buffer_enable",
+        "tx_scan_enable",
+        "tx_dds_raw",
+        "tx_dds_scale",
+    }
+    if set(fields) != required or not re.fullmatch(r"[0-9a-f]{64}", fields["fit_sha256"]):
+        raise BootstrapFirmwareError("remote reconciliation report is incomplete")
+    return fields
 
 
 def _validate_plan_payload(plan: BootstrapPlan, frm: bytes, confirmation: str) -> None:
@@ -1505,6 +1717,18 @@ def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _read_receipt(path: Path) -> dict[str, Any]:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, json.JSONDecodeError) as error:
+        raise BootstrapFirmwareError(f"cannot read standalone receipt: {error}") from error
+    if not isinstance(payload, dict):
+        raise BootstrapFirmwareError("standalone receipt must contain one JSON object")
+    return payload
 
 
 def _update_receipt(

@@ -373,6 +373,23 @@ unplug the radio during the update. A failure after `pluto.frm` is written is re
 `outcome: unknown`; do not retry it until the radio and durable receipt have
 been reconciled.
 
+For an uncertain serial-attested standalone SSH flash, reconcile the durable
+receipt without replaying the update:
+
+```bash
+uv run pluto firmware reconcile-local RECEIPT_ID \
+  --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --profile EXACT_PERSISTENT_PROFILE \
+  --ssh-known-hosts-file /private/radio.known_hosts \
+  --ssh-host 192.168.1.14
+```
+
+This command is hardware-read-only. It validates the receipt and immutable
+profile, re-attests USB and IIOD identity, reads the complete TX/DDS safe state,
+and hashes exactly the receipt-recorded FIT length from `mtd3`. It never stages
+an image, invokes the updater, changes RF state, or reboots. A mismatch leaves
+the attempt unresolved and must not be treated as permission to retry.
+
 If the host UDisks service is unavailable, the same local command can use the
 radio's fixed updater over SSH while remaining bound to the selected USB network
 interface. The radio host key must already be pinned in a private `known_hosts`

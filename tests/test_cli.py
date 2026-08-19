@@ -1239,6 +1239,80 @@ def test_usb_flash_cli_routes_explicit_lan_host_without_usb_bind(
     ]
 
 
+def test_standalone_reconcile_cli_forwards_exact_receipt_path_and_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pluto_plus.bootstrap_firmware import StandaloneReconciliationResult
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    observed: dict[str, object] = {}
+
+    class RecordingSshTransport:
+        def __init__(self, **kwargs: object) -> None:
+            observed["transport_kwargs"] = kwargs
+
+    def reconcile(receipt_id: str, **kwargs: object) -> StandaloneReconciliationResult:
+        observed["receipt_id"] = receipt_id
+        observed.update(kwargs)
+        return StandaloneReconciliationResult(
+            receipt_id=receipt_id,
+            outcome="reconciled_verified",
+            phases=("mtd3_fit_verified",),
+            receipt_path=str(tmp_path / "receipts" / f"{receipt_id}.json"),
+            returned_serial="SERIAL_A",
+            returned_firmware="v7",
+            fit_sha256="a" * 64,
+            tx_safe=True,
+        )
+
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.BoundSshBootstrapTransport",
+        RecordingSshTransport,
+    )
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.reconcile_usb_flash_receipt", reconcile
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "reconcile-local",
+            "11111111-2222-3333-4444-555555555555",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--profile",
+            "exact-profile",
+            "--ssh-host",
+            "192.168.1.14",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--receipt-directory",
+            str(tmp_path / "receipts"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["outcome"] == "reconciled_verified"
+    assert observed["receipt_id"] == "11111111-2222-3333-4444-555555555555"
+    assert observed["usb_sysfs_path"] == Path("/sys/bus/usb/devices/3-8")
+    assert observed["mutation_profile_id"] == "exact-profile"
+    assert observed["receipt_directory"] == (tmp_path / "receipts").resolve()
+    assert observed["transport_kwargs"] == {
+        "interface": None,
+        "password": "analog",
+        "known_hosts_file": known_hosts.resolve(),
+        "host": "192.168.1.14",
+    }
+
+
 def test_doctor_defaults_to_standalone_local_usb_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

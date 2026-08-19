@@ -1704,6 +1704,89 @@ def firmware_reconcile(ctx: typer.Context, receipt_id: str = typer.Argument(...)
     _emit(_api(ctx).request("POST", f"firmware/receipts/{receipt_id}/reconcile", json_body={}))
 
 
+@firmware_app.command("reconcile-local")
+def firmware_reconcile_local(
+    receipt_id: str = typer.Argument(..., help="Exact standalone flash receipt ID."),
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ..., "--usb-sysfs-path", help="Exact direct USB sysfs node recorded by the receipt."
+    ),
+    profile: str = typer.Option(
+        ..., "--profile", help="Exact immutable persistent profile recorded by the receipt."
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ..., "--ssh-known-hosts-file", help="Pinned known_hosts for the exact returned radio."
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None, "--ssh-password-file", help="Optional private password file; otherwise prompt."
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1",
+        "--ssh-host",
+        help="Literal private endpoint; non-default addresses use the LAN route.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_BOOTSTRAP_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory containing the standalone receipt.",
+    ),
+) -> None:
+    """Read-only re-attest an uncertain standalone flash; never retry it."""
+
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapFirmwareError,
+        BoundSshBootstrapTransport,
+        reconcile_usb_flash_receipt,
+    )
+
+    if ssh_password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        try:
+            password = (
+                _read_private_file_bytes(
+                    ssh_password_file,
+                    label="radio SSH password",
+                    maximum_bytes=4096,
+                )
+                .decode("utf-8")
+                .strip()
+            )
+        except UnicodeDecodeError:
+            _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
+    interface = None
+    if ssh_host == "192.168.2.1":
+        matches = [
+            item
+            for item in scan_local_usb_plutos()
+            if item.usb_path == str(usb_sysfs_path)
+            and len(item.host_network_interfaces) == 1
+        ]
+        if len(matches) != 1:
+            _fail(
+                "standalone_reconciliation_identity_unavailable",
+                "USB path must identify one radio with one network interface",
+                4,
+            )
+        interface = matches[0].host_network_interfaces[0].name
+    try:
+        transport = BoundSshBootstrapTransport(
+            interface=interface,
+            password=password,
+            known_hosts_file=ssh_known_hosts_file.expanduser().resolve(),
+            host=ssh_host,
+        )
+        result = reconcile_usb_flash_receipt(
+            receipt_id,
+            receipt_directory=receipt_directory.expanduser().resolve(),
+            usb_sysfs_path=usb_sysfs_path,
+            mutation_profile_id=profile,
+            transport=transport,
+        )
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("standalone_reconciliation_failed", str(error), 4)
+    _emit(asdict(result))
+
+
 @firmware_app.command("enroll-usb-ssh")
 def firmware_enroll_usb_ssh(
     serial: str = typer.Argument(..., help="Exact serial of one USB-attached local radio."),
