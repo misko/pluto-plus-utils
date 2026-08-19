@@ -970,3 +970,23 @@ def test_return_attestation_retries_transient_iiod_startup(
 
     assert result == (None, plan.expected_firmware, "ad9363a")
     assert attempts == 2
+
+
+def test_returned_radio_mute_preflights_native_iio_before_radio_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Environment:
+        healthy = False
+        actionable_message = "explicit native libiio could not be loaded"
+
+    monkeypatch.setattr(
+        bootstrap,
+        "inspect_iio_environment",
+        lambda **_kwargs: Environment(),
+    )
+
+    with pytest.raises(
+        bootstrap.BootstrapFirmwareError,
+        match="returned-radio IIO environment failed.*explicit native libiio",
+    ):
+        bootstrap.mute_returned_radio("SERIAL_A")

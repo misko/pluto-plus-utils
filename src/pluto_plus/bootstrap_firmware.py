@@ -34,6 +34,7 @@ from pluto_plus.doctor import (
 )
 from pluto_plus.firmware import FirmwareImageError, generate_frm, validate_frm
 from pluto_plus.hardware.discovery import _facts_from_context_xml
+from pluto_plus.hardware.preflight import inspect_iio_environment
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 from pluto_plus.ip_firmware import (
     UsbSshRouteAmbiguous,
@@ -964,6 +965,11 @@ def mute_returned_radio(serial: str) -> None:
     """Mute and read back one exact returned USB-IIO radio."""
 
     try:
+        environment = inspect_iio_environment(require_usb=True)
+        if not environment.healthy:
+            raise BootstrapFirmwareError(
+                f"returned-radio IIO environment failed: {environment.actionable_message}"
+            )
         import adi
         import iio
 
@@ -986,7 +992,7 @@ def mute_returned_radio(serial: str) -> None:
         finally:
             device.rx_destroy_buffer()
             device._ctx.close()
-    except (ImportError, OSError, RuntimeError, ValueError) as error:
+    except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as error:
         if isinstance(error, BootstrapFirmwareError):
             raise
         raise BootstrapFirmwareError(f"cannot attest returned TX-safe state: {error}") from error
