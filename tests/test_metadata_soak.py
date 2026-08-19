@@ -12,6 +12,7 @@ from pluto_plus.metadata_soak import (
     MetadataSoakError,
     MetadataSoakPlan,
     SshMetadataHealthProbe,
+    _metadata_phase,
     execute_metadata_soak,
     prepare_metadata_soak,
 )
@@ -170,6 +171,14 @@ def test_ssh_health_probe_uses_fixed_script_and_strict_parser() -> None:
     bad = FakeSshTransport(_health_output() + "PPU\tserial\tduplicate\n")
     with pytest.raises(MetadataSoakError, match="malformed or duplicated"):
         SshMetadataHealthProbe(bad, serial=SERIAL).inspect()
+
+
+def test_live_phase_errors_preserve_slot_frequency_and_refill() -> None:
+    with pytest.raises(
+        MetadataSoakError,
+        match=r"slot=2 phase=metadata_refill frequency_hz=915000000 refill=3: OSError",
+    ), _metadata_phase(2, "metadata_refill", frequency=915_000_000, refill=3):
+        raise OSError(16, "Device or resource busy")
 
 
 def test_soak_passes_matrix_and_writes_atomic_report(tmp_path: Path) -> None:

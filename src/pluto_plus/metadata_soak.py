@@ -11,6 +11,7 @@ import re
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -237,7 +238,8 @@ def _execute_live_metadata_slot(
     import adi
     import iio
 
-    sdr = adi.ad9361(uri=f"ip:{plan.target}")
+    with _metadata_phase(slot, "context_open"):
+        sdr = adi.ad9361(uri=f"ip:{plan.target}")
     buffer: Any | None = None
     maximum_close = 0.0
     frames = 0
@@ -245,76 +247,92 @@ def _execute_live_metadata_slot(
     original: dict[str, Any] = {}
     restored = False
     try:
-        if sdr._ctx.attrs.get("hw_serial") != plan.serial:
-            raise MetadataSoakError("IIO context serial does not match the soak plan")
-        if sdr._ctx.attrs.get("fw_version") != plan.expected_firmware:
-            raise MetadataSoakError("IIO context firmware does not match the soak profile")
-        if sdr._ctx.attrs.get("iio,buffer-metadata") != str(plan.expected_metadata_abi):
-            raise MetadataSoakError("IIO context metadata ABI does not match the soak profile")
-        if sdr._ctx.find_device("tandem-agc") is None:
-            raise MetadataSoakError("IIO context lacks the tandem-AGC device")
-        metadata_buffer = getattr(iio, "MetadataBuffer", None)
-        if metadata_buffer is None:
-            raise MetadataSoakError("loaded libiio Python binding lacks MetadataBuffer")
-        original = _read_live_rx_settings(sdr)
-        _mute_live_tx(sdr)
-        sdr.rx_enabled_channels = [0, 1]
-        sdr.sample_rate = cell.sample_rate_hz
-        sdr.rx_rf_bandwidth = min(cell.sample_rate_hz, 20_000_000)
-        sdr.rx_buffer_size = cell.samples_per_refill
-        sdr.gain_control_mode_chan0 = "manual"
-        sdr.gain_control_mode_chan1 = "manual"
-        sdr.rx_hardwaregain_chan0 = 30
-        sdr.rx_hardwaregain_chan1 = 30
-        sdr._rxadc.set_kernel_buffers_count(2)
+        with _metadata_phase(slot, "context_attestation"):
+            if sdr._ctx.attrs.get("hw_serial") != plan.serial:
+                raise MetadataSoakError("IIO context serial does not match the soak plan")
+            if sdr._ctx.attrs.get("fw_version") != plan.expected_firmware:
+                raise MetadataSoakError("IIO context firmware does not match the soak profile")
+            if sdr._ctx.attrs.get("iio,buffer-metadata") != str(plan.expected_metadata_abi):
+                raise MetadataSoakError("IIO context metadata ABI does not match the soak profile")
+            if sdr._ctx.find_device("tandem-agc") is None:
+                raise MetadataSoakError("IIO context lacks the tandem-AGC device")
+            metadata_buffer = getattr(iio, "MetadataBuffer", None)
+            if metadata_buffer is None:
+                raise MetadataSoakError("loaded libiio Python binding lacks MetadataBuffer")
+        with _metadata_phase(slot, "configure"):
+            original = _read_live_rx_settings(sdr)
+            _mute_live_tx(sdr)
+            sdr.rx_enabled_channels = [0, 1]
+            sdr.sample_rate = cell.sample_rate_hz
+            sdr.rx_rf_bandwidth = min(cell.sample_rate_hz, 20_000_000)
+            sdr.rx_buffer_size = cell.samples_per_refill
+            sdr.gain_control_mode_chan0 = "manual"
+            sdr.gain_control_mode_chan1 = "manual"
+            sdr.rx_hardwaregain_chan0 = 30
+            sdr.rx_hardwaregain_chan1 = 30
+            sdr._rxadc.set_kernel_buffers_count(2)
         frequencies = (
             plan.lo_frequencies_hz
             if slot % 2 == 0
             else tuple(reversed(plan.lo_frequencies_hz))
         )
         for frequency in frequencies:
-            sdr.rx_destroy_buffer()
-            sdr.rx_lo = frequency
-            actual_frequency = int(sdr.rx_lo)
-            lo_readbacks.append(actual_frequency)
-            if abs(actual_frequency - frequency) > MAX_LO_ERROR_HZ:
-                raise MetadataSoakError(
-                    "RX LO readback exceeded the quantization tolerance: "
-                    f"requested={frequency} actual={actual_frequency}"
-                )
-            prime = sdr.rx()
-            sdr.rx_destroy_buffer()
-            if len(prime) != 2 or any(
-                len(channel) != cell.samples_per_refill for channel in prime
-            ):
-                raise MetadataSoakError("ordinary RX prime did not establish paired scan mask")
-            request = TandemSessionRequestV1(mode=TandemMode.HOLD).pack(
-                cell.samples_per_refill
-            )
-            buffer = metadata_buffer(
-                sdr._rxadc,
-                cell.samples_per_refill,
-                request,
-                64 * 1024,
-            )
-            sdr._rxbuf = buffer
-            for _ in range(cell.refills):
-                signal = sdr.rx()
-                if len(signal) != 2 or any(
-                    len(channel) != cell.samples_per_refill for channel in signal
+            with _metadata_phase(slot, "retune_and_prime", frequency=frequency):
+                sdr.rx_destroy_buffer()
+                sdr.rx_lo = frequency
+                actual_frequency = int(sdr.rx_lo)
+                lo_readbacks.append(actual_frequency)
+                if abs(actual_frequency - frequency) > MAX_LO_ERROR_HZ:
+                    raise MetadataSoakError(
+                        "RX LO readback exceeded the quantization tolerance: "
+                        f"requested={frequency} actual={actual_frequency}"
+                    )
+                prime = sdr.rx()
+                sdr.rx_destroy_buffer()
+                if len(prime) != 2 or any(
+                    len(channel) != cell.samples_per_refill for channel in prime
                 ):
-                    raise MetadataSoakError("metadata refill did not return paired RX samples")
-                raw = buffer.metadata
-                if raw is None:
-                    raise MetadataSoakError("metadata refill returned no header")
-                metadata = RadioMetadataV4.unpack(raw)
-                if metadata.tandem_state is not TandemState.ARMED_HOLD:
-                    raise MetadataSoakError("metadata refill lost tandem HOLD ownership")
-                frames += 1
-            maximum_close = max(maximum_close, _close_live_buffer(sdr, buffer))
+                    raise MetadataSoakError(
+                        "ordinary RX prime did not establish paired scan mask"
+                    )
+            with _metadata_phase(slot, "metadata_buffer_open", frequency=frequency):
+                request = TandemSessionRequestV1(mode=TandemMode.HOLD).pack(
+                    cell.samples_per_refill
+                )
+                buffer = metadata_buffer(
+                    sdr._rxadc,
+                    cell.samples_per_refill,
+                    request,
+                    64 * 1024,
+                )
+                sdr._rxbuf = buffer
+            for refill in range(cell.refills):
+                with _metadata_phase(
+                    slot,
+                    "metadata_refill",
+                    frequency=frequency,
+                    refill=refill,
+                ):
+                    signal = sdr.rx()
+                    if len(signal) != 2 or any(
+                        len(channel) != cell.samples_per_refill for channel in signal
+                    ):
+                        raise MetadataSoakError(
+                            "metadata refill did not return paired RX samples"
+                        )
+                    raw = buffer.metadata
+                    if raw is None:
+                        raise MetadataSoakError("metadata refill returned no header")
+                    metadata = RadioMetadataV4.unpack(raw)
+                    if metadata.tandem_state is not TandemState.ARMED_HOLD:
+                        raise MetadataSoakError("metadata refill lost tandem HOLD ownership")
+                    frames += 1
+            with _metadata_phase(slot, "metadata_buffer_close", frequency=frequency):
+                maximum_close = max(maximum_close, _close_live_buffer(sdr, buffer))
             buffer = None
-        _restore_live_rx_settings(sdr, original)
-        restored = _read_live_rx_settings(sdr) == original
+        with _metadata_phase(slot, "settings_restore"):
+            _restore_live_rx_settings(sdr, original)
+            restored = _read_live_rx_settings(sdr) == original
     finally:
         if buffer is not None:
             maximum_close = max(maximum_close, _close_live_buffer(sdr, buffer))
@@ -337,6 +355,27 @@ def _execute_live_metadata_slot(
         settings_restored=restored,
         lo_readbacks_hz=tuple(lo_readbacks),
     )
+
+
+@contextmanager
+def _metadata_phase(
+    slot: int,
+    phase: str,
+    *,
+    frequency: int | None = None,
+    refill: int | None = None,
+) -> Any:
+    try:
+        yield
+    except BaseException as error:
+        details = [f"slot={slot}", f"phase={phase}"]
+        if frequency is not None:
+            details.append(f"frequency_hz={frequency}")
+        if refill is not None:
+            details.append(f"refill={refill}")
+        raise MetadataSoakError(
+            f"{' '.join(details)}: {type(error).__name__}: {error}"
+        ) from error
 
 
 def _read_live_rx_settings(sdr: Any) -> dict[str, Any]:
