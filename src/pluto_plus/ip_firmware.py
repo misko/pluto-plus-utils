@@ -145,8 +145,8 @@ def require_unambiguous_usb_ssh_route(
         )
 
     destination_routes: list[tuple[str, str]] = []
-    competing: list[tuple[str, str]] = []
-    selected_route = False
+    covering: list[tuple[str, ipaddress.IPv4Network]] = []
+    selected_prefixlen: int | None = None
     for item in routes_document:
         if not isinstance(item, dict) or not isinstance(item.get("dev"), str):
             continue
@@ -157,22 +157,39 @@ def require_unambiguous_usb_ssh_route(
             network = ipaddress.ip_network(raw_destination, strict=False)
         except ValueError:
             continue
+        if not isinstance(network, ipaddress.IPv4Network):
+            continue
         if target not in network:
             continue
-        route = (item["dev"], str(network))
-        destination_routes.append(route)
+        destination_routes.append((item["dev"], str(network)))
+        covering.append((item["dev"], network))
         if item["dev"] == interface:
-            selected_route = True
-        else:
-            competing.append(route)
-    if not selected_route:
+            selected_prefixlen = (
+                network.prefixlen
+                if selected_prefixlen is None
+                else max(selected_prefixlen, network.prefixlen)
+            )
+    if selected_prefixlen is None:
         raise UsbSshRouteAmbiguous(
             f"USB-bound SSH endpoint {endpoint} has no observed route through {interface!r}"
         )
+
+    # Linux selects a route by longest-prefix match, so a route that is strictly
+    # less specific than the bound interface's own route can never carry this
+    # destination and is therefore not a competitor.  Only an equally or more
+    # specific route on another interface can win -- that is the case this gate
+    # exists for (two USB gadgets exposing identical host addresses and
+    # destination subnets), and it is still refused below.
+    competing = [
+        (name, str(network))
+        for name, network in covering
+        if name != interface and network.prefixlen >= selected_prefixlen
+    ]
     if competing:
         detail = ", ".join(f"{network} via {name}" for name, network in sorted(competing))
         raise UsbSshRouteAmbiguous(
-            f"USB-bound SSH endpoint {endpoint} is covered by competing routes ({detail}). "
+            f"USB-bound SSH endpoint {endpoint} is covered by competing routes ({detail}) "
+            f"at least as specific as the /{selected_prefixlen} route through {interface!r}. "
             "Disconnect or readdress the overlapping interface; refusing enrollment or mutation."
         )
     return UsbSshRouteObservation(

@@ -109,8 +109,32 @@ def test_usb_path_a_refuses_duplicate_source_address_that_can_reach_path_b() -> 
         )
 
 
-def test_usb_ssh_route_refuses_competing_overlapping_lan_route() -> None:
-    with pytest.raises(UsbSshRouteAmbiguous, match=r"192\.168\.0\.0/22 via eth0"):
+def test_usb_ssh_route_accepts_strictly_less_specific_lan_route() -> None:
+    """A /22 LAN route cannot win against the USB /24 under longest-prefix match.
+
+    Handing out a prefix shorter than /24 that happens to cover the USB subnet
+    is ordinary DHCP behaviour, and the kernel will still select the USB
+    interface.  Refusing it made the guarded SSH firmware and canonical setup
+    paths unusable on such hosts without readdressing the LAN.
+    """
+    observation = require_unambiguous_usb_ssh_route(
+        "enx_path_a",
+        "192.168.2.1",
+        ip_json_reader=_ip_json_reader(
+            addresses={"enx_path_a": ("192.168.2.10",), "eth0": ("192.168.1.10",)},
+            routes=(
+                ("enx_path_a", "192.168.2.0/24"),
+                ("eth0", "192.168.0.0/22"),
+            ),
+        ),
+    )
+
+    assert ("eth0", "192.168.0.0/22") in observation.destination_routes
+
+
+def test_usb_ssh_route_refuses_equally_specific_competing_route() -> None:
+    """Equal prefix length is a genuine tie, broken only by metric."""
+    with pytest.raises(UsbSshRouteAmbiguous, match=r"192\.168\.2\.0/24 via eth0"):
         require_unambiguous_usb_ssh_route(
             "enx_path_a",
             "192.168.2.1",
@@ -118,10 +142,44 @@ def test_usb_ssh_route_refuses_competing_overlapping_lan_route() -> None:
                 addresses={"enx_path_a": ("192.168.2.10",), "eth0": ("192.168.1.10",)},
                 routes=(
                     ("enx_path_a", "192.168.2.0/24"),
-                    ("eth0", "192.168.0.0/22"),
+                    ("eth0", "192.168.2.0/24"),
                 ),
             ),
         )
+
+
+def test_usb_ssh_route_refuses_more_specific_competing_route() -> None:
+    """A longer prefix elsewhere actively steals the destination."""
+    with pytest.raises(UsbSshRouteAmbiguous, match=r"192\.168\.2\.0/25 via eth0"):
+        require_unambiguous_usb_ssh_route(
+            "enx_path_a",
+            "192.168.2.1",
+            ip_json_reader=_ip_json_reader(
+                addresses={"enx_path_a": ("192.168.2.10",), "eth0": ("192.168.1.10",)},
+                routes=(
+                    ("enx_path_a", "192.168.2.0/24"),
+                    ("eth0", "192.168.2.0/25"),
+                ),
+            ),
+        )
+
+
+def test_usb_ssh_route_uses_most_specific_bound_route_as_the_threshold() -> None:
+    """With several routes on the bound interface, the longest one governs."""
+    observation = require_unambiguous_usb_ssh_route(
+        "enx_path_a",
+        "192.168.2.1",
+        ip_json_reader=_ip_json_reader(
+            addresses={"enx_path_a": ("192.168.2.10",), "eth0": ("192.168.1.10",)},
+            routes=(
+                ("enx_path_a", "192.168.2.0/24"),
+                ("enx_path_a", "192.168.2.0/25"),
+                ("eth0", "192.168.2.0/24"),
+            ),
+        ),
+    )
+
+    assert ("eth0", "192.168.2.0/24") in observation.destination_routes
 
 
 def _enrollment() -> IpFirmwareEnrollment:
