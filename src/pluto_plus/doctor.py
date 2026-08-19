@@ -95,20 +95,21 @@ TANDEM_V6_LATCH_CLEAR_PERSISTENT_POLICY = TANDEM_V6_LATCH_CLEAR_RAM_POLICY.model
 )
 
 # Exact final-version-stamped tandem v7 candidate from the trusted Kalman build.
+# This successor includes the synchronous iiOD exclusive-buffer close barrier.
 # This policy is deliberately RAM-only until all four physical radios pass the
 # release matrix. A future persistent policy must be a separate reviewed object.
 TANDEM_AGC_V7_RAM_POLICY = FirmwarePolicy(
     profile_id="tandem-agc-v7-release-ram",
     release_tag="v0.40-plutoplus-spf-tandem-agc-v7",
     device_firmware="v0.40-plutoplus-spf-tandem-agc-v7",
-    asset_name="plutoplus-spf-tandem-agc-v2-8e214cd7826c-pluto.dfu",
-    asset_sha256="532b45f2ab6cc3e7dfdbdf2a552c54c7e6b2217eb392c6d42a1c648852c8feeb",
-    release_url="https://github.com/misko/plutosdr-fw/actions/runs/32206442088",
-    source_commit="8e214cd7826c310ea9b5d2d45186359141d14421",
-    fit_body_sha256="006c3783f1d832dbab6b3f7b990f8bf06a0779e99de5d939bff2899a519352e0",
-    fit_body_size=12_776_775,
+    asset_name="plutoplus-spf-tandem-agc-v2-e0049c2d0077-pluto.dfu",
+    asset_sha256="4fe286f9756e3c721d5322ba9c18831f43ab4678c34bb9ef7f238cbb1236debe",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/32214045747",
+    source_commit="e0049c2d0077770eeb1f6850b957878a373623d9",
+    fit_body_sha256="4c19876d09082adfdbd255726e84be397eb4e18a4c0d96b9722d7d543c2ebae7",
+    fit_body_size=12_776_823,
     hardware_qualified=False,
-    published_at=datetime(2026, 8, 19, 2, 9, 5, tzinfo=UTC),
+    published_at=datetime(2026, 8, 19, 4, 32, 25, tzinfo=UTC),
 )
 
 

@@ -263,14 +263,14 @@ def test_tandem_v7_candidate_is_exactly_ram_only_before_promotion() -> None:
 
     assert policy.release_tag == "v0.40-plutoplus-spf-tandem-agc-v7"
     assert policy.device_firmware == policy.release_tag
-    assert policy.source_commit == "8e214cd7826c310ea9b5d2d45186359141d14421"
+    assert policy.source_commit == "e0049c2d0077770eeb1f6850b957878a373623d9"
     assert policy.asset_sha256 == (
-        "532b45f2ab6cc3e7dfdbdf2a552c54c7e6b2217eb392c6d42a1c648852c8feeb"
+        "4fe286f9756e3c721d5322ba9c18831f43ab4678c34bb9ef7f238cbb1236debe"
     )
     assert policy.fit_body_sha256 == (
-        "006c3783f1d832dbab6b3f7b990f8bf06a0779e99de5d939bff2899a519352e0"
+        "4c19876d09082adfdbd255726e84be397eb4e18a4c0d96b9722d7d543c2ebae7"
     )
-    assert policy.fit_body_size == 12_776_775
+    assert policy.fit_body_size == 12_776_823
     assert policy.hardware_qualified is False
     assert profile.metadata_abi == 2
     assert profile.tandem_agc is True
