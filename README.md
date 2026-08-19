@@ -37,17 +37,53 @@ identifies which rung - and therefore which frequency - it was. Capture one
 artifact per rung at that rung's nominal intermediate frequency, then fit them
 together:
 
+A complete example against a PlutoSDR behind a 13 V (low band) universal LNB,
+nominal LO 9.750 GHz. Five rungs from 10.7 to 11.5 GHz, one pass every 30 s, so
+`u = 30 / (5 x 6) = 1.0 s` and the bursts run 1, 2, 3, 4 and 5 seconds:
+
+| rung | burst | transmitted RF | lands at IF |
+|---:|---:|---:|---:|
+| 1 | 1 s | 10.700 GHz | 950 MHz |
+| 2 | 2 s | 10.900 GHz | 1150 MHz |
+| 3 | 3 s | 11.100 GHz | 1350 MHz |
+| 4 | 4 s | 11.300 GHz | 1550 MHz |
+| 5 | 5 s | 11.500 GHz | 1750 MHz |
+
+**Transmit side.** Not this tool -- the ladder comes from whatever generates it.
+With an ADF5355 driven by [`adf5355_tester`](https://github.com/misko/adf5355_tester),
+start it looping first and leave it running for the whole receive session:
+
 ```bash
-# Once per rung: tune to that rung's nominal IF (f_RF - f_LO) and capture for
-# longer than one full ladder pass, so a complete burst is guaranteed to land
-# inside the capture whatever the keying phase happens to be.
-uv run pluto radio settings set fake-001 --frequency 550000000
-uv run pluto capture start fake-001 --duration 75
-# ... repeat for 650000000, 750000000, 850000000, 950000000 ...
-uv run pluto calibrate freq-ladder ART_1 ART_2 ART_3 ART_4 ART_5 \
-  --rung-start-hz 10.30e9 --rung-stop-hz 10.70e9 --rung-count 5 \
-  --total-seconds 60 --lo-hz 9.75e9
+adf5355 ladder --start-ghz 10.7 --stop-ghz 11.5 \
+               --steps 5 --total-s 30 \
+               --loops 12 --power 0 --enable-rf
 ```
+
+**Receive side.** One capture per rung, tuned to that rung's nominal IF
+(`f_RF - f_LO`), each longer than one full pass plus the longest burst so a
+complete burst is guaranteed to land inside the capture whatever the keying
+phase happens to be:
+
+```bash
+for IF in 950000000 1150000000 1350000000 1550000000 1750000000; do
+    uv run pluto radio settings set RADIO --frequency $IF
+    uv run pluto capture start RADIO --duration 40
+done
+
+uv run pluto calibrate freq-ladder ART_1 ART_2 ART_3 ART_4 ART_5 \
+  --rung-start-hz 10.7e9 --rung-stop-hz 11.5e9 --rung-count 5 \
+  --total-seconds 30 --lo-hz 9.75e9
+```
+
+The `--rung-*`, `--total-seconds` and `--lo-hz` values are the *published*
+parameters and must match what the transmitter is actually doing; nothing else
+about the transmitter is known to, or needed by, this host.
+
+Widen the frequency span as far as the LNB IF passband allows: the slope is the
+receiver clock error, so its precision is roughly the measurement error divided
+by the IF span. Three rungs is the minimum that separates slope from intercept,
+and several passes matter because a single monotonic pass confounds LO drift
+with the very slope being measured.
 
 The receiver's own clock error scales with the intermediate frequency while the
 LNB local-oscillator error is constant, so the fitted slope is the receiver clock
