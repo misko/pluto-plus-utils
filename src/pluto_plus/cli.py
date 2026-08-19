@@ -1004,7 +1004,7 @@ def radio_qualify_tandem(
         help="Weak TX2 hardware gain used by AUTO qualification.",
     ),
     profile_id: str = typer.Option(
-        "libiio-metadata-v6-tandem-latch-clear-ram",
+        "tandem-agc-v7-release-ram",
         "--profile",
         help="Exact immutable ABI-2 tandem firmware profile to qualify.",
     ),

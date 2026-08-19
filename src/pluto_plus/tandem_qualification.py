@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
-from pluto_plus.doctor import TANDEM_V6_LATCH_CLEAR_RAM_POLICY
+from pluto_plus.doctor import TANDEM_AGC_V7_RAM_POLICY
 from pluto_plus.hardware.iio import _mute_transmit
 from pluto_plus.inventory import scan_local_usb_plutos
 from pluto_plus.tandem import (
@@ -125,7 +125,7 @@ def prepare_tandem_qualification(
     physical_attenuation_db: float,
     strong_tx_gain_db: float,
     weak_tx_gain_db: float,
-    profile_id: str = TANDEM_V6_LATCH_CLEAR_RAM_POLICY.profile_id,
+    profile_id: str = TANDEM_AGC_V7_RAM_POLICY.profile_id,
 ) -> TandemQualificationPlan:
     """Prepare a read-only, exact-local-radio tandem qualification plan."""
 

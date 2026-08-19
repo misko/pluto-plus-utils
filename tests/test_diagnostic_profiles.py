@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from pluto_plus.diagnostic_profiles import (
+    TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE,
     V5_PROFILE,
     V6_PROFILE,
     V6_TANDEM_ABI2_PROFILE,
@@ -53,6 +54,7 @@ def test_metadata_abi_preserves_exact_observation(
         (V6_PROFILE, 1, False),
         (V6_TANDEM_ABI2_PROFILE, 2, True),
         (V6_TANDEM_LATCH_CLEAR_RAM_PROFILE, 2, True),
+        (TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE, 2, True),
     ],
 )
 def test_known_profiles_are_accepted_without_changing_mutation_policy(
