@@ -15,7 +15,8 @@ from typing import Any
 
 import numpy as np
 
-from pluto_plus.diagnostic_profiles import V6_TANDEM_LATCH_CLEAR_RAM_PROFILE
+from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
+from pluto_plus.doctor import TANDEM_V6_LATCH_CLEAR_RAM_POLICY
 from pluto_plus.hardware.iio import _mute_transmit
 from pluto_plus.inventory import scan_local_usb_plutos
 from pluto_plus.tandem import (
@@ -46,6 +47,7 @@ class TandemQualificationError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class TandemQualificationPlan:
+    profile_id: str
     serial: str
     usb_sysfs_path: str
     physical_attenuation_db: float
@@ -123,11 +125,22 @@ def prepare_tandem_qualification(
     physical_attenuation_db: float,
     strong_tx_gain_db: float,
     weak_tx_gain_db: float,
+    profile_id: str = TANDEM_V6_LATCH_CLEAR_RAM_POLICY.profile_id,
 ) -> TandemQualificationPlan:
     """Prepare a read-only, exact-local-radio tandem qualification plan."""
 
     if not serial.strip():
         raise TandemQualificationError("serial must be non-empty")
+    profile = STANDALONE_FLASH_PROFILES.get(profile_id)
+    if profile is None:
+        raise TandemQualificationError(
+            f"unknown tandem qualification profile {profile_id!r}; expected one of "
+            f"{sorted(STANDALONE_FLASH_PROFILES)}"
+        )
+    if not profile.tandem_agc or profile.metadata_abi != 2:
+        raise TandemQualificationError(
+            f"profile {profile_id!r} is not an ABI-2 tandem-AGC profile"
+        )
     matches = [
         item
         for item in scan_local_usb_plutos()
@@ -148,14 +161,15 @@ def prepare_tandem_qualification(
         )
     phrase = f"QUALIFY TANDEM {serial} {physical_attenuation_db:g}DB"
     return TandemQualificationPlan(
+        profile_id=profile_id,
         serial=serial,
         usb_sysfs_path=str(usb_sysfs_path),
         physical_attenuation_db=physical_attenuation_db,
         strong_tx_gain_db=strong_tx_gain_db,
         weak_tx_gain_db=weak_tx_gain_db,
         effective_attenuation_db=effective,
-        expected_firmware=V6_TANDEM_LATCH_CLEAR_RAM_PROFILE.firmware_version,
-        expected_metadata_abi=2,
+        expected_firmware=profile.policy.device_firmware,
+        expected_metadata_abi=profile.metadata_abi,
         frequencies_hz=QUALIFICATION_FREQUENCIES_HZ,
         confirmation_phrase=phrase,
     )
@@ -178,6 +192,7 @@ def execute_tandem_qualification(
         physical_attenuation_db=plan.physical_attenuation_db,
         strong_tx_gain_db=plan.strong_tx_gain_db,
         weak_tx_gain_db=plan.weak_tx_gain_db,
+        profile_id=plan.profile_id,
     )
     if fresh != plan:
         raise TandemQualificationError("qualification plan changed before execution")

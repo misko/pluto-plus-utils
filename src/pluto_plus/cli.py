@@ -1003,6 +1003,11 @@ def radio_qualify_tandem(
         "--weak-tx-gain-db",
         help="Weak TX2 hardware gain used by AUTO qualification.",
     ),
+    profile_id: str = typer.Option(
+        "libiio-metadata-v6-tandem-latch-clear-ram",
+        "--profile",
+        help="Exact immutable ABI-2 tandem firmware profile to qualify.",
+    ),
     execute: bool = typer.Option(
         False,
         "--execute",
@@ -1038,6 +1043,7 @@ def radio_qualify_tandem(
             physical_attenuation_db=attenuation_db,
             strong_tx_gain_db=strong_tx_gain_db,
             weak_tx_gain_db=weak_tx_gain_db,
+            profile_id=profile_id,
         )
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         _fail("tandem_qualification_failed", str(error), 5)

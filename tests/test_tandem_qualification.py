@@ -63,6 +63,7 @@ def test_qualification_plan_is_exact_local_and_safety_bounded(
     )
 
     assert plan.effective_attenuation_db == 30
+    assert plan.profile_id == "libiio-metadata-v6-tandem-latch-clear-ram"
     assert plan.expected_firmware == "v0.39-plutoplus-spf-libiio-metadata-v6-36-gab79b"
     assert plan.expected_metadata_abi == 2
     assert plan.frequencies_hz == (915_000_000, 2_450_000_000, 5_800_000_000)
@@ -75,6 +76,52 @@ def test_qualification_plan_is_exact_local_and_safety_bounded(
             physical_attenuation_db=20,
             strong_tx_gain_db=0,
             weak_tx_gain_db=-60,
+        )
+
+
+def test_qualification_profile_selection_is_exact_and_tandem_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "3-11"
+    target.mkdir()
+    monkeypatch.setattr(
+        qualification,
+        "scan_local_usb_plutos",
+        lambda: (_local(target),),
+    )
+
+    persistent_id = "libiio-metadata-v6-tandem-latch-clear-persistent-promotion"
+    plan = qualification.prepare_tandem_qualification(
+        "SERIAL_A",
+        target,
+        physical_attenuation_db=20,
+        strong_tx_gain_db=-10,
+        weak_tx_gain_db=-60,
+        profile_id=persistent_id,
+    )
+
+    assert plan.profile_id == persistent_id
+    assert plan.expected_firmware == (
+        qualification.STANDALONE_FLASH_PROFILES[persistent_id].policy.device_firmware
+    )
+
+    with pytest.raises(qualification.TandemQualificationError, match="unknown tandem"):
+        qualification.prepare_tandem_qualification(
+            "SERIAL_A",
+            target,
+            physical_attenuation_db=20,
+            strong_tx_gain_db=-10,
+            weak_tx_gain_db=-60,
+            profile_id="not-a-profile",
+        )
+    with pytest.raises(qualification.TandemQualificationError, match="not an ABI-2"):
+        qualification.prepare_tandem_qualification(
+            "SERIAL_A",
+            target,
+            physical_attenuation_db=20,
+            strong_tx_gain_db=-10,
+            weak_tx_gain_db=-60,
+            profile_id="libiio-continuous-metadata",
         )
     with pytest.raises(qualification.TandemQualificationError, match="exactly one"):
         qualification.prepare_tandem_qualification(

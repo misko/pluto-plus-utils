@@ -14,6 +14,7 @@ runner = CliRunner()
 
 def _plan() -> TandemQualificationPlan:
     return TandemQualificationPlan(
+        profile_id="candidate-profile",
         serial="SERIAL_A",
         usb_sysfs_path="/sys/bus/usb/devices/3-8",
         physical_attenuation_db=20,
