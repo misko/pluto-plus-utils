@@ -13,6 +13,7 @@ from pluto_plus.metadata_soak import (
     MetadataSoakPlan,
     SshMetadataHealthProbe,
     _metadata_phase,
+    _restore_live_rx_settings,
     execute_metadata_soak,
     prepare_metadata_soak,
 )
@@ -188,6 +189,35 @@ def test_live_phase_errors_preserve_slot_frequency_and_refill() -> None:
         operation="buffer_refill",
     ):
         raise OSError(16, "Device or resource busy")
+
+
+def test_restore_errors_preserve_exact_operation() -> None:
+    class RestoreFailure:
+        def rx_destroy_buffer(self) -> None:
+            pass
+
+        def __setattr__(self, name: str, value: object) -> None:
+            if name == "sample_rate":
+                raise OSError(16, "Device or resource busy")
+            object.__setattr__(self, name, value)
+
+    settings = {
+        "rx_enabled_channels": (0, 1),
+        "sample_rate": 2_500_000,
+        "rx_rf_bandwidth": 2_500_000,
+        "rx_lo": 1_000_000_000,
+        "rx_buffer_size": 100_000,
+        "gain_control_mode_chan0": "manual",
+        "gain_control_mode_chan1": "manual",
+        "rx_hardwaregain_chan0": 30.0,
+        "rx_hardwaregain_chan1": 30.0,
+    }
+
+    with pytest.raises(
+        MetadataSoakError,
+        match=r"slot=4 phase=settings_restore operation=sample_rate_write: OSError",
+    ):
+        _restore_live_rx_settings(RestoreFailure(), settings, slot=4)
 
 
 def test_soak_passes_matrix_and_writes_atomic_report(tmp_path: Path) -> None:

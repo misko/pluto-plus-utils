@@ -365,8 +365,8 @@ def _execute_live_metadata_slot(
             with _metadata_phase(slot, "metadata_buffer_close", frequency=frequency):
                 maximum_close = max(maximum_close, _close_live_buffer(sdr, buffer))
             buffer = None
-        with _metadata_phase(slot, "settings_restore"):
-            _restore_live_rx_settings(sdr, original)
+        _restore_live_rx_settings(sdr, original, slot=slot)
+        with _metadata_phase(slot, "settings_restore", operation="settings_readback"):
             restored = _read_live_rx_settings(sdr) == original
     finally:
         if buffer is not None:
@@ -430,19 +430,57 @@ def _read_live_rx_settings(sdr: Any) -> dict[str, Any]:
     }
 
 
-def _restore_live_rx_settings(sdr: Any, settings: dict[str, Any]) -> None:
-    sdr.rx_destroy_buffer()
-    sdr.rx_enabled_channels = list(settings["rx_enabled_channels"])
-    sdr.sample_rate = settings["sample_rate"]
-    sdr.rx_rf_bandwidth = settings["rx_rf_bandwidth"]
-    sdr.rx_lo = settings["rx_lo"]
-    sdr.rx_buffer_size = settings["rx_buffer_size"]
-    sdr.gain_control_mode_chan0 = settings["gain_control_mode_chan0"]
-    sdr.gain_control_mode_chan1 = settings["gain_control_mode_chan1"]
+def _restore_live_rx_settings(
+    sdr: Any, settings: dict[str, Any], *, slot: int | None = None
+) -> None:
+    def restore(operation: str, setter: Callable[[], None]) -> None:
+        if slot is None:
+            setter()
+            return
+        with _metadata_phase(slot, "settings_restore", operation=operation):
+            setter()
+
+    restore("destroy_before_restore", sdr.rx_destroy_buffer)
+    restore(
+        "enabled_channels_write",
+        lambda: setattr(sdr, "rx_enabled_channels", list(settings["rx_enabled_channels"])),
+    )
+    restore("sample_rate_write", lambda: setattr(sdr, "sample_rate", settings["sample_rate"]))
+    restore(
+        "rf_bandwidth_write",
+        lambda: setattr(sdr, "rx_rf_bandwidth", settings["rx_rf_bandwidth"]),
+    )
+    restore("lo_write", lambda: setattr(sdr, "rx_lo", settings["rx_lo"]))
+    restore(
+        "buffer_size_write",
+        lambda: setattr(sdr, "rx_buffer_size", settings["rx_buffer_size"]),
+    )
+    restore(
+        "gain_mode_chan0_write",
+        lambda: setattr(
+            sdr, "gain_control_mode_chan0", settings["gain_control_mode_chan0"]
+        ),
+    )
+    restore(
+        "gain_mode_chan1_write",
+        lambda: setattr(
+            sdr, "gain_control_mode_chan1", settings["gain_control_mode_chan1"]
+        ),
+    )
     if settings["gain_control_mode_chan0"] == "manual":
-        sdr.rx_hardwaregain_chan0 = settings["rx_hardwaregain_chan0"]
+        restore(
+            "hardware_gain_chan0_write",
+            lambda: setattr(
+                sdr, "rx_hardwaregain_chan0", settings["rx_hardwaregain_chan0"]
+            ),
+        )
     if settings["gain_control_mode_chan1"] == "manual":
-        sdr.rx_hardwaregain_chan1 = settings["rx_hardwaregain_chan1"]
+        restore(
+            "hardware_gain_chan1_write",
+            lambda: setattr(
+                sdr, "rx_hardwaregain_chan1", settings["rx_hardwaregain_chan1"]
+            ),
+        )
 
 
 def _close_live_buffer(sdr: Any, buffer: Any) -> float:
