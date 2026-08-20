@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
+from pluto_plus.setup import (
+    CanonicalSetupManager,
+    SetupExecutionResult,
+    SetupIdentity,
+    SetupObservation,
+)
+from pluto_plus.setup_helper import SetupHelperError
+from pluto_plus.setup_repair import probe_and_repair
+
+# The state a radio lands in when attr_val fires the malformed AD9364 branch.
+REVERTED_UBOOT = {
+    "attr_name": "compatible",
+    "attr_val": "ad9361",
+    "compatible": "ad9361",
+    "mode": "1r1t",
+}
+
+
+def _identity() -> SetupIdentity:
+    return SetupIdentity(
+        serial="SERIAL_A",
+        usb_sysfs_path="/sys/bus/usb/devices/3-8",
+        observed_firmware=CANONICAL_POLICY.device_firmware,
+    )
+
+
+def _observation(**updates: object) -> SetupObservation:
+    values: dict[str, object] = {
+        "identity": _identity(),
+        "board_model": "Analog Devices PlutoSDR Rev.C (Z7010/AD9363)",
+        "live_phy_model": "ad9361",
+        "uboot": dict(REVERTED_UBOOT),
+        "environment_sha256": "1" * 64,
+        "versions_sha256": "2" * 64,
+        "qspi_firmware_sha256": CANONICAL_POLICY.fit_body_sha256,
+        "boot_provenance": "qspi_image_verified",
+        "rx_scan_channels": ("voltage0", "voltage1"),
+        "tx_safe": True,
+    }
+    values.update(updates)
+    return SetupObservation.model_validate(values)
+
+
+class FakeBackend:
+    def __init__(self, current: SetupObservation) -> None:
+        self.current = current
+        self.provisioned: list[object] = []
+
+    def inspect(self, identity: SetupIdentity) -> SetupObservation:
+        return self.current
+
+    def provision(self, plan: object) -> SetupExecutionResult:
+        self.provisioned.append(plan)
+        self.current = _observation(
+            uboot=dict(CANONICAL_UBOOT),
+            environment_sha256="3" * 64,
+            boot_provenance="qspi_reboot_verified",
+            rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
+        )
+        return SetupExecutionResult(
+            observation=self.current,
+            backup_path="/private/SERIAL_A-before.json",
+            backup_sha256="4" * 64,
+        )
+
+
+def _factory(backend: FakeBackend, tmp_path: Path):
+    def build(identity: SetupIdentity) -> CanonicalSetupManager:
+        return CanonicalSetupManager(
+            receipt_directory=tmp_path / "receipts",
+            inspector=backend.inspect,
+            executor=backend,
+        )
+
+    return build
+
+
+def _probe(backend: FakeBackend, tmp_path: Path, *, repair: bool = True):
+    return probe_and_repair(
+        serial="SERIAL_A",
+        usb_sysfs_path="/sys/bus/usb/devices/3-8",
+        firmware_version=CANONICAL_POLICY.device_firmware,
+        manager_factory=_factory(backend, tmp_path),
+        repair=repair,
+    )
+
+
+def test_probe_repairs_a_reverted_tuple_and_reports_the_deletions(tmp_path: Path) -> None:
+    backend = FakeBackend(_observation())
+
+    outcome = _probe(backend, tmp_path)
+
+    assert outcome.status == "pass"
+    assert dict(outcome.actual or ()) == CANONICAL_UBOOT
+    assert outcome.repair is not None
+    assert outcome.repair.attempted and outcome.repair.succeeded
+    assert dict(outcome.repair.changes) == {
+        "attr_name": None,
+        "attr_val": None,
+        "mode": "2r2t",
+    }
+    assert outcome.repair.backup_path == "/private/SERIAL_A-before.json"
+    assert len(backend.provisioned) == 1
+
+
+def test_probe_reports_without_mutating_when_repair_is_disabled(tmp_path: Path) -> None:
+    backend = FakeBackend(_observation())
+
+    outcome = _probe(backend, tmp_path, repair=False)
+
+    assert outcome.status == "fail"
+    assert dict(outcome.actual or ()) == REVERTED_UBOOT
+    assert outcome.repair is None
+    assert backend.provisioned == []
+
+
+def test_probe_passes_and_never_mutates_a_canonical_radio(tmp_path: Path) -> None:
+    backend = FakeBackend(_observation(uboot=dict(CANONICAL_UBOOT)))
+
+    outcome = _probe(backend, tmp_path)
+
+    assert outcome.status == "pass"
+    assert outcome.repair is None
+    assert backend.provisioned == []
+
+
+def test_unreachable_radio_degrades_to_unknown_instead_of_raising(tmp_path: Path) -> None:
+    def build(identity: SetupIdentity) -> CanonicalSetupManager:
+        raise SetupHelperError("ssh: connect to host 192.168.2.1 port 22: No route to host")
+
+    outcome = probe_and_repair(
+        serial="SERIAL_A",
+        usb_sysfs_path="/sys/bus/usb/devices/3-8",
+        firmware_version=CANONICAL_POLICY.device_firmware,
+        manager_factory=build,
+    )
+
+    assert outcome.status == "unknown"
+    assert outcome.actual is None
+    assert outcome.repair is None
+    assert "No route to host" in outcome.summary
+
+
+def test_missing_firmware_cannot_bind_an_identity(tmp_path: Path) -> None:
+    backend = FakeBackend(_observation())
+
+    outcome = probe_and_repair(
+        serial="SERIAL_A",
+        usb_sysfs_path="/sys/bus/usb/devices/3-8",
+        firmware_version=None,
+        manager_factory=_factory(backend, tmp_path),
+    )
+
+    assert outcome.status == "unknown"
+    assert backend.provisioned == []
+
+
+def test_repair_failure_is_reported_and_never_claims_success(tmp_path: Path) -> None:
+    class FailingBackend(FakeBackend):
+        def provision(self, plan: object) -> SetupExecutionResult:
+            raise SetupHelperError("transmit path did not reach fail-closed state")
+
+    backend = FailingBackend(_observation())
+
+    outcome = _probe(backend, tmp_path)
+
+    assert outcome.status == "fail"
+    assert outcome.repair is not None
+    assert outcome.repair.attempted and not outcome.repair.succeeded
+    assert outcome.repair.error is not None
+    assert dict(outcome.actual or ()) == REVERTED_UBOOT

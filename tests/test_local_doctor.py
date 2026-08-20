@@ -6,6 +6,7 @@ import pytest
 
 import pluto_plus.local_doctor as local_doctor
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto, UsbLinkFaultSummary
+from pluto_plus.setup_repair import SetupProbeOutcome, SetupRepairRecord
 
 
 def _device(*, serial: str | None = "SERIAL_A") -> LocalUsbPluto:
@@ -116,3 +117,70 @@ def test_local_doctor_surfaces_usb_power_lineage_and_recent_faults(
     assert checks["usb.power_budget"].status == "pass"
     assert "not measured" in checks["usb.power_budget"].summary
     assert checks["usb.recent_link_faults"].status == "fail"
+
+
+def test_setup_probe_promotes_the_persistent_check_and_records_the_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        local_doctor,
+        "inspect_bound_iiod",
+        lambda interface: {
+            "hw_serial": "SERIAL_A",
+            "hw_model": "Analog Devices PlutoSDR Rev.C",
+            "fw_version": local_doctor.LOCAL_POLICY.device_firmware,
+            "ad9361-phy,model": "ad9361",
+            "iio,buffer-metadata": "1",
+            "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+        },
+    )
+    repair = SetupRepairRecord(
+        attempted=True,
+        succeeded=True,
+        changes=(("attr_name", None), ("attr_val", None), ("mode", "2r2t")),
+        receipt_id="receipt-1",
+    )
+    probed = SetupProbeOutcome(
+        status="pass",
+        actual=(("attr_name", None), ("attr_val", None), ("compatible", "ad9361"),
+                ("mode", "2r2t")),
+        summary="Persistent AD9361/2R2T U-Boot tuple was repaired and re-attested after reboot",
+        repair=repair,
+    )
+    seen: list[str | None] = []
+
+    def probe(device: LocalUsbPluto, firmware: str | None) -> SetupProbeOutcome:
+        seen.append(firmware)
+        return probed
+
+    radio = local_doctor.diagnose_local_usb_radios(
+        devices=(_device(),), setup_probe=probe
+    ).radios[0]
+
+    statuses = {check.code: check.status for check in radio.checks}
+    assert statuses["setup.uboot_ad9361_2r2t"] == "pass"
+    assert radio.setup_repair == repair
+    assert seen == [local_doctor.LOCAL_POLICY.device_firmware]
+
+
+def test_without_a_setup_probe_the_persistent_check_stays_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        local_doctor,
+        "inspect_bound_iiod",
+        lambda interface: {
+            "hw_serial": "SERIAL_A",
+            "hw_model": "Analog Devices PlutoSDR Rev.C",
+            "fw_version": local_doctor.LOCAL_POLICY.device_firmware,
+            "ad9361-phy,model": "ad9361",
+            "iio,buffer-metadata": "1",
+            "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+        },
+    )
+
+    radio = local_doctor.diagnose_local_usb_radios(devices=(_device(),)).radios[0]
+
+    statuses = {check.code: check.status for check in radio.checks}
+    assert statuses["setup.uboot_ad9361_2r2t"] == "unknown"
+    assert radio.setup_repair is None

@@ -1320,7 +1320,7 @@ def test_doctor_defaults_to_standalone_local_usb_json(
 
     monkeypatch.setattr(
         "pluto_plus.local_doctor.diagnose_local_usb_radios",
-        lambda path: LocalDoctorReport(
+        lambda path, setup_probe=None: LocalDoctorReport(
             generated_at="2026-08-16T12:00:00+00:00",
             canonical_firmware="v5",
             canonical_image_sha256="a" * 64,
@@ -1332,3 +1332,41 @@ def test_doctor_defaults_to_standalone_local_usb_json(
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["canonical_firmware"] == "v5"
+
+
+def test_doctor_stays_read_only_without_setup_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.local_doctor import LocalDoctorReport
+
+    seen: list[object] = []
+
+    def fake(path, setup_probe=None):
+        seen.append(setup_probe)
+        return LocalDoctorReport(
+            generated_at="2026-08-16T12:00:00+00:00",
+            canonical_firmware="v5",
+            canonical_image_sha256="a" * 64,
+            radios=(),
+        )
+
+    monkeypatch.setattr("pluto_plus.local_doctor.diagnose_local_usb_radios", fake)
+
+    result = runner.invoke(app, ["doctor", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == [None]
+
+
+def test_doctor_setup_inspection_requires_one_exact_radio(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+
+    result = runner.invoke(
+        app,
+        ["doctor", "--format", "json", "--setup-known-hosts-file", str(known_hosts)],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "setup_probe_target_required" in result.output
