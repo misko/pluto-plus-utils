@@ -445,16 +445,23 @@ def _tx_safe(fields: Mapping[str, str]) -> bool:
     buffers = _csv_numbers(_required(fields, "tx_buffer_enable"))
     available = _csv_numbers(_required(fields, "tx_data_available"))
     scans = _csv_numbers(_required(fields, "tx_scan_enable"))
+    # A 1R1T radio reports exactly half of every 2R2T count, and canonical
+    # setup runs on a 1R1T radio by definition -- so requiring the 2R2T shape
+    # here makes the fail-closed check unsatisfiable on the only hardware that
+    # needs the procedure. Accept either shape, keyed on the number of
+    # transmitters actually present, and keep every present value strictly
+    # muted. The post-conversion call lands on the 2R2T row because the radio
+    # really does have two transmitters by then.
+    tx_shapes = {1: (4, 4, 2), 2: (8, 8, 4)}    # transmitters -> raw, scale, scan
+    expected = tx_shapes.get(len(gains))
     return (
-        len(raws) == 8
+        expected is not None
+        and (len(raws), len(scales), len(scans)) == expected
         and all(value == 0 for value in raws)
-        and len(scales) == 8
         and all(value == 0 for value in scales)
-        and len(gains) == 2
         and all(value <= -80 for value in gains)
         and buffers == (0,)
         and available == (0,)
-        and len(scans) == 4
         and all(value == 0 for value in scans)
     )
 
