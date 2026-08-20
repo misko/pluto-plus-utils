@@ -529,8 +529,10 @@ for d in /sys/bus/iio/devices/iio:device*; do
   esac
 done
 [ -n "$phy" ] && [ -n "$dds" ]
-printf '%s\n' -80 >"$phy/out_voltage0_hardwaregain"
-printf '%s\n' -80 >"$phy/out_voltage1_hardwaregain"
+for f in "$phy"/out_voltage[0-9]_hardwaregain; do
+  [ -e "$f" ] || continue
+  printf '%s\n' -80 >"$f"
+done
 printf '%s\n' 0 >"$dds/buffer/enable"
 for f in "$dds"/scan_elements/out_voltage[0-3]_en; do
   [ -e "$f" ] && printf '%s\n' 0 >"$f"
