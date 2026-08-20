@@ -1293,6 +1293,67 @@ def config_receipt_list(ctx: typer.Context) -> None:
     _emit(_api(ctx).request("GET", "network-config/receipts"))
 
 
+def _remediation_offers(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    """Collect (headline, command) for findings doctor can hand the operator a fix for.
+
+    Doctor cannot obtain a firmware image -- nothing in this project downloads
+    release assets -- so a firmware offer prints the exact guarded sequence rather
+    than pretending it can flash on its own.
+    """
+
+    offers: list[tuple[str, str]] = []
+    host = payload.get("host_libiio")
+    if isinstance(host, dict) and host.get("healthy") is False:
+        offers.append(
+            (
+                f"Host libiio is not usable ({host.get('status')}): {host.get('summary')}",
+                str(host.get("remediation") or "scripts/install_native_libiio.sh"),
+            )
+        )
+    for radio in payload.get("radios", []):
+        stale = next(
+            (
+                check
+                for check in radio.get("checks", [])
+                if check.get("code") == "firmware.release_currency"
+                and check.get("status") == "fail"
+            ),
+            None,
+        )
+        if stale is None:
+            continue
+        offers.append(
+            (
+                f"{radio.get('serial')} runs {stale.get('actual')}; "
+                f"{stale.get('expected')} is the newest qualified release",
+                (
+                    f"pluto firmware upload <{stale.get('expected')}.dfu>; "
+                    f"pluto firmware flash <IMAGE> "
+                    f"--usb-sysfs-path {radio.get('usb_sysfs_path')} --execute --confirm ..."
+                ),
+            )
+        )
+    return offers
+
+
+def _offer_remediations(offers: list[tuple[str, str]], *, assume_yes: bool) -> None:
+    """Show each fix after an explicit yes; stay silent when not interactive."""
+
+    if not offers:
+        return
+    if not assume_yes and not sys.stdin.isatty():
+        typer.echo(
+            f"\n{len(offers)} finding(s) have a known remediation. "
+            "Rerun interactively, or pass --yes, to see the exact commands."
+        )
+        return
+    for headline, command in offers:
+        typer.echo(f"\n{headline}")
+        if not assume_yes and not typer.confirm("Show the exact fix?", default=False):
+            continue
+        typer.echo(f"  {command}")
+
+
 def _build_setup_probe(
     *,
     known_hosts_file: Path | None,
@@ -1402,6 +1463,12 @@ def doctor(
         "--setup-receipt-directory",
         help="Private directory for setup repair receipts.",
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Assume yes for remediation prompts; required when stdin is not a TTY.",
+    ),
     fix: bool = typer.Option(
         True,
         "--fix/--no-fix",
@@ -1444,8 +1511,9 @@ def doctor(
     payload = asdict(report)
     if normalized == "json":
         _emit(payload)
-    else:
-        typer.echo(_local_doctor_table(payload))
+        return
+    typer.echo(_local_doctor_table(payload))
+    _offer_remediations(_remediation_offers(payload), assume_yes=yes)
 
 
 def _local_doctor_table(report: dict[str, Any]) -> str:

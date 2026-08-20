@@ -135,3 +135,35 @@ def test_unknown_future_metadata_abi_is_available_but_not_profile_compatible() -
 
 def test_unknown_firmware_is_an_explicit_unsupported_profile() -> None:
     assert select_diagnostic_profile("v99-future") is None
+
+
+def test_upgrade_target_is_strictly_upgrade_only() -> None:
+    from pluto_plus.diagnostic_profiles import (
+        UPGRADE_TARGET_PROFILE,
+        select_diagnostic_profile,
+        upgrade_target_for,
+    )
+
+    older = select_diagnostic_profile("v0.38-plutoplus-spf-libiio-metadata-v5")
+    at_target = select_diagnostic_profile("v0.39-plutoplus-spf-libiio-metadata-v6")
+    newer = select_diagnostic_profile("v0.40-plutoplus-spf-tandem-agc-v7")
+
+    assert upgrade_target_for(older) is UPGRADE_TARGET_PROFILE
+    # Never a sideways move, never a downgrade, never a guess.
+    assert upgrade_target_for(at_target) is None
+    assert upgrade_target_for(newer) is None
+    assert upgrade_target_for(None) is None
+
+
+def test_upgrade_target_is_a_full_release_not_a_candidate() -> None:
+    from pluto_plus.diagnostic_profiles import UPGRADE_TARGET_PROFILE
+
+    assert UPGRADE_TARGET_PROFILE.release_status == "hardware-qualified release"
+
+
+def test_release_ranks_are_unique_and_ordered() -> None:
+    from pluto_plus.diagnostic_profiles import DIAGNOSTIC_PROFILES
+
+    ranks = [profile.release_rank for profile in DIAGNOSTIC_PROFILES]
+    assert len(set(ranks)) == len(ranks)
+    assert ranks == sorted(ranks)

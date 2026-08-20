@@ -1370,3 +1370,86 @@ def test_doctor_setup_inspection_requires_one_exact_radio(tmp_path: Path) -> Non
 
     assert result.exit_code == 2, result.output
     assert "setup_probe_target_required" in result.output
+
+
+def test_remediation_offers_cover_stale_firmware_and_broken_host_libiio() -> None:
+    from pluto_plus.cli import _remediation_offers
+
+    payload = {
+        "host_libiio": {
+            "healthy": False,
+            "status": "usb_backend_missing",
+            "summary": "native libiio has no USB backend",
+            "remediation": "scripts/install_native_libiio.sh",
+        },
+        "radios": [
+            {
+                "serial": "SERIAL_A",
+                "usb_sysfs_path": "/sys/bus/usb/devices/3-11",
+                "checks": [
+                    {
+                        "code": "firmware.release_currency",
+                        "status": "fail",
+                        "actual": "v0.38-plutoplus-spf-libiio-metadata-v5",
+                        "expected": "v0.39-plutoplus-spf-libiio-metadata-v6",
+                    }
+                ],
+            }
+        ],
+    }
+
+    offers = _remediation_offers(payload)
+
+    assert len(offers) == 2
+    assert "scripts/install_native_libiio.sh" in offers[0][1]
+    assert "SERIAL_A" in offers[1][0]
+
+
+def test_remediation_offers_stay_empty_for_a_current_radio() -> None:
+    from pluto_plus.cli import _remediation_offers
+
+    payload = {
+        "host_libiio": {"healthy": True, "status": "ready"},
+        "radios": [
+            {
+                "serial": "SERIAL_A",
+                "checks": [{"code": "firmware.release_currency", "status": "pass"}],
+            }
+        ],
+    }
+
+    assert _remediation_offers(payload) == []
+
+
+def test_non_interactive_doctor_never_prompts(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import pluto_plus.cli as cli
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+
+    def explode(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("doctor must not prompt without a TTY")
+
+    monkeypatch.setattr(cli.typer, "confirm", explode)
+
+    cli._offer_remediations([("stale firmware", "pluto firmware flash ...")], assume_yes=False)
+
+    output = capsys.readouterr().out
+    assert "--yes" in output
+    assert "pluto firmware flash" not in output
+
+
+def test_assume_yes_shows_every_fix_without_prompting(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import pluto_plus.cli as cli
+
+    def explode(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("--yes must not prompt")
+
+    monkeypatch.setattr(cli.typer, "confirm", explode)
+
+    cli._offer_remediations([("stale firmware", "pluto firmware flash ...")], assume_yes=True)
+
+    assert "pluto firmware flash" in capsys.readouterr().out

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import pluto_plus.local_doctor as local_doctor
+from pluto_plus.hardware.preflight import IioEnvironmentReport, IioEnvironmentStatus
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto, UsbLinkFaultSummary
 from pluto_plus.setup_repair import SetupProbeOutcome, SetupRepairRecord
 
@@ -184,3 +185,94 @@ def test_without_a_setup_probe_the_persistent_check_stays_unknown(
     statuses = {check.code: check.status for check in radio.checks}
     assert statuses["setup.uboot_ad9361_2r2t"] == "unknown"
     assert radio.setup_repair is None
+
+
+def _iiod_facts(fw: str) -> dict[str, object]:
+    return {
+        "hw_serial": "SERIAL_A",
+        "hw_model": "Analog Devices PlutoSDR Rev.C",
+        "fw_version": fw,
+        "ad9361-phy,model": "ad9361",
+        "iio,buffer-metadata": "1",
+        "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+    }
+
+
+def _healthy_environment() -> IioEnvironmentReport:
+    return IioEnvironmentReport(
+        healthy=True,
+        status=IioEnvironmentStatus.READY,
+        message="ready",
+        python_executable="/usr/bin/python3",
+        libiio_version="0.25",
+        backends=("usb",),
+    )
+
+
+@pytest.mark.parametrize(
+    ("firmware", "expected"),
+    [
+        ("v0.38-plutoplus-spf-libiio-metadata-v5", "fail"),
+        ("v0.39-plutoplus-spf-libiio-metadata-v6", "pass"),
+        ("v0.40-plutoplus-spf-tandem-agc-v7", "pass"),
+        ("v0.32-dirty", "unknown"),
+    ],
+)
+def test_release_currency_never_proposes_a_downgrade(
+    monkeypatch: pytest.MonkeyPatch, firmware: str, expected: str
+) -> None:
+    monkeypatch.setattr(
+        local_doctor, "inspect_bound_iiod", lambda interface: _iiod_facts(firmware)
+    )
+
+    radio = local_doctor.diagnose_local_usb_radios(
+        devices=(_device(),), environment_probe=_healthy_environment
+    ).radios[0]
+
+    statuses = {check.code: check.status for check in radio.checks}
+    assert statuses["firmware.release_currency"] == expected
+
+
+def test_report_carries_host_libiio_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        local_doctor,
+        "inspect_bound_iiod",
+        lambda interface: _iiod_facts(local_doctor.LOCAL_POLICY.device_firmware),
+    )
+
+    def broken() -> IioEnvironmentReport:
+        return IioEnvironmentReport(
+            healthy=False,
+            status=IioEnvironmentStatus.USB_BACKEND_MISSING,
+            message="native libiio has no USB backend",
+            remediation="scripts/install_native_libiio.sh",
+            python_executable="/usr/bin/python3",
+        )
+
+    report = local_doctor.diagnose_local_usb_radios(
+        devices=(_device(),), environment_probe=broken
+    )
+
+    assert report.host_libiio is not None
+    assert report.host_libiio.healthy is False
+    assert report.host_libiio.remediation == "scripts/install_native_libiio.sh"
+
+
+def test_a_failing_environment_probe_never_fails_the_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        local_doctor,
+        "inspect_bound_iiod",
+        lambda interface: _iiod_facts(local_doctor.LOCAL_POLICY.device_firmware),
+    )
+
+    def explodes() -> IioEnvironmentReport:
+        raise RuntimeError("native loader blew up")
+
+    report = local_doctor.diagnose_local_usb_radios(
+        devices=(_device(),), environment_probe=explodes
+    )
+
+    assert report.host_libiio is None
+    assert len(report.radios) == 1
