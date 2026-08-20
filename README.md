@@ -196,6 +196,37 @@ uv run pluto doctor MANAGED_RADIO_ID  # explicitly uses plutod
 uv run pluto doctor --daemon          # all daemon-managed radios
 ```
 
+### Persistent setup inspection and repair
+
+Without credentials doctor cannot reach the persistent U-Boot environment and
+reports `setup.uboot_ad9361_2r2t` as `unknown`. Give it an enrolled known_hosts
+file for one exact radio and it reads the real tuple instead — and repairs a
+non-canonical one by default:
+
+```bash
+uv run pluto doctor \
+  --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --setup-known-hosts-file ~/.local/state/pluto-plus-utils/ssh/SERIAL.known_hosts \
+  --setup-password-file ~/.config/pluto-plus/radio.pw
+
+uv run pluto doctor ... --no-fix   # read the tuple, change nothing
+```
+
+Repair is not a new mutation path: it drives the same guarded setup transaction
+as `pluto setup plan` / `pluto setup execute`, so every run still backs up the
+complete environment, applies the fail-closed TX mute, binds the environment
+digest, reboots, re-attests the exact serial and path, and writes a receipt.
+A radio that is already canonical is never written to.
+
+Two boundaries keep the default-on repair bounded. It needs
+`--setup-known-hosts-file`, so a doctor run without credentials cannot mutate
+anything; and it needs `--usb-sysfs-path`, because a pinned host key and the
+private `192.168.2.1` endpoint each address exactly one radio. The no-argument
+sweep across every attached radio therefore stays read-only.
+
+Only the `attr_name`/`attr_val`/`compatible`/`mode` tuple is repaired. Firmware
+version mismatches are reported, never auto-flashed.
+
 Loopback is the safe default. Setup and firmware mutations have a separately configured
 bearer-token and strict browser-Origin boundary, but ordinary tune/stream/capture routes
 are intentionally not a general remote-authentication system. For a local multi-user

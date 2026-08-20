@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,8 +21,12 @@ from pluto_plus.diagnostic_profiles import (
 )
 from pluto_plus.doctor import CANONICAL_UBOOT
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
+from pluto_plus.setup_repair import SetupProbeOutcome, SetupRepairRecord
 
 CheckStatus = Literal["pass", "fail", "unknown"]
+# Reads (and, when enabled, repairs) one radio's persistent U-Boot tuple.  Injected so
+# the read-only lane stays free of any SSH or credential dependency.
+SetupProbe = Callable[[LocalUsbPluto, "str | None"], SetupProbeOutcome]
 LOCAL_POLICY = BOOTSTRAP_POLICY
 # Rendered from the single canonical definition so the advertised tuple cannot drift
 # away from the one the provisioner actually writes.
@@ -56,6 +61,7 @@ class LocalDoctorRadio:
     overall: CheckStatus
     checks: tuple[LocalDoctorCheck, ...]
     error: str | None = None
+    setup_repair: SetupRepairRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +77,7 @@ def diagnose_local_usb_radios(
     usb_sysfs_path: Path | None = None,
     *,
     devices: tuple[LocalUsbPluto, ...] | None = None,
+    setup_probe: SetupProbe | None = None,
 ) -> LocalDoctorReport:
     """Freshly inspect each selected USB Pluto without opening an IIO buffer."""
 
@@ -82,7 +89,7 @@ def diagnose_local_usb_radios(
             raise ValueError(
                 f"expected exactly one local Pluto at {usb_sysfs_path}, found {len(selected)}"
             )
-    radios = tuple(_diagnose_radio(device) for device in selected)
+    radios = tuple(_diagnose_radio(device, setup_probe) for device in selected)
     return LocalDoctorReport(
         generated_at=datetime.now(UTC).isoformat(),
         canonical_firmware=LOCAL_POLICY.device_firmware,
@@ -92,7 +99,9 @@ def diagnose_local_usb_radios(
     )
 
 
-def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
+def _diagnose_radio(
+    device: LocalUsbPluto, setup_probe: SetupProbe | None = None
+) -> LocalDoctorRadio:
     checks: list[LocalDoctorCheck] = []
     usb_bus_device = (
         f"{device.bus_number:03d}:{device.device_number:03d}"
@@ -252,13 +261,16 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         "fresh trusted persistent-boot evidence",
         "Standalone USB IIOD inspection cannot prove QSPI boot provenance",
     )
+    probed = None if setup_probe is None else setup_probe(device, firmware)
     _check(
         checks,
         "setup.uboot_ad9361_2r2t",
-        "unknown",
-        None,
+        "unknown" if probed is None else probed.status,
+        None if probed is None else probed.actual,
         CANONICAL_UBOOT_SUMMARY,
-        "Persistent U-Boot values require the authenticated setup inspector",
+        "Persistent U-Boot values require the authenticated setup inspector"
+        if probed is None
+        else probed.summary,
     )
     return _radio_result(
         device,
@@ -266,6 +278,7 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         interface,
         storage,
         checks,
+        setup_repair=None if probed is None else probed.repair,
         firmware=firmware,
         model=model,
         phy=phy,
@@ -387,6 +400,7 @@ def _radio_result(
     storage: str | None,
     checks: list[LocalDoctorCheck],
     *,
+    setup_repair: SetupRepairRecord | None = None,
     firmware: str | None = None,
     model: str | None = None,
     phy: str | None = None,
@@ -416,4 +430,5 @@ def _radio_result(
         overall=overall,
         checks=tuple(checks),
         error=error,
+        setup_repair=setup_repair,
     )

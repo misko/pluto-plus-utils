@@ -48,6 +48,7 @@ DEFAULT_METADATA_SOAK_REPORTS = Path.home() / ".local/state/pluto-plus-utils/met
 DEFAULT_HOST_ISOLATION_RECEIPTS = (
     Path.home() / ".local/state/pluto-plus-utils/host-isolation-receipts"
 )
+DEFAULT_SETUP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/setup-receipts"
 API_PREFIX = "api/v1"
 
 app = typer.Typer(
@@ -1292,6 +1293,77 @@ def config_receipt_list(ctx: typer.Context) -> None:
     _emit(_api(ctx).request("GET", "network-config/receipts"))
 
 
+def _build_setup_probe(
+    *,
+    known_hosts_file: Path | None,
+    password_file: Path | None,
+    host: str,
+    receipt_directory: Path,
+    usb_sysfs_path: Path | None,
+    repair: bool,
+) -> Callable[[Any, str | None], Any] | None:
+    """Build the credentialed persistent-tuple probe, or None to stay read-only.
+
+    Without an enrolled known_hosts file there is no attested way to reach the
+    radio, so doctor keeps its existing read-only behaviour and cannot mutate.
+    """
+
+    if known_hosts_file is None:
+        return None
+    if usb_sysfs_path is None:
+        _fail(
+            "setup_probe_target_required",
+            "--setup-known-hosts-file requires --usb-sysfs-path: the pinned host key and the "
+            "private endpoint each address exactly one radio",
+            2,
+        )
+    from pluto_plus.setup_repair import SetupCredentials, probe_and_repair, ssh_manager_factory
+
+    selected_known_hosts = known_hosts_file.expanduser().absolute()
+    _read_private_file_bytes(
+        selected_known_hosts, label="setup SSH known-hosts", maximum_bytes=1024 * 1024
+    )
+    if password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        password = _read_private_text_file(
+            password_file.expanduser().absolute(), label="radio SSH password"
+        )
+
+    def probe(device: Any, firmware: str | None) -> Any:
+        if not device.serial:
+            from pluto_plus.setup_repair import SetupProbeOutcome
+
+            return SetupProbeOutcome(
+                status="unknown",
+                actual=None,
+                summary="Persistent tuple needs one stable USB serial to bind an identity",
+            )
+        interfaces = device.host_network_interfaces
+        return probe_and_repair(
+            serial=device.serial,
+            usb_sysfs_path=device.usb_path,
+            firmware_version=firmware,
+            manager_factory=ssh_manager_factory(
+                SetupCredentials(
+                    host=host,
+                    password=password,
+                    known_hosts_file=selected_known_hosts,
+                    receipt_directory=receipt_directory.expanduser().absolute(),
+                    state_root=receipt_directory.expanduser().absolute().parent,
+                    interface=(
+                        interfaces[0].name
+                        if host == "192.168.2.1" and len(interfaces) == 1
+                        else None
+                    ),
+                )
+            ),
+            repair=repair,
+        )
+
+    return probe
+
+
 @app.command("doctor")
 def doctor(
     ctx: typer.Context,
@@ -1308,6 +1380,35 @@ def doctor(
     ),
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Standalone output format: table or json."
+    ),
+    setup_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--setup-known-hosts-file",
+        help=(
+            "Enrolled private known_hosts pinned to this exact radio. Supplying it lets "
+            "doctor read the persistent U-Boot tuple instead of reporting it unknown."
+        ),
+    ),
+    setup_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--setup-password-file",
+        help="Private radio root password file; prompts when omitted.",
+    ),
+    setup_host: str = typer.Option(
+        "192.168.2.1", "--setup-host", help="Literal private IPv4 endpoint for the radio."
+    ),
+    setup_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_SETUP_RECEIPTS,
+        "--setup-receipt-directory",
+        help="Private directory for setup repair receipts.",
+    ),
+    fix: bool = typer.Option(
+        True,
+        "--fix/--no-fix",
+        help=(
+            "Repair a non-canonical persistent U-Boot tuple through the guarded setup "
+            "transaction. Requires --setup-known-hosts-file; --no-fix reports only."
+        ),
     ),
 ) -> None:
     """Check local USB radios directly, or one managed radio through plutod."""
@@ -1327,8 +1428,17 @@ def doctor(
         _fail("invalid_doctor_format", "doctor format must be table or json", 2)
     from pluto_plus.local_doctor import diagnose_local_usb_radios
 
+    setup_probe = _build_setup_probe(
+        known_hosts_file=setup_known_hosts_file,
+        password_file=setup_password_file,
+        host=setup_host,
+        receipt_directory=setup_receipt_directory,
+        usb_sysfs_path=usb_sysfs_path,
+        repair=fix,
+    )
+
     try:
-        report = diagnose_local_usb_radios(usb_sysfs_path)
+        report = diagnose_local_usb_radios(usb_sysfs_path, setup_probe=setup_probe)
     except ValueError as error:
         _fail("local_doctor_target_not_found", str(error), 4)
     payload = asdict(report)
@@ -1351,6 +1461,18 @@ def _local_doctor_table(report: dict[str, Any]) -> str:
             notes.append("UNKNOWN: " + ",".join(unknown))
         if radio.get("error"):
             notes.append(str(radio["error"]))
+        repair = radio.get("setup_repair")
+        if isinstance(repair, dict) and repair.get("attempted"):
+            applied = ", ".join(
+                f"{key} delete" if value is None else f"{key}={value}"
+                for key, value in repair.get("changes") or ()
+            )
+            if repair.get("succeeded"):
+                notes.append(
+                    f"REPAIRED setup ({applied}); receipt {repair.get('receipt_id')}"
+                )
+            else:
+                notes.append(f"REPAIR FAILED ({applied}): {repair.get('error')}")
         rows.append(
             {
                 "USB": " ".join(
