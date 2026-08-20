@@ -353,3 +353,49 @@ def test_tx_mute_covers_every_transmitter_on_a_two_transmitter_radio(tmp_path):
     proc, written = _run_mute(tmp_path, channels=[0, 1])
     assert proc.returncode == 0, proc.stderr
     assert written == {0: "-80", 1: "-80"}
+
+
+def _tx_fields(*, transmitters, raws, scales, scans, gain=-80.0):
+    from pluto_plus.setup_helper import _tx_safe  # noqa: F401  (import check)
+
+    return {
+        "tx_dds_raw": ",".join("0" for _ in range(raws)),
+        "tx_dds_scale": ",".join("0" for _ in range(scales)),
+        "tx_hardwaregain_db": ",".join(str(gain) for _ in range(transmitters)),
+        "tx_buffer_enable": "0",
+        "tx_data_available": "0",
+        "tx_scan_enable": ",".join("0" for _ in range(scans)),
+    }
+
+
+def test_tx_safe_accepts_a_muted_one_transmitter_radio():
+    """Measured on a Pluto+ in 1r1t: 4 DDS tones, 4 scales, 2 TX scan elements.
+
+    Requiring the 2R2T counts here made the fail-closed check unsatisfiable on
+    exactly the radios canonical setup exists to convert.
+    """
+    from pluto_plus.setup_helper import _tx_safe
+
+    assert _tx_safe(_tx_fields(transmitters=1, raws=4, scales=4, scans=2))
+
+
+def test_tx_safe_accepts_a_muted_two_transmitter_radio():
+    from pluto_plus.setup_helper import _tx_safe
+
+    assert _tx_safe(_tx_fields(transmitters=2, raws=8, scales=8, scans=4))
+
+
+def test_tx_safe_still_rejects_an_unmuted_transmitter():
+    """Accepting a second shape must not weaken what the check is for."""
+    from pluto_plus.setup_helper import _tx_safe
+
+    assert not _tx_safe(_tx_fields(transmitters=1, raws=4, scales=4, scans=2, gain=0.0))
+    assert not _tx_safe(_tx_fields(transmitters=2, raws=8, scales=8, scans=4, gain=-79.0))
+
+
+def test_tx_safe_rejects_a_shape_that_matches_neither_configuration():
+    """A half-reported radio must not slip through as a smaller one."""
+    from pluto_plus.setup_helper import _tx_safe
+
+    assert not _tx_safe(_tx_fields(transmitters=2, raws=4, scales=4, scans=2))
+    assert not _tx_safe(_tx_fields(transmitters=1, raws=8, scales=8, scans=4))
