@@ -27,9 +27,20 @@ from pluto_plus.models import (
     RadioSnapshot,
 )
 
-CANONICAL_UBOOT = {
-    "attr_name": "compatible",
-    "attr_val": "ad9361",
+# attr_name/attr_val must stay unset.  The AD936x boot script on these boards guards
+# its AD9364 branch with a malformed condition:
+#
+#     test ${compatible} = ad9364 || test -n ${attr_val} = ad9364
+#
+# U-Boot's test consumes "-n <value>" as a complete operator, then matches no operator
+# at the trailing "= ad9364" and returns true unconditionally (u-boot cmd/test.c).  Any
+# non-empty attr_val therefore fires that branch on every boot, stripping
+# adi,2rx-2tx-mode-enable and running "setenv mode 1r1t; saveenv" -- reverting a 2R2T
+# radio to 1R1T and persisting the revert.  compatible=ad9361 drives the AD9361
+# override on its own through a separate, correctly formed branch.
+CANONICAL_UBOOT: dict[str, str | None] = {
+    "attr_name": None,
+    "attr_val": None,
     "compatible": "ad9361",
     "mode": "2r2t",
 }

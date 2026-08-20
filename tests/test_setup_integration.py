@@ -67,10 +67,10 @@ class RepairableFakeRadio(FakeRadioDevice):
             "uboot": CANONICAL_UBOOT
             if self._canonical
             else {
-                "attr_name": None,
-                "attr_val": None,
-                "compatible": None,
-                "mode": "2r2t",
+                "attr_name": "compatible",
+                "attr_val": "ad9361",
+                "compatible": "ad9361",
+                "mode": "1r1t",
             },
             # The fixture starts from an independently cold-attested canonical QSPI
             # image. Setup execution proves the environment survived a reboot; it
@@ -130,10 +130,10 @@ class SetupBackend:
                 dict(CANONICAL_UBOOT)
                 if canonical
                 else {
-                    "attr_name": None,
-                    "attr_val": None,
-                    "compatible": None,
-                    "mode": "2r2t",
+                    "attr_name": "compatible",
+                    "attr_val": "ad9361",
+                    "compatible": "ad9361",
+                    "mode": "1r1t",
                 }
             ),
             environment_sha256=("3" if canonical else "1") * 64,
@@ -313,11 +313,11 @@ def test_setup_api_plan_execute_receipt_and_fresh_doctor(tmp_path: Path) -> None
         }
         assert document["plan"]["environment_sha256"] == "1" * 64
         assert dict(document["plan"]["changes_items"]) == {
-            "attr_name": "compatible",
-            "attr_val": "ad9361",
-            "compatible": "ad9361",
+            "attr_name": None,
+            "attr_val": None,
+            "mode": "2r2t",
         }
-        assert "mode" not in dict(document["plan"]["changes_items"])
+        assert "compatible" not in dict(document["plan"]["changes_items"])
 
         wrong_token = client.post(
             f"{API_PREFIX}/setup/executions",

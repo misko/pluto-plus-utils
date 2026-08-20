@@ -89,9 +89,9 @@ def _plan() -> dict[str, object]:
             "profile_id": CANONICAL_POLICY.profile_id,
             "environment_sha256": "1" * 64,
             "changes_items": [
-                ["attr_name", "compatible"],
-                ["attr_val", "ad9361"],
-                ["compatible", "ad9361"],
+                ["attr_name", None],
+                ["attr_val", None],
+                ["mode", "2r2t"],
             ],
             "tx_mute_required": True,
         },
@@ -161,7 +161,7 @@ def test_doctor_repairs_noncanonical_radio_through_guarded_web_flow(
     assert plan_requests[0].headers["origin"] == fake_daemon_origin
     plan_output = page.locator("#setup-plan-output").inner_text()
     assert SERIAL in plan_output
-    assert "attr_name" in plan_output and "ad9361" in plan_output
+    assert "attr_name" in plan_output and "<delete>" in plan_output and "2r2t" in plan_output
     assert "one-time-setup-token" not in plan_output
 
     page.locator("#setup-confirm-serial").fill("wrong-radio")
