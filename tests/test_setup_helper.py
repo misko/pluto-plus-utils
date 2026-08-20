@@ -126,10 +126,12 @@ def _observation(*, canonical: bool, tx_safe: bool) -> SetupObservation:
             dict(CANONICAL_UBOOT)
             if canonical
             else {
-                "attr_name": None,
-                "attr_val": None,
-                "compatible": None,
-                "mode": "2r2t",
+                # The real-world reverted state: attr_name/attr_val present, which fires
+                # the malformed AD9364 branch and persists mode=1r1t on every boot.
+                "attr_name": "compatible",
+                "attr_val": "ad9361",
+                "compatible": "ad9361",
+                "mode": "1r1t",
             }
         ),
         environment_sha256=("2" if canonical else "1") * 64,
@@ -152,9 +154,9 @@ def _plan(before: SetupObservation) -> SetupPlan:
         environment_sha256=before.environment_sha256,
         before=before,
         changes_items=(
-            ("attr_name", "compatible"),
-            ("attr_val", "ad9361"),
-            ("compatible", "ad9361"),
+            ("attr_name", None),
+            ("attr_val", None),
+            ("mode", "2r2t"),
         ),
         tx_mute_required=not before.tx_safe,
     )
@@ -216,11 +218,10 @@ def test_executor_backs_up_before_exact_batch_write_and_reboot(tmp_path: Path) -
     )
 
     batch = executor.canonical_batch(
-        {"attr_name": "compatible", "attr_val": "ad9361", "compatible": "ad9361"}
+        {"attr_name": None, "attr_val": None, "compatible": "ad9361"}
     )
-    assert batch == (
-        b"attr_name compatible\nattr_val ad9361\ncompatible ad9361\n"
-    )
+    # A line carrying no value deletes the variable in fw_setenv --script mode.
+    assert batch == b"attr_name\nattr_val\ncompatible ad9361\n"
     assert b"mode" not in batch
     with pytest.raises(SetupHelperError):
         executor.canonical_batch({"arbitrary": "value"})
@@ -262,7 +263,7 @@ def test_provision_orders_backup_mute_exact_batch_reboot_and_verification(
     command, stdin = executor.recording_transport.commands[0]
     assert before.environment_sha256 in command
     assert command.endswith("/usr/sbin/device_reboot reset")
-    assert stdin == b"attr_name compatible\nattr_val ad9361\ncompatible ad9361\n"
+    assert stdin == b"attr_name\nattr_val\nmode 2r2t\n"
     assert result.observation.live_phy_model == "ad9361"
     assert result.backup_path == "/private/backup.json"
 

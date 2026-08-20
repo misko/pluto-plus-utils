@@ -83,11 +83,25 @@ two-receiver Web preview now pass. A physical cold boot remains a separate check
 Only use this profile for an exact serial-attested Pluto+ Rev.C. The persistent tuple is:
 
 ```text
-attr_name=compatible
-attr_val=ad9361
+attr_name    (unset)
+attr_val     (unset)
 compatible=ad9361
 mode=2r2t
 ```
+
+`attr_name` and `attr_val` must be **absent**, not set to `compatible`/`ad9361`. The
+AD936x boot script on these boards guards its AD9364 branch with a malformed condition:
+
+```text
+test ${compatible} = ad9364 || test -n ${attr_val} = ad9364
+```
+
+U-Boot's `test` consumes `-n <value>` as a complete operator, then matches no operator at
+the trailing `= ad9364` and returns true unconditionally (`u-boot cmd/test.c`). Any
+non-empty `attr_val` therefore fires that branch on every boot, which strips
+`adi,2rx-2tx-mode-enable` and runs `setenv mode 1r1t; saveenv` — silently reverting the
+radio to 1R1T and persisting the revert. `compatible=ad9361` drives the AD9361 override on
+its own through a separate, correctly formed branch, so the unlock is unaffected.
 
 A safe provisioner must perform this entire transaction:
 

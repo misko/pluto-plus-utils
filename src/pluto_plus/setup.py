@@ -118,11 +118,11 @@ class SetupPlan:
     profile_id: str
     environment_sha256: str
     before: SetupObservation
-    changes_items: tuple[tuple[str, str], ...]
+    changes_items: tuple[tuple[str, str | None], ...]
     tx_mute_required: bool
 
     @property
-    def changes(self) -> dict[str, str]:
+    def changes(self) -> dict[str, str | None]:
         return dict(self.changes_items)
 
 
@@ -142,7 +142,7 @@ class SetupReceipt:
     identity: SetupIdentity
     before: SetupObservation
     after: SetupObservation | None
-    changes_items: tuple[tuple[str, str], ...]
+    changes_items: tuple[tuple[str, str | None], ...]
     backup_path: str | None
     backup_sha256: str | None
     outcome: Literal[
@@ -160,7 +160,7 @@ class SetupReceipt:
     error: str | None
 
     @property
-    def changes(self) -> dict[str, str]:
+    def changes(self) -> dict[str, str | None]:
         return dict(self.changes_items)
 
 
@@ -548,11 +548,11 @@ def _receipt_from_document(document: Mapping[str, object]) -> SetupReceipt:
     raw_changes = document["changes_items"]
     if not isinstance(raw_changes, list):
         raise TypeError("changes_items must be a list")
-    changes: list[tuple[str, str]] = []
+    changes: list[tuple[str, str | None]] = []
     for item in raw_changes:
         if not isinstance(item, list) or len(item) != 2:
             raise TypeError("each setup receipt change must be a pair")
-        changes.append((str(item[0]), str(item[1])))
+        changes.append((str(item[0]), None if item[1] is None else str(item[1])))
     success = bool(document["success"])
     raw_completed = document.get("completed_phases", [])
     if not isinstance(raw_completed, list):

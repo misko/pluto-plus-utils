@@ -84,13 +84,37 @@ def test_setup_plan_is_exact_identity_environment_and_policy_bound(tmp_path: Pat
     assert planned.plan.identity == _identity()
     assert planned.plan.profile_id == CANONICAL_POLICY.profile_id
     assert planned.plan.environment_sha256 == "1" * 64
-    assert planned.plan.changes == {
-        "attr_name": "compatible",
-        "attr_val": "ad9361",
-        "compatible": "ad9361",
-    }
+    assert planned.plan.changes == {"compatible": "ad9361"}
     assert "mode" not in planned.plan.changes
     assert planned.plan.tx_mute_required is False
+
+
+def test_setup_plan_deletes_attr_name_and_attr_val_that_revert_2r2t(
+    tmp_path: Path,
+) -> None:
+    backend = FakeSetupBackend(
+        _observation(
+            uboot={
+                "attr_name": "compatible",
+                "attr_val": "ad9361",
+                "compatible": "ad9361",
+                "mode": "1r1t",
+            }
+        )
+    )
+    manager = CanonicalSetupManager(
+        receipt_directory=tmp_path / "receipts",
+        inspector=backend.inspect,
+        executor=backend,
+    )
+
+    planned = manager.create_plan(_identity())
+
+    assert planned.plan.changes == {
+        "attr_name": None,
+        "attr_val": None,
+        "mode": "2r2t",
+    }
 
 
 def test_setup_plan_explicitly_includes_required_fail_closed_tx_mute(

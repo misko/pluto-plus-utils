@@ -545,8 +545,8 @@ function validatedSetupPlan(document) {
   const plan = document?.plan;
   const selected = state.snapshot?.identity;
   const expectedValues = {
-    attr_name: "compatible",
-    attr_val: "ad9361",
+    attr_name: null,
+    attr_val: null,
     compatible: "ad9361",
     mode: "2r2t",
   };
@@ -567,7 +567,7 @@ function validatedSetupPlan(document) {
     if (!Array.isArray(item) || item.length !== 2 || expectedValues[item[0]] !== item[1]) {
       throw new Error("Setup plan contains a non-canonical field or value.");
     }
-    changes[item[0]] = item[1];
+    changes[item[0]] = item[1] === null ? "<delete>" : item[1];
   }
   return {
     plan: {

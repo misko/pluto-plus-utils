@@ -18,10 +18,16 @@ from pluto_plus.diagnostic_profiles import (
     parse_metadata_abi,
     select_diagnostic_profile,
 )
+from pluto_plus.doctor import CANONICAL_UBOOT
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 
 CheckStatus = Literal["pass", "fail", "unknown"]
 LOCAL_POLICY = BOOTSTRAP_POLICY
+# Rendered from the single canonical definition so the advertised tuple cannot drift
+# away from the one the provisioner actually writes.
+CANONICAL_UBOOT_SUMMARY = ", ".join(
+    f"{key} unset" if value is None else f"{key}={value}" for key, value in CANONICAL_UBOOT.items()
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +257,7 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         "setup.uboot_ad9361_2r2t",
         "unknown",
         None,
-        "attr_name=compatible, attr_val=ad9361, compatible=ad9361, mode=2r2t",
+        CANONICAL_UBOOT_SUMMARY,
         "Persistent U-Boot values require the authenticated setup inspector",
     )
     return _radio_result(

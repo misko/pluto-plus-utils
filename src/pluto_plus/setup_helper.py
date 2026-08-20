@@ -202,7 +202,7 @@ class FixedSshSetupExecutor:
         self._reenumeration_timeout_s = reenumeration_timeout_s
         self._poll_interval_s = poll_interval_s
 
-    def canonical_batch(self, changes: Mapping[str, str]) -> bytes:
+    def canonical_batch(self, changes: Mapping[str, str | None]) -> bytes:
         if not changes:
             raise SetupHelperError("canonical setup has no changes")
         if not set(changes).issubset(CANONICAL_UBOOT):
@@ -213,7 +213,8 @@ class FixedSshSetupExecutor:
                 continue
             if changes[key] != expected:
                 raise SetupHelperError("setup requested a non-canonical U-Boot value")
-            ordered.append(f"{key} {expected}\n")
+            # fw_setenv --script deletes a variable when the line carries no value.
+            ordered.append(f"{key}\n" if expected is None else f"{key} {expected}\n")
         return "".join(ordered).encode()
 
     def inspect(self, identity: SetupIdentity | None = None) -> SetupObservation:
