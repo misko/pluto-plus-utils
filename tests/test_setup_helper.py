@@ -281,3 +281,75 @@ def test_failure_after_backup_preserves_backup_reference_and_never_retries(
     assert caught.value.backup_sha256 == "4" * 64
     assert executor.events == ["inspect", "backup"]
     assert len(executor.recording_transport.commands) == 1
+
+
+def _tx_mute_fragment() -> str:
+    """The TX-attenuation step out of _MUTE_SCRIPT, runnable on its own.
+
+    Sliced between the phy/dds guard and the DDS buffer write, so the fragment
+    is whatever that step happens to be -- a hardcoded pair of writes or a loop
+    over present channels. The test then judges the step by what it *does* on a
+    given radio, not by how it is spelled.
+
+    The surrounding script reads the USB gadget serial out of configfs, which
+    cannot be faked without a chroot, so only this step is extracted.
+    """
+    from pluto_plus.setup_helper import _MUTE_SCRIPT
+
+    text = _MUTE_SCRIPT.decode()
+    start = text.index("\n", text.index('[ -n "$phy" ]')) + 1
+    end = text.index('printf \'%s\\n\' 0 >"$dds/buffer/enable"')
+    return 'set -eu\nphy="$1"\n' + text[start:end]
+
+
+def _run_mute(tmp_path, channels):
+    """Run the fragment against a phy directory exposing `channels` TX gains.
+
+    The directory is made read-only after the attribute files are created, so
+    that writing to an attribute the radio does not have fails the way it fails
+    on the real part. sysfs will not create new entries; an ordinary temporary
+    directory happily will, and a fake tree without this would let a preflight
+    that writes to a non-existent transmitter pass here and fail on hardware --
+    which is exactly how the bug reached a radio.
+    """
+    import os
+    import subprocess
+
+    phy = tmp_path / "phy"
+    phy.mkdir()
+    for ch in channels:
+        (phy / f"out_voltage{ch}_hardwaregain").write_text("0.000000\n")
+    os.chmod(phy, 0o555)
+    try:
+        proc = subprocess.run(
+            ["sh", "-c", _tx_mute_fragment(), "sh", str(phy)],
+            capture_output=True, text=True,
+        )
+        written = {
+            ch: (phy / f"out_voltage{ch}_hardwaregain").read_text().strip()
+            for ch in channels
+        }
+    finally:
+        os.chmod(phy, 0o755)
+    return proc, written
+
+
+def test_tx_mute_succeeds_on_a_one_transmitter_radio(tmp_path):
+    """A 1R1T radio has no out_voltage1_hardwaregain.
+
+    Canonical setup exists to convert exactly such a radio to 2R2T, so a
+    preflight that requires the second transmitter to already be present can
+    never run on the only hardware that needs it. Writing to the absent path
+    fails as `can't create ...: Permission denied`, which reads like a
+    privilege problem and is not one.
+    """
+    proc, written = _run_mute(tmp_path, channels=[0])
+    assert proc.returncode == 0, f"mute failed on a 1R1T radio: {proc.stderr}"
+    assert written == {0: "-80"}
+
+
+def test_tx_mute_covers_every_transmitter_on_a_two_transmitter_radio(tmp_path):
+    """Skipping absent channels must not become skipping present ones."""
+    proc, written = _run_mute(tmp_path, channels=[0, 1])
+    assert proc.returncode == 0, proc.stderr
+    assert written == {0: "-80", 1: "-80"}
