@@ -227,6 +227,34 @@ sweep across every attached radio therefore stays read-only.
 Only the `attr_name`/`attr_val`/`compatible`/`mode` tuple is repaired. Firmware
 version mismatches are reported, never auto-flashed.
 
+### Stale firmware and host libiio
+
+`firmware.release_currency` compares the radio against `UPGRADE_TARGET_PROFILE`,
+the newest **full** hardware-qualified release. Release candidates, development
+builds, and RAM-only promotion candidates are deliberately excluded, and the
+comparison uses an explicit `release_rank` rather than list position, so a radio
+already on something newer is never offered a downgrade.
+
+The report also carries `host_libiio`, the host-local libiio preflight that
+`pluto environment` runs. It gates every radio, so a broken host is reported once
+rather than per radio.
+
+When either has a known fix, doctor offers it after an explicit `y`:
+
+```bash
+uv run pluto doctor          # prompts per finding, default no
+uv run pluto doctor --yes    # show every fix without prompting
+```
+
+Prompting is suppressed for `--format json` and when stdin is not a TTY, so
+scripts and CI are unaffected; a non-interactive run prints how many findings
+have a fix and nothing else.
+
+The offer prints the exact command rather than executing it. For libiio that is
+deliberate. For firmware it is also a limitation: nothing in this project
+downloads release assets, so doctor has no image to flash and cannot complete an
+upgrade on its own.
+
 Loopback is the safe default. Setup and firmware mutations have a separately configured
 bearer-token and strict browser-Origin boundary, but ordinary tune/stream/capture routes
 are intentionally not a general remote-authentication system. For a local multi-user

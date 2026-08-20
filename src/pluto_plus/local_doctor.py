@@ -15,11 +15,14 @@ from pluto_plus.bootstrap_firmware import (
 )
 from pluto_plus.diagnostic_profiles import (
     DIAGNOSTIC_PROFILES,
+    UPGRADE_TARGET_PROFILE,
     MetadataAbiState,
     parse_metadata_abi,
     select_diagnostic_profile,
+    upgrade_target_for,
 )
 from pluto_plus.doctor import CANONICAL_UBOOT
+from pluto_plus.hardware.preflight import IioEnvironmentReport, inspect_iio_environment
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 from pluto_plus.setup_repair import SetupProbeOutcome, SetupRepairRecord
 
@@ -65,12 +68,25 @@ class LocalDoctorRadio:
 
 
 @dataclass(frozen=True, slots=True)
+class HostLibiioCheck:
+    """Host-local libiio health. Not a per-radio fact: it gates every radio."""
+
+    status: str
+    healthy: bool
+    summary: str
+    remediation: str | None
+    libiio_version: str | None
+    backends: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LocalDoctorReport:
     generated_at: str
     canonical_firmware: str
     canonical_image_sha256: str
     radios: tuple[LocalDoctorRadio, ...]
     diagnostic_profiles: tuple[str, ...] = ()
+    host_libiio: HostLibiioCheck | None = None
 
 
 def diagnose_local_usb_radios(
@@ -78,6 +94,7 @@ def diagnose_local_usb_radios(
     *,
     devices: tuple[LocalUsbPluto, ...] | None = None,
     setup_probe: SetupProbe | None = None,
+    environment_probe: Callable[[], IioEnvironmentReport] = inspect_iio_environment,
 ) -> LocalDoctorReport:
     """Freshly inspect each selected USB Pluto without opening an IIO buffer."""
 
@@ -96,6 +113,7 @@ def diagnose_local_usb_radios(
         canonical_image_sha256=LOCAL_POLICY.asset_sha256,
         diagnostic_profiles=tuple(profile.profile_id for profile in DIAGNOSTIC_PROFILES),
         radios=radios,
+        host_libiio=_host_libiio(environment_probe),
     )
 
 
@@ -195,6 +213,19 @@ def _diagnose_radio(
         f"Active firmware matches diagnostic profile {profile.profile_id}"
         if profile is not None
         else "Active firmware has no supported diagnostic profile",
+    )
+    upgrade = upgrade_target_for(profile)
+    _check(
+        checks,
+        "firmware.release_currency",
+        "unknown" if profile is None else "fail" if upgrade is not None else "pass",
+        firmware,
+        UPGRADE_TARGET_PROFILE.firmware_version,
+        "Active firmware has no known profile, so it cannot be ranked"
+        if profile is None
+        else f"A newer qualified release is available: {upgrade.firmware_version}"
+        if upgrade is not None
+        else "Active firmware is at or newer than the newest qualified release",
     )
     phy = str(facts.get("ad9361-phy,model") or "").strip() or None
     _check(
@@ -297,6 +328,7 @@ def _unknown_facts(checks: list[LocalDoctorCheck]) -> None:
             "firmware.diagnostic_profile",
             tuple(item.firmware_version for item in DIAGNOSTIC_PROFILES),
         ),
+        ("firmware.release_currency", UPGRADE_TARGET_PROFILE.firmware_version),
         ("rf.phy_model", "ad9361"),
         ("transport.buffer_metadata", "metadata ABI selected by a known profile"),
         ("rf.paired_rx_device", ("ad9361-phy", "cf-ad9361-lpc")),
@@ -431,4 +463,21 @@ def _radio_result(
         checks=tuple(checks),
         error=error,
         setup_repair=setup_repair,
+    )
+
+
+def _host_libiio(probe: Callable[[], IioEnvironmentReport]) -> HostLibiioCheck | None:
+    """Summarise host libiio health, degrading to None if the probe itself fails."""
+
+    try:
+        report = probe()
+    except Exception:  # noqa: BLE001 - a probe failure must not fail the whole sweep
+        return None
+    return HostLibiioCheck(
+        status=str(report.status),
+        healthy=report.healthy,
+        summary=report.message,
+        remediation=report.remediation,
+        libiio_version=report.libiio_version,
+        backends=tuple(report.backends),
     )

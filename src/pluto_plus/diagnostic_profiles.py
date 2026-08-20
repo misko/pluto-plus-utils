@@ -30,6 +30,10 @@ class DiagnosticProfile:
     metadata_abis: tuple[int, ...]
     tandem_agc_required: bool
     release_status: str
+    # Explicit chronological rank.  Upgrade decisions must never infer order from
+    # DIAGNOSTIC_PROFILES tuple position: reordering it would silently propose a
+    # firmware downgrade.
+    release_rank: int
 
 
 V5_PROFILE = DiagnosticProfile(
@@ -38,6 +42,7 @@ V5_PROFILE = DiagnosticProfile(
     metadata_abis=(1,),
     tandem_agc_required=False,
     release_status="hardware-qualified release",
+    release_rank=1,
 )
 
 V6_PROFILE = DiagnosticProfile(
@@ -46,6 +51,7 @@ V6_PROFILE = DiagnosticProfile(
     metadata_abis=(1,),
     tandem_agc_required=False,
     release_status="hardware-qualified release",
+    release_rank=2,
 )
 
 V6_TANDEM_ABI2_PROFILE = DiagnosticProfile(
@@ -54,6 +60,7 @@ V6_TANDEM_ABI2_PROFILE = DiagnosticProfile(
     metadata_abis=(2,),
     tandem_agc_required=True,
     release_status="recognized development build; diagnostic-only",
+    release_rank=3,
 )
 
 V6_TANDEM_LATCH_CLEAR_RAM_PROFILE = DiagnosticProfile(
@@ -62,6 +69,7 @@ V6_TANDEM_LATCH_CLEAR_RAM_PROFILE = DiagnosticProfile(
     metadata_abis=(2,),
     tandem_agc_required=True,
     release_status="RAM-only hardware-promotion candidate; never persistence-qualified",
+    release_rank=4,
 )
 
 TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE = DiagnosticProfile(
@@ -70,6 +78,7 @@ TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE = DiagnosticProfile(
     metadata_abis=(2,),
     tandem_agc_required=True,
     release_status="hardware-qualified release candidate; persistence qualified",
+    release_rank=5,
 )
 
 DIAGNOSTIC_PROFILES = (
@@ -111,3 +120,24 @@ def parse_metadata_abi(value: object) -> MetadataAbi:
     if abi < 1:
         return MetadataAbi(raw=raw, abi=None, state=MetadataAbiState.MALFORMED)
     return MetadataAbi(raw=raw, abi=abi, state=MetadataAbiState.AVAILABLE)
+
+
+# The release doctor proposes as an upgrade target: the newest full
+# hardware-qualified release.  Release candidates, development builds, and
+# RAM-only promotion candidates are deliberately excluded, so doctor never
+# proposes moving a radio onto an image that was not qualified for persistence.
+UPGRADE_TARGET_PROFILE = V6_PROFILE
+
+
+def upgrade_target_for(profile: DiagnosticProfile | None) -> DiagnosticProfile | None:
+    """Return the upgrade target only when a radio is strictly older than it.
+
+    Never proposes a downgrade or a sideways move, and never ranks a firmware
+    with no known profile.
+    """
+
+    if profile is None:
+        return None
+    if profile.release_rank >= UPGRADE_TARGET_PROFILE.release_rank:
+        return None
+    return UPGRADE_TARGET_PROFILE
