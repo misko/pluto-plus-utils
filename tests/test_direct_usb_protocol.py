@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import struct
+import zlib
 
 import numpy as np
 import pytest
@@ -11,10 +13,13 @@ from pluto_plus.direct_radio.usb import (
     CAPABILITIES_MAGIC,
     HARDWARE_IDENTITY_BYTES,
     HARDWARE_IDENTITY_MAGIC,
+    HEADER_PREFIX_BYTES_V3,
     RUNTIME_STATUS_BYTES,
     RUNTIME_STATUS_MAGIC,
     CapabilityFlags,
     DirectRxFrame,
+    GainEventFlags,
+    GainEventV3,
     GadgetCapabilitiesV1,
     GainObservationFlags,
     GainObservationV3,
@@ -33,6 +38,16 @@ from pluto_plus.direct_radio.usb import (
     TimeAnchorV1,
     pack_start_request_v3,
     pack_time_anchor_query,
+)
+from pluto_plus.tandem import (
+    AD9361_TEMPERATURE_FEATURE,
+    HEADER_PREFIX_BYTES_V5,
+    TANDEM_METADATA_FEATURE,
+    TANDEM_METADATA_VALID_FLAG,
+    TEMPERATURE_INVALID,
+    RadioMetadataV5,
+    TandemGainTable,
+    TandemState,
 )
 
 FEATURES = MetadataFeatures(0xF7)
@@ -102,6 +117,73 @@ def test_usb_v3_metadata_reference_layout_round_trip_and_crc() -> None:
         RadioMetadataV3.unpack(corrupt)
     with pytest.raises(ProtocolError, match="length"):
         RadioMetadataV3.unpack(packed + b"\0")
+
+
+def _tandem_v5_frame(temperature_mdeg_c: int) -> bytes:
+    base = dataclasses.replace(
+        metadata(),
+        features=FEATURES | MetadataFeatures.FPGA_GAIN_EVENTS,
+        flags=metadata().flags | MetadataFlags.FPGA_EVENTS_VALID,
+        gain_event_capacity=1,
+        gain_events=(
+            GainEventV3(
+                sample_sequence=1_001,
+                flags=GainEventFlags.RX1_CHANGED | GainEventFlags.RX2_CHANGED,
+            ),
+        ),
+    )
+    v3 = bytearray(base.pack())
+    prefix = v3[:HEADER_PREFIX_BYTES_V3]
+    struct.pack_into("<H", prefix, 4, 5)
+    struct.pack_into("<H", prefix, 6, len(v3) + 56)
+    struct.pack_into(
+        "<I",
+        prefix,
+        8,
+        struct.unpack_from("<I", prefix, 8)[0]
+        | TANDEM_METADATA_FEATURE
+        | AD9361_TEMPERATURE_FEATURE,
+    )
+    struct.pack_into(
+        "<I",
+        prefix,
+        12,
+        struct.unpack_from("<I", prefix, 12)[0] | TANDEM_METADATA_VALID_FLAG,
+    )
+    extension = struct.pack(
+        "<IIIIIIiiiBBBBi3I",
+        9,
+        int(TandemState.ARMED_AUTO),
+        0,
+        1,
+        int(TandemGainTable.MHZ_1300_4000),
+        0x30313A14,
+        0,
+        62,
+        20,
+        0,
+        76,
+        21,
+        21,
+        temperature_mdeg_c,
+        0,
+        0,
+        0,
+    )
+    arrays = bytearray(v3[HEADER_PREFIX_BYTES_V3:-4])
+    struct.pack_into("<QIHBB", arrays, 64, 1_001, 7, 0x13, 21, 21)
+    output = prefix + extension + arrays + bytes(4)
+    output[-4:] = struct.pack("<I", zlib.crc32(output))
+    assert len(prefix) + len(extension) == HEADER_PREFIX_BYTES_V5
+    return bytes(output)
+
+
+def test_tandem_v5_temperature_decodes_without_growing_extension() -> None:
+    valid = RadioMetadataV5.unpack(_tandem_v5_frame(43_860))
+    invalid = RadioMetadataV5.unpack(_tandem_v5_frame(TEMPERATURE_INVALID))
+
+    assert valid.ad9361_temperature_mdeg_c == 43_860
+    assert invalid.ad9361_temperature_mdeg_c is None
 
 
 def test_usb_frame_parser_handles_bulk_boundaries_and_fails_closed() -> None:
