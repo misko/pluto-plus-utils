@@ -18,7 +18,7 @@ from typing import Any, Protocol, cast
 from pydantic import Field
 
 from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
-from pluto_plus.doctor import TANDEM_AGC_V7_RAM_POLICY
+from pluto_plus.doctor import TANDEM_AGC_V8_RC1_RAM_POLICY
 from pluto_plus.hardware.preflight import inspect_iio_environment
 from pluto_plus.models import ApiModel
 from pluto_plus.setup_helper import SetupTransport
@@ -629,7 +629,7 @@ def prepare_metadata_soak(
     serial: str,
     *,
     slots: int,
-    profile_id: str = TANDEM_AGC_V7_RAM_POLICY.profile_id,
+    profile_id: str = TANDEM_AGC_V8_RC1_RAM_POLICY.profile_id,
 ) -> MetadataSoakPlan:
     """Prepare an immutable exact-profile network soak plan."""
 

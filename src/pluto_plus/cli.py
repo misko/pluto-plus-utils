@@ -1005,7 +1005,7 @@ def radio_soak_metadata(
         help="Bounded context slots; the full long-soak maximum is 936.",
     ),
     profile_id: str = typer.Option(
-        "tandem-agc-v7-release-ram",
+        "tandem-agc-v8-rc1-ram",
         "--profile",
         help="Exact immutable ABI-2 tandem firmware profile.",
     ),
@@ -1130,7 +1130,7 @@ def radio_qualify_tandem(
         help="Weak TX2 hardware gain used by AUTO qualification.",
     ),
     profile_id: str = typer.Option(
-        "tandem-agc-v7-release-ram",
+        "tandem-agc-v8-rc1-ram",
         "--profile",
         help="Exact immutable ABI-2 tandem firmware profile to qualify.",
     ),

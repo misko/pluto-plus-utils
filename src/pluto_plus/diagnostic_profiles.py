@@ -81,12 +81,22 @@ TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE = DiagnosticProfile(
     release_rank=5,
 )
 
+TANDEM_AGC_V8_RC1_PROFILE = DiagnosticProfile(
+    profile_id="tandem-agc-v8-rc1",
+    firmware_version="v0.41-plutoplus-spf-tandem-agc-v8-rc1",
+    metadata_abis=(2,),
+    tandem_agc_required=True,
+    release_status="RAM-only temperature-metadata candidate; persistence unqualified",
+    release_rank=6,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
     V6_TANDEM_ABI2_PROFILE,
     V6_TANDEM_LATCH_CLEAR_RAM_PROFILE,
     TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE,
+    TANDEM_AGC_V8_RC1_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 

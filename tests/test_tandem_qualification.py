@@ -64,8 +64,8 @@ def test_qualification_plan_is_exact_local_and_safety_bounded(
     )
 
     assert plan.effective_attenuation_db == 30
-    assert plan.profile_id == "tandem-agc-v7-release-ram"
-    assert plan.expected_firmware == "v0.40-plutoplus-spf-tandem-agc-v7"
+    assert plan.profile_id == "tandem-agc-v8-rc1-ram"
+    assert plan.expected_firmware == "v0.41-plutoplus-spf-tandem-agc-v8-rc1"
     assert plan.expected_metadata_abi == 2
     assert plan.frequencies_hz == (915_000_000, 2_450_000_000, 5_800_000_000)
     assert plan.confirmation_phrase == "QUALIFY TANDEM SERIAL_A 20DB"

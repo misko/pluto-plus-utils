@@ -21,7 +21,7 @@ from pluto_plus.metadata_soak import (
 )
 
 SERIAL = "104000b29905000e17000800065934759d"
-FIRMWARE = "v0.40-plutoplus-spf-tandem-agc-v7"
+FIRMWARE = "v0.41-plutoplus-spf-tandem-agc-v8-rc1"
 
 
 def _health(**changes: object) -> MetadataHealth:
@@ -129,7 +129,7 @@ def test_prepare_soak_is_exact_profile_and_bounded() -> None:
     plan = prepare_metadata_soak(
         "192.168.1.15",
         SERIAL,
-        profile_id="tandem-agc-v7-release-ram",
+        profile_id="tandem-agc-v8-rc1-ram",
         slots=9,
     )
 

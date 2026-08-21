@@ -289,6 +289,30 @@ def test_tandem_v7_ram_profile_remains_distinct_from_persistent_promotion() -> N
     assert promotion.tandem_agc is profile.tandem_agc is True
 
 
+def test_tandem_v8_rc1_profile_is_exact_and_ram_only() -> None:
+    policy = bootstrap.TANDEM_AGC_V8_RC1_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "v0.41-plutoplus-spf-tandem-agc-v8-rc1"
+    assert policy.device_firmware == policy.release_tag
+    assert policy.source_commit == "62a5c228a992a286869266ba884979656df82b5d"
+    assert policy.asset_name == (
+        "plutoplus-spf-tandem-agc-v8-rc1-62a5c228a992-pluto.dfu"
+    )
+    assert policy.asset_sha256 == (
+        "9e88b2bcf28416528bfcf4c92bf10aa59dd01ddab6a6741dc6d78ae7325d9cd3"
+    )
+    assert policy.fit_body_sha256 == (
+        "ca4cf900d9c52d8da89681d311267c6f114425144369cea522c42487da2b88d1"
+    )
+    assert policy.fit_body_size == 12_780_591
+    assert policy.hardware_qualified is False
+    assert profile.metadata_abi == 2
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert "tandem-agc-v8-rc1-persistent" not in bootstrap.STANDALONE_FLASH_PROFILES
+
+
 def test_normal_flash_requires_matching_stable_usb_and_iiod_serial(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     monkeypatch: pytest.MonkeyPatch,

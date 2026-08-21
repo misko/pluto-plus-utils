@@ -133,6 +133,23 @@ TANDEM_AGC_V7_PERSISTENT_POLICY = TANDEM_AGC_V7_RAM_POLICY.model_copy(
     }
 )
 
+# Exact v8 RC1 candidate from the trusted Kalman build. Temperature is sampled
+# by iiOD's device-side worker and carried in the existing ABI-2 frame extension.
+# This identity is RAM-only until the attached-radio promotion gates pass.
+TANDEM_AGC_V8_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="tandem-agc-v8-rc1-ram",
+    release_tag="v0.41-plutoplus-spf-tandem-agc-v8-rc1",
+    device_firmware="v0.41-plutoplus-spf-tandem-agc-v8-rc1",
+    asset_name="plutoplus-spf-tandem-agc-v8-rc1-62a5c228a992-pluto.dfu",
+    asset_sha256="9e88b2bcf28416528bfcf4c92bf10aa59dd01ddab6a6741dc6d78ae7325d9cd3",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/32533280971",
+    source_commit="62a5c228a992a286869266ba884979656df82b5d",
+    fit_body_sha256="ca4cf900d9c52d8da89681d311267c6f114425144369cea522c42487da2b88d1",
+    fit_body_size=12_780_591,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 21, 22, 47, 53, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,
