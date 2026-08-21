@@ -312,7 +312,17 @@ def test_tandem_v8_rc1_profile_is_exact_and_ram_only() -> None:
     assert profile.metadata_abi == 2
     assert profile.tandem_agc is True
     assert profile.persistent_allowed is False
-    assert "tandem-agc-v8-rc1-persistent" not in bootstrap.STANDALONE_FLASH_PROFILES
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "tandem-agc-v8-rc1-persistent-promotion"
+    ]
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.profile_id != policy.profile_id
+    assert promotion.policy.asset_sha256 == policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == policy.fit_body_sha256
+    assert promotion.policy.source_commit == policy.source_commit
+    assert promotion.policy.hardware_qualified is True
+    assert promotion.metadata_abi == profile.metadata_abi == 2
+    assert promotion.tandem_agc is profile.tandem_agc is True
 
 
 def test_normal_flash_requires_matching_stable_usb_and_iiod_serial(

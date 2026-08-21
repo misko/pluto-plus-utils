@@ -150,6 +150,16 @@ TANDEM_AGC_V8_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 21, 22, 47, 53, tzinfo=UTC),
 )
 
+# The same attested bytes receive a distinct QSPI authorization after both
+# attached Winbond radios passed the RAM-only USB/TCP temperature and lifecycle
+# matrix. The RAM identity above remains unable to authorize persistence.
+TANDEM_AGC_V8_RC1_PERSISTENT_POLICY = TANDEM_AGC_V8_RC1_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "tandem-agc-v8-rc1-persistent-promotion",
+        "hardware_qualified": True,
+    }
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,
