@@ -8,6 +8,7 @@ radios must use the plan/token firmware manager instead.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import hmac
 import ipaddress
@@ -1195,27 +1196,35 @@ def mute_returned_radio(serial: str) -> None:
                 f"returned-radio IIO environment failed: {environment.actionable_message}"
             )
         import adi
-        import iio
-
         from pluto_plus.hardware.iio import _mute_transmit
 
         matches = [
-            uri
-            for uri, description in iio.scan_contexts().items()
-            if uri.startswith("usb:") and f"serial={serial}" in description
+            radio for radio in scan_local_usb_plutos() if radio.serial == serial
         ]
         if len(matches) != 1:
             raise BootstrapFirmwareError(
-                f"expected one returned USB-IIO context for TX safety, got {matches}"
+                f"expected one returned USB radio for TX safety, got {len(matches)}"
             )
-        device = adi.ad9361(uri=matches[0])
+        radio = matches[0]
+        if radio.bus_number is None or radio.device_number is None:
+            raise BootstrapFirmwareError("returned USB radio has no stable bus/device identity")
+        # Opening the URI found by iio.scan_contexts() immediately after that
+        # scan can self-contend on pylibiio versions that retain the discovery
+        # handle. The already serial-attested sysfs inventory gives us the same
+        # exact interface without a second discovery context.
+        uri = f"usb:{radio.bus_number}.{radio.device_number}.5"
+        device = adi.ad9361(uri=uri)
         try:
             if device._ctx.attrs.get("hw_serial") != serial:
                 raise BootstrapFirmwareError("TX safety context has the wrong serial")
             _mute_transmit(device)
         finally:
             device.rx_destroy_buffer()
-            device._ctx.close()
+            close_context = getattr(device._ctx, "close", None)
+            if callable(close_context):
+                close_context()
+            del device
+            gc.collect()
     except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as error:
         if isinstance(error, BootstrapFirmwareError):
             raise

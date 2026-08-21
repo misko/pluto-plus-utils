@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1184,3 +1186,56 @@ def test_returned_radio_mute_preflights_native_iio_before_radio_access(
         match="returned-radio IIO environment failed.*explicit native libiio",
     ):
         bootstrap.mute_returned_radio("SERIAL_A")
+
+
+def test_returned_radio_mute_uses_serial_attested_uri_without_context_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Environment:
+        healthy = True
+        actionable_message = "ready"
+
+    class Device:
+        def __init__(self, uri: str) -> None:
+            self.uri = uri
+            self._ctx = SimpleNamespace(attrs={"hw_serial": "SERIAL_A"})
+            self.tx_hardwaregain_chan0 = -10.0
+            self.tx_hardwaregain_chan1 = -10.0
+            self.tx_enabled_channels = [0, 1]
+            self.dds_scales = [0.5, 0.5]
+            self.dds_enabled = ["1", "1"]
+            self.rx_destroyed = False
+
+        def tx_destroy_buffer(self) -> None:
+            pass
+
+        def disable_dds(self) -> None:
+            self.dds_enabled = ["0", "0"]
+
+        def rx_destroy_buffer(self) -> None:
+            self.rx_destroyed = True
+
+    devices: list[Device] = []
+
+    def open_device(uri: str) -> Device:
+        device = Device(uri)
+        devices.append(device)
+        return device
+
+    monkeypatch.setattr(bootstrap, "inspect_iio_environment", lambda **_kwargs: Environment())
+    monkeypatch.setattr(
+        bootstrap,
+        "scan_local_usb_plutos",
+        lambda: (_local(tmp_path / "3-11", serial="SERIAL_A"),),
+    )
+    monkeypatch.setitem(sys.modules, "adi", SimpleNamespace(ad9361=open_device))
+
+    bootstrap.mute_returned_radio("SERIAL_A")
+
+    assert devices[0].uri == "usb:3.17.5"
+    assert devices[0].tx_hardwaregain_chan0 == -80.0
+    assert devices[0].tx_hardwaregain_chan1 == -80.0
+    assert devices[0].tx_enabled_channels == []
+    assert devices[0].dds_scales == [0.0, 0.0]
+    assert devices[0].dds_enabled == ["0", "0"]
+    assert devices[0].rx_destroyed is True
