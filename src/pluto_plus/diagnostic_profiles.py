@@ -86,7 +86,7 @@ TANDEM_AGC_V8_RC1_PROFILE = DiagnosticProfile(
     firmware_version="v0.41-plutoplus-spf-tandem-agc-v8-rc1",
     metadata_abis=(2,),
     tandem_agc_required=True,
-    release_status="RAM-only temperature-metadata candidate; persistence unqualified",
+    release_status="two-radio hardware-qualified persistent prerelease",
     release_rank=6,
 )
 
