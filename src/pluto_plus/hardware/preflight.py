@@ -2,19 +2,47 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
+import inspect
+import json
 import os
 import sys
 from collections.abc import Callable, Sequence
 from ctypes import CDLL, RTLD_GLOBAL
 from ctypes.util import find_library
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+
+METADATA_RUNTIME_RECEIPT = Path("share/pluto-plus-utils/metadata-runtime.json")
+METADATA_RUNTIME_SOURCE_COMMITS = {
+    1: "c26258bfa33098c2b215e19cf85d448e89499b1a",
+    2: "6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7",
+}
+METADATA_BUFFER_PARAMETERS = {
+    1: ("self", "device", "samples_count", "metadata_capacity"),
+    2: ("self", "device", "samples_count", "request", "metadata_capacity"),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataRuntimeVerification:
+    """Immutable attestation of one release-local metadata host runtime."""
+
+    metadata_abi: int
+    source_ref: str
+    source_commit: str
+    native_libiio_path: str
+    native_libiio_sha256: str
+    pylibiio_path: str
+    pylibiio_sha256: str
+    receipt_path: str
 
 
 class IioEnvironmentStatus(StrEnum):
@@ -53,6 +81,142 @@ class IioEnvironmentReport(BaseModel):
         if self.remediation:
             parts.append(f"Remediation: {self.remediation}")
         return " ".join(parts)
+
+
+def verify_metadata_runtime(expected_abi: int = 1) -> MetadataRuntimeVerification:
+    """Fail unless this process has the exact release-local metadata runtime.
+
+    The installer receipt binds the selected firmware ABI to immutable libiio
+    source, native and Python file hashes, constructor shape, and absolute
+    release-local paths.  Ambient system libiio is never an accepted fallback.
+    """
+
+    if expected_abi not in METADATA_RUNTIME_SOURCE_COMMITS:
+        raise ValueError("expected metadata ABI must be 1 or 2")
+    prefix = Path(sys.prefix).resolve(strict=True)
+    try:
+        receipt_path = (prefix / METADATA_RUNTIME_RECEIPT).resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("release-local metadata runtime receipt is missing") from error
+    if not receipt_path.is_relative_to(prefix):
+        raise RuntimeError("metadata runtime receipt escaped the release prefix")
+    try:
+        document = json.loads(receipt_path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"metadata runtime receipt is unreadable: {error}") from error
+    receipt = _validate_metadata_runtime_receipt(
+        document,
+        prefix=prefix,
+        receipt_path=receipt_path,
+        expected_abi=expected_abi,
+    )
+    native_path = Path(receipt.native_libiio_path)
+    try:
+        CDLL(str(native_path), mode=RTLD_GLOBAL)
+    except OSError as error:
+        raise RuntimeError(
+            f"release-local metadata libiio could not be preloaded: {error}"
+        ) from error
+    try:
+        iio = importlib.import_module("iio")
+    except (AttributeError, ImportError, OSError) as error:
+        raise RuntimeError(f"release-local pylibiio could not be imported: {error}") from error
+    binding_path = Path(str(getattr(iio, "__file__", ""))).resolve(strict=True)
+    if binding_path != Path(receipt.pylibiio_path):
+        raise RuntimeError(f"loaded pylibiio is {binding_path}, expected {receipt.pylibiio_path}")
+    metadata_buffer = getattr(iio, "MetadataBuffer", None)
+    if metadata_buffer is None:
+        raise RuntimeError("release-local pylibiio lacks MetadataBuffer")
+    parameters = tuple(inspect.signature(metadata_buffer.__init__).parameters)
+    if parameters != METADATA_BUFFER_PARAMETERS[expected_abi]:
+        raise RuntimeError(
+            f"MetadataBuffer constructor is {parameters}, expected "
+            f"{METADATA_BUFFER_PARAMETERS[expected_abi]}"
+        )
+    environment = inspect_iio_environment(require_usb=False)
+    if not environment.healthy:
+        raise RuntimeError(environment.actionable_message)
+    if environment.native_libiio_path is None:
+        raise RuntimeError("loaded native libiio path is unavailable")
+    loaded_native = Path(environment.native_libiio_path).resolve(strict=True)
+    if loaded_native != native_path:
+        raise RuntimeError(f"loaded native libiio is {loaded_native}, expected {native_path}")
+    if _sha256(native_path) != receipt.native_libiio_sha256:
+        raise RuntimeError("release-local native libiio hash changed after installation")
+    if _sha256(binding_path) != receipt.pylibiio_sha256:
+        raise RuntimeError("release-local pylibiio hash changed after installation")
+    return receipt
+
+
+def _validate_metadata_runtime_receipt(
+    document: object,
+    *,
+    prefix: Path,
+    receipt_path: Path,
+    expected_abi: int,
+) -> MetadataRuntimeVerification:
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        raise RuntimeError("metadata runtime receipt has an unsupported schema")
+    if document.get("metadata_abi") != expected_abi:
+        raise RuntimeError("metadata runtime receipt ABI does not match the radio")
+    source_commit = str(document.get("source_commit") or "")
+    if source_commit != METADATA_RUNTIME_SOURCE_COMMITS[expected_abi]:
+        raise RuntimeError("metadata runtime receipt has the wrong source commit")
+    parameters = tuple(document.get("metadata_buffer_parameters") or ())
+    if parameters != METADATA_BUFFER_PARAMETERS[expected_abi]:
+        raise RuntimeError("metadata runtime receipt has the wrong constructor ABI")
+    native_path = _receipt_file(document, "native_libiio_path", prefix)
+    binding_path = _receipt_file(document, "pylibiio_path", prefix)
+    native_hash = _receipt_hash(document, "native_libiio_sha256")
+    binding_hash = _receipt_hash(document, "pylibiio_sha256")
+    source_ref = str(document.get("source_ref") or "")
+    if not source_ref:
+        raise RuntimeError("metadata runtime receipt lacks its immutable source ref")
+    return MetadataRuntimeVerification(
+        metadata_abi=expected_abi,
+        source_ref=source_ref,
+        source_commit=source_commit,
+        native_libiio_path=str(native_path),
+        native_libiio_sha256=native_hash,
+        pylibiio_path=str(binding_path),
+        pylibiio_sha256=binding_hash,
+        receipt_path=str(receipt_path),
+    )
+
+
+def _receipt_file(document: dict[object, object], name: str, prefix: Path) -> Path:
+    raw = document.get(name)
+    if not isinstance(raw, str) or not raw:
+        raise RuntimeError(f"metadata runtime receipt lacks {name}")
+    path = Path(raw)
+    if not path.is_absolute():
+        raise RuntimeError(f"metadata runtime receipt {name} is not absolute")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(f"metadata runtime receipt {name} is unavailable") from error
+    if not resolved.is_file() or not resolved.is_relative_to(prefix):
+        raise RuntimeError(f"metadata runtime receipt {name} is not release-local")
+    return resolved
+
+
+def _receipt_hash(document: dict[object, object], name: str) -> str:
+    value = document.get(name)
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise RuntimeError(f"metadata runtime receipt {name} is malformed")
+    return value
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def inspect_iio_environment(

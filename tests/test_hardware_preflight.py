@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
-from pluto_plus.hardware.preflight import IioEnvironmentStatus, inspect_iio_environment
+import pytest
+
+import pluto_plus.hardware.preflight as preflight
+from pluto_plus.hardware.preflight import (
+    IioEnvironmentStatus,
+    inspect_iio_environment,
+    verify_metadata_runtime,
+)
 
 
 def _spec(name: str) -> SimpleNamespace:
@@ -57,9 +66,7 @@ def test_preflight_preserves_underlying_abi_error() -> None:
 
     assert report.status is IioEnvironmentStatus.LIBIIO_ABI_INCOMPATIBLE
     assert report.native_libiio_candidate == "libiio.so.0"
-    assert report.underlying_error == (
-        "AttributeError: undefined symbol: iio_get_backends_count"
-    )
+    assert report.underlying_error == ("AttributeError: undefined symbol: iio_get_backends_count")
 
 
 def test_preflight_distinguishes_missing_usb_backend() -> None:
@@ -120,3 +127,127 @@ def test_pyadi_import_failure_is_classified_after_native_load() -> None:
 
     assert report.status is IioEnvironmentStatus.LIBIIO_ABI_INCOMPATIBLE
     assert report.underlying_error == "ImportError: cannot import name ad9361"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "release/.venv"
+    native = prefix / "lib/libiio.so.0.25"
+    binding = prefix / "lib/python3.11/site-packages/iio.py"
+    receipt = prefix / "share/pluto-plus-utils/metadata-runtime.json"
+    native.parent.mkdir(parents=True)
+    binding.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    native.write_bytes(b"exact native build")
+    binding.write_text("# exact binding\n")
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "metadata_abi": 1,
+                "source_ref": "spf-frame-metadata-source/v0.25-final-v3",
+                "source_commit": "c26258bfa33098c2b215e19cf85d448e89499b1a",
+                "native_libiio_path": str(native),
+                "native_libiio_sha256": _sha256(native),
+                "pylibiio_path": str(binding),
+                "pylibiio_sha256": _sha256(binding),
+                "metadata_buffer_parameters": [
+                    "self",
+                    "device",
+                    "samples_count",
+                    "metadata_capacity",
+                ],
+            }
+        )
+    )
+
+    class MetadataBuffer:
+        def __init__(
+            self, device: object, samples_count: int, metadata_capacity: int = 64 * 1024
+        ) -> None:
+            pass
+
+    module = SimpleNamespace(MetadataBuffer=MetadataBuffer, __file__=str(binding))
+    monkeypatch.setattr(preflight.sys, "prefix", str(prefix))
+    monkeypatch.setattr(preflight, "CDLL", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(preflight.importlib, "import_module", lambda _name: module)
+    monkeypatch.setattr(
+        preflight,
+        "inspect_iio_environment",
+        lambda **_kwargs: SimpleNamespace(
+            healthy=True,
+            native_libiio_path=str(native),
+            actionable_message="",
+        ),
+    )
+
+    result = verify_metadata_runtime(expected_abi=1)
+
+    assert result.metadata_abi == 1
+    assert result.native_libiio_sha256 == _sha256(native)
+    assert result.pylibiio_path == str(binding)
+
+
+def test_metadata_runtime_gate_rejects_missing_receipt_and_changed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "release/.venv"
+    prefix.mkdir(parents=True)
+    monkeypatch.setattr(preflight.sys, "prefix", str(prefix))
+    with pytest.raises(RuntimeError, match="receipt is missing"):
+        verify_metadata_runtime(expected_abi=1)
+
+    native = prefix / "lib/libiio.so.0.25"
+    binding = prefix / "lib/python3.11/site-packages/iio.py"
+    receipt = prefix / "share/pluto-plus-utils/metadata-runtime.json"
+    native.parent.mkdir(parents=True)
+    binding.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    native.write_bytes(b"changed native build")
+    binding.write_text("# exact binding\n")
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "metadata_abi": 1,
+                "source_ref": "spf-frame-metadata-source/v0.25-final-v3",
+                "source_commit": "c26258bfa33098c2b215e19cf85d448e89499b1a",
+                "native_libiio_path": str(native),
+                "native_libiio_sha256": "0" * 64,
+                "pylibiio_path": str(binding),
+                "pylibiio_sha256": _sha256(binding),
+                "metadata_buffer_parameters": [
+                    "self",
+                    "device",
+                    "samples_count",
+                    "metadata_capacity",
+                ],
+            }
+        )
+    )
+
+    class MetadataBuffer:
+        def __init__(
+            self, device: object, samples_count: int, metadata_capacity: int = 64 * 1024
+        ) -> None:
+            pass
+
+    module = SimpleNamespace(MetadataBuffer=MetadataBuffer, __file__=str(binding))
+    monkeypatch.setattr(preflight, "CDLL", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(preflight.importlib, "import_module", lambda _name: module)
+    monkeypatch.setattr(
+        preflight,
+        "inspect_iio_environment",
+        lambda **_kwargs: SimpleNamespace(
+            healthy=True,
+            native_libiio_path=str(native),
+            actionable_message="",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="native libiio hash changed"):
+        verify_metadata_runtime(expected_abi=1)

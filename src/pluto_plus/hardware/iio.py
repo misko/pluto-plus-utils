@@ -14,6 +14,8 @@ import numpy as np
 from pluto_plus.diagnostic_profiles import parse_metadata_abi
 from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
 from pluto_plus.hardware.base import SampleBlock
+from pluto_plus.hardware.iio_metadata import IioMetadataCaptureSession
+from pluto_plus.hardware.preflight import verify_metadata_runtime
 from pluto_plus.models import (
     GainMode,
     RadioCapabilities,
@@ -21,6 +23,7 @@ from pluto_plus.models import (
     RadioSettings,
     Transport,
 )
+from pluto_plus.tandem import TandemSessionRequestV1
 
 PLUTO_USB_VENDOR = "0456"
 PLUTO_RUNTIME_PRODUCT = "b673"
@@ -36,6 +39,7 @@ class IioRadioDevice:
         serial: str | None = None,
         radio_id: str | None = None,
         adi_module: ModuleType | Any | None = None,
+        iio_module: ModuleType | Any | None = None,
         iio_contexts: Mapping[str, str] | None = None,
     ) -> None:
         normalized = uri.removeprefix("pluto://")
@@ -43,9 +47,11 @@ class IioRadioDevice:
         self._requested_serial = serial
         self._radio_id = radio_id or serial or normalized
         self._adi_module = adi_module
+        self._iio_module = iio_module
         self._iio_contexts = iio_contexts
         self._device: Any | None = None
         self._buffer_size: int | None = None
+        self._metadata_capture: IioMetadataCaptureSession | None = None
         self._diagnostic_facts: dict[str, object] = {}
         transport = Transport.IIO_USB if normalized.startswith("usb:") else Transport.IIO_IP
         self._identity = RadioIdentity(
@@ -137,6 +143,7 @@ class IioRadioDevice:
             raise
 
     def close(self) -> None:
+        self.reset_receive_buffer()
         device, self._device = self._device, None
         self._buffer_size = None
         self._diagnostic_facts = {}
@@ -158,8 +165,7 @@ class IioRadioDevice:
         gain = None
         if mode is GainMode.MANUAL:
             gains = tuple(
-                float(getattr(device, f"rx_hardwaregain_chan{channel}"))
-                for channel in channels
+                float(getattr(device, f"rx_hardwaregain_chan{channel}")) for channel in channels
             )
             if max(gains) - min(gains) > 0.25:
                 raise RadioConfigurationError(f"receiver manual gains differ: {gains}")
@@ -175,8 +181,7 @@ class IioRadioDevice:
 
     def apply_settings(self, settings: RadioSettings) -> RadioSettings:
         device = self._require_device()
-        device.rx_destroy_buffer()
-        self._buffer_size = None
+        self.reset_receive_buffer()
         device.sample_rate = round(settings.sample_rate_hz)
         device.rx_rf_bandwidth = round(settings.bandwidth_hz)
         device.rx_lo = round(settings.center_frequency_hz)
@@ -190,7 +195,14 @@ class IioRadioDevice:
         return self.read_settings()
 
     def read_block(self, sample_count: int) -> SampleBlock:
+        """Read legacy host-timed IQ with continuity explicitly unobservable."""
+
         device = self._require_device()
+        if self._metadata_capture is not None and self._metadata_capture.is_open:
+            raise RuntimeError(
+                "legacy read_block cannot run during a metadata capture; "
+                "use the session's read_block instead"
+            )
         if sample_count <= 0:
             raise ValueError("sample_count must be positive")
         if self._buffer_size != sample_count:
@@ -211,14 +223,13 @@ class IioRadioDevice:
             )
         return SampleBlock(utc_ns=(before + after) // 2, samples=values.astype(np.complex64))
 
-    def configure_kernel_buffers(self, count: int) -> None:
+    def configure_kernel_buffers(self, count: int) -> int:
         """Set the libiio RX kernel-buffer count before creating a userspace buffer."""
 
         if count < 1 or count > 64:
             raise ValueError("kernel buffer count must be between 1 and 64")
         device = self._require_device()
-        device.rx_destroy_buffer()
-        self._buffer_size = None
+        self.reset_receive_buffer()
         rx_device = getattr(device, "_rxadc", None)
         setter = getattr(rx_device, "set_kernel_buffers_count", None)
         if not callable(setter):
@@ -231,10 +242,111 @@ class IioRadioDevice:
                 f"libiio rejected RX kernel buffer count {count}: error {result}"
             )
         actual = getattr(rx_device, "kernel_buffers_count", None)
-        if actual is not None and int(actual) != count:
+        if actual is None:
+            raise RadioConfigurationError(
+                "installed libiio binding cannot read back RX kernel buffers"
+            )
+        if int(actual) != count:
             raise RadioConfigurationError(
                 f"RX kernel buffer read-back is {actual}, expected {count}"
             )
+        return int(actual)
+
+    def read_kernel_buffers_count(self) -> int:
+        """Return the live kernel-buffer count, failing if readback is unavailable."""
+
+        rx_device = getattr(self._require_device(), "_rxadc", None)
+        actual = getattr(rx_device, "kernel_buffers_count", None)
+        if actual is None:
+            raise RadioConfigurationError(
+                "installed libiio binding cannot read back RX kernel buffers"
+            )
+        return int(actual)
+
+    def reset_receive_buffer(self) -> None:
+        """Synchronously destroy any ordinary or metadata RX buffer.
+
+        This operation is idempotent and defines the reset boundary required
+        before a new dwell or retuned scanner target.
+        """
+
+        capture, self._metadata_capture = self._metadata_capture, None
+        if capture is not None:
+            capture.close()
+        device = self._device
+        self._buffer_size = None
+        if device is not None:
+            buffer = getattr(device, "_rxbuf", None)
+            device.rx_destroy_buffer()
+            close = getattr(buffer, "close", None)
+            if callable(close):
+                close()
+
+    def tune_center_frequency(self, center_frequency_hz: float) -> float:
+        """Reset RX, tune the LO, and return the exact hardware readback."""
+
+        if center_frequency_hz <= 0:
+            raise ValueError("center_frequency_hz must be positive")
+        device = self._require_device()
+        self.reset_receive_buffer()
+        device.rx_lo = round(center_frequency_hz)
+        return float(device.rx_lo)
+
+    def begin_metadata_capture(
+        self,
+        sample_count: int,
+        *,
+        kernel_buffers: int,
+        tandem_request: TandemSessionRequestV1 | None = None,
+    ) -> IioMetadataCaptureSession:
+        """Reset and arm one fail-closed FPGA-metadata capture generation."""
+
+        if sample_count <= 0:
+            raise ValueError("sample_count must be positive")
+        device = self._require_device()
+        self.reset_receive_buffer()
+        if tuple(int(item) for item in device.rx_enabled_channels) != (0, 1):
+            raise RadioConfigurationError("metadata capture requires paired RX channels (0, 1)")
+        facts = context_facts(device.ctx)
+        metadata_abi = facts.get("buffer_metadata_abi")
+        if metadata_abi not in {1, 2}:
+            raise RadioConfigurationError(
+                "metadata capture requires supported context capability iio,buffer-metadata=1 or 2"
+            )
+        if metadata_abi == 2 and not facts.get("tandem_agc"):
+            raise RadioConfigurationError(
+                "metadata ABI 2 capture requires the tandem-agc IIO device"
+            )
+        module = self._iio_module
+        if module is None:
+            verify_metadata_runtime(int(metadata_abi))
+            try:
+                module = importlib.import_module("iio")
+            except ImportError as error:
+                raise ImportError(
+                    "metadata capture requires the patched native pylibiio binding"
+                ) from error
+        metadata_buffer_type = getattr(module, "MetadataBuffer", None)
+        if metadata_buffer_type is None:
+            raise RadioConfigurationError("installed pylibiio does not expose MetadataBuffer")
+        actual_kernel_buffers = self.configure_kernel_buffers(kernel_buffers)
+        session = IioMetadataCaptureSession(
+            device,
+            metadata_buffer_type,
+            sample_rate_hz=round(float(device.sample_rate)),
+            samples_per_channel=sample_count,
+            kernel_buffers=actual_kernel_buffers,
+            metadata_abi=int(metadata_abi),
+            tandem_request=tandem_request,
+        )
+        try:
+            session.open()
+        except BaseException:
+            session.close()
+            self.reset_receive_buffer()
+            raise
+        self._metadata_capture = session
+        return session
 
     def diagnostic_facts(self) -> Mapping[str, object]:
         """Return passive facts captured when the exact IIO context was opened."""
@@ -297,9 +409,7 @@ def discover_usb_serials(usb_root: Path = Path("/sys/bus/usb/devices")) -> list[
     return sorted(serials)
 
 
-def find_usb_sysfs_path(
-    serial: str, usb_root: Path = Path("/sys/bus/usb/devices")
-) -> str | None:
+def find_usb_sysfs_path(serial: str, usb_root: Path = Path("/sys/bus/usb/devices")) -> str | None:
     """Correlate one runtime Pluto USB device by serial, failing on ambiguity."""
 
     matches: list[Path] = []
@@ -399,13 +509,17 @@ def _mute_transmit(device: Any) -> None:
         if float(getattr(device, name)) > -80.0:
             raise RadioConfigurationError(f"{name} did not reach the -80 dB safety limit")
     has_muted_scales, muted_scales = _optional_attribute(device, "dds_scales")
-    if has_muted_scales and muted_scales is not None and any(
-        float(value) != 0.0 for value in muted_scales
+    if (
+        has_muted_scales
+        and muted_scales is not None
+        and any(float(value) != 0.0 for value in muted_scales)
     ):
         raise RadioConfigurationError("DDS scale remained nonzero after mute")
     has_dds_enabled, dds_enabled = _optional_attribute(device, "dds_enabled")
-    if has_dds_enabled and dds_enabled is not None and any(
-        str(value).strip().lower() not in {"0", "false"} for value in dds_enabled
+    if (
+        has_dds_enabled
+        and dds_enabled is not None
+        and any(str(value).strip().lower() not in {"0", "false"} for value in dds_enabled)
     ):
         raise RadioConfigurationError("DDS source remained enabled after mute")
 
