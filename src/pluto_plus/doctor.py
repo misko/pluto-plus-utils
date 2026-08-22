@@ -163,6 +163,23 @@ TANDEM_AGC_V8_RC1_PERSISTENT_POLICY = TANDEM_AGC_V8_RC1_RAM_POLICY.model_copy(
     }
 )
 
+# Exact v8 RC2 candidate from the trusted Kalman build. Implausible AD9361
+# temperature samples are ignored without replacing the last valid cached
+# sample. This profile intentionally permits volatile RAM loading only.
+TANDEM_AGC_V8_RC2_RAM_POLICY = FirmwarePolicy(
+    profile_id="tandem-agc-v8-rc2-ram",
+    release_tag="v0.41-plutoplus-spf-tandem-agc-v8-rc2",
+    device_firmware="v0.41-plutoplus-spf-tandem-agc-v8-rc2",
+    asset_name="plutoplus-spf-tandem-agc-v8-rc2-19d146a62bdc-pluto.dfu",
+    asset_sha256="9f550f78a6fce95749bf98f8d84ab4ee750ed0e7482c24b4c788897730cfeb4f",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/32544173864",
+    source_commit="19d146a62bdc7c468618ad9f83332f110c0629b6",
+    fit_body_sha256="d617f500513e97661dfbbe677a15a54af86d83423f976d8be721d713a0fc2e2c",
+    fit_body_size=12_780_495,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 22, 1, 59, 10, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,

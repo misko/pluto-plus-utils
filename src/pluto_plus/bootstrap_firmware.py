@@ -31,8 +31,9 @@ from pluto_plus.doctor import (
     CANONICAL_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
-    TANDEM_AGC_V8_RC1_RAM_POLICY,
     TANDEM_AGC_V8_RC1_PERSISTENT_POLICY,
+    TANDEM_AGC_V8_RC1_RAM_POLICY,
+    TANDEM_AGC_V8_RC2_RAM_POLICY,
     TANDEM_V6_DEVELOPMENT_POLICY,
     TANDEM_V6_LATCH_CLEAR_PERSISTENT_POLICY,
     TANDEM_V6_LATCH_CLEAR_RAM_POLICY,
@@ -86,6 +87,9 @@ STANDALONE_FLASH_PROFILES = {
     ),
     TANDEM_AGC_V8_RC1_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
         TANDEM_AGC_V8_RC1_PERSISTENT_POLICY, 2, True
+    ),
+    TANDEM_AGC_V8_RC2_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        TANDEM_AGC_V8_RC2_RAM_POLICY, 2, True, persistent_allowed=False
     ),
 }
 
@@ -1200,6 +1204,7 @@ def mute_returned_radio(serial: str) -> None:
                 f"returned-radio IIO environment failed: {environment.actionable_message}"
             )
         import adi
+
         from pluto_plus.hardware.iio import _mute_transmit
 
         matches = [
