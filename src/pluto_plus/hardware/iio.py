@@ -87,12 +87,16 @@ class IioRadioDevice:
             raise RuntimeError("IIO radio is already open")
         self._diagnostic_facts = {}
         self._metadata_runtime = None
-        if self._expected_metadata_abi is not None and self._iio_module is None:
+        injected_runtime = self._adi_module is not None and self._iio_module is not None
+        if self._expected_metadata_abi is not None and not injected_runtime:
             # This must happen before importing pyadi: pyadi imports pylibiio,
             # and an ambient object which has already satisfied libiio.so.0
-            # cannot be replaced safely later in this process.
+            # cannot be replaced safely later in this process. Reverify on
+            # every open so a closed/reopened adapter never loses its runtime
+            # attestation while retaining the already imported module.
             self._metadata_runtime = verify_metadata_runtime(self._expected_metadata_abi)
-            self._iio_module = importlib.import_module("iio")
+            if self._iio_module is None:
+                self._iio_module = importlib.import_module("iio")
         module = self._adi_module
         if module is None:
             try:

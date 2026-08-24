@@ -62,3 +62,4 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     text = script.read_text()
     assert "pip setuptools" not in text
     assert '"$uv_bin" pip install' in text
+    assert "--no-build-isolation" in text

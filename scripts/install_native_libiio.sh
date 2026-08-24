@@ -110,7 +110,7 @@ cmake -S "$worktree/src" -B "$worktree/build" \
 cmake --build "$worktree/build" --parallel "$jobs"
 cmake --install "$worktree/build"
 "$uv_bin" pip install --python "$python_bin" --quiet --force-reinstall --no-deps \
-    "$worktree/build/bindings/python"
+    --no-build-isolation "$worktree/build/bindings/python"
 
 PLUTO_LIBIIO_LIBRARY="$prefix/lib/libiio.so.0" \
     PLUTO_METADATA_ABI="$metadata_abi" \

@@ -516,6 +516,13 @@ def test_open_preloads_expected_runtime_before_importing_pyadi(
         radio.close()
     assert not radio.capabilities.supports_device_sample_counter
     assert not radio.capabilities.supports_continuity_sequence
+    radio.open()
+    try:
+        assert events.count("verify:1") == 2
+        assert radio.capabilities.supports_device_sample_counter
+        assert radio.capabilities.supports_continuity_sequence
+    finally:
+        radio.close()
 
 
 def test_expected_runtime_must_match_radio_capability(monkeypatch: pytest.MonkeyPatch) -> None:
