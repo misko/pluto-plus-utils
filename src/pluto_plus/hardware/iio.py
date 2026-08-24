@@ -15,7 +15,7 @@ from pluto_plus.diagnostic_profiles import parse_metadata_abi
 from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
 from pluto_plus.hardware.base import SampleBlock
 from pluto_plus.hardware.iio_metadata import IioMetadataCaptureSession
-from pluto_plus.hardware.preflight import verify_metadata_runtime
+from pluto_plus.hardware.preflight import MetadataRuntimeVerification, verify_metadata_runtime
 from pluto_plus.models import (
     GainMode,
     RadioCapabilities,
@@ -41,7 +41,10 @@ class IioRadioDevice:
         adi_module: ModuleType | Any | None = None,
         iio_module: ModuleType | Any | None = None,
         iio_contexts: Mapping[str, str] | None = None,
+        expected_metadata_abi: int | None = None,
     ) -> None:
+        if expected_metadata_abi not in {None, 1, 2}:
+            raise ValueError("expected_metadata_abi must be 1, 2, or None")
         normalized = uri.removeprefix("pluto://")
         self._configured_uri = normalized
         self._requested_serial = serial
@@ -49,6 +52,8 @@ class IioRadioDevice:
         self._adi_module = adi_module
         self._iio_module = iio_module
         self._iio_contexts = iio_contexts
+        self._expected_metadata_abi = expected_metadata_abi
+        self._metadata_runtime: MetadataRuntimeVerification | None = None
         self._device: Any | None = None
         self._buffer_size: int | None = None
         self._metadata_capture: IioMetadataCaptureSession | None = None
@@ -81,6 +86,13 @@ class IioRadioDevice:
         if self._device is not None:
             raise RuntimeError("IIO radio is already open")
         self._diagnostic_facts = {}
+        self._metadata_runtime = None
+        if self._expected_metadata_abi is not None and self._iio_module is None:
+            # This must happen before importing pyadi: pyadi imports pylibiio,
+            # and an ambient object which has already satisfied libiio.so.0
+            # cannot be replaced safely later in this process.
+            self._metadata_runtime = verify_metadata_runtime(self._expected_metadata_abi)
+            self._iio_module = importlib.import_module("iio")
         module = self._adi_module
         if module is None:
             try:
@@ -137,6 +149,38 @@ class IioRadioDevice:
             # from those getters rather than AttributeError.
             _mute_transmit(device)
             _require_canonical_rx_layout(facts)
+            actual_metadata_abi = facts.get("buffer_metadata_abi")
+            if (
+                self._expected_metadata_abi is not None
+                and actual_metadata_abi != self._expected_metadata_abi
+            ):
+                raise RadioConfigurationError(
+                    "radio metadata ABI does not match the release-local host runtime: "
+                    f"radio={actual_metadata_abi!r}, host={self._expected_metadata_abi}"
+                )
+            injected_runtime = self._adi_module is not None and self._iio_module is not None
+            runtime_ready = (
+                actual_metadata_abi in {1, 2}
+                and (self._metadata_runtime is not None or injected_runtime)
+            )
+            if runtime_ready:
+                counter_reader = getattr(getattr(device, "_rxadc", None), "reg_read", None)
+                if not callable(counter_reader):
+                    raise RadioConfigurationError(
+                        "metadata runtime lacks FPGA sample-counter register access"
+                    )
+                try:
+                    int(counter_reader(0x800000B8)) & 0xFFFFFFFF
+                except (AttributeError, OSError, TypeError, ValueError) as error:
+                    raise RadioConfigurationError(
+                        "FPGA sample-counter register probe failed"
+                    ) from error
+            self._capabilities = self._capabilities.model_copy(
+                update={
+                    "supports_device_sample_counter": runtime_ready,
+                    "supports_continuity_sequence": runtime_ready,
+                }
+            )
             self._device = device
         except Exception:
             _release_device(device)
@@ -146,6 +190,13 @@ class IioRadioDevice:
         self.reset_receive_buffer()
         device, self._device = self._device, None
         self._buffer_size = None
+        self._metadata_runtime = None
+        self._capabilities = self._capabilities.model_copy(
+            update={
+                "supports_device_sample_counter": False,
+                "supports_continuity_sequence": False,
+            }
+        )
         self._diagnostic_facts = {}
         if device is not None:
             _release_device(device)
@@ -317,15 +368,18 @@ class IioRadioDevice:
             raise RadioConfigurationError(
                 "metadata ABI 2 capture requires the tandem-agc IIO device"
             )
+        if not (
+            self._capabilities.supports_device_sample_counter
+            and self._capabilities.supports_continuity_sequence
+        ):
+            raise RadioConfigurationError(
+                "radio was not opened with a matched continuity-observable metadata runtime"
+            )
         module = self._iio_module
         if module is None:
-            verify_metadata_runtime(int(metadata_abi))
-            try:
-                module = importlib.import_module("iio")
-            except ImportError as error:
-                raise ImportError(
-                    "metadata capture requires the patched native pylibiio binding"
-                ) from error
+            raise RadioConfigurationError(
+                "metadata capture runtime was not loaded before the IIO context"
+            )
         metadata_buffer_type = getattr(module, "MetadataBuffer", None)
         if metadata_buffer_type is None:
             raise RadioConfigurationError("installed pylibiio does not expose MetadataBuffer")

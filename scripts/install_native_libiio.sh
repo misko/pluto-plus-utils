@@ -8,19 +8,20 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="${repo_root}/.venv/bin/python"
 prefix="${repo_root}/.venv"
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
+uv_bin=""
 metadata_abi=1
 source_ref=""
 source_commit=""
 
 usage() {
     cat <<EOF
-Usage: scripts/install_native_libiio.sh [--python PATH] [--prefix PATH] [--jobs N]
-                                         [--metadata-abi 1|2]
+Usage: scripts/install_native_libiio.sh --uv-bin ABSOLUTE_PATH
+       [--python PATH] [--prefix PATH] [--jobs N] [--metadata-abi 1|2]
 
 Builds the exact host libiio matched to the selected firmware metadata ABI with
 USB support. The default ABI is 1 for the currently deployed production radios.
-The default prefix is this checkout's .venv, which Pluto+ Utils discovers
-automatically.
+The source-checkout script defaults to that checkout's .venv; the installed
+entry point defaults to its own Python environment.
 EOF
 }
 
@@ -29,6 +30,7 @@ while (($#)); do
     --python) python_bin="${2:?missing value for --python}"; shift 2 ;;
     --prefix) prefix="${2:?missing value for --prefix}"; shift 2 ;;
     --jobs) jobs="${2:?missing value for --jobs}"; shift 2 ;;
+    --uv-bin) uv_bin="${2:?missing value for --uv-bin}"; shift 2 ;;
     --metadata-abi) metadata_abi="${2:?missing value for --metadata-abi}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; printf 'ERROR: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -50,8 +52,8 @@ case "$metadata_abi" in
     ;;
 esac
 
-[[ "$python_bin" == /* && "$prefix" == /* ]] || {
-    printf 'ERROR: --python and --prefix must be absolute paths\n' >&2
+[[ "$python_bin" == /* && "$prefix" == /* && "$uv_bin" == /* ]] || {
+    printf 'ERROR: --python, --prefix, and --uv-bin must be absolute paths\n' >&2
     exit 2
 }
 [[ -x "$python_bin" ]] || {
@@ -59,18 +61,20 @@ esac
         "$python_bin" >&2
     exit 1
 }
+[[ -f "$uv_bin" && -x "$uv_bin" && ! -L "$uv_bin" ]] || {
+    printf 'ERROR: --uv-bin must be a regular non-symlink executable: %s\n' "$uv_bin" >&2
+    exit 1
+}
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || {
     printf 'ERROR: --jobs must be a positive integer\n' >&2
     exit 2
 }
-for command in git cmake uv; do
+for command in git cmake; do
     command -v "$command" >/dev/null || {
         printf 'ERROR: %s is required\n' "$command" >&2
         exit 1
     }
 done
-
-uv pip install --python "$python_bin" pip setuptools
 
 worktree="$(mktemp -d "${TMPDIR:-/tmp}/pluto-plus-libiio.XXXXXX")"
 cleanup() {
@@ -105,7 +109,7 @@ cmake -S "$worktree/src" -B "$worktree/build" \
     -DWITH_USB_BACKEND=ON
 cmake --build "$worktree/build" --parallel "$jobs"
 cmake --install "$worktree/build"
-"$python_bin" -m pip install --quiet --force-reinstall --no-deps \
+"$uv_bin" pip install --python "$python_bin" --quiet --force-reinstall --no-deps \
     "$worktree/build/bindings/python"
 
 PLUTO_LIBIIO_LIBRARY="$prefix/lib/libiio.so.0" \
@@ -118,9 +122,10 @@ import hashlib
 import inspect
 import json
 import os
+import sys
 from pathlib import Path
 
-from pluto_plus.hardware.preflight import inspect_iio_environment
+from pluto_plus.hardware.preflight import inspect_iio_environment, verify_metadata_runtime
 
 report = inspect_iio_environment()
 assert report.healthy, report.actionable_message
@@ -135,9 +140,11 @@ expected = (
     else ("self", "device", "samples_count", "request", "metadata_capacity")
 )
 assert parameters == expected, (parameters, expected)
-native_path = Path(report.native_libiio_path).resolve(strict=True)
-binding_path = Path(iio.__file__).resolve(strict=True)
 prefix = Path(os.environ["PLUTO_METADATA_PREFIX"]).resolve(strict=True)
+if Path(sys.prefix).resolve(strict=True) != prefix:
+    raise RuntimeError((sys.prefix, prefix))
+native_path = (prefix / "lib/libiio.so.0").resolve(strict=True)
+binding_path = Path(iio.__file__).resolve(strict=True)
 if not native_path.is_relative_to(prefix) or not binding_path.is_relative_to(prefix):
     raise RuntimeError((native_path, binding_path, prefix))
 
@@ -166,6 +173,8 @@ receipt_path.parent.mkdir(parents=True, exist_ok=True)
 temporary = receipt_path.with_suffix(".json.tmp")
 temporary.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 temporary.replace(receipt_path)
+verification = verify_metadata_runtime(expected_abi=abi)
+assert Path(verification.native_libiio_path) == native_path
 print(
     f"PASS: metadata_abi={abi} {report.libiio_version} "
     f"{report.native_libiio_path} backends={report.backends} receipt={receipt_path}"

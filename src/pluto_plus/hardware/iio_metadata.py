@@ -165,6 +165,15 @@ class IioMetadataCaptureSession:
         raise RuntimeError("metadata IIO open attempts were not exhausted")
 
     def read_block(self) -> SampleBlockV2:
+        """Read one atomic IQ/metadata refill, poisoning on any failure."""
+
+        try:
+            return self._read_block()
+        except BaseException:
+            self.close()
+            raise
+
+    def _read_block(self) -> SampleBlockV2:
         if self._buffer is None:
             raise RuntimeError("IIO metadata capture is not open")
         host_before_ns = time.time_ns()
@@ -265,7 +274,7 @@ class IioMetadataCaptureSession:
         if missing < 0:
             raise RuntimeError("FPGA sample counter repeated or regressed")
         skipped_buffers = buffer_delta - 1
-        if skipped_buffers and missing != skipped_buffers * self._samples_per_channel:
+        if missing != skipped_buffers * self._samples_per_channel:
             raise RuntimeError("metadata buffer and FPGA sample sequences disagree")
         self._previous_buffer_sequence = buffer_sequence
         self._previous_sample_end = first_sample + self._samples_per_channel

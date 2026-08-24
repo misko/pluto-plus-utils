@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import pluto_plus.hardware.iio as iio_adapter
 from pluto_plus.direct_radio.usb import (
     HEADER_PREFIX_BYTES_V3,
     GainEventFlags,
@@ -363,6 +364,21 @@ def test_sequence_disagreement_and_stream_change_fail_closed() -> None:
         capture.read_block()
         with pytest.raises(RuntimeError, match="sequences disagree"):
             capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+    hidden_counter_gap = [
+        _metadata_v3(buffer_sequence=0, first_sample_sequence=1_000).pack(),
+        _metadata_v3(buffer_sequence=1, first_sample_sequence=1_008).pack(),
+    ]
+    radio, _adi, _factory = _open_radio(hidden_counter_gap)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match="sequences disagree"):
+            capture.read_block()
+        assert not capture.is_open
     finally:
         radio.close()
 
@@ -465,5 +481,73 @@ def test_kernel_buffer_readback_is_mandatory() -> None:
     try:
         with pytest.raises(RadioConfigurationError, match="read-back"):
             radio.configure_kernel_buffers(8)
+    finally:
+        radio.close()
+
+
+def test_open_preloads_expected_runtime_before_importing_pyadi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    adi = FakeAdi([], metadata_abi=1)
+    iio = SimpleNamespace(MetadataBuffer=FakeMetadataBufferFactory())
+
+    def verify(expected_abi: int) -> SimpleNamespace:
+        events.append(f"verify:{expected_abi}")
+        return SimpleNamespace(metadata_abi=expected_abi)
+
+    def import_module(name: str) -> object:
+        events.append(f"import:{name}")
+        return iio if name == "iio" else adi
+
+    monkeypatch.setattr(iio_adapter, "verify_metadata_runtime", verify)
+    monkeypatch.setattr(iio_adapter.importlib, "import_module", import_module)
+    radio = IioRadioDevice(
+        "ip:192.0.2.1",
+        serial="SERIAL_A",
+        expected_metadata_abi=1,
+    )
+    radio.open()
+    try:
+        assert events[:3] == ["verify:1", "import:iio", "import:adi"]
+        assert radio.capabilities.supports_device_sample_counter
+        assert radio.capabilities.supports_continuity_sequence
+    finally:
+        radio.close()
+    assert not radio.capabilities.supports_device_sample_counter
+    assert not radio.capabilities.supports_continuity_sequence
+
+
+def test_expected_runtime_must_match_radio_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    adi = FakeAdi([], metadata_abi=1)
+    iio = SimpleNamespace(MetadataBuffer=FakeMetadataBufferFactory())
+    monkeypatch.setattr(
+        iio_adapter,
+        "verify_metadata_runtime",
+        lambda expected_abi: SimpleNamespace(metadata_abi=expected_abi),
+    )
+    monkeypatch.setattr(
+        iio_adapter.importlib,
+        "import_module",
+        lambda name: iio if name == "iio" else adi,
+    )
+    radio = IioRadioDevice(
+        "ip:192.0.2.1",
+        serial="SERIAL_A",
+        expected_metadata_abi=2,
+    )
+    with pytest.raises(RadioConfigurationError, match="does not match"):
+        radio.open()
+
+
+def test_real_context_without_predeclared_runtime_cannot_claim_continuity() -> None:
+    adi = FakeAdi([], metadata_abi=1)
+    radio = IioRadioDevice("ip:192.0.2.1", serial="SERIAL_A", adi_module=adi)
+    radio.open()
+    try:
+        assert not radio.capabilities.supports_device_sample_counter
+        assert not radio.capabilities.supports_continuity_sequence
+        with pytest.raises(RadioConfigurationError, match="matched continuity-observable"):
+            radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8)
     finally:
         radio.close()

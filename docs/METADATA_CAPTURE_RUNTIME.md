@@ -21,10 +21,16 @@ environment:
 
 ```bash
 scripts/install_native_libiio.sh \
+  --uv-bin /srv/leo/releases/RELEASE/.release-tools/uv \
   --metadata-abi 1 \
   --python /srv/leo/releases/RELEASE/.venv/bin/python \
   --prefix /srv/leo/releases/RELEASE/.venv
 ```
+
+An installed release can invoke the same package-owned script through
+`pluto-install-metadata-runtime`. The explicit `--uv-bin` must name the
+release-sealed, non-symlink executable; the installer never upgrades pip or
+setuptools and never falls back to an ambient `uv`.
 
 The installer resolves an immutable Git tag, verifies its exact commit, builds
 native and Python pieces together, and validates the `MetadataBuffer`
@@ -58,6 +64,20 @@ For a repeated-refill dwell:
 with radio.begin_metadata_capture(samples_per_refill, kernel_buffers=8) as capture:
     blocks = [capture.read_block() for _ in range(refill_count)]
 ```
+
+Construct a production IIO adapter with the release's declared ABI before
+opening it:
+
+```python
+radio = IioRadioDevice(uri, serial=serial, expected_metadata_abi=1)
+radio.open()
+```
+
+This preloads and verifies the receipt-bound native library before pyadi can
+import pylibiio. The radio capability is compared to that declaration after
+the context opens; a mismatch is fatal. Omitting `expected_metadata_abi` keeps
+legacy host-timed reads available but deliberately leaves device-counter and
+continuity-sequence capabilities false.
 
 For each scanner target:
 

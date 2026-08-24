@@ -19,6 +19,7 @@ def test_distribution_metadata_and_console_scripts_are_consistent() -> None:
     }
     assert scripts == {
         "pluto": "pluto_plus.cli:app",
+        "pluto-install-metadata-runtime": "pluto_plus.metadata_runtime_install:main",
         "plutod": "pluto_plus.cli:serve_entrypoint",
     }
 

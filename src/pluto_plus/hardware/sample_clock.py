@@ -175,6 +175,12 @@ def fit_sample_clock(
     y = host_times - host_origin
     if maximum_rate_error_ppm < 0 or not math.isfinite(maximum_rate_error_ppm):
         raise ValueError("maximum rate error must be non-negative and finite")
+    if maximum_rate_error_ppm >= 1_000_000:
+        raise ValueError("maximum rate error must be less than one million ppm")
+    if nominal_sample_rate_hz is not None and (
+        nominal_sample_rate_hz <= 0 or not math.isfinite(nominal_sample_rate_hz)
+    ):
+        raise ValueError("nominal sample rate must be positive and finite")
     denominator = float(np.dot(x, x))
     if denominator > 0:
         nanoseconds_per_sample = float(np.dot(x, y) / denominator)
@@ -184,6 +190,15 @@ def fit_sample_clock(
         raise ValueError("counter-separated anchors or a positive nominal sample rate are required")
     if not math.isfinite(nanoseconds_per_sample) or nanoseconds_per_sample <= 0:
         raise ValueError("fitted sample period is not positive and finite")
+    if nominal_sample_rate_hz is not None:
+        scale = maximum_rate_error_ppm / 1_000_000.0
+        minimum_period = 1e9 / (float(nominal_sample_rate_hz) * (1.0 + scale))
+        maximum_period = 1e9 / (float(nominal_sample_rate_hz) * (1.0 - scale))
+        # Host transport jitter can dominate a short startup regression.  The
+        # radio clock is nevertheless known to be within this declared bound,
+        # so constrain the fit and retain the resulting residual as timing
+        # uncertainty instead of publishing an impossible sample rate.
+        nanoseconds_per_sample = min(max(nanoseconds_per_sample, minimum_period), maximum_period)
     predicted = host_origin + nanoseconds_per_sample * x
     maximum_residual = float(np.max(np.abs(host_times - predicted)))
     maximum_rtt = max(item.measurement.round_trip_ns for item in observations)

@@ -111,6 +111,25 @@ def verify_metadata_runtime(expected_abi: int = 1) -> MetadataRuntimeVerificatio
         expected_abi=expected_abi,
     )
     native_path = Path(receipt.native_libiio_path)
+    binding_path = Path(receipt.pylibiio_path)
+    # Native code must never run before its receipt-bound digest has been
+    # checked.  In particular, do not turn a malformed receipt into an
+    # arbitrary release-local shared-library execution primitive.
+    if _sha256(native_path) != receipt.native_libiio_sha256:
+        raise RuntimeError("release-local native libiio hash changed after installation")
+    if _sha256(binding_path) != receipt.pylibiio_sha256:
+        raise RuntimeError("release-local pylibiio hash changed after installation")
+    already_imported = sys.modules.get("iio")
+    mapped_before = _mapped_libiio_paths()
+    if mapped_before and not _is_exact_native_loaded(native_path):
+        cause = (
+            "pylibiio was imported"
+            if already_imported is not None
+            else "native libiio was loaded"
+        )
+        raise RuntimeError(
+            f"{cause} before the release-local metadata runtime was preloaded"
+        )
     try:
         CDLL(str(native_path), mode=RTLD_GLOBAL)
     except OSError as error:
@@ -121,9 +140,11 @@ def verify_metadata_runtime(expected_abi: int = 1) -> MetadataRuntimeVerificatio
         iio = importlib.import_module("iio")
     except (AttributeError, ImportError, OSError) as error:
         raise RuntimeError(f"release-local pylibiio could not be imported: {error}") from error
-    binding_path = Path(str(getattr(iio, "__file__", ""))).resolve(strict=True)
-    if binding_path != Path(receipt.pylibiio_path):
-        raise RuntimeError(f"loaded pylibiio is {binding_path}, expected {receipt.pylibiio_path}")
+    loaded_binding_path = Path(str(getattr(iio, "__file__", ""))).resolve(strict=True)
+    if loaded_binding_path != binding_path:
+        raise RuntimeError(
+            f"loaded pylibiio is {loaded_binding_path}, expected {receipt.pylibiio_path}"
+        )
     metadata_buffer = getattr(iio, "MetadataBuffer", None)
     if metadata_buffer is None:
         raise RuntimeError("release-local pylibiio lacks MetadataBuffer")
@@ -133,19 +154,61 @@ def verify_metadata_runtime(expected_abi: int = 1) -> MetadataRuntimeVerificatio
             f"MetadataBuffer constructor is {parameters}, expected "
             f"{METADATA_BUFFER_PARAMETERS[expected_abi]}"
         )
+    if not _is_exact_native_loaded(native_path):
+        raise RuntimeError(
+            f"release-local metadata libiio is not the loaded libiio: {native_path}"
+        )
     environment = inspect_iio_environment(require_usb=False)
     if not environment.healthy:
         raise RuntimeError(environment.actionable_message)
-    if environment.native_libiio_path is None:
-        raise RuntimeError("loaded native libiio path is unavailable")
-    loaded_native = Path(environment.native_libiio_path).resolve(strict=True)
-    if loaded_native != native_path:
-        raise RuntimeError(f"loaded native libiio is {loaded_native}, expected {native_path}")
-    if _sha256(native_path) != receipt.native_libiio_sha256:
-        raise RuntimeError("release-local native libiio hash changed after installation")
-    if _sha256(binding_path) != receipt.pylibiio_sha256:
-        raise RuntimeError("release-local pylibiio hash changed after installation")
+    # inspect_iio_environment also imports pyadi.  Re-check after that import so
+    # a second ambient SONAME cannot be hidden behind the healthy API report.
+    if not _is_exact_native_loaded(native_path):
+        raise RuntimeError("pyadi loaded a native libiio outside the release runtime")
     return receipt
+
+
+def _mapped_libiio_paths(maps_path: Path = Path("/proc/self/maps")) -> tuple[Path, ...]:
+    """Return all mapped libiio objects as canonical paths.
+
+    ``ctypes.CDLL._name`` commonly remains the unresolved string
+    ``libiio.so.0`` even when an absolute release-local object satisfied that
+    SONAME.  The process map is the authoritative observation on Linux.
+    """
+
+    try:
+        lines = maps_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ()
+    paths: set[Path] = set()
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 6:
+            continue
+        deleted = fields[-1] == "(deleted)"
+        raw = fields[-2] if deleted else fields[-1]
+        if not raw.startswith("/"):
+            continue
+        path = Path(raw)
+        if not path.name.startswith("libiio.so"):
+            continue
+        if deleted:
+            paths.add(Path(f"{raw}.deleted-mapping"))
+        else:
+            try:
+                paths.add(path.resolve(strict=True))
+            except OSError:
+                paths.add(path)
+    return tuple(sorted(paths))
+
+
+def _is_exact_native_loaded(native_path: Path) -> bool:
+    try:
+        expected = native_path.resolve(strict=True)
+    except OSError:
+        return False
+    mapped = _mapped_libiio_paths()
+    return bool(mapped) and all(path == expected for path in mapped)
 
 
 def _validate_metadata_runtime_receipt(
@@ -402,9 +465,19 @@ def _loaded_library_path(iio: ModuleType, candidate: str, *, maps_path: Path) ->
         for line in mappings
         if len(fields := line.split()) >= 6
         and fields[-1].startswith("/")
-        and Path(fields[-1]).name == basename
+        and (
+            Path(fields[-1]).name == basename
+            or (
+                basename.startswith("libiio.so")
+                and Path(fields[-1]).name.startswith("libiio.so")
+            )
+        )
     }
-    return sorted(paths)[0] if paths else loaded_name
+    if not paths:
+        return loaded_name
+    prefix = str(Path(sys.prefix).resolve()) + os.sep
+    release_local = sorted(path for path in paths if path.startswith(prefix))
+    return release_local[0] if release_local else sorted(paths)[0]
 
 
 def _exception_text(error: BaseException) -> str:

@@ -175,6 +175,7 @@ def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
     module = SimpleNamespace(MetadataBuffer=MetadataBuffer, __file__=str(binding))
     monkeypatch.setattr(preflight.sys, "prefix", str(prefix))
     monkeypatch.setattr(preflight, "CDLL", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(preflight, "_mapped_libiio_paths", lambda: (native,))
     monkeypatch.setattr(preflight.importlib, "import_module", lambda _name: module)
     monkeypatch.setattr(
         preflight,
@@ -239,6 +240,7 @@ def test_metadata_runtime_gate_rejects_missing_receipt_and_changed_file(
 
     module = SimpleNamespace(MetadataBuffer=MetadataBuffer, __file__=str(binding))
     monkeypatch.setattr(preflight, "CDLL", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(preflight, "_mapped_libiio_paths", lambda: (native,))
     monkeypatch.setattr(preflight.importlib, "import_module", lambda _name: module)
     monkeypatch.setattr(
         preflight,
@@ -251,3 +253,63 @@ def test_metadata_runtime_gate_rejects_missing_receipt_and_changed_file(
     )
     with pytest.raises(RuntimeError, match="native libiio hash changed"):
         verify_metadata_runtime(expected_abi=1)
+
+
+def test_metadata_runtime_rejects_iio_imported_before_exact_native(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "release/.venv"
+    native = prefix / "lib/libiio.so.0.25"
+    binding = prefix / "lib/python3.11/site-packages/iio.py"
+    receipt = prefix / "share/pluto-plus-utils/metadata-runtime.json"
+    native.parent.mkdir(parents=True)
+    binding.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    native.write_bytes(b"exact native build")
+    binding.write_text("# exact binding\n")
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "metadata_abi": 1,
+                "source_ref": "spf-frame-metadata-source/v0.25-final-v3",
+                "source_commit": "c26258bfa33098c2b215e19cf85d448e89499b1a",
+                "native_libiio_path": str(native),
+                "native_libiio_sha256": _sha256(native),
+                "pylibiio_path": str(binding),
+                "pylibiio_sha256": _sha256(binding),
+                "metadata_buffer_parameters": [
+                    "self",
+                    "device",
+                    "samples_count",
+                    "metadata_capacity",
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(preflight.sys, "prefix", str(prefix))
+    monkeypatch.setitem(preflight.sys.modules, "iio", ModuleType("iio"))
+    monkeypatch.setattr(
+        preflight,
+        "_mapped_libiio_paths",
+        lambda: (Path("/usr/lib/x86_64-linux-gnu/libiio.so.0.26"),),
+    )
+
+    with pytest.raises(RuntimeError, match="imported before"):
+        verify_metadata_runtime(expected_abi=1)
+
+
+def test_loaded_library_path_resolves_versioned_release_mapping(tmp_path: Path) -> None:
+    prefix = tmp_path / "release/.venv"
+    native = prefix / "lib/libiio.so.0.25"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native")
+    maps = tmp_path / "maps"
+    maps.write_text(
+        f"7f00-7f01 r-xp 00000000 00:00 1 {native}\n",
+        encoding="utf-8",
+    )
+    iio = ModuleType("iio")
+    iio._lib = SimpleNamespace(_name="libiio.so.0")  # type: ignore[attr-defined]
+
+    assert preflight._loaded_library_path(iio, "libiio.so.0", maps_path=maps) == str(native)
