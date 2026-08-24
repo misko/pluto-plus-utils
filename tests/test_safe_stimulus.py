@@ -124,6 +124,8 @@ def test_capture_is_serial_bound_and_always_finishes_muted() -> None:
     assert capture.identity.serial == "SERIAL_A"
     assert capture.block.samples.shape == (2, 4096)
     assert capture.tx_gain_readback_db == -40.0
+    assert any(capture.dds_enabled_readback)
+    assert max(capture.dds_scale_readback) == 0.25
     assert capture.plan.worst_case_load_input_dbm == pytest.approx(-45.0412)
     assert module.device is not None
     assert module.device.selected_tone == (100_000, 0.25, 0)

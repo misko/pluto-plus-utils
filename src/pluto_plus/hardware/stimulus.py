@@ -105,6 +105,8 @@ class SafeDdsToneCapture:
     settings: RadioSettings
     block: SampleBlock
     tx_gain_readback_db: float
+    dds_enabled_readback: tuple[bool, ...]
+    dds_scale_readback: tuple[float, ...]
 
 
 def capture_safe_dds_tone(
@@ -171,6 +173,14 @@ def capture_safe_dds_tone(
         scale_values = tuple(abs(float(value)) for value in scales)
         if not any(scale_values) or max(scale_values) > plan.dds_scale + 1e-6:
             raise RadioConfigurationError("DDS scale read-back is outside the plan")
+        has_enabled, enabled = _optional_attribute(device, "dds_enabled")
+        if not has_enabled or enabled is None:
+            raise RadioConfigurationError("DDS enable read-back is unavailable")
+        enabled_values = tuple(
+            str(value).strip().lower() not in {"0", "false"} for value in enabled
+        )
+        if not any(enabled_values):
+            raise RadioConfigurationError("DDS source did not enable")
 
         time.sleep(plan.settle_ms / 1000.0)
         before = time.time_ns()
@@ -209,6 +219,8 @@ def capture_safe_dds_tone(
                 samples=values.astype(np.complex64, copy=False),
             ),
             tx_gain_readback_db=readback_gain,
+            dds_enabled_readback=enabled_values,
+            dds_scale_readback=tuple(float(value) for value in scales),
         )
     finally:
         _release_device(device)
