@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
-from pluto_plus.hardware.preflight import IioEnvironmentStatus, inspect_iio_environment
+import pytest
+
+import pluto_plus.hardware.preflight as preflight
+from pluto_plus.hardware.preflight import (
+    IioEnvironmentStatus,
+    inspect_iio_environment,
+    verify_metadata_runtime,
+)
 
 
 def _spec(name: str) -> SimpleNamespace:
@@ -57,9 +66,7 @@ def test_preflight_preserves_underlying_abi_error() -> None:
 
     assert report.status is IioEnvironmentStatus.LIBIIO_ABI_INCOMPATIBLE
     assert report.native_libiio_candidate == "libiio.so.0"
-    assert report.underlying_error == (
-        "AttributeError: undefined symbol: iio_get_backends_count"
-    )
+    assert report.underlying_error == ("AttributeError: undefined symbol: iio_get_backends_count")
 
 
 def test_preflight_distinguishes_missing_usb_backend() -> None:
@@ -120,3 +127,276 @@ def test_pyadi_import_failure_is_classified_after_native_load() -> None:
 
     assert report.status is IioEnvironmentStatus.LIBIIO_ABI_INCOMPATIBLE
     assert report.underlying_error == "ImportError: cannot import name ad9361"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_abi2_runtime_profile_requires_exact_v7_firmware() -> None:
+    with pytest.raises(ValueError, match="firmware version is required"):
+        verify_metadata_runtime(expected_abi=2)
+    with pytest.raises(ValueError, match="unsupported metadata runtime profile"):
+        verify_metadata_runtime(
+            expected_abi=2,
+            expected_firmware_version="v0.40-plutoplus-spf-tandem-agc-v8",
+        )
+
+    profile = preflight._metadata_runtime_profile(2, preflight.V7_FIRMWARE_VERSION)
+
+    assert profile.metadata_abi == 2
+    assert profile.firmware_version == preflight.V7_FIRMWARE_VERSION
+    assert profile.source_ref == "tandem-agc-v2-source/libiio-v9"
+    assert profile.source_commit == "015e4924113d4996667f80b880c34cbf7d1147de"
+    assert profile.metadata_buffer_parameters == (
+        "self",
+        "device",
+        "samples_count",
+        "request",
+        "metadata_capacity",
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("firmware_version", "v0.40-plutoplus-spf-tandem-agc-v8", "firmware profile"),
+        ("source_ref", "tandem-agc-v8-rc2-source/libiio-v1", "source ref"),
+        ("source_commit", "6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7", "source commit"),
+    ],
+)
+def test_abi2_receipt_rejects_every_non_v7_profile_field(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    prefix = tmp_path / "release/.venv"
+    native = prefix / "lib/libiio.so.0.25"
+    binding = prefix / "lib/python3.11/site-packages/iio.py"
+    receipt = prefix / "share/pluto-plus-utils/metadata-runtime.json"
+    native.parent.mkdir(parents=True)
+    binding.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    native.write_bytes(b"exact v7 native build")
+    binding.write_text("# exact v7 binding\n")
+    document = {
+        "schema_version": 1,
+        "metadata_abi": 2,
+        "firmware_version": preflight.V7_FIRMWARE_VERSION,
+        "source_ref": "tandem-agc-v2-source/libiio-v9",
+        "source_commit": "015e4924113d4996667f80b880c34cbf7d1147de",
+        "native_libiio_path": str(native),
+        "native_libiio_sha256": _sha256(native),
+        "pylibiio_path": str(binding),
+        "pylibiio_sha256": _sha256(binding),
+        "metadata_buffer_parameters": [
+            "self",
+            "device",
+            "samples_count",
+            "request",
+            "metadata_capacity",
+        ],
+    }
+    profile = preflight._metadata_runtime_profile(2, preflight.V7_FIRMWARE_VERSION)
+    verified = preflight._validate_metadata_runtime_receipt(
+        document,
+        prefix=prefix,
+        receipt_path=receipt,
+        profile=profile,
+    )
+
+    assert verified.firmware_version == preflight.V7_FIRMWARE_VERSION
+    assert verified.source_ref == "tandem-agc-v2-source/libiio-v9"
+    assert verified.source_commit == "015e4924113d4996667f80b880c34cbf7d1147de"
+
+    document[field] = value
+    with pytest.raises(RuntimeError, match=message):
+        preflight._validate_metadata_runtime_receipt(
+            document,
+            prefix=prefix,
+            receipt_path=receipt,
+            profile=profile,
+        )
+
+
+def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "release/.venv"
+    native = prefix / "lib/libiio.so.0.25"
+    binding = prefix / "lib/python3.11/site-packages/iio.py"
+    receipt = prefix / "share/pluto-plus-utils/metadata-runtime.json"
+    native.parent.mkdir(parents=True)
+    binding.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    native.write_bytes(b"exact native build")
+    binding.write_text("# exact binding\n")
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "metadata_abi": 1,
+                "source_ref": "spf-frame-metadata-source/v0.25-final-v3",
+                "source_commit": "c26258bfa33098c2b215e19cf85d448e89499b1a",
+                "native_libiio_path": str(native),
+                "native_libiio_sha256": _sha256(native),
+                "pylibiio_path": str(binding),
+                "pylibiio_sha256": _sha256(binding),
+                "metadata_buffer_parameters": [
+                    "self",
+                    "device",
+                    "samples_count",
+                    "metadata_capacity",
+                ],
+            }
+        )
+    )
+
+    class MetadataBuffer:
+        def __init__(
+            self, device: object, samples_count: int, metadata_capacity: int = 64 * 1024
+        ) -> None:
+            pass
+
+    module = SimpleNamespace(MetadataBuffer=MetadataBuffer, __file__=str(binding))
+    monkeypatch.setattr(preflight.sys, "prefix", str(prefix))
+    monkeypatch.setattr(preflight, "CDLL", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(preflight, "_mapped_libiio_paths", lambda: (native,))
+    monkeypatch.setattr(preflight.importlib, "import_module", lambda _name: module)
+    monkeypatch.setattr(
+        preflight,
+        "inspect_iio_environment",
+        lambda **_kwargs: SimpleNamespace(
+            healthy=True,
+            native_libiio_path=str(native),
+            actionable_message="",
+        ),
+    )
+
+    result = verify_metadata_runtime(expected_abi=1)
+
+    assert result.metadata_abi == 1
+    assert result.native_libiio_sha256 == _sha256(native)
+    assert result.pylibiio_path == str(binding)
+
+
+def test_metadata_runtime_gate_rejects_missing_receipt_and_changed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "release/.venv"
+    prefix.mkdir(parents=True)
+    monkeypatch.setattr(preflight.sys, "prefix", str(prefix))
+    with pytest.raises(RuntimeError, match="receipt is missing"):
+        verify_metadata_runtime(expected_abi=1)
+
+    native = prefix / "lib/libiio.so.0.25"
+    binding = prefix / "lib/python3.11/site-packages/iio.py"
+    receipt = prefix / "share/pluto-plus-utils/metadata-runtime.json"
+    native.parent.mkdir(parents=True)
+    binding.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    native.write_bytes(b"changed native build")
+    binding.write_text("# exact binding\n")
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "metadata_abi": 1,
+                "source_ref": "spf-frame-metadata-source/v0.25-final-v3",
+                "source_commit": "c26258bfa33098c2b215e19cf85d448e89499b1a",
+                "native_libiio_path": str(native),
+                "native_libiio_sha256": "0" * 64,
+                "pylibiio_path": str(binding),
+                "pylibiio_sha256": _sha256(binding),
+                "metadata_buffer_parameters": [
+                    "self",
+                    "device",
+                    "samples_count",
+                    "metadata_capacity",
+                ],
+            }
+        )
+    )
+
+    class MetadataBuffer:
+        def __init__(
+            self, device: object, samples_count: int, metadata_capacity: int = 64 * 1024
+        ) -> None:
+            pass
+
+    module = SimpleNamespace(MetadataBuffer=MetadataBuffer, __file__=str(binding))
+    monkeypatch.setattr(preflight, "CDLL", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(preflight, "_mapped_libiio_paths", lambda: (native,))
+    monkeypatch.setattr(preflight.importlib, "import_module", lambda _name: module)
+    monkeypatch.setattr(
+        preflight,
+        "inspect_iio_environment",
+        lambda **_kwargs: SimpleNamespace(
+            healthy=True,
+            native_libiio_path=str(native),
+            actionable_message="",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="native libiio hash changed"):
+        verify_metadata_runtime(expected_abi=1)
+
+
+def test_metadata_runtime_rejects_iio_imported_before_exact_native(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "release/.venv"
+    native = prefix / "lib/libiio.so.0.25"
+    binding = prefix / "lib/python3.11/site-packages/iio.py"
+    receipt = prefix / "share/pluto-plus-utils/metadata-runtime.json"
+    native.parent.mkdir(parents=True)
+    binding.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    native.write_bytes(b"exact native build")
+    binding.write_text("# exact binding\n")
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "metadata_abi": 1,
+                "source_ref": "spf-frame-metadata-source/v0.25-final-v3",
+                "source_commit": "c26258bfa33098c2b215e19cf85d448e89499b1a",
+                "native_libiio_path": str(native),
+                "native_libiio_sha256": _sha256(native),
+                "pylibiio_path": str(binding),
+                "pylibiio_sha256": _sha256(binding),
+                "metadata_buffer_parameters": [
+                    "self",
+                    "device",
+                    "samples_count",
+                    "metadata_capacity",
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(preflight.sys, "prefix", str(prefix))
+    monkeypatch.setitem(preflight.sys.modules, "iio", ModuleType("iio"))
+    monkeypatch.setattr(
+        preflight,
+        "_mapped_libiio_paths",
+        lambda: (Path("/usr/lib/x86_64-linux-gnu/libiio.so.0.26"),),
+    )
+
+    with pytest.raises(RuntimeError, match="imported before"):
+        verify_metadata_runtime(expected_abi=1)
+
+
+def test_loaded_library_path_resolves_versioned_release_mapping(tmp_path: Path) -> None:
+    prefix = tmp_path / "release/.venv"
+    native = prefix / "lib/libiio.so.0.25"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native")
+    maps = tmp_path / "maps"
+    maps.write_text(
+        f"7f00-7f01 r-xp 00000000 00:00 1 {native}\n",
+        encoding="utf-8",
+    )
+    iio = ModuleType("iio")
+    iio._lib = SimpleNamespace(_name="libiio.so.0")  # type: ignore[attr-defined]
+
+    assert preflight._loaded_library_path(iio, "libiio.so.0", maps_path=maps) == str(native)

@@ -8,12 +8,21 @@ import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import numpy as np
 
-from pluto_plus.hardware.base import SampleBlock
+from pluto_plus.direct_radio.usb import MetadataFlags
+from pluto_plus.hardware.base import SampleBlock, SampleBlockV2
 from pluto_plus.models import ArtifactSummary, RadioIdentity, RadioSettings, utc_now
+
+_METADATA_FAILURE_FLAGS = (
+    MetadataFlags.DEVICE_IIO_OVERFLOW
+    | MetadataFlags.GAIN_READ_FAILED
+    | MetadataFlags.FPGA_EVENT_OVERFLOW
+    | MetadataFlags.RSSI_READ_FAILED
+    | MetadataFlags.GAIN_OBSERVATION_OVERFLOW
+)
 
 
 class CaptureWriter:
@@ -45,14 +54,31 @@ class CaptureWriter:
         self._last_utc_ns: int | None = None
         self._epochs: list[dict[str, Any]] = []
         self._last_revision: int | None = None
+        self._block_contract: str | None = None
+        self._continuity_blocks: list[dict[str, Any]] = []
+        self._continuity_stream_id: int | None = None
+        self._continuity_metadata_abi: int | None = None
+        self._continuity_first_sample: int | None = None
+        self._continuity_previous_buffer: int | None = None
+        self._continuity_previous_sample_end: int | None = None
+        self._continuity_error: str | None = None
         self._closed = False
 
-    def append(self, block: SampleBlock, settings: RadioSettings, revision: int) -> None:
+    def append(
+        self, block: SampleBlock | SampleBlockV2, settings: RadioSettings, revision: int
+    ) -> None:
         self._require_open()
+        if self._continuity_error is not None:
+            raise RuntimeError(
+                f"capture writer rejected a prior block: {self._continuity_error}"
+            )
         values = np.asarray(block.samples)
         if values.shape[0] != self._receiver_count:
             raise ValueError("receiver count changed during capture")
         encoded = complex_to_ci16(values)
+        self._validate_block_contract(block)
+        if isinstance(block, SampleBlockV2):
+            self._append_continuity_record(block, values.shape[1])
         wire = encoded.tobytes(order="C")
         self._stream.write(wire)
         self._sha256.update(wire)
@@ -73,6 +99,10 @@ class CaptureWriter:
 
     def finalize(self) -> ArtifactSummary:
         self._require_open()
+        if self._continuity_error is not None:
+            raise RuntimeError(
+                f"cannot finalize discontinuous capture: {self._continuity_error}"
+            )
         self._stream.flush()
         os.fsync(self._stream.fileno())
         self._stream.close()
@@ -99,6 +129,9 @@ class CaptureWriter:
                 "initial_settings": self._initial_settings.model_dump(mode="json"),
             },
         }
+        continuity = self._continuity_metadata()
+        if continuity is not None:
+            metadata["pluto:continuity"] = continuity
         meta_path = self._partial / f"{self.artifact_id}.sigmf-meta"
         with meta_path.open("x", encoding="utf-8") as stream:
             json.dump(metadata, stream, sort_keys=True, separators=(",", ":"))
@@ -143,6 +176,119 @@ class CaptureWriter:
     def _require_open(self) -> None:
         if self._closed:
             raise RuntimeError("capture writer is closed")
+
+    def _validate_block_contract(self, block: SampleBlock | SampleBlockV2) -> None:
+        contract = "metadata_v2" if isinstance(block, SampleBlockV2) else "legacy"
+        if self._block_contract is None:
+            self._block_contract = contract
+            return
+        if contract != self._block_contract:
+            self._reject_continuity("legacy SampleBlock and SampleBlockV2 cannot be mixed")
+
+    def _append_continuity_record(self, block: SampleBlockV2, sample_count: int) -> None:
+        if block.metadata_abi not in {1, 2}:
+            self._reject_continuity("metadata ABI is not supported for continuity evidence")
+        required_flags = (
+            MetadataFlags.SAMPLE_SEQUENCE_VALID
+            | MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID
+        )
+        if MetadataFlags(block.metadata_flags) & required_flags != required_flags:
+            self._reject_continuity(
+                "metadata lacks valid sample-sequence or hardware-counter flags"
+            )
+        if block.sample_count != sample_count:
+            self._reject_continuity(
+                "metadata samples_per_channel does not match the IQ block sample count"
+            )
+        if block.missing_samples_before != 0:
+            self._reject_continuity("metadata reports missing samples before this block")
+        failure_flags = MetadataFlags(block.metadata_flags) & _METADATA_FAILURE_FLAGS
+        if failure_flags:
+            self._reject_continuity(
+                f"metadata reports overflow or capture failure flags: 0x{int(failure_flags):x}"
+            )
+
+        if self._continuity_stream_id is None:
+            if block.buffer_sequence != 0:
+                self._reject_continuity(
+                    "first metadata block must begin at buffer sequence zero"
+                )
+        else:
+            assert self._continuity_metadata_abi is not None
+            assert self._continuity_previous_buffer is not None
+            assert self._continuity_previous_sample_end is not None
+            if block.stream_id != self._continuity_stream_id:
+                self._reject_continuity("metadata stream_id changed during capture")
+            if block.metadata_abi != self._continuity_metadata_abi:
+                self._reject_continuity("metadata ABI changed during capture")
+            if block.buffer_sequence != self._continuity_previous_buffer + 1:
+                self._reject_continuity(
+                    "metadata buffer_sequence did not increment by exactly one"
+                )
+            if block.first_sample_sequence != self._continuity_previous_sample_end:
+                self._reject_continuity(
+                    "metadata first_sample_sequence does not follow the prior block"
+                )
+
+        record: dict[str, Any] = {
+            "sample_start": self._sample_count,
+            "sample_count": sample_count,
+            "utc_ns": block.utc_ns,
+            "metadata_abi": block.metadata_abi,
+            "stream_id": block.stream_id,
+            "buffer_sequence": block.buffer_sequence,
+            "first_sample_sequence": block.first_sample_sequence,
+            "last_sample_sequence_exclusive": block.last_sample_sequence_exclusive,
+            "metadata_flags": block.metadata_flags,
+            "missing_samples_before": block.missing_samples_before,
+        }
+        timing = {
+            "sample_time_realtime_start_ns": block.sample_time_realtime_start_ns,
+            "sample_time_realtime_end_ns": block.sample_time_realtime_end_ns,
+            "sample_time_monotonic_start_ns": block.sample_time_monotonic_start_ns,
+            "sample_time_monotonic_end_ns": block.sample_time_monotonic_end_ns,
+            "sample_time_uncertainty_ns": block.sample_time_uncertainty_ns,
+        }
+        record.update({key: value for key, value in timing.items() if value is not None})
+
+        if self._continuity_stream_id is None:
+            self._continuity_stream_id = block.stream_id
+            self._continuity_metadata_abi = block.metadata_abi
+            self._continuity_first_sample = block.first_sample_sequence
+        self._continuity_previous_buffer = block.buffer_sequence
+        self._continuity_previous_sample_end = block.last_sample_sequence_exclusive
+        self._continuity_blocks.append(record)
+
+    def _continuity_metadata(self) -> dict[str, Any] | None:
+        if self._block_contract != "metadata_v2":
+            return None
+        if not self._continuity_blocks:
+            raise RuntimeError("metadata capture contains no continuity blocks")
+        assert self._continuity_stream_id is not None
+        assert self._continuity_metadata_abi is not None
+        assert self._continuity_first_sample is not None
+        assert self._continuity_previous_sample_end is not None
+        sample_span = self._continuity_previous_sample_end - self._continuity_first_sample
+        block_total = sum(int(block["sample_count"]) for block in self._continuity_blocks)
+        if block_total != self._sample_count or sample_span != self._sample_count:
+            self._reject_continuity(
+                "metadata sample span does not match the persisted IQ sample count"
+            )
+        return {
+            "schema_version": 1,
+            "metadata_abi": self._continuity_metadata_abi,
+            "stream_id": self._continuity_stream_id,
+            "block_count": len(self._continuity_blocks),
+            "total_samples": self._sample_count,
+            "first_sample_sequence": self._continuity_first_sample,
+            "last_sample_sequence_exclusive": self._continuity_previous_sample_end,
+            "sample_sequence_span": sample_span,
+            "blocks": self._continuity_blocks,
+        }
+
+    def _reject_continuity(self, message: str) -> NoReturn:
+        self._continuity_error = message
+        raise ValueError(message)
 
 
 def complex_to_ci16(samples: np.ndarray) -> np.ndarray:

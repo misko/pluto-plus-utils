@@ -31,6 +31,7 @@ hardware = [
   "pyadi-iio>=0.0.21",
   "pylibiio>=0.25,<0.27",
   "libusb1>=3.1",
+  "setuptools>=75,<82",
 ]
 browser = [
   "playwright>=1.49,<2",
@@ -39,9 +40,13 @@ browser = [
 [project.scripts]
 pluto = "pluto_plus.cli:app"
 plutod = "pluto_plus.cli:serve_entrypoint"
+pluto-install-metadata-runtime = "pluto_plus.metadata_runtime_install:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pluto_plus"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/install_native_libiio.sh" = "pluto_plus/_native/install_native_libiio.sh"
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
