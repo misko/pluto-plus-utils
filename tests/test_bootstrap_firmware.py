@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -61,6 +62,75 @@ def _local(path: Path, *, serial: str | None = None) -> LocalUsbPluto:
         terminal_devices=("/dev/ttyACM0",),
         storage_devices=("/dev/sdb1",),
     )
+
+
+def _lan_iio_facts(*, serial: str = "SERIAL_A") -> dict[str, object]:
+    return {
+        "hw_serial": serial,
+        "hw_model": "Analog Devices PlutoSDR Rev.C (Z7010/AD9363)",
+        "fw_version": bootstrap.CANONICAL_POLICY.device_firmware,
+        "ad9361-phy,model": "ad9361",
+        "iio,buffer-metadata": "1",
+        "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+        "cf-ad9361-lpc,scan_channels": (
+            "voltage0",
+            "voltage1",
+            "voltage2",
+            "voltage3",
+        ),
+    }
+
+
+def _install_lan_ssh_fake(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    remote_serial: str,
+) -> tuple[list[list[str]], list[bytes]]:
+    spawned_arguments: list[list[str]] = []
+    submitted_passwords: list[bytes] = []
+
+    class SuccessfulChild:
+        exitstatus = 0
+        signalstatus = None
+
+        def __init__(self, output: bytes) -> None:
+            self.before = b""
+            self._output = output
+            self._expects = 0
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            self._expects += 1
+            if self._expects == 1:
+                self.before = b""
+                return 0
+            self.before = self._output
+            return 1
+
+        def sendline(self, value: bytes) -> None:
+            submitted_passwords.append(value)
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    def spawn(binary: str, arguments: list[str], **kwargs: object) -> SuccessfulChild:
+        del kwargs
+        assert binary == "ssh"
+        spawned_arguments.append(list(arguments))
+        if "StrictHostKeyChecking=accept-new" in arguments:
+            known_hosts_argument = next(
+                item for item in arguments if item.startswith("UserKnownHostsFile=")
+            )
+            Path(known_hosts_argument.partition("=")[2]).write_text(
+                "192.168.1.20 ssh-ed25519 AAAATESTKEY\n"
+            )
+            return SuccessfulChild(b"")
+        return SuccessfulChild(f"serial={remote_serial}\n".encode())
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", spawn)
+    return spawned_arguments, submitted_passwords
 
 
 @pytest.fixture
@@ -234,6 +304,178 @@ def test_bound_ssh_bootstrap_upload_uses_only_the_selected_known_hosts_file(
 
     assert f"UserKnownHostsFile={known_hosts}" in spawned_arguments
     assert "GlobalKnownHostsFile=/dev/null" in spawned_arguments
+
+
+def test_lan_ssh_enrollment_attests_then_uses_isolated_tofu_and_pinned_sessions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inspected_hosts: list[str] = []
+
+    def inspect(host: str) -> dict[str, object]:
+        inspected_hosts.append(host)
+        return _lan_iio_facts()
+
+    monkeypatch.setattr(bootstrap, "_inspect_iio_context", inspect)
+    monkeypatch.setattr(bootstrap, "_run_output", lambda argv, timeout_s: "SHA256:key radio")
+    spawned, passwords = _install_lan_ssh_fake(monkeypatch, remote_serial="SERIAL_A")
+    destination = tmp_path / "trust" / "SERIAL_A.known_hosts"
+    plan = bootstrap.prepare_lan_ssh_host_key_enrollment(
+        serial="SERIAL_A",
+        host="192.168.1.20",
+        known_hosts_file=destination,
+        profile_id="libiio-metadata-v6",
+    )
+
+    result = bootstrap.execute_lan_ssh_host_key_enrollment(
+        plan,
+        confirmation="TRUST LAN SSH SERIAL_A 192.168.1.20",
+    )
+
+    assert inspected_hosts == ["192.168.1.20", "192.168.1.20"]
+    assert plan.confirmation_phrase == "TRUST LAN SSH SERIAL_A 192.168.1.20"
+    assert result["trust_model"] == "explicit_lan_tofu"
+    assert result["serial"] == "SERIAL_A"
+    assert result["metadata_abi"] == 1
+    assert destination.read_text() == "192.168.1.20 ssh-ed25519 AAAATESTKEY\n"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert passwords == [b"analog", b"analog"]
+    assert len(spawned) == 2
+    assert "StrictHostKeyChecking=accept-new" in spawned[0]
+    assert "StrictHostKeyChecking=yes" in spawned[1]
+    for arguments in spawned:
+        assert arguments[:2] == ["-F", "/dev/null"]
+        assert "GlobalKnownHostsFile=/dev/null" in arguments
+        assert "PubkeyAuthentication=no" in arguments
+        assert "PreferredAuthentications=password" in arguments
+        assert sum(item.startswith("UserKnownHostsFile=") for item in arguments) == 1
+
+
+def test_lan_ssh_enrollment_rejects_pinned_remote_serial_mismatch_without_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bootstrap, "_inspect_iio_context", lambda host: _lan_iio_facts())
+    monkeypatch.setattr(bootstrap, "_run_output", lambda argv, timeout_s: "unused")
+    spawned, _passwords = _install_lan_ssh_fake(monkeypatch, remote_serial="SERIAL_MITM")
+    destination = tmp_path / "trust" / "SERIAL_A.known_hosts"
+    plan = bootstrap.prepare_lan_ssh_host_key_enrollment(
+        serial="SERIAL_A",
+        host="192.168.1.20",
+        known_hosts_file=destination,
+        profile_id="libiio-metadata-v6",
+    )
+
+    with pytest.raises(
+        bootstrap.BootstrapFirmwareError,
+        match="pinned LAN SSH endpoint attested serial 'SERIAL_MITM', expected 'SERIAL_A'",
+    ):
+        bootstrap.execute_lan_ssh_host_key_enrollment(
+            plan,
+            confirmation=plan.confirmation_phrase,
+        )
+
+    assert len(spawned) == 2
+    assert not destination.exists()
+    assert not tuple(destination.parent.glob(f".{destination.name}.*"))
+
+
+def test_lan_ssh_enrollment_rejects_iio_serial_mismatch_before_tofu(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bootstrap,
+        "_inspect_iio_context",
+        lambda host: _lan_iio_facts(serial="SERIAL_OTHER"),
+    )
+
+    def unexpected_spawn(*args: object, **kwargs: object) -> object:
+        pytest.fail(f"IIO identity mismatch must prevent SSH TOFU: {args!r} {kwargs!r}")
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", unexpected_spawn)
+    with pytest.raises(
+        bootstrap.BootstrapFirmwareError,
+        match="attested serial 'SERIAL_OTHER', expected 'SERIAL_A'",
+    ):
+        bootstrap.prepare_lan_ssh_host_key_enrollment(
+            serial="SERIAL_A",
+            host="192.168.1.20",
+            known_hosts_file=tmp_path / "SERIAL_A.known_hosts",
+            profile_id="libiio-metadata-v6",
+        )
+
+
+def test_lan_ssh_enrollment_refuses_existing_destination_before_network_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "SERIAL_A.known_hosts"
+    destination.write_text("keep\n")
+
+    def unexpected_inspection(host: str) -> dict[str, object]:
+        pytest.fail(f"existing destination must fail before inspecting {host}")
+
+    monkeypatch.setattr(bootstrap, "_inspect_iio_context", unexpected_inspection)
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="already exists"):
+        bootstrap.prepare_lan_ssh_host_key_enrollment(
+            serial="SERIAL_A",
+            host="192.168.1.20",
+            known_hosts_file=destination,
+            profile_id="libiio-metadata-v6",
+        )
+
+    assert destination.read_text() == "keep\n"
+
+
+def test_lan_ssh_enrollment_requires_exact_serial_and_host_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bootstrap, "_inspect_iio_context", lambda host: _lan_iio_facts())
+    plan = bootstrap.prepare_lan_ssh_host_key_enrollment(
+        serial="SERIAL_A",
+        host="192.168.1.20",
+        known_hosts_file=tmp_path / "SERIAL_A.known_hosts",
+        profile_id="libiio-metadata-v6",
+    )
+
+    def unexpected_spawn(*args: object, **kwargs: object) -> object:
+        pytest.fail(f"wrong confirmation must not start SSH: {args!r} {kwargs!r}")
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", unexpected_spawn)
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="confirmation must be exactly"):
+        bootstrap.execute_lan_ssh_host_key_enrollment(
+            plan,
+            confirmation="TRUST LAN SSH SERIAL_A 192.168.1.21",
+        )
+
+
+@pytest.mark.parametrize(
+    "host",
+    ("radio.local", "8.8.8.8", "127.0.0.1", "192.168.2.1"),
+)
+def test_lan_ssh_enrollment_accepts_only_literal_private_lan_ipv4(
+    host: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_inspection(candidate: str) -> dict[str, object]:
+        pytest.fail(f"invalid LAN host must fail before IIOD access: {candidate}")
+
+    monkeypatch.setattr(bootstrap, "_inspect_iio_context", unexpected_inspection)
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="LAN SSH"):
+        bootstrap.prepare_lan_ssh_host_key_enrollment(
+            serial="SERIAL_A",
+            host=host,
+            known_hosts_file=tmp_path / "SERIAL_A.known_hosts",
+            profile_id="libiio-metadata-v6",
+        )
 
 
 def test_selected_forward_profile_is_exact_and_blank_recovery_stays_canonical(

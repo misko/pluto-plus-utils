@@ -467,6 +467,42 @@ independently hashes the exact FIT bytes in `mtd3`, removes the stage, reboots,
 and retries post-return IIOD attestation while services start. It never exposes
 an arbitrary remote command or updater path.
 
+### Explicit LAN TOFU enrollment
+
+When the exact radio cannot be physically USB-attached, an operator may
+explicitly enroll its LAN SSH key using the factory-default password. First run
+the read-only plan:
+
+```bash
+uv run pluto firmware enroll-lan-ssh EXACT_SERIAL \
+  --host 192.168.1.20 \
+  --profile libiio-metadata-v5 \
+  --known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts
+```
+
+The plan reads only that host's bounded IIOD context and requires the exact
+serial, immutable firmware profile, AD9361/paired-RX scan layout, metadata ABI,
+and profile-specific tandem capability. Review it, then repeat with both explicit
+guards:
+
+```bash
+uv run pluto firmware enroll-lan-ssh EXACT_SERIAL \
+  --host 192.168.1.20 \
+  --profile libiio-metadata-v5 \
+  --known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts \
+  --execute --use-default-password \
+  --confirm 'TRUST LAN SSH EXACT_SERIAL 192.168.1.20'
+```
+
+This is deliberately **LAN trust on first use**, not a USB physical-path trust
+anchor. A network attacker capable of consistently impersonating both IIOD and
+SSH may defeat it, so prefer `firmware enroll-usb-ssh` whenever physical USB is
+available. Enrollment accepts the first key only into a new mode-0600 temporary
+file, disables user and global SSH trust, reconnects with strict checking to run
+only the fixed gadget-serial read, and publishes atomically without overwriting.
+It never writes `~/.ssh/known_hosts` or a global known-hosts file. Key rotation
+requires a separately reviewed new destination path.
+
 ### Experimental pinned-SSH radio administration
 
 An IP-attached, managed IIO radio can be explicitly enrolled for a canonical,
