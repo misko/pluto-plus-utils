@@ -191,6 +191,8 @@ class BoundSshBootstrapTransport:
                 "StrictHostKeyChecking=yes",
                 "-o",
                 f"UserKnownHostsFile={self._known_hosts_file}",
+                "-o",
+                "GlobalKnownHostsFile=/dev/null",
                 str(local_path),
                 f"{self._username}@{self._host}:/tmp/pluto-plus-utils/pluto.frm",
             ]
@@ -287,6 +289,8 @@ def enroll_bound_usb_ssh_host_key(
             "StrictHostKeyChecking=accept-new",
             "-o",
             f"UserKnownHostsFile={temporary}",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
             f"root@{host}",
             command,
         ]

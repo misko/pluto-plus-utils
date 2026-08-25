@@ -18,6 +18,7 @@ import numpy as np
 from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
 from pluto_plus.doctor import TANDEM_AGC_V7_RAM_POLICY
 from pluto_plus.hardware.iio import _mute_transmit
+from pluto_plus.hardware.iio_metadata import configure_iio_context_timeout
 from pluto_plus.inventory import scan_local_usb_plutos
 from pluto_plus.tandem import (
     RadioMetadataV5,
@@ -218,6 +219,7 @@ def execute_tandem_qualification(
         "outcome": "started",
     }
     try:
+        configure_iio_context_timeout(sdr._ctx)
         if sdr._ctx.attrs.get("hw_serial") != plan.serial:
             raise TandemQualificationError("opened IIO context has the wrong serial")
         if sdr._ctx.attrs.get("fw_version") != plan.expected_firmware:

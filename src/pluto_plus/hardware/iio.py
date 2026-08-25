@@ -14,7 +14,10 @@ import numpy as np
 from pluto_plus.diagnostic_profiles import parse_metadata_abi
 from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
 from pluto_plus.hardware.base import SampleBlock
-from pluto_plus.hardware.iio_metadata import IioMetadataCaptureSession
+from pluto_plus.hardware.iio_metadata import (
+    IioMetadataCaptureSession,
+    configure_iio_context_timeout,
+)
 from pluto_plus.hardware.preflight import MetadataRuntimeVerification, verify_metadata_runtime
 from pluto_plus.models import (
     GainMode,
@@ -112,6 +115,7 @@ class IioRadioDevice:
         )
         device = module.ad9361(uri=uri)
         try:
+            configure_iio_context_timeout(device.ctx)
             device.rx_destroy_buffer()
             facts = context_facts(device.ctx)
             detected_serial = str(facts.get("serial") or "")

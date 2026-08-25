@@ -170,7 +170,14 @@ def test_usb_ssh_enrollment_for_path_a_never_accepts_serial_b(
 
     import pexpect
 
-    monkeypatch.setattr(pexpect, "spawn", lambda *args, **kwargs: WrongRadioChild())
+    spawned_arguments: list[str] = []
+
+    def spawn(binary: str, arguments: list[str], **kwargs: object) -> WrongRadioChild:
+        del binary, kwargs
+        spawned_arguments.extend(arguments)
+        return WrongRadioChild()
+
+    monkeypatch.setattr(pexpect, "spawn", spawn)
     destination = tmp_path / "SERIAL_A.known_hosts"
 
     with pytest.raises(
@@ -185,6 +192,48 @@ def test_usb_ssh_enrollment_for_path_a_never_accepts_serial_b(
         )
 
     assert not destination.exists()
+    assert "GlobalKnownHostsFile=/dev/null" in spawned_arguments
+
+
+def test_bound_ssh_bootstrap_upload_uses_only_the_selected_known_hosts_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    spawned_arguments: list[str] = []
+
+    class SuccessfulChild:
+        before = b""
+        exitstatus = 0
+        signalstatus = None
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            return 1
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    def spawn(binary: str, arguments: list[str], **kwargs: object) -> SuccessfulChild:
+        del binary, kwargs
+        spawned_arguments.extend(arguments)
+        return SuccessfulChild()
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", spawn)
+    transport = bootstrap.BoundSshBootstrapTransport(
+        interface=None,
+        password="analog",
+        known_hosts_file=known_hosts,
+    )
+
+    transport.upload_frm(b"firmware")
+
+    assert f"UserKnownHostsFile={known_hosts}" in spawned_arguments
+    assert "GlobalKnownHostsFile=/dev/null" in spawned_arguments
 
 
 def test_selected_forward_profile_is_exact_and_blank_recovery_stays_canonical(

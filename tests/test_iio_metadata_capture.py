@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import struct
 import zlib
 from collections import deque
@@ -24,6 +25,7 @@ from pluto_plus.direct_radio.usb import (
 )
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.iio import IioRadioDevice
+from pluto_plus.hardware.iio_metadata import IIO_CONTEXT_TIMEOUT_MS
 from pluto_plus.tandem import (
     AD9361_TEMPERATURE_FEATURE,
     TANDEM_METADATA_FEATURE,
@@ -208,6 +210,10 @@ class FakeAd9361:
         preserve_readback: bool = True,
     ) -> None:
         self.uri = uri
+        self.events: list[str] = []
+        self.timeout_calls: list[int] = []
+        self.rx_failure: OSError | None = None
+        self.context_close_count = 0
         attrs = {
             "hw_serial": "SERIAL_A",
             "hw_model": "Pluto+ Test",
@@ -228,7 +234,8 @@ class FakeAd9361:
                 if name == "tandem-agc" and metadata_abi == 2
                 else None
             ),
-            close=lambda: None,
+            set_timeout=self._set_timeout,
+            close=self._close_context,
         )
         self.sample_rate = 2_500_000
         self.rx_rf_bandwidth = 2_500_000
@@ -258,7 +265,17 @@ class FakeAd9361:
     def disable_dds(self) -> None:
         self.dds_enabled = [0] * 8
 
+    def _set_timeout(self, timeout_ms: int) -> None:
+        self.timeout_calls.append(timeout_ms)
+        self.events.append(f"timeout:{timeout_ms}")
+
+    def _close_context(self) -> None:
+        self.context_close_count += 1
+
     def rx(self) -> np.ndarray:
+        self.events.append("read")
+        if self.rx_failure is not None:
+            raise self.rx_failure
         axis = np.arange(self.rx_buffer_size, dtype=np.float32)
         return np.stack((axis + 1j * axis, 2 * axis + 3j * axis)).astype(np.complex64)
 
@@ -337,6 +354,27 @@ def test_abi1_capture_reports_contiguous_counter_time_and_exact_constructor() ->
             capture.read_block()
     finally:
         radio.close()
+
+
+def test_context_timeout_precedes_reads_and_read_timeout_allows_cleanup() -> None:
+    radio, adi, factory = _open_radio([])
+    assert adi.device is not None
+    device = adi.device
+    assert device.timeout_calls == [IIO_CONTEXT_TIMEOUT_MS]
+    assert device.events == [f"timeout:{IIO_CONTEXT_TIMEOUT_MS}"]
+
+    capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8)
+    assert device.events[:2] == [f"timeout:{IIO_CONTEXT_TIMEOUT_MS}", "read"]
+    device.rx_failure = TimeoutError(errno.ETIMEDOUT, "IIO context timed out")
+
+    with pytest.raises(TimeoutError, match="IIO context timed out") as caught:
+        capture.read_block()
+
+    assert caught.value.errno == errno.ETIMEDOUT
+    assert not capture.is_open
+    assert factory.instances[0].closed
+    radio.close()
+    assert device.context_close_count == 1
 
 
 def test_abi1_capture_surfaces_a_whole_refill_gap() -> None:

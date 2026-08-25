@@ -648,6 +648,7 @@ def test_pinned_ssh_transport_uses_key_only_strict_host_checking_and_fixed_updat
     assert stdin is None
     assert "BatchMode=yes" in argv
     assert "StrictHostKeyChecking=yes" in argv
+    assert "GlobalKnownHostsFile=/dev/null" in argv
     assert "PasswordAuthentication=no" in argv
     assert argv[-1] == "/sbin/update_frm.sh /root/.pluto-plus-ip-firmware/pluto.frm"
     assert all("mtd" not in argument for argument in argv)

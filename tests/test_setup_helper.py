@@ -38,6 +38,47 @@ def test_bound_ssh_transport_supports_private_lan_without_usb_bind(
     assert transport.interface is None
 
 
+def test_bound_ssh_transport_uses_only_the_selected_known_hosts_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    spawned_arguments: list[str] = []
+
+    class SuccessfulChild:
+        before = b""
+        exitstatus = 0
+        signalstatus = None
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            return 1
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    def spawn(binary: str, arguments: list[str], **kwargs: object) -> SuccessfulChild:
+        del binary, kwargs
+        spawned_arguments.extend(arguments)
+        return SuccessfulChild()
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", spawn)
+    transport = BoundSshTransport(
+        host="192.168.1.14",
+        interface=None,
+        password="analog",
+        known_hosts_file=known_hosts,
+    )
+
+    assert transport.run("fw_printenv mode") == ""
+    assert f"UserKnownHostsFile={known_hosts}" in spawned_arguments
+    assert "GlobalKnownHostsFile=/dev/null" in spawned_arguments
+
+
 def test_bound_ssh_transport_rejects_public_or_named_hosts(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("placeholder\n")

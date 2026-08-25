@@ -16,6 +16,7 @@ from pluto_plus.direct_radio.usb import (
     TimeAnchorFlags,
     TimeAnchorV1,
 )
+from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.base import SampleBlockV2
 from pluto_plus.hardware.sample_clock import (
     DEFAULT_SAMPLE_CLOCK_RATE_TOLERANCE_PPM,
@@ -27,12 +28,32 @@ from pluto_plus.tandem import RadioMetadataV5, TandemMode, TandemSessionRequestV
 
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
 DEFAULT_METADATA_CAPACITY = 64 * 1024
+# A 262,144-sample dual-RX refill spans about 105 ms at 2.5 MS/s. Five
+# seconds leaves more than 47 refill intervals for transport jitter while
+# ensuring a disconnected USB or IP context cannot block a campaign forever.
+IIO_CONTEXT_TIMEOUT_MS = 5_000
 INITIAL_TIME_ANCHOR_COUNT = 8
 MAX_TIME_ANCHORS = 32
 TIME_ANCHOR_WINDOW_NS = 10_000_000_000
 MAX_STARTUP_FRAME_DISCARDS = 64
 _OPEN_MAX_ATTEMPTS = 3
 _OPEN_RETRY_DELAY_SECONDS = 0.05
+
+
+def configure_iio_context_timeout(context: Any) -> None:
+    """Fail closed unless libiio applies the bounded metadata I/O timeout."""
+
+    setter = getattr(context, "set_timeout", None)
+    if not callable(setter):
+        raise RadioConfigurationError(
+            "installed libiio binding cannot configure a finite context timeout"
+        )
+    try:
+        setter(IIO_CONTEXT_TIMEOUT_MS)
+    except Exception as error:
+        raise RadioConfigurationError(
+            "failed to configure the finite IIO context timeout"
+        ) from error
 
 
 def _close_buffer(buffer: Any | None) -> None:
