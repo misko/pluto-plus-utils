@@ -147,6 +147,12 @@ The reviewed finite-call ceiling is 60 million samples. This permits a
 deadline and artifact size bounded; the synchronous consumer still streams
 each frame instead of retaining the full capture in memory.
 
+For metadata buffers exposing the native interleaved scan, the capture session
+uses one raw buffer read and one dual-complex allocation per refill. This avoids
+pyadi's four per-channel extraction buffers and is required to drain sustained
+dual-RX 5 MS/s captures on resource-constrained hosts. Header, sequence, sample
+counter, tandem ownership, and failure-flag validation are unchanged.
+
 `CaptureWriter` accepts these `SampleBlockV2` refills and writes the exact
 per-frame ledger under `pluto:continuity`. The authoritative continuity proof
 is the tuple of stream ID, buffer sequence, FPGA first-sample sequence, sample

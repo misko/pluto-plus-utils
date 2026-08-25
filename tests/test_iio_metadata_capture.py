@@ -25,6 +25,7 @@ from pluto_plus.direct_radio.usb import (
 )
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.iio import IioRadioDevice
+from pluto_plus.hardware.iio_metadata import _decode_raw_interleaved_iq
 from pluto_plus.hardware.preflight import V7_FIRMWARE_VERSION
 from pluto_plus.tandem import (
     TANDEM_METADATA_FEATURE,
@@ -38,6 +39,22 @@ from pluto_plus.tandem import (
 SAMPLE_COUNT = 4
 STREAM = 0x1234
 REQUIRED_FEATURES = MetadataFeatures(0xF7)
+
+
+def test_raw_interleaved_iq_decode_preserves_dual_receiver_scan_order() -> None:
+    wire = np.asarray(
+        [10, -11, 20, -21, 12, -13, 22, -23, 14, -15, 24, -25],
+        dtype="<i2",
+    ).tobytes()
+
+    signal = _decode_raw_interleaved_iq(
+        wire,
+        receiver_count=2,
+        samples_per_channel=3,
+    )
+
+    np.testing.assert_array_equal(signal[0], [10 - 11j, 12 - 13j, 14 - 15j])
+    np.testing.assert_array_equal(signal[1], [20 - 21j, 22 - 23j, 24 - 25j])
 
 
 def _metadata_v3(

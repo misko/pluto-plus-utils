@@ -46,6 +46,29 @@ def _close_buffer(buffer: Any | None) -> None:
         close()
 
 
+def _decode_raw_interleaved_iq(
+    raw: bytes | bytearray,
+    *,
+    receiver_count: int,
+    samples_per_channel: int,
+) -> np.ndarray:
+    """Decode one native dual-CS16 scan with one allocation and no channel copies."""
+
+    expected_components = receiver_count * samples_per_channel * 2
+    components = np.frombuffer(raw, dtype="<i2")
+    if components.size != expected_components:
+        raise RuntimeError(
+            f"raw metadata IIO read returned {components.size * 2} bytes, expected "
+            f"{expected_components * 2}"
+        )
+    scans = components.reshape(samples_per_channel, receiver_count, 2)
+    signal = np.empty((receiver_count, samples_per_channel), dtype=np.complex64)
+    for receiver in range(receiver_count):
+        signal[receiver].real = scans[:, receiver, 0]
+        signal[receiver].imag = scans[:, receiver, 1]
+    return signal
+
+
 class IioMetadataCaptureSession:
     """One reset-bounded FPGA-metadata capture generation.
 
@@ -182,9 +205,21 @@ class IioMetadataCaptureSession:
         if self._buffer is None:
             raise RuntimeError("IIO metadata capture is not open")
         host_before_ns = time.time_ns()
+        expected_receivers = len(tuple(self._sdr.rx_enabled_channels))
+        raw_reader = getattr(self._buffer, "read", None)
+        direct_read = callable(raw_reader)
         for startup_discard in range(MAX_STARTUP_FRAME_DISCARDS + 1):
             try:
-                raw_signal = self._sdr.rx()
+                if direct_read:
+                    assert callable(raw_reader)
+                    self._buffer.refill()
+                    raw_signal = _decode_raw_interleaved_iq(
+                        raw_reader(),
+                        receiver_count=expected_receivers,
+                        samples_per_channel=self._samples_per_channel,
+                    )
+                else:
+                    raw_signal = self._sdr.rx()
                 break
             except OSError as error:
                 if error.errno != errno.EAGAIN or startup_discard == MAX_STARTUP_FRAME_DISCARDS:
@@ -198,7 +233,6 @@ class IioMetadataCaptureSession:
                 self._sdr._rxbuf = self._buffer
         host_after_ns = time.time_ns()
         signal = np.asarray(raw_signal)
-        expected_receivers = len(tuple(self._sdr.rx_enabled_channels))
         if expected_receivers == 1 and signal.ndim == 1:
             signal = signal[np.newaxis, :]
         if signal.ndim != 2 or signal.shape != (
