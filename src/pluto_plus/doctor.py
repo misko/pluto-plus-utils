@@ -180,6 +180,22 @@ TANDEM_AGC_V8_RC2_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 22, 1, 59, 10, tzinfo=UTC),
 )
 
+# Exact v8 RC3 candidate from the trusted Kalman build. This profile remains
+# hardware-unqualified and permits volatile RAM loading only.
+TANDEM_AGC_V8_RC3_RAM_POLICY = FirmwarePolicy(
+    profile_id="tandem-agc-v8-rc3-ram",
+    release_tag="v0.41-plutoplus-spf-tandem-agc-v8-rc3",
+    device_firmware="v0.41-plutoplus-spf-tandem-agc-v8-rc3",
+    asset_name="plutoplus-spf-tandem-agc-v8-rc3-01eff4051f63-pluto.dfu",
+    asset_sha256="d5117721d0a1de038a3ee1e01be77de2b46e64030b2003fd373b0c2a05811cac",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/32834624500",
+    source_commit="01eff4051f63bd14ee7490093e4b9e2099de4de5",
+    fit_body_sha256="cc2c9305589bb4e297e6adeda94a99a50838b83964671fb9795dbaa470ab11c1",
+    fit_body_size=12_783_051,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 25, 10, 14, 24, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,

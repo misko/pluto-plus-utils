@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -346,6 +347,38 @@ def test_tandem_v8_rc2_profile_is_exact_and_ram_only() -> None:
     assert profile.metadata_abi == 2
     assert profile.tandem_agc is True
     assert profile.persistent_allowed is False
+
+
+def test_tandem_v8_rc3_profile_is_exact_and_ram_only() -> None:
+    policy = bootstrap.TANDEM_AGC_V8_RC3_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.profile_id == "tandem-agc-v8-rc3-ram"
+    assert policy.release_tag == "v0.41-plutoplus-spf-tandem-agc-v8-rc3"
+    assert policy.device_firmware == policy.release_tag
+    assert policy.source_commit == "01eff4051f63bd14ee7490093e4b9e2099de4de5"
+    assert policy.asset_name == (
+        "plutoplus-spf-tandem-agc-v8-rc3-01eff4051f63-pluto.dfu"
+    )
+    assert policy.asset_sha256 == (
+        "d5117721d0a1de038a3ee1e01be77de2b46e64030b2003fd373b0c2a05811cac"
+    )
+    assert policy.release_url == (
+        "https://github.com/misko/plutosdr-fw/actions/runs/32834624500"
+    )
+    assert policy.fit_body_sha256 == (
+        "cc2c9305589bb4e297e6adeda94a99a50838b83964671fb9795dbaa470ab11c1"
+    )
+    assert policy.fit_body_size == 12_783_051
+    assert policy.published_at == datetime(2026, 8, 25, 10, 14, 24, tzinfo=UTC)
+    assert policy.hardware_qualified is False
+    assert profile.policy is policy
+    assert profile.metadata_abi == 2
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert "tandem-agc-v8-rc3-persistent-promotion" not in (
+        bootstrap.STANDALONE_FLASH_PROFILES
+    )
 
 
 def test_normal_flash_requires_matching_stable_usb_and_iiod_serial(
