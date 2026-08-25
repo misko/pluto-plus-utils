@@ -358,6 +358,16 @@ def test_continuous_capture_requires_more_than_two_kernel_buffers() -> None:
         )
 
 
+def test_continuous_capture_rejects_more_than_sixty_million_samples() -> None:
+    with pytest.raises(ValueError, match="sample-count bound"):
+        capture_continuous_safe_dds_tone(
+            safe_plan(),
+            samples_per_frame=1_000_000,
+            frame_count=61,
+            kernel_buffers=8,
+        )
+
+
 def test_continuous_capture_rejects_unrepresentable_hold_gain() -> None:
     plan = safe_plan()
     invalid = replace(plan, receiver_gain_db=40.5)

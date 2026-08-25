@@ -142,6 +142,11 @@ sequence. A stream-ID change, counter gap, overflow/read failure flag, wrong
 shape, or ABI change aborts the capture. The synchronous consumer permits each
 IQ block to be persisted without retaining all samples in memory.
 
+The reviewed finite-call ceiling is 60 million samples. This permits a
+10-second qualification at 5 MS/s (50 million samples) while keeping the RF
+deadline and artifact size bounded; the synchronous consumer still streams
+each frame instead of retaining the full capture in memory.
+
 `CaptureWriter` accepts these `SampleBlockV2` refills and writes the exact
 per-frame ledger under `pluto:continuity`. The authoritative continuity proof
 is the tuple of stream ID, buffer sequence, FPGA first-sample sequence, sample

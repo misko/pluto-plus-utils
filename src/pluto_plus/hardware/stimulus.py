@@ -30,7 +30,10 @@ from pluto_plus.models import GainMode, RadioIdentity, RadioSettings, Transport
 from pluto_plus.tandem import TandemMode, TandemSessionRequestV1
 
 MAX_TONE_CAPTURE_SAMPLES = 1_048_576
-MAX_CONTINUOUS_TONE_CAPTURE_SAMPLES = 15_000_000
+# Supports a 10-second qualification at 5 MS/s while retaining a finite RF
+# deadline and bounded artifact size. IQ blocks remain synchronously streamed;
+# this limit does not imply in-memory retention.
+MAX_CONTINUOUS_TONE_CAPTURE_SAMPLES = 60_000_000
 MIN_CONTINUOUS_KERNEL_BUFFERS = 3
 _METADATA_FAILURE_FLAGS = (
     MetadataFlags.DEVICE_IIO_OVERFLOW
