@@ -196,6 +196,42 @@ uv run pluto doctor MANAGED_RADIO_ID  # explicitly uses plutod
 uv run pluto doctor --daemon          # all daemon-managed radios
 ```
 
+The passive sweep reports `transport.rx_data_plane` as `unknown`, because IIOD
+metadata alone cannot prove that a buffer refill completes. When the selected radio
+is quiescent, request one bounded 65,536-sample-per-channel refill on an exact USB
+target:
+
+```bash
+uv run pluto doctor --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --probe-data-plane --format json
+```
+
+If that probe reports an `ETIMEDOUT` while IIOD metadata remains responsive, use the
+standalone recovery lane. It derives the USB topology and interface from the serial,
+does not require canonical AD9361/2R2T setup, and is a dry run until explicitly
+confirmed:
+
+```bash
+uv run pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts
+uv run pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts \
+  --ssh-password-file /private/SERIAL.password \
+  --execute --confirm 'RESTART IIOD SERIAL'
+```
+
+Execution is allowed only when the pre-probe failed as a receive timeout. The fixed
+SSH script re-attests the remote gadget serial, records the old and replacement IIOD
+PID/start epoch plus CMA and active-buffer evidence, and the command retries a fresh
+bounded refill before issuing a mode-0600 receipt. A healthy, wrong-identity, or
+host-environment failure never triggers a restart. LAN recovery uses `--ssh-host` and
+the independently pinned key for that exact endpoint.
+
+To prevent the known trigger, every `IioRadioDevice` ordinary and metadata capture
+rejects a single RX allocation above 32 MiB: half of the supported firmware's 64 MiB
+CMA pool. Use repeated/streaming buffers for longer captures. This avoids relying on a
+nearly pristine contiguous CMA region even when `CmaFree` is high.
+
 ### Persistent setup inspection and repair
 
 Without credentials doctor cannot reach the persistent U-Boot environment and
@@ -319,8 +355,12 @@ will not send the bearer token over non-loopback plaintext HTTP.
 
 If execution becomes uncertain after mutation or reboot, the receipt records the last
 completed phase and durable backup reference. Do not replay the consumed plan. Re-attest
-and, if necessary, explicitly re-pin the selected radio's SSH host key out of band, then
-use the receipt's read-only reconciliation action.
+and use the receipt's read-only reconciliation action. Firmware which regenerates its
+SSH key on reboot is handled automatically only for the exact USB endpoint: setup first
+proves that the selected serial/path disappeared and returned, rechecks the unambiguous
+USB route, attests the same remote gadget serial, atomically archives the prior key, and
+records both key fingerprints/digests in the receipt. LAN-routed replacement keys still
+require independent out-of-band verification and are never accepted from IP identity.
 
 ## Guarded config.txt and static IP workflow
 
@@ -518,6 +558,42 @@ This path verifies the staged FRM hash, requires an unambiguous updater `Done`,
 independently hashes the exact FIT bytes in `mtd3`, removes the stage, reboots,
 and retries post-return IIOD attestation while services start. It never exposes
 an arbitrary remote command or updater path.
+
+### Explicit LAN TOFU enrollment
+
+When the exact radio cannot be physically USB-attached, an operator may
+explicitly enroll its LAN SSH key using the factory-default password. First run
+the read-only plan:
+
+```bash
+uv run pluto firmware enroll-lan-ssh EXACT_SERIAL \
+  --host 192.168.1.20 \
+  --profile libiio-metadata-v5 \
+  --known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts
+```
+
+The plan reads only that host's bounded IIOD context and requires the exact
+serial, immutable firmware profile, AD9361/paired-RX scan layout, metadata ABI,
+and profile-specific tandem capability. Review it, then repeat with both explicit
+guards:
+
+```bash
+uv run pluto firmware enroll-lan-ssh EXACT_SERIAL \
+  --host 192.168.1.20 \
+  --profile libiio-metadata-v5 \
+  --known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts \
+  --execute --use-default-password \
+  --confirm 'TRUST LAN SSH EXACT_SERIAL 192.168.1.20'
+```
+
+This is deliberately **LAN trust on first use**, not a USB physical-path trust
+anchor. A network attacker capable of consistently impersonating both IIOD and
+SSH may defeat it, so prefer `firmware enroll-usb-ssh` whenever physical USB is
+available. Enrollment accepts the first key only into a new mode-0600 temporary
+file, disables user and global SSH trust, reconnects with strict checking to run
+only the fixed gadget-serial read, and publishes atomically without overwriting.
+It never writes `~/.ssh/known_hosts` or a global known-hosts file. Key rotation
+requires a separately reviewed new destination path.
 
 ### Experimental pinned-SSH radio administration
 

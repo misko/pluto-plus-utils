@@ -64,6 +64,7 @@ class SetupExecutorFailure(SetupError):
         failure_phase: str = "environment_write",
         completed_phases: tuple[str, ...] = (),
         reconciliation_required: bool = True,
+        host_key_rotation: SetupHostKeyRotation | None = None,
     ) -> None:
         super().__init__(message)
         self.backup_path = backup_path
@@ -72,6 +73,7 @@ class SetupExecutorFailure(SetupError):
         self.failure_phase = failure_phase
         self.completed_phases = completed_phases
         self.reconciliation_required = reconciliation_required
+        self.host_key_rotation = host_key_rotation
 
 
 class SetupIdentity(ApiModel):
@@ -94,12 +96,20 @@ class SetupObservation(ApiModel):
 
     @field_validator("uboot")
     @classmethod
-    def validate_uboot_keys(
-        cls, value: dict[str, str | None]
-    ) -> dict[str, str | None]:
+    def validate_uboot_keys(cls, value: dict[str, str | None]) -> dict[str, str | None]:
         if set(value) != set(CANONICAL_UBOOT):
             raise ValueError("U-Boot observation must contain exactly the canonical keys")
         return value
+
+
+class SetupHostKeyRotation(ApiModel):
+    """Receipt evidence for a USB-anchored, expected post-reboot SSH key change."""
+
+    previous_known_hosts_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    replacement_known_hosts_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    previous_fingerprint: str = Field(min_length=1, max_length=512)
+    replacement_fingerprint: str = Field(min_length=1, max_length=512)
+    previous_known_hosts_backup: str = Field(min_length=1, max_length=1024)
 
 
 class SetupExecutionResult(ApiModel):
@@ -107,6 +117,7 @@ class SetupExecutionResult(ApiModel):
     backup_path: str = Field(min_length=1, max_length=1024)
     backup_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     completed_phases: tuple[str, ...] = ()
+    host_key_rotation: SetupHostKeyRotation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +169,7 @@ class SetupReceipt:
     reconciliation_of: str | None
     success: bool
     error: str | None
+    host_key_rotation: SetupHostKeyRotation | None = None
 
     @property
     def changes(self) -> dict[str, str | None]:
@@ -311,7 +323,7 @@ class CanonicalSetupManager:
                 "post_reboot_attestation",
             )
         receipt = SetupReceipt(
-            schema_version=2,
+            schema_version=3,
             receipt_id=uuid.uuid4().hex,
             plan_id=plan.plan_id,
             started_at=started,
@@ -341,6 +353,11 @@ class CanonicalSetupManager:
             reconciliation_of=None,
             success=error is None,
             error=error,
+            host_key_rotation=(
+                result.host_key_rotation
+                if result is not None
+                else (None if partial_failure is None else partial_failure.host_key_rotation)
+            ),
         )
         self._write_receipt(receipt)
         with self._lock:
@@ -351,9 +368,7 @@ class CanonicalSetupManager:
 
     def list_receipts(self) -> list[SetupReceipt]:
         with self._lock:
-            return sorted(
-                self._receipts.values(), key=lambda item: item.started_at, reverse=True
-            )
+            return sorted(self._receipts.values(), key=lambda item: item.started_at, reverse=True)
 
     def reconcile(self, receipt_id: str) -> SetupReceipt:
         """Re-attest an uncertain outcome without invoking the mutation executor."""
@@ -367,9 +382,7 @@ class CanonicalSetupManager:
         started = self._now()
         observation = self.inspect(original.identity)
         if "reboot_observed" in original.completed_phases:
-            observation = observation.model_copy(
-                update={"boot_provenance": "qspi_reboot_verified"}
-            )
+            observation = observation.model_copy(update={"boot_provenance": "qspi_reboot_verified"})
         error: str | None = None
         try:
             self._validate_success(original.identity, observation)
@@ -377,7 +390,7 @@ class CanonicalSetupManager:
             error = f"{type(caught).__name__}: {caught}"
         success = error is None
         receipt = SetupReceipt(
-            schema_version=2,
+            schema_version=3,
             receipt_id=uuid.uuid4().hex,
             plan_id=original.plan_id,
             started_at=started,
@@ -395,6 +408,7 @@ class CanonicalSetupManager:
             reconciliation_of=original.receipt_id,
             success=success,
             error=error,
+            host_key_rotation=original.host_key_rotation,
         )
         self._write_receipt(receipt)
         with self._lock:
@@ -414,15 +428,11 @@ class CanonicalSetupManager:
             raise SetupPreconditionError("existing U-Boot mode is invalid")
 
     @staticmethod
-    def _validate_identity(
-        expected: SetupIdentity, observation: SetupObservation
-    ) -> None:
+    def _validate_identity(expected: SetupIdentity, observation: SetupObservation) -> None:
         if observation.identity != expected:
             raise SetupPreconditionError("setup helper returned a different radio identity")
 
-    def _validate_success(
-        self, identity: SetupIdentity, observation: SetupObservation
-    ) -> None:
+    def _validate_success(self, identity: SetupIdentity, observation: SetupObservation) -> None:
         self._validate_identity(identity, observation)
         if observation.uboot != CANONICAL_UBOOT:
             raise SetupPreconditionError("canonical U-Boot tuple did not persist")
@@ -439,9 +449,7 @@ class CanonicalSetupManager:
         if not observation.tx_safe:
             raise SetupPreconditionError("transmit state is not safe after reboot")
 
-    def _authorize(
-        self, plan: SetupPlan, token: str, now: datetime, *, consume: bool
-    ) -> None:
+    def _authorize(self, plan: SetupPlan, token: str, now: datetime, *, consume: bool) -> None:
         presented = hashlib.sha256(token.encode()).digest()
         with self._lock:
             record = self._tokens.get(plan.plan_id)
@@ -540,6 +548,11 @@ def _receipt_document(receipt: SetupReceipt) -> dict[str, object]:
         "reconciliation_of": receipt.reconciliation_of,
         "success": receipt.success,
         "error": receipt.error,
+        "host_key_rotation": (
+            None
+            if receipt.host_key_rotation is None
+            else receipt.host_key_rotation.model_dump(mode="json")
+        ),
     }
 
 
@@ -576,24 +589,16 @@ def _receipt_from_document(document: Mapping[str, object]) -> SetupReceipt:
         before=SetupObservation.model_validate(document["before"]),
         after=None if after is None else SetupObservation.model_validate(after),
         changes_items=tuple(changes),
-        backup_path=(
-            None if document["backup_path"] is None else str(document["backup_path"])
-        ),
+        backup_path=(None if document["backup_path"] is None else str(document["backup_path"])),
         backup_sha256=(
-            None
-            if document["backup_sha256"] is None
-            else str(document["backup_sha256"])
+            None if document["backup_sha256"] is None else str(document["backup_sha256"])
         ),
         outcome=outcome,  # type: ignore[arg-type]
         failure_phase=(
-            None
-            if document.get("failure_phase") is None
-            else str(document["failure_phase"])
+            None if document.get("failure_phase") is None else str(document["failure_phase"])
         ),
         completed_phases=tuple(str(item) for item in raw_completed),
-        reconciliation_required=bool(
-            document.get("reconciliation_required", outcome == "unknown")
-        ),
+        reconciliation_required=bool(document.get("reconciliation_required", outcome == "unknown")),
         reconciliation_of=(
             None
             if document.get("reconciliation_of") is None
@@ -601,4 +606,9 @@ def _receipt_from_document(document: Mapping[str, object]) -> SetupReceipt:
         ),
         success=success,
         error=None if document["error"] is None else str(document["error"]),
+        host_key_rotation=(
+            None
+            if document.get("host_key_rotation") is None
+            else SetupHostKeyRotation.model_validate(document["host_key_rotation"])
+        ),
     )

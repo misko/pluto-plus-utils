@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from pluto_plus.cli import DEFAULT_TOOL_REPOSITORY, app
@@ -74,20 +75,21 @@ def test_candidate_ram_help_has_native_plan_execute_and_no_known_hosts() -> None
     assert "execute" in result.output
     assert "recover" in result.output
     assert "receipt-verify" in result.output
-    execute = runner.invoke(app, ["firmware", "candidate-ram", "execute", "--help"])
-    assert execute.exit_code == 0, execute.output
-    assert "--ssh-password-file" in execute.output
-    assert "known-host" not in execute.output.lower()
-    recover = runner.invoke(
-        app,
-        ["firmware", "candidate-ram", "recover", "--help"],
-        terminal_width=160,
-    )
-    assert recover.exit_code == 0, recover.output
-    assert "--ssh-password-file" in recover.output
-    assert "--expected-return-fi" in recover.output
-    assert "--output" in recover.output
-    assert "known-host" not in recover.output.lower()
+    root = get_command(app)
+    candidate = root.commands["firmware"].commands["candidate-ram"]  # type: ignore[attr-defined]
+
+    def options(command_name: str) -> set[str]:
+        command = candidate.commands[command_name]  # type: ignore[attr-defined]
+        return {option for parameter in command.params for option in getattr(parameter, "opts", ())}
+
+    execute_options = options("execute")
+    assert "--ssh-password-file" in execute_options
+    assert not any("known-host" in option for option in execute_options)
+    recover_options = options("recover")
+    assert "--ssh-password-file" in recover_options
+    assert "--expected-return-firmware" in recover_options
+    assert "--output" in recover_options
+    assert not any("known-host" in option for option in recover_options)
 
 
 def test_candidate_ram_defaults_to_the_source_checkout() -> None:

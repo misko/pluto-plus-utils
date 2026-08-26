@@ -23,7 +23,7 @@ from pluto_plus.errors import (
     RadioSetupRequiredError,
     RevisionConflictError,
 )
-from pluto_plus.hardware.base import RadioDevice, SampleBlock
+from pluto_plus.hardware.base import RadioDevice, SampleBlock, restore_settings_exact
 from pluto_plus.models import (
     JobState,
     RadioSettings,
@@ -688,8 +688,7 @@ class RadioController:
                     self._revision += 1
                 points.append(_scan_point(block, actual, request.fft_size))
             with self._device_lock:
-                restored_actual = self._device.apply_settings(original)
-                _validate_readback(original, restored_actual)
+                restored_actual = restore_settings_exact(self._device, original).restored
             restored = True
             with self._lock:
                 self._requested = original
@@ -731,8 +730,7 @@ class RadioController:
             if not restored:
                 try:
                     with self._device_lock:
-                        restored_actual = self._device.apply_settings(original)
-                        _validate_readback(original, restored_actual)
+                        restored_actual = restore_settings_exact(self._device, original).restored
                     with self._lock:
                         self._requested = original
                         self._actual = restored_actual

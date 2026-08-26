@@ -42,6 +42,8 @@ The web UI runs the same API at `GET /api/v1/radios/{radio_id}/doctor`. It check
 each fact independently:
 
 - exact IIO hardware serial and a separately correlated `0456:b673` USB sysfs path;
+- an optional exact-serial 65,536-sample RX refill (`--probe-data-plane` on one exact
+  `--usb-sysfs-path`), which detects a responsive control plane with a wedged data plane;
 - active `fw_version` against the selected firmware profile;
 - live `ad9361-phy,model == ad9361`;
 - RX scan elements `voltage0..voltage3`, proving both complex receive paths exist;
@@ -53,6 +55,40 @@ each fact independently:
 `unknown` is deliberate. Channel presence cannot prove the persistent U-Boot values,
 and an active RAM-loaded image cannot prove QSPI contents. The daemon does not use
 default SSH credentials and does not guess these facts.
+
+## Data-plane timeout prevention and recovery
+
+Supported firmware reserves a 64 MiB contiguous-memory (CMA) pool. A large single
+IIOD allocation can intermittently fragment that pool and leave later small refills
+timing out even though attribute reads still work. Pluto+ Utils therefore refuses a
+single ordinary or metadata RX buffer above 32 MiB (50% of the pool). Split longer
+captures into repeated buffers rather than increasing one `rx_buffer_size`.
+
+First stop other owners and prove the failure on one exact local USB radio:
+
+```console
+pluto doctor --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --probe-data-plane --format json
+```
+
+If `transport.rx_data_plane` fails with a timeout, plan and execute the narrow recovery:
+
+```console
+pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts
+pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts \
+  --ssh-password-file /private/SERIAL.password \
+  --execute --confirm 'RESTART IIOD SERIAL'
+```
+
+This path is intentionally independent of the canonical 2R2T gate. It derives the USB
+path/interface from the stable serial, requires pinned SSH trust, remotely re-attests
+the same gadget serial, restarts only the supervisor-owned IIOD child, and records both
+process generations, active RX-buffer state, and `CmaTotal`/`CmaFree`. It then waits for
+a fresh bounded RX refill and writes an absent-only mode-0600 receipt. It refuses to
+restart for a healthy probe, a wrong serial, an invalid refill shape, or a broken host
+libiio environment.
 
 ## Radio `.15` on Gauss
 
@@ -115,6 +151,16 @@ A safe provisioner must perform this entire transaction:
 8. Require scan elements 0–3 and take a paired two-receiver sample.
 9. Keep DDS/TX buffers disabled and set/read back TX1 and TX2 attenuation to the safe minimum.
 
+SSH trust should normally be enrolled through an exact USB physical path. If
+that radio cannot be USB-attached, `pluto firmware enroll-lan-ssh` provides a
+separate, explicitly weaker LAN-TOFU path. Its dry run first attests the exact
+private IPv4 endpoint and serial through bounded read-only IIOD metadata. An
+execution additionally requires `--use-default-password` and the exact phrase
+`TRUST LAN SSH <serial> <host>`. It records no user or global SSH trust, verifies
+the gadget serial again over the newly pinned key, and creates the requested
+private known-hosts file only if no destination exists. Prefer USB enrollment;
+LAN TOFU cannot exclude an attacker able to impersonate both IIOD and SSH.
+
 Pluto+ Utils implements this as a separate setup plan, not as a generic remote shell or
 firmware upload. The daemon must be explicitly composed with one exact serial, sysfs path,
 USB network interface, private USB address, private password file, and pinned SSH host-key
@@ -137,11 +183,15 @@ pluto --admin-token-file /private/admin.token setup receipt-list
 
 The Web Doctor panel enables **Prepare setup repair** only for an eligible, noncanonical
 selected radio. Inspect the immutable diff, enter the admin token, type
-`PROVISION <serial>`, and execute once. A changed SSH host key is a hard verification
-failure: physically re-attest the USB serial/path before reviewing and re-pinning it.
-If an execution receipt reports an unknown outcome, do not retry provisioning. Preserve
-the receipt and backup reference, restore pinned SSH trust only after that out-of-band
-attestation, and run the dedicated read-only reconciliation action.
+`PROVISION <serial>`, and execute once. For the exact interface-bound USB endpoint,
+firmware which regenerates its SSH key on reboot is handled only after the selected
+serial/path has disappeared and returned. Setup then repeats the unambiguous route and
+local USB identity checks, accepts one replacement key while running a fixed remote
+serial attestation, atomically archives the previous key, and records both fingerprints
+and file digests in the receipt. This recovery is deliberately unavailable for a LAN
+endpoint, whose changed key still requires independent out-of-band verification. If an
+execution receipt reports an unknown outcome, do not retry provisioning; preserve its
+receipt and backup and use the dedicated read-only reconciliation action.
 
 ## Firmware update contract
 

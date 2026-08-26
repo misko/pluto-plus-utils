@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import pluto_plus.local_doctor as local_doctor
+from pluto_plus.data_plane import DataPlaneProbe
 from pluto_plus.hardware.preflight import IioEnvironmentReport, IioEnvironmentStatus
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto, UsbLinkFaultSummary
 from pluto_plus.setup_repair import SetupProbeOutcome, SetupRepairRecord
@@ -50,8 +51,46 @@ def test_local_doctor_reports_fresh_canonical_and_unknown_persistence(
     assert statuses["identity.iio_serial"] == "pass"
     assert statuses["firmware.diagnostic_profile"] == "pass"
     assert statuses["rf.phy_model"] == "pass"
+    assert statuses["transport.rx_data_plane"] == "unknown"
     assert statuses["firmware.qspi_boot_provenance"] == "unknown"
     assert radio.overall == "unknown"
+
+
+def test_local_doctor_reports_explicit_bounded_data_plane_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        local_doctor,
+        "inspect_bound_iiod",
+        lambda interface: {
+            "hw_serial": "SERIAL_A",
+            "hw_model": "Analog Devices PlutoSDR Rev.C",
+            "fw_version": local_doctor.LOCAL_POLICY.device_firmware,
+            "ad9361-phy,model": "ad9361",
+            "iio,buffer-metadata": "1",
+            "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+        },
+    )
+
+    radio = local_doctor.diagnose_local_usb_radios(
+        devices=(_device(),),
+        data_plane_probe=lambda device: DataPlaneProbe(
+            status="fail",
+            serial=device.serial or "missing",
+            uri="usb:1",
+            samples_per_channel=65_536,
+            receiver_count=2,
+            wire_bytes=524_288,
+            elapsed_ms=5000,
+            failure_kind="timeout",
+            error="TimeoutError: [Errno 110]",
+        ),
+    ).radios[0]
+
+    check = next(item for item in radio.checks if item.code == "transport.rx_data_plane")
+    assert check.status == "fail"
+    assert "TimeoutError" in check.summary
+    assert radio.overall == "fail"
 
 
 def test_local_doctor_flags_blank_identity_old_firmware_and_wrong_phy(
@@ -143,8 +182,12 @@ def test_setup_probe_promotes_the_persistent_check_and_records_the_repair(
     )
     probed = SetupProbeOutcome(
         status="pass",
-        actual=(("attr_name", None), ("attr_val", None), ("compatible", "ad9361"),
-                ("mode", "2r2t")),
+        actual=(
+            ("attr_name", None),
+            ("attr_val", None),
+            ("compatible", "ad9361"),
+            ("mode", "2r2t"),
+        ),
         summary="Persistent AD9361/2R2T U-Boot tuple was repaired and re-attested after reboot",
         repair=repair,
     )
@@ -154,9 +197,9 @@ def test_setup_probe_promotes_the_persistent_check_and_records_the_repair(
         seen.append(firmware)
         return probed
 
-    radio = local_doctor.diagnose_local_usb_radios(
-        devices=(_device(),), setup_probe=probe
-    ).radios[0]
+    radio = local_doctor.diagnose_local_usb_radios(devices=(_device(),), setup_probe=probe).radios[
+        0
+    ]
 
     statuses = {check.code: check.status for check in radio.checks}
     assert statuses["setup.uboot_ad9361_2r2t"] == "pass"
@@ -221,9 +264,7 @@ def _healthy_environment() -> IioEnvironmentReport:
 def test_release_currency_never_proposes_a_downgrade(
     monkeypatch: pytest.MonkeyPatch, firmware: str, expected: str
 ) -> None:
-    monkeypatch.setattr(
-        local_doctor, "inspect_bound_iiod", lambda interface: _iiod_facts(firmware)
-    )
+    monkeypatch.setattr(local_doctor, "inspect_bound_iiod", lambda interface: _iiod_facts(firmware))
 
     radio = local_doctor.diagnose_local_usb_radios(
         devices=(_device(),), environment_probe=_healthy_environment
@@ -249,9 +290,7 @@ def test_report_carries_host_libiio_health(monkeypatch: pytest.MonkeyPatch) -> N
             python_executable="/usr/bin/python3",
         )
 
-    report = local_doctor.diagnose_local_usb_radios(
-        devices=(_device(),), environment_probe=broken
-    )
+    report = local_doctor.diagnose_local_usb_radios(devices=(_device(),), environment_probe=broken)
 
     assert report.host_libiio is not None
     assert report.host_libiio.healthy is False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -53,6 +54,9 @@ DEFAULT_HOST_ISOLATION_RECEIPTS = (
     Path.home() / ".local/state/pluto-plus-utils/host-isolation-receipts"
 )
 DEFAULT_SETUP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/setup-receipts"
+DEFAULT_DATA_PLANE_RECOVERY_RECEIPTS = (
+    Path.home() / ".local/state/pluto-plus-utils/data-plane-recovery-receipts"
+)
 API_PREFIX = "api/v1"
 
 app = typer.Typer(
@@ -1223,9 +1227,261 @@ def radio_status(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> Non
 
 
 @radio_app.command("recover")
-def radio_recover(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> None:
-    """Reopen an errored/offline radio and re-attest its stable serial."""
-    _emit(_api(ctx).request("POST", f"radios/{radio_id}/recover"))
+def radio_recover(
+    ctx: typer.Context,
+    radio_id: str = typer.Argument(...),
+    data_plane: bool = typer.Option(
+        False,
+        "--data-plane",
+        help="Probe a wedged data plane and restart its attested iiOD over SSH.",
+    ),
+    usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--usb-sysfs-path",
+        help="Optional exact local USB node; otherwise derive it from SERIAL.",
+    ),
+    ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts pinned to the exact recovery endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Optional private one-line root password file; otherwise prompt on execution.",
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1",
+        "--ssh-host",
+        help="Literal private SSH IPv4; 192.168.2.1 uses the exact USB interface.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Restart iiOD only after the bounded pre-probe confirms a timeout.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase RESTART IIOD <serial>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_DATA_PLANE_RECOVERY_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for the durable recovery receipt.",
+    ),
+) -> None:
+    """Recover controller resources, or explicitly repair a wedged iiOD data plane."""
+
+    if not data_plane:
+        local_options = (
+            usb_sysfs_path,
+            ssh_known_hosts_file,
+            ssh_password_file,
+            confirmation,
+        )
+        if execute or any(value is not None for value in local_options):
+            _fail(
+                "data_plane_recovery_flag_required",
+                "local SSH recovery options require --data-plane",
+                2,
+            )
+        _emit(_api(ctx).request("POST", f"radios/{radio_id}/recover"))
+        return
+    _recover_data_plane(
+        radio_id,
+        usb_sysfs_path=usb_sysfs_path,
+        ssh_known_hosts_file=ssh_known_hosts_file,
+        ssh_password_file=ssh_password_file,
+        ssh_host=ssh_host,
+        execute=execute,
+        confirmation=confirmation,
+        receipt_directory=receipt_directory,
+    )
+
+
+def _recover_data_plane(
+    serial: str,
+    *,
+    usb_sysfs_path: Path | None,
+    ssh_known_hosts_file: Path | None,
+    ssh_password_file: Path | None,
+    ssh_host: str,
+    execute: bool,
+    confirmation: str | None,
+    receipt_directory: Path,
+) -> None:
+    from pluto_plus.data_plane import (
+        IIOD_RECOVERY_SCHEMA,
+        IiodRecoveryReceipt,
+        new_recovery_receipt_id,
+        probe_iio_data_plane,
+        restart_attested_iiod,
+        utc_now,
+        wait_for_iio_data_plane,
+    )
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
+        write_private_contract,
+    )
+
+    try:
+        ssh_address = ip_address(ssh_host)
+    except ValueError:
+        _fail("invalid_data_plane_recovery_host", "--ssh-host must be a literal IPv4", 2)
+    if ssh_address.version != 4 or not ssh_address.is_private:
+        _fail("invalid_data_plane_recovery_host", "--ssh-host must be a private IPv4", 2)
+    ssh_host = str(ssh_address)
+    if ssh_known_hosts_file is None:
+        _fail(
+            "data_plane_recovery_trust_required",
+            "--data-plane requires --ssh-known-hosts-file",
+            2,
+        )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    known_hosts_bytes = _read_private_file_bytes(
+        selected_known_hosts,
+        label="data-plane recovery known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    local_matches = [
+        device
+        for device in scan_local_usb_plutos()
+        if device.serial == serial
+        and (usb_sysfs_path is None or device.usb_path == str(usb_sysfs_path))
+    ]
+    selected_usb: LocalUsbPluto | None = None
+    interface: str | None = None
+    probe_uri: str
+    if ssh_host == "192.168.2.1":
+        if len(local_matches) != 1:
+            _fail(
+                "data_plane_recovery_target_ambiguous",
+                f"expected one local USB radio with serial {serial!r}, found {len(local_matches)}",
+                4,
+            )
+        selected_usb = local_matches[0]
+        if len(selected_usb.host_network_interfaces) != 1:
+            _fail(
+                "data_plane_recovery_target_ambiguous",
+                "selected USB radio does not expose one exact host network interface",
+                4,
+            )
+        interface = selected_usb.host_network_interfaces[0].name
+        probe_uri = "usb:"
+    else:
+        if usb_sysfs_path is not None and len(local_matches) != 1:
+            _fail(
+                "data_plane_recovery_target_ambiguous",
+                "the requested USB path does not match one local radio with the expected serial",
+                4,
+            )
+        selected_usb = local_matches[0] if len(local_matches) == 1 else None
+        probe_uri = f"ip:{ssh_host}"
+    environment = inspect_iio_environment(require_usb=probe_uri == "usb:")
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    before = probe_iio_data_plane(probe_uri, serial)
+    confirmation_phrase = f"RESTART IIOD {serial}"
+    dry_run = {
+        "mode": "dry_run",
+        "serial": serial,
+        "ssh_host": ssh_host,
+        "ssh_interface": interface,
+        "usb_sysfs_path": None if selected_usb is None else selected_usb.usb_path,
+        "before_probe": before.model_dump(mode="json"),
+        "will_restart_iiod": False,
+        "eligible_for_restart": before.failure_kind == "timeout",
+        "next_command": (
+            None
+            if before.status == "pass" or before.failure_kind != "timeout"
+            else f"repeat with --execute and --confirm {json.dumps(confirmation_phrase)}"
+        ),
+    }
+    if not execute:
+        _emit(dry_run)
+        return
+    if before.status == "pass":
+        _emit({**dry_run, "mode": "already_healthy"})
+        return
+    if before.failure_kind != "timeout":
+        _fail(
+            "data_plane_recovery_not_eligible",
+            "iiOD restart is allowed only for a bounded RX timeout; "
+            f"probe failed as {before.failure_kind}: {before.error}",
+            4,
+        )
+    if confirmation != confirmation_phrase:
+        _fail(
+            "data_plane_recovery_confirmation_required",
+            f"--execute requires --confirm {confirmation_phrase!r}",
+            2,
+        )
+    if ssh_password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        password = _read_private_text_file(
+            ssh_password_file.expanduser().absolute(), label="radio SSH password"
+        )
+
+    receipt_id = new_recovery_receipt_id()
+    started_at = utc_now()
+    restart = None
+    after = None
+    error_text: str | None = None
+    try:
+        transport = BoundSshTransport(
+            host=ssh_host,
+            interface=interface,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+        restart = restart_attested_iiod(transport, serial)
+        after = wait_for_iio_data_plane(probe_uri, serial)
+        if after.status != "pass":
+            raise RuntimeError(f"post-restart data-plane probe failed: {after.error}")
+    except Exception as error:
+        error_text = f"{type(error).__name__}: {error}"
+    receipt = IiodRecoveryReceipt(
+        schema=IIOD_RECOVERY_SCHEMA,
+        receipt_id=receipt_id,
+        started_at=started_at,
+        finished_at=utc_now(),
+        serial=serial,
+        uri=probe_uri,
+        ssh_host=ssh_host,
+        ssh_interface=interface,
+        usb_sysfs_path=None if selected_usb is None else selected_usb.usb_path,
+        known_hosts_sha256=hashlib.sha256(known_hosts_bytes).hexdigest(),
+        before_probe=before,
+        restart=restart,
+        after_probe=after,
+        outcome="recovered" if error_text is None else "failed",
+        error=error_text,
+    )
+    selected_directory = receipt_directory.expanduser().absolute()
+    try:
+        selected_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory_state = selected_directory.lstat()
+        if (
+            not stat.S_ISDIR(directory_state.st_mode)
+            or selected_directory.is_symlink()
+            or directory_state.st_uid != os.getuid()
+            or stat.S_IMODE(directory_state.st_mode) != 0o700
+        ):
+            raise OSError("receipt directory must be an owned mode-0700 real directory")
+        identity = write_private_contract(selected_directory / f"{receipt_id}.json", receipt)
+    except (OSError, ReleaseCandidateContractError) as error:
+        _fail("data_plane_recovery_receipt_failed", str(error), 5)
+    payload = {
+        "receipt": receipt.model_dump(mode="json", by_alias=True),
+        "receipt_path": str(identity.path),
+        "receipt_sha256": identity.sha256,
+    }
+    if error_text is not None:
+        _emit(payload)
+        raise typer.Exit(5)
+    _emit(payload)
 
 
 @config_app.command("status")
@@ -1444,6 +1700,14 @@ def doctor(
         "--daemon",
         help="Use plutod for all-radio doctor instead of standalone local USB inspection.",
     ),
+    probe_data_plane: bool = typer.Option(
+        False,
+        "--probe-data-plane",
+        help=(
+            "Open one 64 Ki-sample RX buffer on the exact --usb-sysfs-path and report "
+            "iiOD data-plane health."
+        ),
+    ),
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Standalone output format: table or json."
     ),
@@ -1486,10 +1750,10 @@ def doctor(
     """Check local USB radios directly, or one managed radio through plutod."""
 
     if radio_id is not None or daemon:
-        if usb_sysfs_path is not None:
+        if usb_sysfs_path is not None or probe_data_plane:
             _fail(
                 "incompatible_doctor_options",
-                "--usb-sysfs-path cannot be combined with a daemon radio ID or --daemon",
+                "local USB probe options cannot be combined with a daemon radio ID or --daemon",
                 2,
             )
         path = "doctor" if radio_id is None else f"radios/{radio_id}/doctor"
@@ -1499,6 +1763,13 @@ def doctor(
     if normalized not in {"table", "json"}:
         _fail("invalid_doctor_format", "doctor format must be table or json", 2)
     from pluto_plus.local_doctor import diagnose_local_usb_radios
+
+    if probe_data_plane and usb_sysfs_path is None:
+        _fail(
+            "data_plane_probe_target_required",
+            "--probe-data-plane requires one exact --usb-sysfs-path",
+            2,
+        )
 
     setup_probe = _build_setup_probe(
         known_hosts_file=setup_known_hosts_file,
@@ -1510,7 +1781,17 @@ def doctor(
     )
 
     try:
-        report = diagnose_local_usb_radios(usb_sysfs_path, setup_probe=setup_probe)
+        doctor_options: dict[str, Any] = {"setup_probe": setup_probe}
+        if probe_data_plane:
+            from pluto_plus.data_plane import probe_iio_data_plane
+
+            def active_probe(device: LocalUsbPluto) -> Any:
+                if device.serial is None:
+                    raise ValueError("selected USB radio has no stable serial")
+                return probe_iio_data_plane("usb:", device.serial)
+
+            doctor_options["data_plane_probe"] = active_probe
+        report = diagnose_local_usb_radios(usb_sysfs_path, **doctor_options)
     except ValueError as error:
         _fail("local_doctor_target_not_found", str(error), 4)
     payload = asdict(report)
@@ -1977,6 +2258,79 @@ def firmware_reconcile_local(
     except (BootstrapFirmwareError, OSError, ValueError) as error:
         _fail("standalone_reconciliation_failed", str(error), 4)
     _emit(asdict(result))
+
+
+@firmware_app.command("enroll-lan-ssh")
+def firmware_enroll_lan_ssh(
+    serial: str = typer.Argument(..., help="Exact serial expected at the LAN endpoint."),
+    host: str = typer.Option(..., "--host", help="Exact private LAN IPv4 endpoint."),
+    known_hosts_file: Path = typer.Option(  # noqa: B008
+        ..., "--known-hosts-file", help="New private serial-specific known_hosts file."
+    ),
+    profile: str = typer.Option(
+        ...,
+        "--profile",
+        help="Immutable metadata firmware/capability profile required from IIOD.",
+    ),
+    execute: bool = typer.Option(False, "--execute", help="Perform explicit LAN TOFU."),
+    use_default_password: bool = typer.Option(
+        False,
+        "--use-default-password",
+        help="Acknowledge use of the Pluto factory-default root password for enrollment.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase TRUST LAN SSH <serial> <host>.",
+    ),
+) -> None:
+    """Pin one LAN SSH key after read-only IIOD identity attestation."""
+
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapFirmwareError,
+        execute_lan_ssh_host_key_enrollment,
+        prepare_lan_ssh_host_key_enrollment,
+    )
+
+    try:
+        plan = prepare_lan_ssh_host_key_enrollment(
+            serial=serial,
+            host=host,
+            known_hosts_file=known_hosts_file,
+            profile_id=profile,
+        )
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("lan_ssh_identity_attestation_failed", str(error), 4)
+    if not execute:
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_trust_host_key": False,
+                "warning": "explicit LAN TOFU is weaker than USB-anchored enrollment",
+                "plan": asdict(plan),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "lan_ssh_confirmation_required",
+            f"--confirm must be exactly {plan.confirmation_phrase!r}",
+            2,
+        )
+    if not use_default_password:
+        _fail(
+            "lan_ssh_default_password_authorization_required",
+            "--execute requires explicit --use-default-password authorization",
+            2,
+        )
+    try:
+        result = execute_lan_ssh_host_key_enrollment(
+            plan,
+            confirmation=confirmation,
+        )
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("lan_ssh_enrollment_failed", str(error), 4)
+    _emit(result)
 
 
 @firmware_app.command("enroll-usb-ssh")
@@ -3029,6 +3383,17 @@ def _discover_production_devices() -> tuple[Any, ...]:
     return tuple(discovery.discover_devices())
 
 
+def _append_hardware_without_explicit_duplicates(
+    explicit: list[Any], discovered: tuple[Any, ...]
+) -> None:
+    """Let an explicit transport selection override broad hardware discovery."""
+
+    explicit_ids = {str(device.identity.radio_id) for device in explicit}
+    explicit.extend(
+        device for device in discovered if str(device.identity.radio_id) not in explicit_ids
+    )
+
+
 def _direct_ip_devices(specifications: list[str]) -> tuple[Any, ...]:
     """Compose explicit host/serial direct-IP targets without eager native imports."""
 
@@ -3321,7 +3686,7 @@ def serve(
         )
         devices.extend(managed_network_devices)
     if hardware:
-        devices.extend(_discover_production_devices())
+        _append_hardware_without_explicit_duplicates(devices, _discover_production_devices())
     if not devices and not discovered_radios:
         _fail("no_radios", "no fake radios requested and no hardware radios discovered", 2)
 

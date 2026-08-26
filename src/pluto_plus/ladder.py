@@ -11,7 +11,7 @@ from typing import Protocol
 import numpy as np
 from pydantic import Field
 
-from pluto_plus.hardware.base import SampleBlock
+from pluto_plus.hardware.base import SampleBlock, restore_settings_exact
 from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.models import ApiModel, RadioCapabilities, RadioIdentity, RadioSettings
 
@@ -85,7 +85,7 @@ class LadderRadio(Protocol):
 
     def apply_settings(self, settings: RadioSettings) -> RadioSettings: ...
 
-    def configure_kernel_buffers(self, count: int) -> None: ...
+    def configure_kernel_buffers(self, count: int) -> int | None: ...
 
     def read_block(self, sample_count: int) -> SampleBlock: ...
 
@@ -210,7 +210,7 @@ def run_iio_ladder(
     finally:
         try:
             if opened and original is not None:
-                restored = radio.apply_settings(original) == original
+                restored = restore_settings_exact(radio, original).restored == original
         finally:
             if opened:
                 radio.close()
