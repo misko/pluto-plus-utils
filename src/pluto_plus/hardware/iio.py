@@ -167,9 +167,8 @@ class IioRadioDevice:
                     f"radio={actual_metadata_abi!r}, host={self._expected_metadata_abi}"
                 )
             injected_runtime = self._adi_module is not None and self._iio_module is not None
-            runtime_ready = (
-                actual_metadata_abi in {1, 2}
-                and (self._metadata_runtime is not None or injected_runtime)
+            runtime_ready = actual_metadata_abi in {1, 2} and (
+                self._metadata_runtime is not None or injected_runtime
             )
             if runtime_ready:
                 counter_reader = getattr(getattr(device, "_rxadc", None), "reg_read", None)
@@ -256,6 +255,8 @@ class IioRadioDevice:
     def read_block(self, sample_count: int) -> SampleBlock:
         """Read legacy host-timed IQ with continuity explicitly unobservable."""
 
+        from pluto_plus.data_plane import require_safe_iio_buffer
+
         device = self._require_device()
         if self._metadata_capture is not None and self._metadata_capture.is_open:
             raise RuntimeError(
@@ -264,6 +265,8 @@ class IioRadioDevice:
             )
         if sample_count <= 0:
             raise ValueError("sample_count must be positive")
+        receiver_count = len(tuple(device.rx_enabled_channels))
+        require_safe_iio_buffer(sample_count, receiver_count)
         if self._buffer_size != sample_count:
             device.rx_destroy_buffer()
             device.rx_buffer_size = sample_count
@@ -360,12 +363,16 @@ class IioRadioDevice:
     ) -> IioMetadataCaptureSession:
         """Reset and arm one fail-closed FPGA-metadata capture generation."""
 
+        from pluto_plus.data_plane import require_safe_iio_buffer
+
         if sample_count <= 0:
             raise ValueError("sample_count must be positive")
         device = self._require_device()
         self.reset_receive_buffer()
-        if tuple(int(item) for item in device.rx_enabled_channels) != (0, 1):
+        channels = tuple(int(item) for item in device.rx_enabled_channels)
+        if channels != (0, 1):
             raise RadioConfigurationError("metadata capture requires paired RX channels (0, 1)")
+        require_safe_iio_buffer(sample_count, len(channels))
         facts = context_facts(device.ctx)
         metadata_abi = facts.get("buffer_metadata_abi")
         if metadata_abi not in {1, 2}:

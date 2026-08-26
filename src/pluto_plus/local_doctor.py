@@ -13,6 +13,7 @@ from pluto_plus.bootstrap_firmware import (
     BootstrapFirmwareError,
     inspect_bound_iiod,
 )
+from pluto_plus.data_plane import DataPlaneProbe
 from pluto_plus.diagnostic_profiles import (
     DIAGNOSTIC_PROFILES,
     UPGRADE_TARGET_PROFILE,
@@ -30,6 +31,7 @@ CheckStatus = Literal["pass", "fail", "unknown"]
 # Reads (and, when enabled, repairs) one radio's persistent U-Boot tuple.  Injected so
 # the read-only lane stays free of any SSH or credential dependency.
 SetupProbe = Callable[[LocalUsbPluto, "str | None"], SetupProbeOutcome]
+DataPlaneProbeRunner = Callable[[LocalUsbPluto], DataPlaneProbe]
 LOCAL_POLICY = BOOTSTRAP_POLICY
 # Rendered from the single canonical definition so the advertised tuple cannot drift
 # away from the one the provisioner actually writes.
@@ -94,9 +96,10 @@ def diagnose_local_usb_radios(
     *,
     devices: tuple[LocalUsbPluto, ...] | None = None,
     setup_probe: SetupProbe | None = None,
+    data_plane_probe: DataPlaneProbeRunner | None = None,
     environment_probe: Callable[[], IioEnvironmentReport] = inspect_iio_environment,
 ) -> LocalDoctorReport:
-    """Freshly inspect each selected USB Pluto without opening an IIO buffer."""
+    """Freshly inspect local Plutos, with an explicitly supplied active probe."""
 
     selected = scan_local_usb_plutos() if devices is None else devices
     if usb_sysfs_path is not None:
@@ -106,7 +109,7 @@ def diagnose_local_usb_radios(
             raise ValueError(
                 f"expected exactly one local Pluto at {usb_sysfs_path}, found {len(selected)}"
             )
-    radios = tuple(_diagnose_radio(device, setup_probe) for device in selected)
+    radios = tuple(_diagnose_radio(device, setup_probe, data_plane_probe) for device in selected)
     return LocalDoctorReport(
         generated_at=datetime.now(UTC).isoformat(),
         canonical_firmware=LOCAL_POLICY.device_firmware,
@@ -118,7 +121,9 @@ def diagnose_local_usb_radios(
 
 
 def _diagnose_radio(
-    device: LocalUsbPluto, setup_probe: SetupProbe | None = None
+    device: LocalUsbPluto,
+    setup_probe: SetupProbe | None = None,
+    data_plane_probe: DataPlaneProbeRunner | None = None,
 ) -> LocalDoctorRadio:
     checks: list[LocalDoctorCheck] = []
     usb_bus_device = (
@@ -192,6 +197,40 @@ def _diagnose_radio(
         if identity_ok
         else "IIOD identity is blank or does not match USB",
     )
+    if data_plane_probe is None or device.serial is None:
+        _check(
+            checks,
+            "transport.rx_data_plane",
+            "unknown",
+            None,
+            "one exact-serial bounded RX refill",
+            "Data-plane probe was not requested"
+            if data_plane_probe is None
+            else "Data-plane probe requires a stable USB serial",
+        )
+    else:
+        try:
+            data_plane = data_plane_probe(device)
+        except Exception as error:
+            _check(
+                checks,
+                "transport.rx_data_plane",
+                "fail",
+                f"{type(error).__name__}: {error}",
+                "one exact-serial bounded RX refill",
+                "Bounded RX data-plane probe failed",
+            )
+        else:
+            _check(
+                checks,
+                "transport.rx_data_plane",
+                data_plane.status,
+                data_plane.model_dump(mode="json"),
+                "one exact-serial bounded RX refill",
+                "Bounded RX data-plane refill passed"
+                if data_plane.status == "pass"
+                else f"Bounded RX data-plane refill failed: {data_plane.error}",
+            )
     model = str(facts.get("hw_model") or "").strip() or None
     model_ok = model is not None and "plutosdr rev.c" in model.lower()
     _check(
@@ -323,6 +362,7 @@ def _diagnose_radio(
 def _unknown_facts(checks: list[LocalDoctorCheck]) -> None:
     for code, expected in (
         ("identity.iio_serial", "same non-empty USB serial"),
+        ("transport.rx_data_plane", "one exact-serial bounded RX refill"),
         ("hardware.rev_c", "PlutoSDR Rev.C"),
         (
             "firmware.diagnostic_profile",

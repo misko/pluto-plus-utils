@@ -196,6 +196,42 @@ uv run pluto doctor MANAGED_RADIO_ID  # explicitly uses plutod
 uv run pluto doctor --daemon          # all daemon-managed radios
 ```
 
+The passive sweep reports `transport.rx_data_plane` as `unknown`, because IIOD
+metadata alone cannot prove that a buffer refill completes. When the selected radio
+is quiescent, request one bounded 65,536-sample-per-channel refill on an exact USB
+target:
+
+```bash
+uv run pluto doctor --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --probe-data-plane --format json
+```
+
+If that probe reports an `ETIMEDOUT` while IIOD metadata remains responsive, use the
+standalone recovery lane. It derives the USB topology and interface from the serial,
+does not require canonical AD9361/2R2T setup, and is a dry run until explicitly
+confirmed:
+
+```bash
+uv run pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts
+uv run pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts \
+  --ssh-password-file /private/SERIAL.password \
+  --execute --confirm 'RESTART IIOD SERIAL'
+```
+
+Execution is allowed only when the pre-probe failed as a receive timeout. The fixed
+SSH script re-attests the remote gadget serial, records the old and replacement IIOD
+PID/start epoch plus CMA and active-buffer evidence, and the command retries a fresh
+bounded refill before issuing a mode-0600 receipt. A healthy, wrong-identity, or
+host-environment failure never triggers a restart. LAN recovery uses `--ssh-host` and
+the independently pinned key for that exact endpoint.
+
+To prevent the known trigger, every `IioRadioDevice` ordinary and metadata capture
+rejects a single RX allocation above 32 MiB: half of the supported firmware's 64 MiB
+CMA pool. Use repeated/streaming buffers for longer captures. This avoids relying on a
+nearly pristine contiguous CMA region even when `CmaFree` is high.
+
 ### Persistent setup inspection and repair
 
 Without credentials doctor cannot reach the persistent U-Boot environment and

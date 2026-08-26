@@ -42,6 +42,8 @@ The web UI runs the same API at `GET /api/v1/radios/{radio_id}/doctor`. It check
 each fact independently:
 
 - exact IIO hardware serial and a separately correlated `0456:b673` USB sysfs path;
+- an optional exact-serial 65,536-sample RX refill (`--probe-data-plane` on one exact
+  `--usb-sysfs-path`), which detects a responsive control plane with a wedged data plane;
 - active `fw_version` against the selected firmware profile;
 - live `ad9361-phy,model == ad9361`;
 - RX scan elements `voltage0..voltage3`, proving both complex receive paths exist;
@@ -53,6 +55,40 @@ each fact independently:
 `unknown` is deliberate. Channel presence cannot prove the persistent U-Boot values,
 and an active RAM-loaded image cannot prove QSPI contents. The daemon does not use
 default SSH credentials and does not guess these facts.
+
+## Data-plane timeout prevention and recovery
+
+Supported firmware reserves a 64 MiB contiguous-memory (CMA) pool. A large single
+IIOD allocation can intermittently fragment that pool and leave later small refills
+timing out even though attribute reads still work. Pluto+ Utils therefore refuses a
+single ordinary or metadata RX buffer above 32 MiB (50% of the pool). Split longer
+captures into repeated buffers rather than increasing one `rx_buffer_size`.
+
+First stop other owners and prove the failure on one exact local USB radio:
+
+```console
+pluto doctor --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --probe-data-plane --format json
+```
+
+If `transport.rx_data_plane` fails with a timeout, plan and execute the narrow recovery:
+
+```console
+pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts
+pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts \
+  --ssh-password-file /private/SERIAL.password \
+  --execute --confirm 'RESTART IIOD SERIAL'
+```
+
+This path is intentionally independent of the canonical 2R2T gate. It derives the USB
+path/interface from the stable serial, requires pinned SSH trust, remotely re-attests
+the same gadget serial, restarts only the supervisor-owned IIOD child, and records both
+process generations, active RX-buffer state, and `CmaTotal`/`CmaFree`. It then waits for
+a fresh bounded RX refill and writes an absent-only mode-0600 receipt. It refuses to
+restart for a healthy probe, a wrong serial, an invalid refill shape, or a broken host
+libiio environment.
 
 ## Radio `.15` on Gauss
 

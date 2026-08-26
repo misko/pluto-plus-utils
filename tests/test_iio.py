@@ -210,6 +210,24 @@ def test_iio_adapter_applies_reads_back_and_captures_paired_rx() -> None:
     assert radio.diagnostic_facts() == {}
 
 
+def test_iio_adapter_refuses_single_buffer_above_half_cma() -> None:
+    module = FakeAdi()
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        adi_module=module,
+        iio_contexts={"usb:1": "serial=SERIAL_A"},
+    )
+    radio.open()
+    try:
+        with pytest.raises(RadioConfigurationError, match="safety ceiling"):
+            radio.read_block(4_194_305)
+        with pytest.raises(RadioConfigurationError, match="safety ceiling"):
+            radio.begin_metadata_capture(4_194_305, kernel_buffers=1)
+    finally:
+        radio.close()
+
+
 def test_iio_adapter_fails_closed_on_wrong_opened_serial() -> None:
     radio = IioRadioDevice(
         "usb:",
@@ -294,9 +312,7 @@ def test_sysfs_discovery_is_stable_and_filtered(tmp_path) -> None:
 
 
 def test_context_facts_include_live_model_metadata_and_dual_rx_scan() -> None:
-    channels = [
-        SimpleNamespace(id=f"voltage{index}", scan_element=True) for index in range(4)
-    ]
+    channels = [SimpleNamespace(id=f"voltage{index}", scan_element=True) for index in range(4)]
     context = SimpleNamespace(
         attrs={
             "hw_serial": "SERIAL_A",

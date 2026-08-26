@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -18,10 +19,25 @@ from pluto_plus.cli import (
     _read_ssh_firmware_enrollment,
     app,
 )
-from pluto_plus.inventory import LocalUsbPluto
+from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.models import Transport
 
 runner = CliRunner()
+
+
+def _recovery_usb() -> LocalUsbPluto:
+    return LocalUsbPluto(
+        usb_path="/sys/bus/usb/devices/3-8",
+        bus_number=3,
+        device_number=11,
+        product="PlutoSDR+",
+        serial="SERIAL_A",
+        speed_mbps=480,
+        interface_count=7,
+        host_network_interfaces=(
+            HostNetworkInterface(name="enx001", ipv4_addresses=("192.168.2.10",)),
+        ),
+    )
 
 
 @pytest.fixture
@@ -376,6 +392,199 @@ def test_settings_set_fetches_revision_and_sends_only_requested_fields(api_trans
         "gain_mode": "slow_attack",
         "channels": [0, 1],
     }
+
+
+def test_data_plane_recovery_dry_run_derives_usb_target_and_reports_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneProbe
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda **kwargs: SimpleNamespace(healthy=True),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.probe_iio_data_plane",
+        lambda uri, serial: DataPlaneProbe(
+            status="fail",
+            serial=serial,
+            uri="usb:1",
+            samples_per_channel=65_536,
+            receiver_count=2,
+            wire_bytes=524_288,
+            elapsed_ms=5000,
+            failure_kind="timeout",
+            error="TimeoutError: [Errno 110]",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "recover",
+            "SERIAL_A",
+            "--data-plane",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["eligible_for_restart"] is True
+    assert payload["will_restart_iiod"] is False
+    assert payload["ssh_interface"] == "enx001"
+    assert payload["usb_sysfs_path"] == "/sys/bus/usb/devices/3-8"
+
+
+def test_data_plane_recovery_restarts_only_timeout_and_writes_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneProbe, IiodRestartEvidence
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    probes = iter(
+        (
+            DataPlaneProbe(
+                status="fail",
+                serial="SERIAL_A",
+                uri="usb:1",
+                samples_per_channel=65_536,
+                receiver_count=2,
+                wire_bytes=524_288,
+                elapsed_ms=5000,
+                failure_kind="timeout",
+                error="TimeoutError: [Errno 110]",
+            ),
+            DataPlaneProbe(
+                status="pass",
+                serial="SERIAL_A",
+                uri="usb:1",
+                samples_per_channel=65_536,
+                receiver_count=2,
+                wire_bytes=524_288,
+                elapsed_ms=40,
+            ),
+        )
+    )
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda **kwargs: SimpleNamespace(healthy=True),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.probe_iio_data_plane", lambda uri, serial: next(probes)
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.BoundSshTransport",
+        lambda **kwargs: SimpleNamespace(bound=kwargs),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.restart_attested_iiod",
+        lambda transport, serial: IiodRestartEvidence(
+            serial=serial,
+            previous_pid=101,
+            replacement_pid=202,
+            previous_start_ticks=1000,
+            replacement_start_ticks=2000,
+            active_rx_buffers_before=1,
+            cma_total_bytes=64 * 1024 * 1024,
+            cma_free_before_bytes=12 * 1024 * 1024,
+            cma_free_after_bytes=63 * 1024 * 1024,
+        ),
+    )
+    receipt_directory = tmp_path / "receipts"
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "recover",
+            "SERIAL_A",
+            "--data-plane",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--receipt-directory",
+            str(receipt_directory),
+            "--execute",
+            "--confirm",
+            "RESTART IIOD SERIAL_A",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["receipt"]["outcome"] == "recovered"
+    receipt_path = Path(payload["receipt_path"])
+    assert receipt_path.is_file()
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(receipt_path.read_text())["restart"]["replacement_pid"] == 202
+
+
+def test_data_plane_recovery_never_restarts_a_wrong_identity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneProbe
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda **kwargs: SimpleNamespace(healthy=True),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.probe_iio_data_plane",
+        lambda uri, serial: DataPlaneProbe(
+            status="fail",
+            serial=serial,
+            uri="usb:wrong",
+            samples_per_channel=65_536,
+            elapsed_ms=5,
+            failure_kind="identity",
+            error="DataPlaneRecoveryError: attested serial 'OTHER'",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "recover",
+            "SERIAL_A",
+            "--data-plane",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--execute",
+            "--confirm",
+            "RESTART IIOD SERIAL_A",
+        ],
+    )
+
+    assert result.exit_code == 4, result.output
+    assert "data_plane_recovery_not_eligible" in result.output
+    assert "identity" in result.output
 
 
 @pytest.mark.parametrize(
@@ -1274,9 +1483,7 @@ def test_standalone_reconcile_cli_forwards_exact_receipt_path_and_profile(
         "pluto_plus.bootstrap_firmware.BoundSshBootstrapTransport",
         RecordingSshTransport,
     )
-    monkeypatch.setattr(
-        "pluto_plus.bootstrap_firmware.reconcile_usb_flash_receipt", reconcile
-    )
+    monkeypatch.setattr("pluto_plus.bootstrap_firmware.reconcile_usb_flash_receipt", reconcile)
 
     result = runner.invoke(
         app,
@@ -1356,6 +1563,13 @@ def test_doctor_stays_read_only_without_setup_credentials(
 
     assert result.exit_code == 0, result.output
     assert seen == [None]
+
+
+def test_doctor_data_plane_probe_requires_one_exact_usb_target() -> None:
+    result = runner.invoke(app, ["doctor", "--format", "json", "--probe-data-plane"])
+
+    assert result.exit_code == 2, result.output
+    assert "data_plane_probe_target_required" in result.output
 
 
 def test_doctor_setup_inspection_requires_one_exact_radio(tmp_path: Path) -> None:
