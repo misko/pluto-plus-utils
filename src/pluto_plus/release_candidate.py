@@ -473,8 +473,8 @@ class ReleaseCandidateRecoveryReceipt(ApiModel):
     recovered_runtime: RuntimeObservation
     expected_return_firmware: FirmwareVersion
     host_route: HostRouteReceipt
-    recovery_action: Literal["dfu-detach-e"] = "dfu-detach-e"
-    dfu_detach_completed: Literal[True] = True
+    recovery_action: Literal["dfu-detach-e", "runtime-attestation"]
+    dfu_detach_completed: bool
     persistent_write: Literal[False] = False
     qspi_unchanged: Literal[True] = True
     cleanup: CleanupReceipt
@@ -513,6 +513,8 @@ class ReleaseCandidateRecoveryReceipt(ApiModel):
             raise ValueError("DFU recovery requires a new runtime boot ID")
         if self.pre_runtime.qspi != self.recovered_runtime.qspi:
             raise ValueError("DFU recovery requires unchanged qspi-linux bytes")
+        if self.dfu_detach_completed != (self.recovery_action == "dfu-detach-e"):
+            raise ValueError("recovery action and DFU detach verdict disagree")
         if not self.host_route.release_verified:
             raise ValueError("recovery host route release is not verified")
         if (

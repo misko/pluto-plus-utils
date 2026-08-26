@@ -563,29 +563,40 @@ class LinuxReleaseCandidateBackend:
         password: PasswordFileIdentity,
         ssh_host: str,
         timeout_s: float,
-    ) -> tuple[RuntimeObservation, HostRouteReceipt]:
-        """Detach one exact DFU target and attest its unchanged persistent runtime."""
+    ) -> tuple[RuntimeObservation, HostRouteReceipt, bool]:
+        """Return or re-attest one exact unknown transition without another download."""
 
         if self._active_target != target:
             raise ReleaseCandidateLifecycleError("DFU recovery target is not lock-bound")
-        device = self._dfu_device(target.topology)
-        if device.serial and device.serial != target.serial:
-            raise ReleaseCandidateLifecycleError(
-                "DFU recovery device exposed a different serial at the selected topology"
-            )
-        self.detach_dfu(
-            (
-                "dfu-util",
-                "-d",
-                DFU_SELECTOR,
-                "-p",
-                target.topology,
-                "-a",
-                DFU_ALTERNATE,
-                "-e",
-            )
+        matches = tuple(
+            item
+            for item in self._runtime_targets()
+            if item.serial == target.serial and item.topology == target.topology
         )
-        returned = self.wait_for_runtime(target, timeout_s=timeout_s)
+        if len(matches) > 1:
+            raise ReleaseCandidateLifecycleError("DFU recovery found multiple matching runtimes")
+        detached = not matches
+        if detached:
+            device = self._dfu_device(target.topology)
+            if device.serial and device.serial != target.serial:
+                raise ReleaseCandidateLifecycleError(
+                    "DFU recovery device exposed a different serial at the selected topology"
+                )
+            self.detach_dfu(
+                (
+                    "dfu-util",
+                    "-d",
+                    DFU_SELECTOR,
+                    "-p",
+                    target.topology,
+                    "-a",
+                    DFU_ALTERNATE,
+                    "-e",
+                )
+            )
+            returned = self.wait_for_runtime(target, timeout_s=timeout_s)
+        else:
+            returned = matches[0]
         if (
             returned.serial != target.serial
             or returned.topology != target.topology
@@ -614,7 +625,7 @@ class LinuxReleaseCandidateBackend:
             self.release_host_route(route)
             raise
         self.release_host_route(route)
-        return observed, route.model_copy(update={"release_verified": True})
+        return observed, route.model_copy(update={"release_verified": True}), detached
 
     def _runtime_targets(self) -> tuple[UsbInventoryTarget, ...]:
         targets: list[UsbInventoryTarget] = []

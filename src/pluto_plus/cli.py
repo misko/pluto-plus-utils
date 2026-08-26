@@ -2441,6 +2441,11 @@ def firmware_candidate_ram_recover(
     confirmation: str = typer.Option(
         ..., "--confirm", help="Exact phrase RECOVER RELEASE CANDIDATE <serial>."
     ),
+    expected_return_firmware: str = typer.Option(
+        ...,
+        "--expected-return-firmware",
+        help="Exact firmware expected after returning to or finding the safe runtime.",
+    ),
     output: Path = typer.Option(  # noqa: B008
         ..., "--output", help="Absent private recovery-receipt output."
     ),
@@ -2531,17 +2536,19 @@ def firmware_candidate_ram_recover(
         backend = LinuxReleaseCandidateBackend(
             state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
         )
-        expected_firmware = (
-            candidate.expected_runtime.firmware_version
-            if unknown.transition.download_completed
-            else unknown.pre_runtime.firmware_version
-        )
+        if (
+            unknown.transition.download_completed
+            and expected_return_firmware != candidate.expected_runtime.firmware_version
+        ):
+            raise ReleaseCandidateLifecycleError(
+                "a completed candidate download must recover to the candidate firmware"
+            )
         started_at = datetime.now(UTC)
         with backend.transaction_locks(unknown.target, operation.ssh_host):
-            recovered, route = backend.recover_unknown_runtime(
+            recovered, route, detached = backend.recover_unknown_runtime(
                 unknown.target,
                 pre_runtime=unknown.pre_runtime,
-                expected_firmware=expected_firmware,
+                expected_firmware=expected_return_firmware,
                 password=password,
                 ssh_host=operation.ssh_host,
                 timeout_s=timeout_s,
@@ -2560,10 +2567,10 @@ def firmware_candidate_ram_recover(
             target=unknown.target,
             pre_runtime=unknown.pre_runtime,
             recovered_runtime=recovered,
-            expected_return_firmware=expected_firmware,
+            expected_return_firmware=expected_return_firmware,
             host_route=route,
-            recovery_action="dfu-detach-e",
-            dfu_detach_completed=True,
+            recovery_action="dfu-detach-e" if detached else "runtime-attestation",
+            dfu_detach_completed=detached,
             persistent_write=False,
             qspi_unchanged=True,
             cleanup=CleanupReceipt(verified=True),

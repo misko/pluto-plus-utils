@@ -78,9 +78,14 @@ def test_candidate_ram_help_has_native_plan_execute_and_no_known_hosts() -> None
     assert execute.exit_code == 0, execute.output
     assert "--ssh-password-file" in execute.output
     assert "known-host" not in execute.output.lower()
-    recover = runner.invoke(app, ["firmware", "candidate-ram", "recover", "--help"])
+    recover = runner.invoke(
+        app,
+        ["firmware", "candidate-ram", "recover", "--help"],
+        terminal_width=160,
+    )
     assert recover.exit_code == 0, recover.output
     assert "--ssh-password-file" in recover.output
+    assert "--expected-return-fi" in recover.output
     assert "--output" in recover.output
     assert "known-host" not in recover.output.lower()
 

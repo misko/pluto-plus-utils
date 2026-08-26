@@ -368,7 +368,7 @@ def test_unknown_dfu_recovery_detaches_and_attests_unchanged_qspi(
     )
 
     with backend.transaction_locks(_target(), "192.168.2.1"):
-        observed, route = backend.recover_unknown_runtime(
+        observed, route, detached = backend.recover_unknown_runtime(
             _target(),
             pre_runtime=pre,
             expected_firmware=pre.firmware_version,
@@ -379,8 +379,43 @@ def test_unknown_dfu_recovery_detaches_and_attests_unchanged_qspi(
 
     assert observed == recovered
     assert route.release_verified is True
+    assert detached is True
     assert runner.route_present is False
     assert any(call[0] == "dfu-util" for call in runner.calls)
+
+
+def test_unknown_recovery_attests_already_returned_runtime_without_detach(
+    tmp_path: Path,
+) -> None:
+    runner = RouteRunner()
+    password_path = tmp_path / "password"
+    password_path.write_text("analog\n")
+    password_path.chmod(0o600)
+    password = validate_password_file(password_path.absolute())
+    pre = _runtime(boot_id="11111111-1111-4111-8111-111111111111")
+    recovered = _runtime(boot_id="22222222-2222-4222-8222-222222222222")
+    backend = LinuxReleaseCandidateBackend(
+        state_root=(tmp_path / "state").absolute(),
+        scanner=lambda: (_local(),),
+        command_runner=runner,
+        runtime_attestor=lambda target, expected_firmware, password, route: recovered,
+    )
+
+    with backend.transaction_locks(_target(), "192.168.2.1"):
+        observed, route, detached = backend.recover_unknown_runtime(
+            _target(),
+            pre_runtime=pre,
+            expected_firmware=pre.firmware_version,
+            password=password,
+            ssh_host="192.168.2.1",
+            timeout_s=45,
+        )
+
+    assert observed == recovered
+    assert route.release_verified is True
+    assert detached is False
+    assert runner.route_present is False
+    assert not any(call[0] == "dfu-util" for call in runner.calls)
 
 
 def test_exact_topology_dfu_rejects_present_wrong_serial(tmp_path: Path) -> None:
