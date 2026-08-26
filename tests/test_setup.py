@@ -11,6 +11,7 @@ from pluto_plus.setup import (
     CanonicalSetupManager,
     SetupAuthorizationError,
     SetupExecutionResult,
+    SetupHostKeyRotation,
     SetupIdentity,
     SetupObservation,
     SetupPreconditionError,
@@ -51,6 +52,7 @@ class FakeSetupBackend:
     def __init__(self, current: SetupObservation) -> None:
         self.current = current
         self.plans = []
+        self.host_key_rotation: SetupHostKeyRotation | None = None
 
     def inspect(self, identity: SetupIdentity) -> SetupObservation:
         assert identity.serial == self.current.identity.serial
@@ -68,6 +70,7 @@ class FakeSetupBackend:
             observation=self.current,
             backup_path="backups/SERIAL_A-before.txt",
             backup_sha256="4" * 64,
+            host_key_rotation=self.host_key_rotation,
         )
 
 
@@ -190,6 +193,35 @@ def test_setup_success_is_verified_and_receipted(tmp_path: Path) -> None:
     assert next((tmp_path / "receipts").glob("*.json")).is_file()
     with pytest.raises(SetupAuthorizationError, match="already used"):
         manager.execute(planned.plan, planned.confirmation_token)
+
+
+def test_setup_receipt_persists_post_reboot_host_key_rotation(tmp_path: Path) -> None:
+    backend = FakeSetupBackend(_observation())
+    backend.host_key_rotation = SetupHostKeyRotation(
+        previous_known_hosts_sha256="5" * 64,
+        replacement_known_hosts_sha256="6" * 64,
+        previous_fingerprint="SHA256:old",
+        replacement_fingerprint="SHA256:new",
+        previous_known_hosts_backup="/private/known_hosts.pre-reboot",
+    )
+    receipt_directory = tmp_path / "receipts"
+    manager = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    )
+    planned = manager.create_plan(_identity())
+
+    receipt = manager.execute(planned.plan, planned.confirmation_token)
+    reloaded = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    ).list_receipts()[0]
+
+    assert receipt.schema_version == 3
+    assert receipt.host_key_rotation == backend.host_key_rotation
+    assert reloaded.host_key_rotation == backend.host_key_rotation
 
 
 def test_setup_token_rejects_tampered_plan(tmp_path: Path) -> None:

@@ -147,11 +147,15 @@ pluto --admin-token-file /private/admin.token setup receipt-list
 
 The Web Doctor panel enables **Prepare setup repair** only for an eligible, noncanonical
 selected radio. Inspect the immutable diff, enter the admin token, type
-`PROVISION <serial>`, and execute once. A changed SSH host key is a hard verification
-failure: physically re-attest the USB serial/path before reviewing and re-pinning it.
-If an execution receipt reports an unknown outcome, do not retry provisioning. Preserve
-the receipt and backup reference, restore pinned SSH trust only after that out-of-band
-attestation, and run the dedicated read-only reconciliation action.
+`PROVISION <serial>`, and execute once. For the exact interface-bound USB endpoint,
+firmware which regenerates its SSH key on reboot is handled only after the selected
+serial/path has disappeared and returned. Setup then repeats the unambiguous route and
+local USB identity checks, accepts one replacement key while running a fixed remote
+serial attestation, atomically archives the previous key, and records both fingerprints
+and file digests in the receipt. This recovery is deliberately unavailable for a LAN
+endpoint, whose changed key still requires independent out-of-band verification. If an
+execution receipt reports an unknown outcome, do not retry provisioning; preserve its
+receipt and backup and use the dedicated read-only reconciliation action.
 
 ## Firmware update contract
 

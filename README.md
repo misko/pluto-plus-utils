@@ -319,8 +319,12 @@ will not send the bearer token over non-loopback plaintext HTTP.
 
 If execution becomes uncertain after mutation or reboot, the receipt records the last
 completed phase and durable backup reference. Do not replay the consumed plan. Re-attest
-and, if necessary, explicitly re-pin the selected radio's SSH host key out of band, then
-use the receipt's read-only reconciliation action.
+and use the receipt's read-only reconciliation action. Firmware which regenerates its
+SSH key on reboot is handled automatically only for the exact USB endpoint: setup first
+proves that the selected serial/path disappeared and returned, rechecks the unambiguous
+USB route, attests the same remote gadget serial, atomically archives the prior key, and
+records both key fingerprints/digests in the receipt. LAN-routed replacement keys still
+require independent out-of-band verification and are never accepted from IP identity.
 
 ## Guarded config.txt and static IP workflow
 
