@@ -1979,6 +1979,79 @@ def firmware_reconcile_local(
     _emit(asdict(result))
 
 
+@firmware_app.command("enroll-lan-ssh")
+def firmware_enroll_lan_ssh(
+    serial: str = typer.Argument(..., help="Exact serial expected at the LAN endpoint."),
+    host: str = typer.Option(..., "--host", help="Exact private LAN IPv4 endpoint."),
+    known_hosts_file: Path = typer.Option(  # noqa: B008
+        ..., "--known-hosts-file", help="New private serial-specific known_hosts file."
+    ),
+    profile: str = typer.Option(
+        ...,
+        "--profile",
+        help="Immutable metadata firmware/capability profile required from IIOD.",
+    ),
+    execute: bool = typer.Option(False, "--execute", help="Perform explicit LAN TOFU."),
+    use_default_password: bool = typer.Option(
+        False,
+        "--use-default-password",
+        help="Acknowledge use of the Pluto factory-default root password for enrollment.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase TRUST LAN SSH <serial> <host>.",
+    ),
+) -> None:
+    """Pin one LAN SSH key after read-only IIOD identity attestation."""
+
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapFirmwareError,
+        execute_lan_ssh_host_key_enrollment,
+        prepare_lan_ssh_host_key_enrollment,
+    )
+
+    try:
+        plan = prepare_lan_ssh_host_key_enrollment(
+            serial=serial,
+            host=host,
+            known_hosts_file=known_hosts_file,
+            profile_id=profile,
+        )
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("lan_ssh_identity_attestation_failed", str(error), 4)
+    if not execute:
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_trust_host_key": False,
+                "warning": "explicit LAN TOFU is weaker than USB-anchored enrollment",
+                "plan": asdict(plan),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "lan_ssh_confirmation_required",
+            f"--confirm must be exactly {plan.confirmation_phrase!r}",
+            2,
+        )
+    if not use_default_password:
+        _fail(
+            "lan_ssh_default_password_authorization_required",
+            "--execute requires explicit --use-default-password authorization",
+            2,
+        )
+    try:
+        result = execute_lan_ssh_host_key_enrollment(
+            plan,
+            confirmation=confirmation,
+        )
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("lan_ssh_enrollment_failed", str(error), 4)
+    _emit(result)
+
+
 @firmware_app.command("enroll-usb-ssh")
 def firmware_enroll_usb_ssh(
     serial: str = typer.Argument(..., help="Exact serial of one USB-attached local radio."),

@@ -129,6 +129,8 @@ class BoundSshTransport:
             "StrictHostKeyChecking=yes",
             "-o",
             f"UserKnownHostsFile={self._known_hosts_file}",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
             f"{self._username}@{self.host}",
             command,
         ]

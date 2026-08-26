@@ -19,10 +19,11 @@ from pydantic import Field
 
 from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
 from pluto_plus.doctor import TANDEM_AGC_V7_RAM_POLICY
+from pluto_plus.hardware.iio_metadata import configure_iio_context_timeout
 from pluto_plus.hardware.preflight import inspect_iio_environment
 from pluto_plus.models import ApiModel
 from pluto_plus.setup_helper import SetupTransport
-from pluto_plus.tandem import RadioMetadataV4, TandemMode, TandemSessionRequestV1, TandemState
+from pluto_plus.tandem import RadioMetadataV5, TandemMode, TandemSessionRequestV1, TandemState
 
 MAX_SLOTS = 936
 MAX_CLOSE_SECONDS = 2.0
@@ -254,6 +255,7 @@ def _execute_live_metadata_slot(
     original: dict[str, Any] = {}
     restored = False
     try:
+        configure_iio_context_timeout(sdr._ctx)
         with _metadata_phase(slot, "context_attestation"):
             if sdr._ctx.attrs.get("hw_serial") != plan.serial:
                 raise MetadataSoakError("IIO context serial does not match the soak plan")
@@ -365,7 +367,7 @@ def _execute_live_metadata_slot(
                     raw = buffer.metadata
                     if raw is None:
                         raise MetadataSoakError("metadata refill returned no header")
-                    metadata = RadioMetadataV4.unpack(raw)
+                    metadata = RadioMetadataV5.unpack(raw)
                     if metadata.tandem_state is not TandemState.ARMED_HOLD:
                         raise MetadataSoakError("metadata refill lost tandem HOLD ownership")
                     frames += 1

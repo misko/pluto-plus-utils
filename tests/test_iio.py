@@ -13,6 +13,7 @@ from pluto_plus.hardware.iio import (
     find_usb_sysfs_path,
     resolve_iio_uri,
 )
+from pluto_plus.hardware.iio_metadata import IIO_CONTEXT_TIMEOUT_MS
 from pluto_plus.models import GainMode, RadioSettings, Transport
 
 
@@ -28,12 +29,14 @@ class FakeRxAdc:
 class FakeAd9361:
     def __init__(self, uri: str, serial: str = "SERIAL_A") -> None:
         self.uri = uri
+        self.timeout_calls: list[int] = []
         self.ctx = SimpleNamespace(
             attrs={
                 "hw_serial": serial,
                 "hw_model": "Pluto+ Test",
                 "fw_version": "v-test",
             },
+            set_timeout=self.timeout_calls.append,
             close=lambda: None,
         )
         self.sample_rate = 2_500_000
@@ -114,6 +117,7 @@ class OneRxFakeAd9361(FakeAd9361):
                 if name == "cf-ad9361-lpc"
                 else None
             ),
+            set_timeout=self.timeout_calls.append,
             close=lambda: None,
         )
         self.tx_enabled_channels = [0]
@@ -179,6 +183,8 @@ def test_iio_adapter_applies_reads_back_and_captures_paired_rx() -> None:
     )
     radio.open()
     try:
+        assert module.device is not None
+        assert module.device.timeout_calls == [IIO_CONTEXT_TIMEOUT_MS]
         assert radio.identity.serial == "SERIAL_A"
         assert radio.identity.transport is Transport.IIO_USB
         settings = RadioSettings(
@@ -192,7 +198,6 @@ def test_iio_adapter_applies_reads_back_and_captures_paired_rx() -> None:
         assert radio.apply_settings(settings) == settings
         block = radio.read_block(2048)
         assert block.samples.shape == (2, 2048)
-        assert module.device is not None
         assert module.device.tx_enabled_channels == []
         assert module.device.tx_hardwaregain_chan0 == -80.0
         assert module.device.tx_hardwaregain_chan1 == -80.0

@@ -115,6 +115,16 @@ A safe provisioner must perform this entire transaction:
 8. Require scan elements 0–3 and take a paired two-receiver sample.
 9. Keep DDS/TX buffers disabled and set/read back TX1 and TX2 attenuation to the safe minimum.
 
+SSH trust should normally be enrolled through an exact USB physical path. If
+that radio cannot be USB-attached, `pluto firmware enroll-lan-ssh` provides a
+separate, explicitly weaker LAN-TOFU path. Its dry run first attests the exact
+private IPv4 endpoint and serial through bounded read-only IIOD metadata. An
+execution additionally requires `--use-default-password` and the exact phrase
+`TRUST LAN SSH <serial> <host>`. It records no user or global SSH trust, verifies
+the gadget serial again over the newly pinned key, and creates the requested
+private known-hosts file only if no destination exists. Prefer USB enrollment;
+LAN TOFU cannot exclude an attacker able to impersonate both IIOD and SSH.
+
 Pluto+ Utils implements this as a separate setup plan, not as a generic remote shell or
 firmware upload. The daemon must be explicitly composed with one exact serial, sysfs path,
 USB network interface, private USB address, private password file, and pinned SSH host-key

@@ -18,9 +18,10 @@ import numpy as np
 from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
 from pluto_plus.doctor import TANDEM_AGC_V7_RAM_POLICY
 from pluto_plus.hardware.iio import _mute_transmit
+from pluto_plus.hardware.iio_metadata import configure_iio_context_timeout
 from pluto_plus.inventory import scan_local_usb_plutos
 from pluto_plus.tandem import (
-    RadioMetadataV4,
+    RadioMetadataV5,
     TandemEventDirection,
     TandemGainTable,
     TandemMode,
@@ -88,7 +89,7 @@ class _MetadataReceiver:
         )
         self.sdr._rxbuf = self.buffer
 
-    def capture(self) -> tuple[np.ndarray, RadioMetadataV4]:
+    def capture(self) -> tuple[np.ndarray, RadioMetadataV5]:
         if self.buffer is None:
             raise TandemQualificationError("metadata receiver is not open")
         for attempt in range(65):
@@ -101,7 +102,7 @@ class _MetadataReceiver:
         raw = self.buffer.metadata
         if raw is None:
             raise TandemQualificationError("metadata refill returned no header")
-        metadata = RadioMetadataV4.unpack(raw)
+        metadata = RadioMetadataV5.unpack(raw)
         if signal.shape != (2, SAMPLES_PER_CHANNEL):
             raise TandemQualificationError("metadata IQ shape is not paired")
         return signal, metadata
@@ -218,6 +219,7 @@ def execute_tandem_qualification(
         "outcome": "started",
     }
     try:
+        configure_iio_context_timeout(sdr._ctx)
         if sdr._ctx.attrs.get("hw_serial") != plan.serial:
             raise TandemQualificationError("opened IIO context has the wrong serial")
         if sdr._ctx.attrs.get("fw_version") != plan.expected_firmware:
@@ -311,11 +313,32 @@ def _expected_gain_table(frequency_hz: int) -> TandemGainTable:
     )
 
 
+def _temperature_summary(frames: list[RadioMetadataV5]) -> dict[str, int]:
+    values = [
+        frame.ad9361_temperature_mdeg_c
+        for frame in frames
+        if frame.ad9361_temperature_mdeg_c is not None
+    ]
+    if not values:
+        raise TandemQualificationError("no valid cached AD9361 temperature")
+    if any(not -40_000 <= value <= 125_000 for value in values):
+        raise TandemQualificationError("AD9361 temperature is outside its physical range")
+    return {
+        "temperature_mdeg_c_min": min(values),
+        "temperature_mdeg_c_max": max(values),
+    }
+
+
 def _qualify_hold(sdr: Any, expected_gain_table: TandemGainTable) -> dict[str, Any]:
     receiver = _MetadataReceiver(sdr, TandemMode.HOLD)
     receiver.open()
     try:
         frames = [receiver.capture()[1] for _ in range(2)]
+        deadline = time.monotonic() + 2.0
+        while not any(
+            frame.ad9361_temperature_mdeg_c is not None for frame in frames
+        ) and time.monotonic() < deadline:
+            frames.append(receiver.capture()[1])
         if any(frame.tandem_state is not TandemState.ARMED_HOLD for frame in frames):
             raise TandemQualificationError("HOLD metadata does not report ARMED_HOLD")
         if any(frame.gain_events or frame.tandem_transition_count for frame in frames):
@@ -336,6 +359,7 @@ def _qualify_hold(sdr: Any, expected_gain_table: TandemGainTable) -> dict[str, A
             "frames": len(frames),
             "ownership_epoch": frames[0].ownership_epoch,
             "gain_table_id": int(frames[0].gain_table_id),
+            **_temperature_summary(frames),
         }
     finally:
         receiver.close()
@@ -431,7 +455,7 @@ def _qualify_auto(
     sdr.dds_single_tone(TONE_HZ, AUTO_TONE_SCALE, channel=1)
     sdr.tx_hardwaregain_chan1 = plan.weak_tx_gain_db
     receiver.open()
-    frames: list[RadioMetadataV4] = []
+    frames: list[RadioMetadataV5] = []
     attempts: list[dict[str, int]] = []
     try:
         for attempt in range(1, 4):
@@ -493,6 +517,7 @@ def _qualify_auto(
         "last_transition_count": frames[-1].tandem_transition_count,
         "gain_table_id": int(frames[0].gain_table_id),
         "attempts": attempts,
+        **_temperature_summary(frames),
     }
 
 

@@ -37,6 +37,12 @@ fault/overflow, settings-restoration, or TX-safe failure is a release failure.
 The 936-slot campaign is a separate long-soak checkpoint and must retain the
 fixed absolute slot schedule without catch-up bursts.
 
+Every IIO context is configured with a 5,000 ms libiio timeout before its first
+RX refill. At 2.5 MS/s, a 262,144-sample dual-RX refill spans about 105 ms, so
+this allows more than 47 nominal refill intervals for transport jitter while
+bounding a stalled USB or IP read. A timeout is a capture failure and callers
+must close the capture or radio so its receive buffer and context are released.
+
 For direct transport qualification, start only the daemon composition matching
 the named serial:
 
