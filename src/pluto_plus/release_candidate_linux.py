@@ -554,6 +554,68 @@ class LinuxReleaseCandidateBackend:
             runtime=None, cleanup=CleanupReceipt(verified=False, errors=tuple(errors))
         )
 
+    def recover_unknown_runtime(
+        self,
+        target: UsbInventoryTarget,
+        *,
+        pre_runtime: RuntimeObservation,
+        expected_firmware: str,
+        password: PasswordFileIdentity,
+        ssh_host: str,
+        timeout_s: float,
+    ) -> tuple[RuntimeObservation, HostRouteReceipt]:
+        """Detach one exact DFU target and attest its unchanged persistent runtime."""
+
+        if self._active_target != target:
+            raise ReleaseCandidateLifecycleError("DFU recovery target is not lock-bound")
+        device = self._dfu_device(target.topology)
+        if device.serial and device.serial != target.serial:
+            raise ReleaseCandidateLifecycleError(
+                "DFU recovery device exposed a different serial at the selected topology"
+            )
+        self.detach_dfu(
+            (
+                "dfu-util",
+                "-d",
+                DFU_SELECTOR,
+                "-p",
+                target.topology,
+                "-a",
+                DFU_ALTERNATE,
+                "-e",
+            )
+        )
+        returned = self.wait_for_runtime(target, timeout_s=timeout_s)
+        if (
+            returned.serial != target.serial
+            or returned.topology != target.topology
+            or returned.network_interface != target.network_interface
+            or returned.source_ipv4 != target.source_ipv4
+        ):
+            raise ReleaseCandidateLifecycleError(
+                "DFU recovery returned a different physical target"
+            )
+        self._active_target = returned
+        route = self.acquire_host_route(returned, ssh_host)
+        try:
+            observed = self.attest_runtime(
+                returned,
+                expected_firmware=expected_firmware,
+                password=password,
+                route=route,
+            )
+            if observed.boot_id == pre_runtime.boot_id:
+                raise ReleaseCandidateLifecycleError(
+                    "DFU recovery did not produce a new runtime boot ID"
+                )
+            if observed.qspi != pre_runtime.qspi:
+                raise ReleaseCandidateLifecycleError("qspi-linux bytes changed across DFU recovery")
+        except BaseException:
+            self.release_host_route(route)
+            raise
+        self.release_host_route(route)
+        return observed, route.model_copy(update={"release_verified": True})
+
     def _runtime_targets(self) -> tuple[UsbInventoryTarget, ...]:
         targets: list[UsbInventoryTarget] = []
         for device in self.scanner():
@@ -588,7 +650,12 @@ class LinuxReleaseCandidateBackend:
         path = self.sysfs_root / topology
         try:
             resolved = path.resolve(strict=True)
-            if resolved.name != topology or resolved.parent.resolve() != self.sysfs_root.resolve():
+            # /sys/bus/usb/devices/<topology> is a kernel-owned symlink into
+            # /sys/devices/.../usbN/<topology>.  The unresolved selector is
+            # constructed locally from an exact topology, while the resolved
+            # node must retain that same final component.  Requiring its parent
+            # to resolve back under /sys/bus is incompatible with real sysfs.
+            if path.parent != self.sysfs_root or resolved.name != topology:
                 raise ReleaseCandidateLifecycleError("DFU sysfs path is not direct")
             vendor = (resolved / "idVendor").read_text(encoding="ascii").strip().lower()
             product = (resolved / "idProduct").read_text(encoding="ascii").strip().lower()

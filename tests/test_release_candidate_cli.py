@@ -72,11 +72,17 @@ def test_candidate_ram_help_has_native_plan_execute_and_no_known_hosts() -> None
     assert "inventory" in result.output
     assert "plan" in result.output
     assert "execute" in result.output
+    assert "recover" in result.output
     assert "receipt-verify" in result.output
     execute = runner.invoke(app, ["firmware", "candidate-ram", "execute", "--help"])
     assert execute.exit_code == 0, execute.output
     assert "--ssh-password-file" in execute.output
     assert "known-host" not in execute.output.lower()
+    recover = runner.invoke(app, ["firmware", "candidate-ram", "recover", "--help"])
+    assert recover.exit_code == 0, recover.output
+    assert "--ssh-password-file" in recover.output
+    assert "--output" in recover.output
+    assert "known-host" not in recover.output.lower()
 
 
 def test_candidate_ram_defaults_to_the_source_checkout() -> None:

@@ -2432,6 +2432,158 @@ def firmware_candidate_ram_receipt_verify(
     )
 
 
+@candidate_ram_app.command("recover")
+def firmware_candidate_ram_recover(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+    ssh_password_file: Path = typer.Option(  # noqa: B008
+        ..., "--ssh-password-file", help="Owned mode-0600 one-line radio password file."
+    ),
+    confirmation: str = typer.Option(
+        ..., "--confirm", help="Exact phrase RECOVER RELEASE CANDIDATE <serial>."
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent private recovery-receipt output."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout whose commit performs recovery.",
+    ),
+    state_root: Path = typer.Option(  # noqa: B008
+        DEFAULT_STATE_ROOT,
+        "--state-root",
+        help="Private daemon state root used for exclusive maintenance locking.",
+    ),
+    timeout_s: float = typer.Option(
+        45.0, "--timeout", min=5.0, max=600.0, help="Per-recovery wait timeout."
+    ),
+) -> None:
+    """Return one exact unknown candidate DFU transition to a safe runtime."""
+
+    import uuid
+    from datetime import UTC, datetime
+
+    from pluto_plus import __version__
+    from pluto_plus.release_candidate import (
+        RECOVERY_RECEIPT_SCHEMA,
+        CleanupReceipt,
+        ReleaseCandidateOperationPlan,
+        ReleaseCandidatePlan,
+        ReleaseCandidateRamReceipt,
+        ReleaseCandidateRecoveryReceipt,
+        load_private_contract,
+        model_file_identity,
+        validate_contract_bundle,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import (
+        ReleaseCandidateLifecycleError,
+        validate_password_file,
+    )
+    from pluto_plus.release_candidate_linux import (
+        LinuxReleaseCandidateBackend,
+        attest_clean_tool_repository,
+    )
+
+    try:
+        selected_receipt = receipt.expanduser().absolute()
+        unknown = load_private_contract(selected_receipt, ReleaseCandidateRamReceipt)
+        operation = load_private_contract(
+            unknown.operation_plan.path, ReleaseCandidateOperationPlan
+        )
+        candidate = load_private_contract(unknown.candidate_plan.path, ReleaseCandidatePlan)
+        validate_contract_bundle(
+            candidate,
+            operation,
+            unknown,
+            candidate_path=unknown.candidate_plan.path,
+            operation_path=unknown.operation_plan.path,
+        )
+        if selected_receipt != operation.receipt_path:
+            raise ReleaseCandidateLifecycleError(
+                "unknown receipt path differs from its operation plan"
+            )
+        if (
+            unknown.outcome != "unknown"
+            or unknown.pre_runtime is None
+            or unknown.cleanup.verified
+            or not unknown.host_route.release_verified
+            or unknown.transition.persistent_write
+        ):
+            raise ReleaseCandidateLifecycleError(
+                "recovery requires one route-released unknown RAM receipt"
+            )
+        expected_confirmation = f"RECOVER RELEASE CANDIDATE {unknown.target.serial}"
+        if confirmation != expected_confirmation:
+            raise ReleaseCandidateLifecycleError(
+                f"recovery requires exact confirmation {expected_confirmation!r}"
+            )
+        password = validate_password_file(ssh_password_file.expanduser().absolute())
+        try:
+            password.path.relative_to(candidate.artifact_index.path.parent)
+        except ValueError:
+            pass
+        else:
+            raise ReleaseCandidateLifecycleError(
+                "SSH password file must be outside the candidate archive"
+            )
+        source = attest_clean_tool_repository(tool_repository.expanduser().absolute())
+        backend = LinuxReleaseCandidateBackend(
+            state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
+        )
+        expected_firmware = (
+            candidate.expected_runtime.firmware_version
+            if unknown.transition.download_completed
+            else unknown.pre_runtime.firmware_version
+        )
+        started_at = datetime.now(UTC)
+        with backend.transaction_locks(unknown.target, operation.ssh_host):
+            recovered, route = backend.recover_unknown_runtime(
+                unknown.target,
+                pre_runtime=unknown.pre_runtime,
+                expected_firmware=expected_firmware,
+                password=password,
+                ssh_host=operation.ssh_host,
+                timeout_s=timeout_s,
+            )
+        recovery = ReleaseCandidateRecoveryReceipt(
+            schema=RECOVERY_RECEIPT_SCHEMA,
+            recovery_id=uuid.uuid4().hex,
+            started_at=started_at,
+            completed_at=datetime.now(UTC),
+            tool_repository=source.repository,
+            tool_version=__version__,
+            tool_source_commit=source.commit,
+            source_receipt=model_file_identity(selected_receipt, unknown),
+            operation_plan=unknown.operation_plan,
+            candidate_plan=unknown.candidate_plan,
+            target=unknown.target,
+            pre_runtime=unknown.pre_runtime,
+            recovered_runtime=recovered,
+            expected_return_firmware=expected_firmware,
+            host_route=route,
+            recovery_action="dfu-detach-e",
+            dfu_detach_completed=True,
+            persistent_write=False,
+            qspi_unchanged=True,
+            cleanup=CleanupReceipt(verified=True),
+        )
+        identity = write_private_contract(output.expanduser().absolute(), recovery)
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        _fail("candidate_ram_recovery_failed", str(error), 5)
+    _emit(
+        {
+            "outcome": "pass",
+            "recovery_receipt": str(identity.path),
+            "recovery_receipt_sha256": identity.sha256,
+            "serial": recovery.target.serial,
+            "firmware_version": recovery.recovered_runtime.firmware_version,
+            "qspi_unchanged": recovery.qspi_unchanged,
+            "route_release_verified": recovery.host_route.release_verified,
+        }
+    )
+
+
 @firmware_app.command("ram-boot")
 def firmware_ram_boot(
     image: Path = typer.Argument(...),  # noqa: B008

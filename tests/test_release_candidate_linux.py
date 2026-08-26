@@ -10,10 +10,17 @@ from types import SimpleNamespace
 import pytest
 
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
-from pluto_plus.release_candidate import HostRouteReceipt, UsbInventoryTarget
+from pluto_plus.release_candidate import (
+    HostRouteReceipt,
+    QspiObservation,
+    RuntimeObservation,
+    SafeState,
+    UsbInventoryTarget,
+)
 from pluto_plus.release_candidate_lifecycle import (
     PasswordFileIdentity,
     ReleaseCandidateLifecycleError,
+    validate_password_file,
 )
 from pluto_plus.release_candidate_linux import (
     LinuxReleaseCandidateBackend,
@@ -37,9 +44,9 @@ def _target() -> UsbInventoryTarget:
     )
 
 
-def _local() -> LocalUsbPluto:
+def _local(*, usb_path: str = f"/sys/bus/usb/devices/{TOPOLOGY}") -> LocalUsbPluto:
     return LocalUsbPluto(
-        usb_path=f"/sys/bus/usb/devices/{TOPOLOGY}",
+        usb_path=usb_path,
         bus_number=3,
         device_number=29,
         product="PlutoSDR+",
@@ -48,6 +55,29 @@ def _local() -> LocalUsbPluto:
         interface_count=7,
         host_network_interfaces=(
             HostNetworkInterface(name=INTERFACE, ipv4_addresses=("192.168.2.10",)),
+        ),
+    )
+
+
+def _runtime(*, boot_id: str) -> RuntimeObservation:
+    return RuntimeObservation(
+        serial=SERIAL,
+        topology=TOPOLOGY,
+        usb_uri="usb:3.31.5",
+        hardware_model="Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
+        firmware_version="v0.41-plutoplus-spf-tandem-agc-v8-rc12",
+        metadata_abi="frame-metadata-v2",
+        capabilities=("tandem-agc",),
+        boot_id=boot_id,
+        qspi=QspiObservation(bytes=31_457_280, sha256="9" * 64),
+        safe_state=SafeState(
+            tx_gain_db=(-80.0, -80.0),
+            dds_raw=(0,) * 8,
+            dds_scale=(0.0,) * 8,
+            dac_selectors=(3, 3, 3, 3),
+            tandem_state="IDLE",
+            fifo_level=0,
+            fault_flags=0,
         ),
     )
 
@@ -252,6 +282,105 @@ def test_exact_topology_dfu_accepts_absent_empty_or_matching_serial(
     )
 
     backend.wait_for_dfu(_target(), timeout_s=1)
+
+
+def test_exact_topology_dfu_accepts_real_kernel_sysfs_symlink_shape(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sys" / "bus" / "usb" / "devices"
+    root.mkdir(parents=True)
+    physical_root = tmp_path / "sys" / "devices" / "pci0000:00" / "usb3"
+    _dfu_sysfs(physical_root, serial=None)
+    (root / TOPOLOGY).symlink_to(physical_root / TOPOLOGY)
+    backend = LinuxReleaseCandidateBackend(
+        state_root=(tmp_path / "state").absolute(),
+        sysfs_root=root,
+        scanner=lambda: (),
+    )
+
+    backend.wait_for_dfu(_target(), timeout_s=1)
+
+
+def test_unknown_dfu_recovery_detaches_and_attests_unchanged_qspi(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sys" / "bus" / "usb" / "devices"
+    root.mkdir(parents=True)
+    physical_root = tmp_path / "sys" / "devices" / "pci0000:00" / "usb3"
+    _dfu_sysfs(physical_root, serial=None)
+    (root / TOPOLOGY).symlink_to(physical_root / TOPOLOGY)
+
+    class RecoveryRunner(RouteRunner):
+        runtime_ready = False
+
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            timeout_s: float,
+            pass_fds: Sequence[int] = (),
+            allowed_returncodes: Sequence[int] = (0,),
+        ) -> str:
+            call = tuple(argv)
+            if call and call[0] == "dfu-util":
+                assert call == (
+                    "dfu-util",
+                    "-d",
+                    "0456:b673,0456:b674",
+                    "-p",
+                    TOPOLOGY,
+                    "-a",
+                    "firmware.dfu",
+                    "-e",
+                )
+                self.calls.append(call)
+                self.runtime_ready = True
+                return ""
+            return super().run(
+                argv,
+                timeout_s=timeout_s,
+                pass_fds=pass_fds,
+                allowed_returncodes=allowed_returncodes,
+            )
+
+    runner = RecoveryRunner()
+
+    class RecoveryBackend(LinuxReleaseCandidateBackend):
+        def wait_for_runtime(
+            self, target: UsbInventoryTarget, *, timeout_s: float
+        ) -> UsbInventoryTarget:
+            assert timeout_s == 45
+            assert runner.runtime_ready
+            return target
+
+    password_path = tmp_path / "password"
+    password_path.write_text("analog\n")
+    password_path.chmod(0o600)
+    password = validate_password_file(password_path.absolute())
+    pre = _runtime(boot_id="11111111-1111-4111-8111-111111111111")
+    recovered = _runtime(boot_id="22222222-2222-4222-8222-222222222222")
+    backend = RecoveryBackend(
+        state_root=(tmp_path / "state").absolute(),
+        sysfs_root=root,
+        scanner=lambda: (),
+        command_runner=runner,
+        runtime_attestor=lambda target, expected_firmware, password, route: recovered,
+    )
+
+    with backend.transaction_locks(_target(), "192.168.2.1"):
+        observed, route = backend.recover_unknown_runtime(
+            _target(),
+            pre_runtime=pre,
+            expected_firmware=pre.firmware_version,
+            password=password,
+            ssh_host="192.168.2.1",
+            timeout_s=45,
+        )
+
+    assert observed == recovered
+    assert route.release_verified is True
+    assert runner.route_present is False
+    assert any(call[0] == "dfu-util" for call in runner.calls)
 
 
 def test_exact_topology_dfu_rejects_present_wrong_serial(tmp_path: Path) -> None:

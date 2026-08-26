@@ -34,6 +34,9 @@ OPERATION_PLAN_SCHEMA: Literal["pluto-plus-utils.release-candidate-operation-pla
 RAM_RECEIPT_SCHEMA: Literal["pluto-plus-utils.release-candidate-ram-receipt.v1"] = (
     "pluto-plus-utils.release-candidate-ram-receipt.v1"
 )
+RECOVERY_RECEIPT_SCHEMA: Literal["pluto-plus-utils.release-candidate-recovery-receipt.v1"] = (
+    "pluto-plus-utils.release-candidate-recovery-receipt.v1"
+)
 USB_INVENTORY_SCHEMA: Literal["pluto-plus-utils.release-usb-inventory.v1"] = (
     "pluto-plus-utils.release-usb-inventory.v1"
 )
@@ -451,7 +454,83 @@ class ReleaseCandidateRamReceipt(ApiModel):
         return self
 
 
-ReleaseContract = ReleaseCandidatePlan | ReleaseCandidateOperationPlan | ReleaseCandidateRamReceipt
+class ReleaseCandidateRecoveryReceipt(ApiModel):
+    schema_id: Literal["pluto-plus-utils.release-candidate-recovery-receipt.v1"] = Field(
+        RECOVERY_RECEIPT_SCHEMA, alias="schema"
+    )
+    schema_version: Literal[1] = 1
+    recovery_id: Identifier
+    started_at: datetime
+    completed_at: datetime
+    tool_repository: Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
+    tool_version: Annotated[str, Field(min_length=1, max_length=128)]
+    tool_source_commit: SourceCommit
+    source_receipt: FileIdentity
+    operation_plan: FileIdentity
+    candidate_plan: FileIdentity
+    target: UsbInventoryTarget
+    pre_runtime: RuntimeObservation
+    recovered_runtime: RuntimeObservation
+    expected_return_firmware: FirmwareVersion
+    host_route: HostRouteReceipt
+    recovery_action: Literal["dfu-detach-e"] = "dfu-detach-e"
+    dfu_detach_completed: Literal[True] = True
+    persistent_write: Literal[False] = False
+    qspi_unchanged: Literal[True] = True
+    cleanup: CleanupReceipt
+
+    @field_validator("started_at", "completed_at")
+    @classmethod
+    def validate_timestamps(cls, value: datetime) -> datetime:
+        return _utc_timestamp(value, label="recovery receipt timestamp")
+
+    @model_validator(mode="after")
+    def validate_relationships(self) -> ReleaseCandidateRecoveryReceipt:
+        if self.completed_at < self.started_at:
+            raise ValueError("recovery completion precedes its start")
+        if self.source_receipt.path in {
+            self.operation_plan.path,
+            self.candidate_plan.path,
+        }:
+            raise ValueError("recovery inputs must be distinct files")
+        if self.operation_plan.path == self.candidate_plan.path:
+            raise ValueError("operation and candidate plan files must be distinct")
+        if (
+            self.pre_runtime.serial != self.target.serial
+            or self.recovered_runtime.serial != self.target.serial
+        ):
+            raise ValueError("recovery runtime serial does not match the target")
+        if (
+            self.pre_runtime.topology != self.target.topology
+            or self.recovered_runtime.topology != self.target.topology
+        ):
+            raise ValueError("recovery runtime topology does not match the target")
+        if self.recovered_runtime.firmware_version != self.expected_return_firmware:
+            raise ValueError("recovered firmware does not match the expected return")
+        if self.pre_runtime.hardware_model != self.recovered_runtime.hardware_model:
+            raise ValueError("hardware model changed during recovery")
+        if self.pre_runtime.boot_id == self.recovered_runtime.boot_id:
+            raise ValueError("DFU recovery requires a new runtime boot ID")
+        if self.pre_runtime.qspi != self.recovered_runtime.qspi:
+            raise ValueError("DFU recovery requires unchanged qspi-linux bytes")
+        if not self.host_route.release_verified:
+            raise ValueError("recovery host route release is not verified")
+        if (
+            self.host_route.interface != self.target.network_interface
+            or self.host_route.source != self.target.source_ipv4
+        ):
+            raise ValueError("recovery host route does not match the target")
+        if not self.cleanup.verified:
+            raise ValueError("recovery cleanup is not verified")
+        return self
+
+
+ReleaseContract = (
+    ReleaseCandidatePlan
+    | ReleaseCandidateOperationPlan
+    | ReleaseCandidateRamReceipt
+    | ReleaseCandidateRecoveryReceipt
+)
 
 
 def canonical_json_bytes(value: ApiModel | dict[str, Any]) -> bytes:
