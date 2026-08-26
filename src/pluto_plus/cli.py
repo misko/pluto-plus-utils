@@ -3383,6 +3383,17 @@ def _discover_production_devices() -> tuple[Any, ...]:
     return tuple(discovery.discover_devices())
 
 
+def _append_hardware_without_explicit_duplicates(
+    explicit: list[Any], discovered: tuple[Any, ...]
+) -> None:
+    """Let an explicit transport selection override broad hardware discovery."""
+
+    explicit_ids = {str(device.identity.radio_id) for device in explicit}
+    explicit.extend(
+        device for device in discovered if str(device.identity.radio_id) not in explicit_ids
+    )
+
+
 def _direct_ip_devices(specifications: list[str]) -> tuple[Any, ...]:
     """Compose explicit host/serial direct-IP targets without eager native imports."""
 
@@ -3675,7 +3686,7 @@ def serve(
         )
         devices.extend(managed_network_devices)
     if hardware:
-        devices.extend(_discover_production_devices())
+        _append_hardware_without_explicit_duplicates(devices, _discover_production_devices())
     if not devices and not discovered_radios:
         _fail("no_radios", "no fake radios requested and no hardware radios discovered", 2)
 

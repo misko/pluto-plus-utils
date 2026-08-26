@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from pluto_plus.cli import (
     ApiClient,
+    _append_hardware_without_explicit_duplicates,
     _direct_ip_devices,
     _direct_usb_devices,
     _iio_ip_devices,
@@ -38,6 +39,21 @@ def _recovery_usb() -> LocalUsbPluto:
             HostNetworkInterface(name="enx001", ipv4_addresses=("192.168.2.10",)),
         ),
     )
+
+
+def test_explicit_direct_transport_overrides_duplicate_broad_hardware_discovery() -> None:
+    explicit = [SimpleNamespace(identity=SimpleNamespace(radio_id="SERIAL_A"), kind="direct")]
+    discovered = (
+        SimpleNamespace(identity=SimpleNamespace(radio_id="SERIAL_A"), kind="iio"),
+        SimpleNamespace(identity=SimpleNamespace(radio_id="SERIAL_B"), kind="iio"),
+    )
+
+    _append_hardware_without_explicit_duplicates(explicit, discovered)
+
+    assert [(item.identity.radio_id, item.kind) for item in explicit] == [
+        ("SERIAL_A", "direct"),
+        ("SERIAL_B", "iio"),
+    ]
 
 
 @pytest.fixture
