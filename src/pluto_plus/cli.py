@@ -40,6 +40,7 @@ from pluto_plus.setup_helper import BoundSshTransport
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
 DEFAULT_STATE_ROOT = Path(os.environ.get("PLUTO_STATE_ROOT", "./pluto-state"))
+DEFAULT_TOOL_REPOSITORY = Path.cwd()
 DEFAULT_BOOTSTRAP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/bootstrap-receipts"
 DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qualification-reports"
 DEFAULT_LOCAL_REBOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/reboot-receipts"
@@ -63,6 +64,10 @@ job_app = typer.Typer(no_args_is_help=True, help="Inspect stream and capture job
 artifact_app = typer.Typer(no_args_is_help=True, help="Inspect captured artifacts.")
 scan_app = typer.Typer(no_args_is_help=True, help="Run exclusive frequency scans.")
 firmware_app = typer.Typer(no_args_is_help=True, help="Plan and execute guarded firmware updates.")
+candidate_ram_app = typer.Typer(
+    no_args_is_help=True,
+    help="Plan, execute, and verify local release-candidate RAM deployments.",
+)
 setup_app = typer.Typer(
     no_args_is_help=True, help="Plan and execute guarded canonical AD9361/2R2T setup."
 )
@@ -79,6 +84,7 @@ app.add_typer(job_app, name="job")
 app.add_typer(artifact_app, name="artifact")
 app.add_typer(scan_app, name="scan")
 app.add_typer(firmware_app, name="firmware")
+firmware_app.add_typer(candidate_ram_app, name="candidate-ram")
 app.add_typer(setup_app, name="setup")
 app.add_typer(config_app, name="config")
 
@@ -734,9 +740,7 @@ def radio_reboot_local(
         if len(selected_matches) != 1 or len(selected_matches[0].host_network_interfaces) != 1:
             _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
         pluto_interfaces = tuple(
-            interface.name
-            for item in local_devices
-            for interface in item.host_network_interfaces
+            interface.name for item in local_devices for interface in item.host_network_interfaces
         )
         try:
             isolation_plan = prepare_usb_ssh_isolation(
@@ -777,9 +781,7 @@ def radio_reboot_local(
                 "mode": "dry_run",
                 "will_reboot": False,
                 "plan": asdict(plan),
-                "host_isolation": (
-                    None if isolation_plan is None else asdict(isolation_plan)
-                ),
+                "host_isolation": (None if isolation_plan is None else asdict(isolation_plan)),
                 "host_environment": environment.model_dump(mode="json"),
                 "next_command": (
                     f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
@@ -824,6 +826,7 @@ def radio_reboot_local(
             )
         except UnicodeDecodeError:
             _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
+
     def reboot_action() -> Any:
         ssh = BoundSshTransport(
             host=plan.ssh_host,
@@ -1184,8 +1187,7 @@ def radio_qualify_tandem(
                 "plan": asdict(plan),
                 "report_path": str(selected_report.expanduser().resolve()),
                 "next_command": (
-                    "repeat with --execute and "
-                    f"--confirm {json.dumps(plan.confirmation_phrase)}"
+                    f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
                 ),
             }
         )
@@ -1536,9 +1538,7 @@ def _local_doctor_table(report: dict[str, Any]) -> str:
                 for key, value in repair.get("changes") or ()
             )
             if repair.get("succeeded"):
-                notes.append(
-                    f"REPAIRED setup ({applied}); receipt {repair.get('receipt_id')}"
-                )
+                notes.append(f"REPAIRED setup ({applied}); receipt {repair.get('receipt_id')}")
             else:
                 notes.append(f"REPAIR FAILED ({applied}): {repair.get('error')}")
         rows.append(
@@ -1948,8 +1948,7 @@ def firmware_reconcile_local(
         matches = [
             item
             for item in scan_local_usb_plutos()
-            if item.usb_path == str(usb_sysfs_path)
-            and len(item.host_network_interfaces) == 1
+            if item.usb_path == str(usb_sysfs_path) and len(item.host_network_interfaces) == 1
         ]
         if len(matches) != 1:
             _fail(
@@ -2039,9 +2038,7 @@ def firmware_enroll_usb_ssh(
     }
     isolation_plan = None
     pluto_interfaces = tuple(
-        interface.name
-        for item in local_devices
-        for interface in item.host_network_interfaces
+        interface.name for item in local_devices for interface in item.host_network_interfaces
     )
     if isolate_usb_route:
         if ssh_host != "192.168.2.1":
@@ -2062,9 +2059,7 @@ def firmware_enroll_usb_ssh(
                 "mode": "dry_run",
                 "will_trust_host_key": False,
                 "plan": plan,
-                "host_isolation": (
-                    None if isolation_plan is None else asdict(isolation_plan)
-                ),
+                "host_isolation": (None if isolation_plan is None else asdict(isolation_plan)),
             }
         )
         return
@@ -2202,6 +2197,235 @@ def firmware_flash_usb(
         ssh_host=ssh_host,
         return_timeout_s=return_timeout_s,
         mutation_profile_id=profile,
+    )
+
+
+@candidate_ram_app.command("inventory")
+def firmware_candidate_ram_inventory(
+    output: Path = typer.Option(  # noqa: B008
+        ...,
+        "--output",
+        help="Absent mode-private output for the strict USB inventory.",
+    ),
+) -> None:
+    """Capture strict runtime USB topology without opening IIO, SSH, or DFU."""
+
+    from datetime import UTC, datetime
+
+    from pluto_plus.release_candidate import (
+        build_release_usb_inventory,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        inventory = build_release_usb_inventory(
+            scan_local_usb_plutos(), created_at=datetime.now(UTC)
+        )
+        identity = write_private_contract(output.expanduser().absolute(), inventory)
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        _fail("candidate_ram_inventory_failed", str(error), 4)
+    _emit(
+        {
+            "mode": "read_only_usb_inventory",
+            "hardware_accessed": False,
+            "device_count": len(inventory.devices),
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+        }
+    )
+
+
+@candidate_ram_app.command("plan")
+def firmware_candidate_ram_plan(
+    candidate_plan: Path = typer.Option(  # noqa: B008
+        ..., "--candidate-plan", help="Private release-candidate plan from the firmware repo."
+    ),
+    usb_inventory: Path = typer.Option(  # noqa: B008
+        ..., "--usb-inventory", help="Private inventory produced by candidate-ram inventory."
+    ),
+    serial: str = typer.Option(..., "--serial", help="Exact target USB serial."),
+    expected_current_firmware: str = typer.Option(
+        ...,
+        "--expected-current-firmware",
+        help="Exact firmware expected before this RAM transition.",
+    ),
+    receipt: Path = typer.Option(  # noqa: B008
+        ..., "--receipt", help="Absent serial-scoped output for the eventual execution receipt."
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent mode-private per-radio operation-plan output."
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1", "--ssh-host", help="Private USB-gadget SSH endpoint."
+    ),
+) -> None:
+    """Create a per-radio operation plan using retained files only."""
+
+    import uuid
+    from datetime import UTC, datetime
+
+    from pluto_plus.release_candidate import (
+        ReleaseCandidatePlan,
+        ReleaseUsbInventory,
+        build_operation_plan,
+        load_private_contract,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        candidate_path = candidate_plan.expanduser().absolute()
+        inventory_path = usb_inventory.expanduser().absolute()
+        candidate = load_private_contract(candidate_path, ReleaseCandidatePlan)
+        inventory = load_private_contract(inventory_path, ReleaseUsbInventory)
+        operation = build_operation_plan(
+            candidate,
+            inventory,
+            candidate_path=candidate_path,
+            inventory_path=inventory_path,
+            serial=serial,
+            expected_current_firmware=expected_current_firmware,
+            receipt_path=receipt.expanduser().absolute(),
+            plan_id=uuid.uuid4().hex,
+            created_at=datetime.now(UTC),
+            ssh_host=ssh_host,
+        )
+        identity = write_private_contract(output.expanduser().absolute(), operation)
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        _fail("candidate_ram_plan_failed", str(error), 4)
+    _emit(
+        {
+            "mode": "offline_plan",
+            "hardware_accessed": False,
+            "will_write_qspi": False,
+            "will_load_volatile_ram": False,
+            "operation_plan": operation.model_dump(mode="json", by_alias=True),
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+            "next_command": (
+                "pluto firmware candidate-ram execute --operation-plan "
+                f"{identity.path} --ssh-password-file <private-file> "
+                f"--confirm {json.dumps(operation.confirmation_phrase)}"
+            ),
+        }
+    )
+
+
+@candidate_ram_app.command("execute")
+def firmware_candidate_ram_execute(
+    operation_plan: Path = typer.Option(  # noqa: B008
+        ..., "--operation-plan", help="Private operation plan produced by candidate-ram plan."
+    ),
+    ssh_password_file: Path = typer.Option(  # noqa: B008
+        ..., "--ssh-password-file", help="Owned mode-0600 one-line radio password file."
+    ),
+    confirmation: str = typer.Option(
+        ..., "--confirm", help="Exact serial-specific phrase printed by candidate-ram plan."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout whose commit is retained in the receipt.",
+    ),
+    state_root: Path = typer.Option(  # noqa: B008
+        DEFAULT_STATE_ROOT,
+        "--state-root",
+        help="Private daemon state root used for exclusive maintenance locking.",
+    ),
+    timeout_s: float = typer.Option(
+        45.0, "--timeout", min=5.0, max=600.0, help="Per-transition wait timeout."
+    ),
+) -> None:
+    """RAM-boot one exact candidate with no host-key or persistent-write authority."""
+
+    from pluto_plus import __version__
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateOperationPlan,
+        load_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import (
+        ReleaseCandidateLifecycleError,
+        execute_candidate_ram,
+    )
+    from pluto_plus.release_candidate_linux import (
+        LinuxReleaseCandidateBackend,
+        attest_clean_tool_repository,
+    )
+
+    try:
+        selected_operation = operation_plan.expanduser().absolute()
+        planned = load_private_contract(selected_operation, ReleaseCandidateOperationPlan)
+        repository = tool_repository.expanduser().absolute()
+        source = attest_clean_tool_repository(repository)
+        backend = LinuxReleaseCandidateBackend(
+            state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
+        )
+        receipt, digest = execute_candidate_ram(
+            selected_operation,
+            password_path=ssh_password_file.expanduser().absolute(),
+            confirmation=confirmation,
+            backend=backend,
+            tool_repository=source.repository,
+            tool_version=__version__,
+            tool_source_commit=source.commit,
+            timeout_s=timeout_s,
+        )
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        detail = ""
+        if isinstance(error, ReleaseCandidateLifecycleError) and error.receipt is not None:
+            detail = (
+                f"; durable {error.receipt.outcome} receipt={planned.receipt_path} "
+                f"sha256={error.receipt_sha256}"
+            )
+        _fail("candidate_ram_execute_failed", f"{error}{detail}", 5)
+    _emit(
+        {
+            "outcome": receipt.outcome,
+            "receipt": receipt.model_dump(mode="json", by_alias=True),
+            "receipt_path": str(planned.receipt_path),
+            "receipt_sha256": digest,
+        }
+    )
+
+
+@candidate_ram_app.command("receipt-verify")
+def firmware_candidate_ram_receipt_verify(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+) -> None:
+    """Replay a durable receipt against its exact candidate and operation plans."""
+
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateOperationPlan,
+        ReleaseCandidatePlan,
+        ReleaseCandidateRamReceipt,
+        load_private_contract,
+        validate_contract_bundle,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        selected = receipt.expanduser().absolute()
+        value = load_private_contract(selected, ReleaseCandidateRamReceipt)
+        operation = load_private_contract(value.operation_plan.path, ReleaseCandidateOperationPlan)
+        candidate = load_private_contract(value.candidate_plan.path, ReleaseCandidatePlan)
+        validate_contract_bundle(
+            candidate,
+            operation,
+            value,
+            candidate_path=value.candidate_plan.path,
+            operation_path=value.operation_plan.path,
+        )
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        _fail("candidate_ram_receipt_invalid", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "outcome": value.outcome,
+            "receipt": str(selected),
+            "serial": value.target.serial,
+            "candidate_firmware": value.expected_firmware,
+        }
     )
 
 

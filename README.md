@@ -359,6 +359,58 @@ and reuses the in-memory admin-token input. See [ADR 0005](docs/adr/0005-structu
 
 ## Guarded firmware workflow
 
+### Local release-candidate RAM lifecycle
+
+`firmware candidate-ram` is the native owner-operated path for loading a
+release candidate into volatile RAM. It is separate from the legacy static
+profiles below: the firmware repository emits a canonical candidate plan, this
+utility owns every live device operation, and the firmware repository consumes
+the resulting semantic receipt.
+
+Capture the current USB topology and create one per-radio plan without opening
+IIO, SSH, DFU, or changing a radio:
+
+```bash
+install -d -m 0700 /private/rc14
+uv run pluto firmware candidate-ram inventory \
+  --output /private/rc14/usb-inventory.json
+uv run pluto firmware candidate-ram plan \
+  --candidate-plan /private/rc14/candidate-plan.json \
+  --usb-inventory /private/rc14/usb-inventory.json \
+  --serial EXACT_SERIAL \
+  --expected-current-firmware EXACT_CURRENT_VERSION \
+  --receipt /private/rc14/hardware/deploy/EXACT_SERIAL/ram-receipt.json \
+  --output /private/rc14/EXACT_SERIAL-operation-plan.json
+```
+
+After reviewing the plan, execute from a fully clean `pluto-plus-utils`
+checkout at the exact repository/version/commit named by the candidate plan.
+The exact confirmation phrase is printed by `plan`:
+
+```bash
+uv run pluto firmware candidate-ram execute \
+  --operation-plan /private/rc14/EXACT_SERIAL-operation-plan.json \
+  --ssh-password-file /private/credentials/EXACT_SERIAL.password \
+  --tool-repository "$PWD" \
+  --confirm 'RAM BOOT RELEASE CANDIDATE EXACT_SERIAL'
+
+uv run pluto firmware candidate-ram receipt-verify \
+  /private/rc14/hardware/deploy/EXACT_SERIAL/ram-receipt.json
+```
+
+RAM Dropbear keys are intentionally ephemeral. Candidate SSH therefore uses
+password authentication through the exact USB interface and owned `/32` route,
+with both known-host databases set to `/dev/null`; no host key is retained or
+used as an authorization gate. The utility still binds the exact serial,
+direct USB topology, candidate DFU/FIT bytes, pre/post boot IDs, unchanged
+`qspi-linux` digest, and complete muted DDS/DAC/tandem safe state. Its only DFU
+sequence uses paired `0456:b673,0456:b674`, the selected physical port, and the
+`firmware.dfu` alternate followed by detach. `-R`, `-S`, arbitrary MTD paths,
+and persistent targets are outside this command.
+
+The full ownership and migration decision is recorded in
+[`docs/adr/0006-release-candidate-device-lifecycle.md`](docs/adr/0006-release-candidate-device-lifecycle.md).
+
 Firmware is fail-closed unless the service is constructed with an explicit
 privileged executor. The normal workflow is inspect → upload → plan → verify the
 serial/path/hash/mode/expected version → execute the short-lived one-time token.
