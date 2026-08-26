@@ -1,6 +1,13 @@
 """Radio hardware adapters."""
 
-from .base import RadioDevice, SampleBlock
+from .base import (
+    RadioDevice,
+    SampleBlock,
+    SettingsRestoration,
+    SettingsRestorationAttempt,
+    SettingsRestorationError,
+    restore_settings_exact,
+)
 from .direct_ip import DirectIpRadioDevice
 from .direct_usb import DirectUsbRadioDevice
 from .fake import FakeRadioDevice
@@ -13,5 +20,9 @@ __all__ = [
     "IioRadioDevice",
     "RadioDevice",
     "SampleBlock",
+    "SettingsRestoration",
+    "SettingsRestorationAttempt",
+    "SettingsRestorationError",
     "discover_usb_serials",
+    "restore_settings_exact",
 ]
