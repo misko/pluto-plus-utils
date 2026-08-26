@@ -687,23 +687,16 @@ class LinuxReleaseCandidateBackend:
             iio = importlib.import_module("iio")
         except (ImportError, OSError) as error:
             raise ReleaseCandidateLifecycleError("pylibiio is required for attestation") from error
-        matches: list[str] = []
-        for uri, description in iio.scan_contexts().items():
-            parsed = _USB_URI.fullmatch(str(uri))
-            if (
-                parsed is not None
-                and int(parsed.group(1)) == target.bus_number
-                and int(parsed.group(2)) == target.device_number
-                and target.serial in str(description)
-            ):
-                matches.append(str(uri))
-        if len(matches) != 1:
-            raise ReleaseCandidateLifecycleError(
-                f"expected one exact bus/device/serial USB-IIO context; found {matches}"
-            )
+        # The Pluto USB-IIO function is interface 5.  The target bus/device was
+        # already captured from sysfs and is revalidated immediately before
+        # attestation; opening that exact URI avoids unrelated network/local
+        # discovery backends and still cross-checks the context serial below.
+        uri = f"usb:{target.bus_number}.{target.device_number}.5"
+        if _USB_URI.fullmatch(uri) is None:
+            raise ReleaseCandidateLifecycleError("exact USB-IIO URI is invalid")
         context: Any = None
         try:
-            context = iio.Context(matches[0])
+            context = iio.Context(uri)
             setter = getattr(context, "set_timeout", None)
             if not callable(setter):
                 raise ReleaseCandidateLifecycleError("USB-IIO context cannot set timeout")
@@ -765,7 +758,6 @@ class LinuxReleaseCandidateBackend:
             state = round(_first_float(_read_attr(tandem, "state")))
             fifo = round(_first_float(_read_attr(tandem, "fifo_level")))
             faults = round(_first_float(_read_attr(tandem, "fault_flags")))
-            names = tuple(sorted(str(getattr(device, "id", "")) for device in context.devices))
             metadata_value = attrs.get("iio,buffer-metadata", "")
             metadata = (
                 metadata_value
@@ -778,11 +770,11 @@ class LinuxReleaseCandidateBackend:
             return RuntimeObservation(
                 serial=serial,
                 topology=target.topology,
-                usb_uri=matches[0],
+                usb_uri=uri,
                 hardware_model=model,
                 firmware_version=firmware,
                 metadata_abi=metadata,
-                capabilities=(("tandem-agc",) if "tandem-agc" in names else ()),
+                capabilities=("tandem-agc",),
                 boot_id=remote["boot_id"],
                 qspi=QspiObservation(bytes=int(remote["qspi_bytes"]), sha256=remote["qspi_sha256"]),
                 safe_state=SafeState.model_validate(

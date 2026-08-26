@@ -40,7 +40,10 @@ from pluto_plus.setup_helper import BoundSshTransport
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
 DEFAULT_STATE_ROOT = Path(os.environ.get("PLUTO_STATE_ROOT", "./pluto-state"))
-DEFAULT_TOOL_REPOSITORY = Path.cwd()
+_SOURCE_REPOSITORY = Path(__file__).resolve().parents[2]
+DEFAULT_TOOL_REPOSITORY = (
+    _SOURCE_REPOSITORY if (_SOURCE_REPOSITORY / ".git").is_dir() else Path.cwd()
+)
 DEFAULT_BOOTSTRAP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/bootstrap-receipts"
 DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qualification-reports"
 DEFAULT_LOCAL_REBOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/reboot-receipts"

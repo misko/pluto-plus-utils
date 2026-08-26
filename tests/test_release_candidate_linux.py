@@ -5,12 +5,16 @@ import os
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
-from pluto_plus.release_candidate import UsbInventoryTarget
-from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+from pluto_plus.release_candidate import HostRouteReceipt, UsbInventoryTarget
+from pluto_plus.release_candidate_lifecycle import (
+    PasswordFileIdentity,
+    ReleaseCandidateLifecycleError,
+)
 from pluto_plus.release_candidate_linux import (
     LinuxReleaseCandidateBackend,
     attest_clean_tool_repository,
@@ -173,6 +177,44 @@ def test_sealed_dfu_descriptor_is_immutable_and_disappears_after_scope(tmp_path:
 
     with pytest.raises(OSError):
         os.fstat(descriptor)
+
+
+def test_runtime_attestation_opens_exact_usb_uri_without_global_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[str] = []
+
+    class StopAfterOpen(RuntimeError):
+        pass
+
+    def context(uri: str) -> None:
+        opened.append(uri)
+        raise StopAfterOpen
+
+    module = SimpleNamespace(Context=context)
+    monkeypatch.setattr(
+        "pluto_plus.release_candidate_linux.importlib.import_module",
+        lambda name: module if name == "iio" else pytest.fail(name),
+    )
+    password = PasswordFileIdentity(
+        path=(tmp_path / "password").absolute(),
+        device=1,
+        inode=2,
+        bytes=7,
+        modified_ns=3,
+        changed_ns=4,
+    )
+    route = HostRouteReceipt(
+        destination="192.168.2.1/32",
+        interface=INTERFACE,
+        source="192.168.2.10",
+        release_verified=False,
+    )
+
+    with pytest.raises(StopAfterOpen):
+        _backend(tmp_path)._attest_runtime_linux(_target(), "candidate-version", password, route)
+
+    assert opened == ["usb:3.29.5"]
 
 
 class AdvancingClock:

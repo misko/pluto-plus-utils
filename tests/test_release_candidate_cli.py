@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from pluto_plus.cli import app
+from pluto_plus.cli import DEFAULT_TOOL_REPOSITORY, app
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.release_candidate import (
     ContentIdentity,
@@ -77,6 +77,10 @@ def test_candidate_ram_help_has_native_plan_execute_and_no_known_hosts() -> None
     assert execute.exit_code == 0, execute.output
     assert "--ssh-password-file" in execute.output
     assert "known-host" not in execute.output.lower()
+
+
+def test_candidate_ram_defaults_to_the_source_checkout() -> None:
+    assert Path(__file__).resolve().parents[1] == DEFAULT_TOOL_REPOSITORY
 
 
 def test_candidate_ram_inventory_is_read_only_and_private(
