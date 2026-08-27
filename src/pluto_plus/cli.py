@@ -84,6 +84,9 @@ DEFAULT_HOST_ISOLATION_RECEIPTS = (
     Path.home() / ".local/state/pluto-plus-utils/host-isolation-receipts"
 )
 DEFAULT_SETUP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/setup-receipts"
+DEFAULT_NETWORK_CONFIG_RECEIPTS = (
+    Path.home() / ".local/state/pluto-plus-utils/network-config-receipts"
+)
 DEFAULT_DATA_PLANE_RECOVERY_RECEIPTS = (
     Path.home() / ".local/state/pluto-plus-utils/data-plane-recovery-receipts"
 )
@@ -2043,6 +2046,263 @@ def config_show(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> None
     """Read structured network settings and password-redacted config.txt."""
 
     _emit(_api(ctx).request("GET", f"radios/{radio_id}/config"))
+
+
+def _standalone_network_plan_payload(plan: Any) -> dict[str, Any]:
+    return {
+        "plan_id": plan.plan_id,
+        "created_at": plan.created_at.isoformat(),
+        "expires_at": plan.expires_at.isoformat(),
+        "identity": plan.identity.model_dump(mode="json"),
+        "before": plan.before.model_dump(mode="json"),
+        "interface": plan.interface.value,
+        "mode": plan.mode.value,
+        "address": plan.address,
+        "netmask": plan.netmask,
+        "host_address": plan.host_address,
+        "changes": plan.changes,
+        "confirmation": plan.confirmation,
+        "endpoint_after_restart": plan.endpoint_after_restart,
+        "restart_required": plan.restart_required,
+    }
+
+
+def _standalone_network_receipt_payload(receipt: Any) -> dict[str, Any]:
+    payload = asdict(receipt)
+    payload["started_at"] = receipt.started_at.isoformat()
+    payload["finished_at"] = receipt.finished_at.isoformat()
+    payload["identity"] = receipt.identity.model_dump(mode="json")
+    payload["interface"] = receipt.interface.value
+    payload["mode"] = receipt.mode.value
+    payload["changes"] = receipt.changes
+    return payload
+
+
+@config_app.command("bootstrap-ethernet")
+def config_bootstrap_ethernet(
+    serial: str = typer.Argument(..., help="Exact stable serial of the local USB radio."),
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ...,
+        "--usb-sysfs-path",
+        help="Exact direct /sys/bus/usb/devices path for the selected radio.",
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--ssh-known-hosts-file",
+        help="Previously enrolled private known_hosts file for this exact USB endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Private radio password file; otherwise execution prompts without echo.",
+    ),
+    mode: str = typer.Option("static", "--mode", help="Ethernet mode: static or dhcp."),
+    address: str | None = typer.Option(None, "--address", help="Static Ethernet IPv4."),
+    netmask: str | None = typer.Option(
+        None, "--netmask", help="Static dotted-decimal Ethernet netmask."
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Persist the validated Ethernet variables; omission only inspects and plans.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, the exact SET STATIC IP ... or SET DHCP ... phrase.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_NETWORK_CONFIG_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for network-config receipts and environment backups.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing Pluto USB routes with a durable receipt.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="Exact phrase ISOLATE USB SSH <interface> for temporary route isolation.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for host-isolation receipts.",
+    ),
+) -> None:
+    """Inspect or persist Ethernet settings through one exact USB-attached radio."""
+
+    from pluto_plus.host_isolation import (
+        HostIsolationError,
+        HostIsolationExecutionError,
+        execute_usb_ssh_isolated,
+        prepare_usb_ssh_isolation,
+    )
+    from pluto_plus.ip_firmware import (
+        IpFirmwareError,
+        SshNetworkConfigBackend,
+        pinned_ssh_host_key_fingerprint,
+    )
+    from pluto_plus.network_config import (
+        NetworkAddressMode,
+        NetworkConfigError,
+        NetworkConfigExecutionError,
+        NetworkConfigIdentity,
+        NetworkConfigManager,
+        NetworkInterface,
+    )
+    from pluto_plus.setup_helper import SetupHelperError
+
+    endpoint = "192.168.2.1"
+    local_devices = scan_local_usb_plutos()
+    selected = [
+        item
+        for item in local_devices
+        if item.serial == serial and item.usb_path == str(usb_sysfs_path)
+    ]
+    if len(selected) != 1 or len(selected[0].host_network_interfaces) != 1:
+        _fail(
+            "network_bootstrap_identity_unavailable",
+            "serial and USB path must identify one radio with one network interface",
+            4,
+        )
+    interface = selected[0].host_network_interfaces[0].name
+    pluto_interfaces = tuple(
+        network.name for item in local_devices for network in item.host_network_interfaces
+    )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    _read_private_file_bytes(
+        selected_known_hosts,
+        label="radio SSH known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    try:
+        fingerprint = pinned_ssh_host_key_fingerprint(selected_known_hosts, endpoint)
+        selected_mode = NetworkAddressMode(mode)
+    except ValueError as error:
+        _fail("network_bootstrap_preflight_failed", str(error), 2)
+
+    isolation_plan = None
+    if isolate_usb_route:
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                interface,
+                endpoint,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        if isolation_confirmation != isolation_plan.confirmation_phrase:
+            _fail(
+                "host_isolation_confirmation_required",
+                f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
+                2,
+            )
+
+    if ssh_password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        password = _read_private_text_file(
+            ssh_password_file.expanduser().absolute(), label="radio SSH password"
+        )
+
+    failed_receipt: dict[str, Any] | None = None
+
+    def configure_action() -> tuple[Any, Any | None]:
+        nonlocal failed_receipt
+        ssh = BoundSshTransport(
+            host=endpoint,
+            interface=interface,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+            route_preflight=(None if isolation_plan is None else lambda: None),
+        )
+        backend = SshNetworkConfigBackend(
+            endpoint=endpoint,
+            host_key_fingerprint=fingerprint,
+            command_runner=ssh.run,
+        )
+        manager = NetworkConfigManager(
+            identity=NetworkConfigIdentity(
+                serial=serial,
+                endpoint=endpoint,
+                host_key_fingerprint=fingerprint,
+            ),
+            backend=backend,
+            receipt_directory=receipt_directory.expanduser().absolute(),
+        )
+        planned = manager.create_plan(
+            interface=NetworkInterface.ETHERNET,
+            mode=selected_mode,
+            address=address,
+            netmask=netmask,
+            host_address=None,
+        )
+        if not execute:
+            return planned.plan, None
+        if confirmation != planned.plan.confirmation:
+            raise NetworkConfigError(f"--execute requires --confirm {planned.plan.confirmation!r}")
+        try:
+            receipt = manager.execute(
+                planned.plan,
+                planned.confirmation_token,
+                confirmation or "",
+            )
+        except NetworkConfigExecutionError as error:
+            failed_receipt = _standalone_network_receipt_payload(error.receipt)
+            raise
+        return planned.plan, receipt
+
+    isolation_receipt = None
+    try:
+        if isolation_plan is None:
+            plan, receipt = configure_action()
+        else:
+            (plan, receipt), isolation_receipt = execute_usb_ssh_isolated(
+                isolation_plan,
+                confirmation=isolation_confirmation or "",
+                receipt_directory=isolation_receipt_directory.expanduser().absolute(),
+                action=configure_action,
+                pluto_interfaces=pluto_interfaces,
+            )
+    except HostIsolationExecutionError as error:
+        payload: dict[str, Any] = {"host_isolation": asdict(error.receipt)}
+        if failed_receipt is not None:
+            payload["network_config"] = failed_receipt
+        _emit(payload)
+        raise typer.Exit(5) from error
+    except HostIsolationError as error:
+        _fail("host_isolation_failed", str(error), 4)
+    except NetworkConfigExecutionError as error:
+        _emit(_standalone_network_receipt_payload(error.receipt))
+        raise typer.Exit(5) from error
+    except (IpFirmwareError, NetworkConfigError, SetupHelperError, OSError, ValueError) as error:
+        _fail("network_bootstrap_failed", str(error), 4)
+
+    isolation_payload = None if isolation_receipt is None else asdict(isolation_receipt)
+    if receipt is None:
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_persist": False,
+                "will_restart": False,
+                "plan": _standalone_network_plan_payload(plan),
+                "host_isolation": isolation_payload,
+                "next_step": (
+                    f"repeat with --execute and --confirm {json.dumps(plan.confirmation)}; "
+                    "restart remains a separate guarded action"
+                ),
+            }
+        )
+        return
+    result = _standalone_network_receipt_payload(receipt)
+    _emit(
+        result
+        if isolation_payload is None
+        else {"host_isolation": isolation_payload, "result": result}
+    )
 
 
 @config_app.command("plan")

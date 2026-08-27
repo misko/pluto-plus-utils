@@ -524,6 +524,31 @@ Ethernet address change, update the daemon's `--iio-ip` target and the pinned-SS
 enrollment to the new endpoint. The Web Network panel implements the same workflow
 and reuses the in-memory admin-token input. See [ADR 0005](docs/adr/0005-structured-network-config.md).
 
+An attached radio does not need a LAN address or a running daemon to enter this
+workflow. `config bootstrap-ethernet` reaches only the fixed USB-gadget endpoint,
+requires an exact local serial/sysfs path/host interface and pinned host key, and
+then reuses the same structured planner and fixed remote operations:
+
+```bash
+uv run pluto config bootstrap-ethernet EXACT_HARDWARE_SERIAL \
+  --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --ssh-known-hosts-file /private/EXACT_HARDWARE_SERIAL.known_hosts \
+  --ssh-password-file /private/radio.password \
+  --address 192.168.1.186 --netmask 255.255.255.0
+```
+
+The default is an inspection-only plan: it exposes the password-redacted current
+configuration and confirmation phrase, but never the internal one-time token. Repeat
+with `--execute --confirm 'SET STATIC IP EXACT_HARDWARE_SERIAL 192.168.1.186'`
+to persist the plan. When local Pluto gadgets have overlapping `192.168.2.1` routes,
+also pass `--isolate-usb-route` and the generated
+`--isolation-confirm 'ISOLATE USB SSH <interface>'` phrase to both invocations.
+The reversible host isolation and persistent radio mutation receive separate private
+receipts. The command writes no firmware partition and never restarts the radio;
+activate the new address later with the separate guarded `radio reboot-local` flow.
+Use `--mode dhcp` without `--address` or `--netmask` to remove a static Ethernet
+address.
+
 ## Guarded firmware workflow
 
 ### Local release-candidate RAM lifecycle

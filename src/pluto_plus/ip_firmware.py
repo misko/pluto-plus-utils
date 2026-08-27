@@ -343,6 +343,12 @@ class SubprocessSshCommandRunner:
         return SshCommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+class NetworkConfigCommandRunner(Protocol):
+    """Narrow adapter used by the fixed network-configuration operation set."""
+
+    def __call__(self, command: str, *, stdin: bytes | None = None, timeout_s: float) -> str: ...
+
+
 _ATTEST_COMMAND = r"""set -eu
 emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
 test "$(id -u)" = 0
@@ -531,6 +537,140 @@ emit mutation_completed 1
 """
 
 
+class SshNetworkConfigBackend:
+    """Fixed network-config operations over an already pinned SSH runner.
+
+    Authentication and route binding remain the caller's responsibility.  This
+    class owns the complete remote operation set so key-authenticated daemon
+    enrollments and password-authenticated exact-USB bootstrap use identical
+    inspection, mutation, backup, and readback semantics.
+    """
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        host_key_fingerprint: str,
+        command_runner: NetworkConfigCommandRunner,
+    ) -> None:
+        try:
+            normalized = str(ipaddress.ip_address(endpoint))
+        except ValueError as error:
+            raise ValueError("network-config endpoint must be a literal IP address") from error
+        if normalized != endpoint:
+            raise ValueError("network-config endpoint must use canonical IP notation")
+        if not _FINGERPRINT_RE.fullmatch(host_key_fingerprint):
+            raise ValueError("network-config host-key fingerprint is malformed")
+        self.endpoint = endpoint
+        self.host_key_fingerprint = host_key_fingerprint
+        self._run = command_runner
+
+    @property
+    def identity_endpoint(self) -> str:
+        return self.endpoint
+
+    def inspect_network_config(self, serial: str) -> NetworkConfigObservation:
+        """Read the generated config safely, redacting the Wi-Fi password."""
+
+        if not _SERIAL_RE.fullmatch(serial):
+            raise IpFirmwareError("invalid serial for network-config inspection")
+        fields = _parse_report(
+            self._run(
+                "/bin/sh -s -- " + serial,
+                stdin=_NETWORK_INSPECT_SCRIPT,
+                timeout_s=20,
+            )
+        )
+        if _required(fields, "serial") != serial:
+            raise IpFirmwareError("network-config inspection returned another serial")
+        encoded = _required(fields, "config_txt_redacted_b64")
+        try:
+            config_bytes = base64.b64decode(encoded, validate=True)
+            config_text = config_bytes.decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError) as error:
+            raise IpFirmwareError("redacted config.txt report is malformed") from error
+        if (
+            len(config_bytes) > 65_536
+            or "pwd_wlan" in config_text
+            and not all(
+                "<redacted>" in line
+                for line in config_text.splitlines()
+                if line.lstrip().startswith("pwd_wlan")
+            )
+        ):
+            raise IpFirmwareError("config.txt redaction did not pass validation")
+        values = {key: fields.get(key, "") for key in NETWORK_KEYS}
+        if not hmac.compare_digest(
+            persistent_environment_sha256(values),
+            _required_digest(fields, "environment_sha256"),
+        ):
+            raise IpFirmwareError("network environment digest report is inconsistent")
+        return NetworkConfigObservation(
+            identity=NetworkConfigIdentity(
+                serial=serial,
+                endpoint=self.endpoint,
+                host_key_fingerprint=self.host_key_fingerprint,
+            ),
+            config_txt_sha256=_required_digest(fields, "config_txt_sha256"),
+            environment_sha256=_required_digest(fields, "environment_sha256"),
+            config_txt_redacted=config_text,
+            hostname=_required(fields, "hostname"),
+            usb_radio_address=_required(fields, "ipaddr"),
+            usb_host_address=_required(fields, "ipaddr_host"),
+            usb_netmask=_required(fields, "netmask"),
+            ethernet_address=fields.get("ipaddr_eth") or None,
+            ethernet_netmask=_required(fields, "netmask_eth"),
+        )
+
+    def apply_network_config(self, plan: NetworkConfigPlan) -> NetworkConfigExecutionResult:
+        """Persist one validated plan without restarting or changing live addresses."""
+
+        if plan.identity != NetworkConfigIdentity(
+            serial=plan.identity.serial,
+            endpoint=self.endpoint,
+            host_key_fingerprint=self.host_key_fingerprint,
+        ):
+            raise IpFirmwareError("network-config plan identity does not match enrollment")
+        if not re.fullmatch(r"[0-9a-f]{32}", plan.plan_id):
+            raise IpFirmwareError("network-config plan identifier is malformed")
+        arguments: list[str] = [
+            plan.identity.serial,
+            plan.before.environment_sha256,
+            plan.plan_id,
+        ]
+        for key, value in plan.changes_items:
+            if key not in NETWORK_KEYS or (value and not re.fullmatch(r"[0-9.]{7,15}", value)):
+                raise IpFirmwareError("network-config plan contains an invalid change")
+            arguments.extend((key, value or "__DELETE__"))
+        command = "/bin/sh -s -- " + " ".join(arguments)
+        fields = _parse_report(self._run(command, stdin=_NETWORK_APPLY_SCRIPT, timeout_s=45))
+        if fields.get("mutation_completed") != "1" or fields.get("serial") != plan.identity.serial:
+            raise IpFirmwareError("network-config persistent write was not acknowledged")
+        after = self.inspect_network_config(plan.identity.serial)
+        if not hmac.compare_digest(
+            after.environment_sha256,
+            _required_digest(fields, "environment_sha256"),
+        ):
+            raise IpFirmwareError("network-config post-write digest changed during readback")
+        return NetworkConfigExecutionResult(
+            observation=after,
+            backup_path=_required(fields, "backup_path"),
+            backup_sha256=_required_digest(fields, "backup_sha256"),
+            backup_content=_decode_bounded_base64(
+                _required(fields, "backup_b64"),
+                label="network environment backup",
+                maximum_bytes=131_072,
+            ),
+            completed_phases=(
+                "identity_attested",
+                "environment_revalidated",
+                "backup_persisted",
+                "environment_written",
+                "persistent_readback_verified",
+            ),
+        )
+
+
 class PinnedSshFirmwareTransport:
     """Key-only OpenSSH transport pinned to one literal endpoint and host key."""
 
@@ -588,6 +728,11 @@ class PinnedSshFirmwareTransport:
             "-o",
             "ConnectTimeout=5",
             f"root@{endpoint}",
+        )
+        self._network_config_backend = SshNetworkConfigBackend(
+            endpoint=self.endpoint,
+            host_key_fingerprint=self.host_key_fingerprint,
+            command_runner=self._run,
         )
 
     def attest(self) -> IpFirmwareAttestation:
@@ -659,105 +804,10 @@ class PinnedSshFirmwareTransport:
             self._raise_result(result)
 
     def inspect_network_config(self, serial: str) -> NetworkConfigObservation:
-        """Read the generated config safely, redacting the Wi-Fi password."""
+        return self._network_config_backend.inspect_network_config(serial)
 
-        if not _SERIAL_RE.fullmatch(serial):
-            raise IpFirmwareError("invalid serial for network-config inspection")
-        fields = _parse_report(
-            self._run(
-                "/bin/sh -s -- " + serial,
-                stdin=_NETWORK_INSPECT_SCRIPT,
-                timeout_s=20,
-            )
-        )
-        if _required(fields, "serial") != serial:
-            raise IpFirmwareError("network-config inspection returned another serial")
-        encoded = _required(fields, "config_txt_redacted_b64")
-        try:
-            config_bytes = base64.b64decode(encoded, validate=True)
-            config_text = config_bytes.decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError) as error:
-            raise IpFirmwareError("redacted config.txt report is malformed") from error
-        if len(config_bytes) > 65_536 or "pwd_wlan" in config_text and not all(
-            "<redacted>" in line
-            for line in config_text.splitlines()
-            if line.lstrip().startswith("pwd_wlan")
-        ):
-            raise IpFirmwareError("config.txt redaction did not pass validation")
-        values = {key: fields.get(key, "") for key in NETWORK_KEYS}
-        if not hmac.compare_digest(
-            persistent_environment_sha256(values),
-            _required_digest(fields, "environment_sha256"),
-        ):
-            raise IpFirmwareError("network environment digest report is inconsistent")
-        return NetworkConfigObservation(
-            identity=NetworkConfigIdentity(
-                serial=serial,
-                endpoint=self.endpoint,
-                host_key_fingerprint=self.host_key_fingerprint,
-            ),
-            config_txt_sha256=_required_digest(fields, "config_txt_sha256"),
-            environment_sha256=_required_digest(fields, "environment_sha256"),
-            config_txt_redacted=config_text,
-            hostname=_required(fields, "hostname"),
-            usb_radio_address=_required(fields, "ipaddr"),
-            usb_host_address=_required(fields, "ipaddr_host"),
-            usb_netmask=_required(fields, "netmask"),
-            ethernet_address=fields.get("ipaddr_eth") or None,
-            ethernet_netmask=_required(fields, "netmask_eth"),
-        )
-
-    def apply_network_config(
-        self, plan: NetworkConfigPlan
-    ) -> NetworkConfigExecutionResult:
-        """Persist one validated plan without restarting or changing live addresses."""
-
-        if plan.identity != NetworkConfigIdentity(
-            serial=plan.identity.serial,
-            endpoint=self.endpoint,
-            host_key_fingerprint=self.host_key_fingerprint,
-        ):
-            raise IpFirmwareError("network-config plan identity does not match enrollment")
-        if not re.fullmatch(r"[0-9a-f]{32}", plan.plan_id):
-            raise IpFirmwareError("network-config plan identifier is malformed")
-        arguments: list[str] = [
-            plan.identity.serial,
-            plan.before.environment_sha256,
-            plan.plan_id,
-        ]
-        for key, value in plan.changes_items:
-            if key not in NETWORK_KEYS or (value and not re.fullmatch(r"[0-9.]{7,15}", value)):
-                raise IpFirmwareError("network-config plan contains an invalid change")
-            arguments.extend((key, value or "__DELETE__"))
-        command = "/bin/sh -s -- " + " ".join(arguments)
-        fields = _parse_report(
-            self._run(command, stdin=_NETWORK_APPLY_SCRIPT, timeout_s=45)
-        )
-        if fields.get("mutation_completed") != "1" or fields.get("serial") != plan.identity.serial:
-            raise IpFirmwareError("network-config persistent write was not acknowledged")
-        after = self.inspect_network_config(plan.identity.serial)
-        if not hmac.compare_digest(
-            after.environment_sha256,
-            _required_digest(fields, "environment_sha256"),
-        ):
-            raise IpFirmwareError("network-config post-write digest changed during readback")
-        return NetworkConfigExecutionResult(
-            observation=after,
-            backup_path=_required(fields, "backup_path"),
-            backup_sha256=_required_digest(fields, "backup_sha256"),
-            backup_content=_decode_bounded_base64(
-                _required(fields, "backup_b64"),
-                label="network environment backup",
-                maximum_bytes=131_072,
-            ),
-            completed_phases=(
-                "identity_attested",
-                "environment_revalidated",
-                "backup_persisted",
-                "environment_written",
-                "persistent_readback_verified",
-            ),
-        )
+    def apply_network_config(self, plan: NetworkConfigPlan) -> NetworkConfigExecutionResult:
+        return self._network_config_backend.apply_network_config(plan)
 
     def _run(
         self, command: str, *, stdin: bytes | None = None, timeout_s: float
@@ -1372,6 +1422,24 @@ def _validate_fixed_command(command: str) -> None:
     ):
         return
     raise IpFirmwareError("SSH command is outside the fixed firmware operation set")
+
+
+def pinned_ssh_host_key_fingerprint(
+    known_hosts_file: Path, endpoint: str, *, port: int = 22
+) -> str:
+    """Return one exact endpoint's fingerprint from a private pinned key file."""
+
+    try:
+        normalized = str(ipaddress.ip_address(endpoint))
+    except ValueError as error:
+        raise ValueError("SSH endpoint must be a literal IP address") from error
+    if normalized != endpoint:
+        raise ValueError("SSH endpoint must use canonical IP notation")
+    if not 1 <= port <= 65535:
+        raise ValueError("SSH port is outside 1..65535")
+    _validate_private_file(known_hosts_file, "SSH known-hosts")
+    fingerprint, _algorithm = _pinned_host_key(known_hosts_file, endpoint, port)
+    return fingerprint
 
 
 def _pinned_host_key(path: Path, endpoint: str, port: int) -> tuple[str, str]:
