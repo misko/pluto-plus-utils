@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from pluto_plus.hardware.base import SettingsRestorationError, restore_settings_exact
+from pluto_plus.hardware.base import (
+    ExactSettingsApplicationError,
+    SettingsRestorationError,
+    apply_settings_exact,
+    restore_settings_exact,
+)
 from pluto_plus.models import RadioSettings
 
 
@@ -83,6 +88,36 @@ def test_exact_restore_searches_nearby_requests_for_original_lo_readback() -> No
         1_690_312_597,
         1_690_312_498,
     ]
+
+
+def test_exact_application_searches_nearby_requests_for_desired_lo_readback() -> None:
+    requested = _snapshot()
+    radio = QuantizedRadio(
+        requested,
+        reproducible_request_hz=round(requested.center_frequency_hz) + 2,
+    )
+
+    result = apply_settings_exact(radio, requested, maximum_lo_offset_hz=4)
+
+    assert result.requested == requested
+    assert result.applied == requested
+    assert radio.requests == [
+        1_690_312_498,
+        1_690_312_499,
+        1_690_312_497,
+        1_690_312_500,
+    ]
+    assert result.attempts[-1].readback == requested
+
+
+def test_exact_application_fails_closed_when_desired_lo_is_not_reproducible() -> None:
+    requested = _snapshot()
+    radio = QuantizedRadio(requested, reproducible_request_hz=None)
+
+    with pytest.raises(ExactSettingsApplicationError, match=r"within \+/-2 Hz") as caught:
+        apply_settings_exact(radio, requested, maximum_lo_offset_hz=2)
+
+    assert len(caught.value.attempts) == 5
 
 
 def test_exact_restore_fails_closed_with_bounded_attempt_evidence() -> None:

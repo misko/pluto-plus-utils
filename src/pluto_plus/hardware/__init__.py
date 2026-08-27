@@ -1,6 +1,8 @@
 """Radio hardware adapters."""
 
 from .base import (
+    ExactSettingsApplication,
+    ExactSettingsApplicationError,
     MetadataCapture,
     MetadataRadioDevice,
     RadioDevice,
@@ -9,6 +11,7 @@ from .base import (
     SettingsRestoration,
     SettingsRestorationAttempt,
     SettingsRestorationError,
+    apply_settings_exact,
     restore_settings_exact,
 )
 from .direct_ip import DirectIpRadioDevice
@@ -22,6 +25,8 @@ __all__ = [
     "DirectIpRadioDevice",
     "DirectUsbRadioDevice",
     "IioRadioDevice",
+    "ExactSettingsApplication",
+    "ExactSettingsApplicationError",
     "MetadataCapture",
     "MetadataRadioDevice",
     "MetadataRuntimeVerification",
@@ -31,6 +36,7 @@ __all__ = [
     "SettingsRestoration",
     "SettingsRestorationAttempt",
     "SettingsRestorationError",
+    "apply_settings_exact",
     "discover_usb_serials",
     "restore_settings_exact",
     "verify_metadata_runtime",

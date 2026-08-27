@@ -51,12 +51,25 @@ class SettingsRestoration:
     attempts: tuple[SettingsRestorationAttempt, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ExactSettingsApplication:
+    """Evidence that requested settings were applied with an exact readback."""
+
+    requested: RadioSettings
+    applied: RadioSettings
+    attempts: tuple[SettingsRestorationAttempt, ...]
+
+
 class SettingsRestorationError(RadioConfigurationError):
     """A bounded exact restoration attempt failed closed."""
 
     def __init__(self, message: str, attempts: tuple[SettingsRestorationAttempt, ...]) -> None:
         super().__init__(message)
         self.attempts = attempts
+
+
+class ExactSettingsApplicationError(SettingsRestorationError):
+    """A bounded exact settings application failed closed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,14 +209,41 @@ def restore_settings_exact(
     requires an exact match to the complete original snapshot.
     """
 
-    if not isinstance(maximum_lo_offset_hz, int) or isinstance(maximum_lo_offset_hz, bool):
-        raise ValueError("maximum_lo_offset_hz must be a non-negative integer")
-    if maximum_lo_offset_hz < 0:
-        raise ValueError("maximum_lo_offset_hz must be a non-negative integer")
-    if maximum_lo_offset_hz > 1024:
-        raise ValueError("maximum_lo_offset_hz cannot exceed 1024 Hz")
+    try:
+        application = apply_settings_exact(
+            device,
+            snapshot,
+            maximum_lo_offset_hz=maximum_lo_offset_hz,
+        )
+    except ExactSettingsApplicationError as error:
+        raise SettingsRestorationError(
+            str(error).replace("application", "restoration"),
+            error.attempts,
+        ) from error
+    return SettingsRestoration(
+        snapshot=snapshot,
+        restored=application.applied,
+        attempts=application.attempts,
+    )
 
-    requested_center = round(snapshot.center_frequency_hz)
+
+def apply_settings_exact(
+    device: RadioDevice,
+    requested: RadioSettings,
+    *,
+    maximum_lo_offset_hz: int = DEFAULT_RESTORE_LO_SEARCH_HZ,
+) -> ExactSettingsApplication:
+    """Apply settings whose independent hardware readback exactly matches the request.
+
+    The AD9361 RX synthesizer may map an integer request to a nearby readback and
+    may not reproduce that readback when it is requested directly.  Search a
+    tightly bounded, deterministic sequence of nearby low-level LO requests.
+    Every attempt reapplies and independently reads all settings; only the LO
+    request may differ from the caller's desired settings.
+    """
+
+    _validate_maximum_lo_offset(maximum_lo_offset_hz)
+    requested_center = round(requested.center_frequency_hz)
     offsets = [0]
     for delta in range(1, maximum_lo_offset_hz + 1):
         offsets.extend((delta, -delta))
@@ -213,7 +253,7 @@ def restore_settings_exact(
         candidate_center = requested_center + offset
         if candidate_center <= 0:
             continue
-        candidate = snapshot.model_copy(update={"center_frequency_hz": float(candidate_center)})
+        candidate = requested.model_copy(update={"center_frequency_hz": float(candidate_center)})
         try:
             device.apply_settings(candidate)
             actual = device.read_settings()
@@ -224,8 +264,8 @@ def restore_settings_exact(
                 error=f"{type(error).__name__}: {error}",
             )
             attempts.append(attempt)
-            raise SettingsRestorationError(
-                "exact settings restoration failed during apply/readback",
+            raise ExactSettingsApplicationError(
+                "exact settings application failed during apply/readback",
                 tuple(attempts),
             ) from error
 
@@ -235,15 +275,15 @@ def restore_settings_exact(
                 readback=actual,
             )
         )
-        if _settings_without_center(actual) != _settings_without_center(snapshot):
-            raise SettingsRestorationError(
-                "exact settings restoration changed a non-LO field",
+        if _settings_without_center(actual) != _settings_without_center(requested):
+            raise ExactSettingsApplicationError(
+                "exact settings application changed a non-LO field",
                 tuple(attempts),
             )
-        if actual == snapshot:
-            return SettingsRestoration(
-                snapshot=snapshot,
-                restored=actual,
+        if actual == requested:
+            return ExactSettingsApplication(
+                requested=requested,
+                applied=actual,
                 attempts=tuple(attempts),
             )
 
@@ -252,12 +292,21 @@ def restore_settings_exact(
         f"{None if attempt.readback is None else attempt.readback.center_frequency_hz:g}"
         for attempt in attempts
     )
-    raise SettingsRestorationError(
-        "exact settings restoration could not reproduce RX LO "
-        f"{snapshot.center_frequency_hz:g} Hz within +/-{maximum_lo_offset_hz} Hz "
+    raise ExactSettingsApplicationError(
+        "exact settings application could not reproduce RX LO "
+        f"{requested.center_frequency_hz:g} Hz within +/-{maximum_lo_offset_hz} Hz "
         f"({summary})",
         tuple(attempts),
     )
+
+
+def _validate_maximum_lo_offset(maximum_lo_offset_hz: int) -> None:
+    if not isinstance(maximum_lo_offset_hz, int) or isinstance(maximum_lo_offset_hz, bool):
+        raise ValueError("maximum_lo_offset_hz must be a non-negative integer")
+    if maximum_lo_offset_hz < 0:
+        raise ValueError("maximum_lo_offset_hz must be a non-negative integer")
+    if maximum_lo_offset_hz > 1024:
+        raise ValueError("maximum_lo_offset_hz cannot exceed 1024 Hz")
 
 
 def _settings_without_center(settings: RadioSettings) -> tuple[object, ...]:
