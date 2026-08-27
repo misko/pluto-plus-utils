@@ -584,16 +584,16 @@ def test_single_rx_metadata_rc1_profile_is_exactly_bound_and_ram_only() -> None:
     policy = bootstrap.SINGLE_RX_METADATA_RC1_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
-    assert policy.release_tag == "plutoplus-spf-single-rx-metadata-rc1-33ffb70b2e4a"
+    assert policy.release_tag == "plutoplus-spf-single-rx-metadata-rc1-c83345490234"
     assert policy.device_firmware == "v0.42-plutoplus-spf-single-rx-metadata-rc1"
-    assert policy.source_commit == "33ffb70b2e4aeeffa01806b3efa0fe7488a85b5c"
+    assert policy.source_commit == "c833454902343843e4af7f3f6c97c40d4a809c90"
     assert policy.asset_sha256 == (
-        "f681573fb52a568820e1e9a201c26927d5c17e454985523fb5ecbdd3c1ae8e58"
+        "3d38a74234823937995e20c32099f61923284df50b530f1e39df1b72f5e80aaf"
     )
     assert policy.fit_body_sha256 == (
-        "bfb90bf0cf9fb1e47e3f4d9bb1a479e0493c9ff1d0f44a780755413443e723a0"
+        "dff0c0f4d607beb5c5adc050e9cf6d2bbb09d1cd5c13a7c57a4771c2cbf17dab"
     )
-    assert policy.fit_body_size == 12_792_719
+    assert policy.fit_body_size == 12_793_263
     assert policy.hardware_qualified is False
     assert profile.metadata_abi == 3
     assert profile.tandem_agc is True

@@ -141,16 +141,16 @@ TANDEM_AGC_V7_PERSISTENT_POLICY = TANDEM_AGC_V7_RAM_POLICY.model_copy(
 # QSPI persistence before an explicit hardware promotion.
 SINGLE_RX_METADATA_RC1_RAM_POLICY = FirmwarePolicy(
     profile_id="single-rx-metadata-rc1-ram",
-    release_tag="plutoplus-spf-single-rx-metadata-rc1-33ffb70b2e4a",
+    release_tag="plutoplus-spf-single-rx-metadata-rc1-c83345490234",
     device_firmware="v0.42-plutoplus-spf-single-rx-metadata-rc1",
-    asset_name="plutoplus-spf-single-rx-metadata-rc1-33ffb70b2e4a-pluto.dfu",
-    asset_sha256="f681573fb52a568820e1e9a201c26927d5c17e454985523fb5ecbdd3c1ae8e58",
-    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33101837372",
-    source_commit="33ffb70b2e4aeeffa01806b3efa0fe7488a85b5c",
-    fit_body_sha256="bfb90bf0cf9fb1e47e3f4d9bb1a479e0493c9ff1d0f44a780755413443e723a0",
-    fit_body_size=12_792_719,
+    asset_name="plutoplus-spf-single-rx-metadata-rc1-c83345490234-pluto.dfu",
+    asset_sha256="3d38a74234823937995e20c32099f61923284df50b530f1e39df1b72f5e80aaf",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33121754593",
+    source_commit="c833454902343843e4af7f3f6c97c40d4a809c90",
+    fit_body_sha256="dff0c0f4d607beb5c5adc050e9cf6d2bbb09d1cd5c13a7c57a4771c2cbf17dab",
+    fit_body_size=12_793_263,
     hardware_qualified=False,
-    published_at=datetime(2026, 8, 27, 18, 45, 37, tzinfo=UTC),
+    published_at=datetime(2026, 8, 27, 22, 38, 52, tzinfo=UTC),
 )
 
 
