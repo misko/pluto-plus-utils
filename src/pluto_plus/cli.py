@@ -20,6 +20,23 @@ from urllib.parse import urlsplit
 import httpx
 import typer
 
+from pluto_plus.fastlock import (
+    DEFAULT_DWELL_US,
+    DEFAULT_HOPS_PER_MODE,
+    DEFAULT_LOWER_FREQUENCY_HZ,
+    DEFAULT_LOWER_PROFILE,
+    DEFAULT_MAX_SECONDS,
+    DEFAULT_PROFILE_SETTLE_MS,
+    DEFAULT_UPPER_FREQUENCY_HZ,
+    DEFAULT_UPPER_PROFILE,
+    MAX_HOPS_PER_MODE,
+    MAX_SECONDS,
+    FastLockProbeError,
+    FastLockProbeReport,
+    prepare_usb_fastlock_probe,
+    run_usb_fastlock_probe,
+    write_fastlock_report,
+)
 from pluto_plus.hardware.preflight import IioEnvironmentReport, inspect_iio_environment
 from pluto_plus.inventory import (
     LocalUsbPluto,
@@ -50,6 +67,7 @@ DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qua
 DEFAULT_LOCAL_REBOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/reboot-receipts"
 DEFAULT_RAM_BOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/ram-boot-receipts"
 DEFAULT_METADATA_SOAK_REPORTS = Path.home() / ".local/state/pluto-plus-utils/metadata-soak-reports"
+DEFAULT_FASTLOCK_REPORTS = Path.home() / ".local/state/pluto-plus-utils/fastlock-reports"
 DEFAULT_HOST_ISOLATION_RECEIPTS = (
     Path.home() / ".local/state/pluto-plus-utils/host-isolation-receipts"
 )
@@ -406,6 +424,32 @@ def _ladder_table(report: LadderReport) -> str:
     )
     restore = "Original RX settings restored: yes"
     return "\n".join((identity, header, separator, *body, restore, report.continuity_claim))
+
+
+def _fastlock_table(report: FastLockProbeReport, report_path: Path) -> str:
+    ordinary = report.ordinary_timing
+    fastlock = report.fastlock_timing
+    lines = (
+        f"Radio {report.identity.serial} · {report.identity.uri} · "
+        f"firmware {report.identity.firmware_version or 'unknown'}",
+        (
+            "Ordinary LO write: "
+            f"median {ordinary.median_us:.1f} us · p95 {ordinary.p95_us:.1f} us · "
+            f"max {ordinary.maximum_us:.1f} us"
+        ),
+        (
+            "Fast Lock recall:  "
+            f"median {fastlock.median_us:.1f} us · p95 {fastlock.p95_us:.1f} us · "
+            f"max {fastlock.maximum_us:.1f} us"
+        ),
+        f"Median speedup: {report.median_speedup:.2f}x",
+        "Original RX settings restored: yes",
+        "TX muted and verified: yes",
+        f"Report: {report_path}",
+        report.latency_claim,
+        report.continuity_claim,
+    )
+    return "\n".join(lines)
 
 
 def _environment_table(report: IioEnvironmentReport) -> str:
@@ -999,6 +1043,130 @@ def radio_ladder(
         typer.echo(_ladder_table(report))
     if report.failures:
         raise typer.Exit(5)
+
+
+@radio_app.command("fastlock-probe")
+def radio_fastlock_probe(
+    serial: str = typer.Argument(..., help="Exact serial of one locally attached USB Pluto+."),
+    lower_hz: int = typer.Option(
+        DEFAULT_LOWER_FREQUENCY_HZ,
+        "--lower-hz",
+        min=70_000_000,
+        max=6_000_000_000,
+        help="Lower RX-LO frequency in Hz.",
+    ),
+    upper_hz: int = typer.Option(
+        DEFAULT_UPPER_FREQUENCY_HZ,
+        "--upper-hz",
+        min=70_000_000,
+        max=6_000_000_000,
+        help="Upper RX-LO frequency in Hz.",
+    ),
+    hops: int = typer.Option(
+        DEFAULT_HOPS_PER_MODE,
+        "--hops",
+        min=2,
+        max=MAX_HOPS_PER_MODE,
+        help="Even hop count for each of ordinary tuning and Fast Lock.",
+    ),
+    dwell_us: int = typer.Option(
+        DEFAULT_DWELL_US,
+        "--dwell-us",
+        min=0,
+        max=1_000_000,
+        help="Host dwell after each control-plane hop.",
+    ),
+    profile_settle_ms: int = typer.Option(
+        DEFAULT_PROFILE_SETTLE_MS,
+        "--profile-settle-ms",
+        min=0,
+        max=1_000,
+        help="Settle time before storing each volatile synthesizer profile.",
+    ),
+    lower_profile: int = typer.Option(DEFAULT_LOWER_PROFILE, "--lower-profile", min=0, max=7),
+    upper_profile: int = typer.Option(DEFAULT_UPPER_PROFILE, "--upper-profile", min=0, max=7),
+    max_seconds: int = typer.Option(
+        DEFAULT_MAX_SECONDS,
+        "--max-seconds",
+        min=1,
+        max=MAX_SECONDS,
+        help=(
+            "Cooperative operation budget checked around every dwell; the finite IIO timeout "
+            "also bounds a stalled USB call, and the maximum is five minutes."
+        ),
+    ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None, "--report", help="Durable atomic JSON timing/restoration receipt."
+    ),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table or json."
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Run the bounded live USB workload, asserting the selected radio is idle.",
+    ),
+    confirmation: str | None = typer.Option(
+        None, "--confirm", help="With --execute, the exact phrase printed by the dry run."
+    ),
+) -> None:
+    """Compare ordinary RX tuning with AD9361 Fast Lock on one exact local USB radio."""
+
+    normalized_format = output_format.strip().lower()
+    if normalized_format not in {"table", "json"}:
+        _fail("invalid_fastlock_format", "Fast Lock format must be table or json", 2)
+    try:
+        plan = prepare_usb_fastlock_probe(
+            serial,
+            lower_frequency_hz=lower_hz,
+            upper_frequency_hz=upper_hz,
+            lower_profile=lower_profile,
+            upper_profile=upper_profile,
+            hops_per_mode=hops,
+            dwell_us=dwell_us,
+            profile_settle_ms=profile_settle_ms,
+            max_seconds=max_seconds,
+        )
+    except (FastLockProbeError, ValueError) as error:
+        _fail("fastlock_plan_failed", str(error), 2)
+    selected_report = (
+        DEFAULT_FASTLOCK_REPORTS / f"fastlock-{plan.serial}-{time.time_ns()}.json"
+        if report_path is None
+        else report_path.expanduser().resolve()
+    )
+    if not execute:
+        _emit(
+            {
+                "execute": False,
+                "plan": plan.model_dump(mode="json"),
+                "confirmation_phrase": plan.expected_confirmation,
+                "report_path": str(selected_report),
+            }
+        )
+        return
+    if confirmation != plan.expected_confirmation:
+        _fail(
+            "fastlock_confirmation_required",
+            f"--confirm must be exactly {plan.expected_confirmation!r}",
+            2,
+        )
+    environment = inspect_iio_environment(require_usb=True)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        report = run_usb_fastlock_probe(plan)
+        write_fastlock_report(selected_report, report)
+    except (FastLockProbeError, ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("fastlock_probe_failed", str(error), 5)
+    if normalized_format == "json":
+        _emit(
+            {
+                "report": report.model_dump(mode="json"),
+                "report_path": str(selected_report),
+            }
+        )
+    else:
+        typer.echo(_fastlock_table(report, selected_report))
 
 
 @radio_app.command("soak-metadata")

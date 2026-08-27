@@ -153,6 +153,41 @@ prove continuity. Stop any daemon or other process that owns the selected radio
 before running a direct ladder. The ladder explicitly configures 8 RX kernel
 buffers by default; use `--kernel-buffers` to compare another bounded count.
 
+### Local USB Fast Lock probe
+
+`radio fastlock-probe` compares ordinary AD9361 RX-LO writes with volatile Fast
+Lock recalls on one exact locally attached USB serial. It never accepts an IP
+target, arms no RX or TX buffer, verifies TX mute, requires a visibly advancing
+FPGA low-32 sample counter, and restores the exact original RX settings. The dry
+run resolves the current USB bus/device/interface and prints the serial-specific
+confirmation phrase:
+
+```bash
+uv run pluto radio fastlock-probe EXACT_SERIAL \
+  --lower-hz 959687500 --upper-hz 1190312500 --hops 32
+uv run pluto radio fastlock-probe EXACT_SERIAL \
+  --lower-hz 959687500 --upper-hz 1190312500 --hops 32 \
+  --report /private/fastlock.json --execute \
+  --confirm 'FASTLOCK USB EXACT_SERIAL'
+```
+
+The measured latency is the host-observed USB IIO attribute-write time, not the
+AD9361's internal RF-lock interval. Counter brackets do not locate the exact IQ
+sample where lock occurred. During Fast Lock, the ordinary LO-frequency attribute
+may remain cached at the last conventional tune; the probe therefore validates the
+active profile and the stored sixteen-byte profile readback instead. Metadata
+buffers are intentionally excluded because
+the tandem owner makes concurrent LO/Fast-Lock writes fail with `EBUSY`.
+The selected profile slots are volatile but remain populated after the probe;
+use the default high slots only on an otherwise idle radio.
+
+The exact confirmation phrase is the operator's assertion that the selected
+radio is otherwise idle. The probe does not acquire a cross-transport ownership
+lock or change host network state. It still attests serial and sysfs path before
+any buffer, TX, or RF mutation and requires the firmware tandem owner to be idle.
+Ordinary and Fast Lock measurements use balanced, interleaved bufferless O-F-F-O
+cycles after one unreported warmup cycle.
+
 ### Metadata lifecycle soak
 
 `radio soak-metadata` reproduces the bounded context/retune/buffer lifecycle

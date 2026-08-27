@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import importlib
+import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -30,6 +32,9 @@ from pluto_plus.tandem import TandemSessionRequestV1
 
 PLUTO_USB_VENDOR = "0456"
 PLUTO_RUNTIME_PRODUCT = "b673"
+ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
+AD9361_FASTLOCK_PROFILE_COUNT = 8
+_CONCRETE_USB_URI = re.compile(r"^usb:[0-9]+[.][0-9]+[.][0-9]+$")
 
 
 class IioRadioDevice:
@@ -40,6 +45,9 @@ class IioRadioDevice:
         uri: str,
         *,
         serial: str | None = None,
+        expected_usb_path: str | None = None,
+        mutation_preflight: Callable[[], None] | None = None,
+        require_idle_tandem_owner: bool = False,
         radio_id: str | None = None,
         adi_module: ModuleType | Any | None = None,
         iio_module: ModuleType | Any | None = None,
@@ -51,6 +59,9 @@ class IioRadioDevice:
         normalized = uri.removeprefix("pluto://")
         self._configured_uri = normalized
         self._requested_serial = serial
+        self._expected_usb_path = expected_usb_path
+        self._mutation_preflight = mutation_preflight
+        self._require_idle_tandem_owner = require_idle_tandem_owner
         self._radio_id = radio_id or serial or normalized
         self._adi_module = adi_module
         self._iio_module = iio_module
@@ -114,9 +125,9 @@ class IioRadioDevice:
             contexts=self._iio_contexts,
         )
         device = module.ad9361(uri=uri)
+        attested = False
         try:
             configure_iio_context_timeout(device.ctx)
-            device.rx_destroy_buffer()
             facts = context_facts(device.ctx)
             detected_serial = str(facts.get("serial") or "")
             if self._requested_serial and detected_serial != self._requested_serial:
@@ -130,6 +141,23 @@ class IioRadioDevice:
             usb_path = _optional_string(facts.get("usb_path"))
             if usb_path is None:
                 usb_path = find_usb_sysfs_path(detected_serial)
+            if self._expected_usb_path is not None and usb_path != self._expected_usb_path:
+                raise RadioConfigurationError(
+                    f"opened Pluto USB path {usb_path!r}, expected {self._expected_usb_path!r}"
+                )
+            if self._require_idle_tandem_owner:
+                first_tandem = (
+                    facts.get("tandem_agc_state"),
+                    facts.get("tandem_agc_ownership_epoch"),
+                    facts.get("tandem_agc_fault_flags"),
+                )
+                second_tandem = _tandem_owner_snapshot(device.ctx)
+                facts["tandem_agc_second_owner_snapshot"] = second_tandem
+                if first_tandem != (0, 0, 0) or second_tandem != first_tandem:
+                    raise RadioConfigurationError(
+                        "Fast Lock requires two stable idle tandem-owner snapshots, got "
+                        f"{first_tandem!r} then {second_tandem!r}"
+                    )
             firmware_capable = usb_path is not None
             self._identity = RadioIdentity(
                 radio_id=self._radio_id,
@@ -152,6 +180,13 @@ class IioRadioDevice:
                 "boot_provenance": None,
                 "uboot": None,
             }
+            if self._mutation_preflight is not None:
+                self._mutation_preflight()
+            # Nothing above this point may alter buffers, RF state, channels, or
+            # TX state. A concrete BUS.DEVICE can be reused between inventory
+            # and open; only mutate after both serial and sysfs path attest.
+            attested = True
+            device.rx_destroy_buffer()
             # Capture identity and passive context facts before accessing any
             # per-channel pyadi properties. A 1R1T device raises a bare Exception
             # from those getters rather than AttributeError.
@@ -189,12 +224,22 @@ class IioRadioDevice:
                 }
             )
             self._device = device
-        except Exception:
-            _release_device(device)
+        except BaseException as failure:
+            try:
+                if attested:
+                    _release_device(device)
+                else:
+                    _close_context_only(device)
+            except BaseException as cleanup_error:
+                failure.add_note(f"IIO open cleanup also failed: {cleanup_error!r}")
             raise
 
     def close(self) -> None:
-        self.reset_receive_buffer()
+        errors: list[BaseException] = []
+        try:
+            self.reset_receive_buffer()
+        except BaseException as error:
+            errors.append(error)
         device, self._device = self._device, None
         self._buffer_size = None
         self._metadata_runtime = None
@@ -206,7 +251,12 @@ class IioRadioDevice:
         )
         self._diagnostic_facts = {}
         if device is not None:
-            _release_device(device)
+            try:
+                _release_device(device)
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise errors[0]
 
     def read_settings(self) -> RadioSettings:
         device = self._require_device()
@@ -347,12 +397,113 @@ class IioRadioDevice:
     def tune_center_frequency(self, center_frequency_hz: float) -> float:
         """Reset RX, tune the LO, and return the exact hardware readback."""
 
+        self.write_center_frequency(center_frequency_hz)
+        return self.read_center_frequency()
+
+    def write_center_frequency(self, center_frequency_hz: float) -> None:
+        """Issue one ordinary RX-LO write after enforcing a bufferless boundary."""
+
         if center_frequency_hz <= 0:
             raise ValueError("center_frequency_hz must be positive")
         device = self._require_device()
         self.reset_receive_buffer()
         device.rx_lo = round(center_frequency_hz)
-        return float(device.rx_lo)
+
+    def write_center_frequency_bufferless(self, center_frequency_hz: float) -> None:
+        """Issue only an RX-LO attribute write after proving no local RX buffer exists."""
+
+        if center_frequency_hz <= 0:
+            raise ValueError("center_frequency_hz must be positive")
+        self._require_bufferless_device().rx_lo = round(center_frequency_hz)
+
+    def read_center_frequency(self) -> float:
+        """Return the live RX synthesizer frequency, including Fast Lock state."""
+
+        return float(self._require_device().rx_lo)
+
+    def mute_transmit(self) -> None:
+        """Apply and verify the adapter's receive-only transmit safety state."""
+
+        _mute_transmit(self._require_device())
+
+    def read_device_sample_counter_low32(self) -> int:
+        """Read the free-running FPGA sample counter without arming an RX buffer."""
+
+        device = self._require_device()
+        reader = getattr(getattr(device, "_rxadc", None), "reg_read", None)
+        if not callable(reader):
+            raise RadioConfigurationError(
+                "installed libiio binding cannot read the FPGA sample-counter register"
+            )
+        try:
+            return int(reader(ADC_SAMPLE_COUNTER_LOW_REG)) & 0xFFFFFFFF
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise RadioConfigurationError("FPGA sample-counter register read failed") from error
+
+    def store_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
+        """Store the current RX synthesizer state in one volatile AD9361 profile."""
+
+        _validate_fastlock_profile(profile)
+        device = self._require_bufferless_device()
+        channel = _rx_fastlock_channel(device)
+        channel.attrs["fastlock_store"].value = str(profile)
+        return self.save_rx_fastlock_profile(profile)
+
+    def save_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
+        """Read back one volatile RX Fast Lock profile as its sixteen register bytes."""
+
+        _validate_fastlock_profile(profile)
+        device = self._require_bufferless_device()
+        attribute = _rx_fastlock_channel(device).attrs["fastlock_save"]
+        attribute.value = str(profile)
+        raw = str(attribute.value).strip()
+        try:
+            raw_profile, raw_values = raw.split(maxsplit=1)
+            values = tuple(int(value) for value in raw_values.split(","))
+        except (TypeError, ValueError) as error:
+            raise RadioConfigurationError(
+                f"malformed RX Fast Lock profile readback: {raw!r}"
+            ) from error
+        if (
+            int(raw_profile) != profile
+            or len(values) != 16
+            or any(value < 0 or value > 255 for value in values)
+        ):
+            raise RadioConfigurationError(
+                f"invalid RX Fast Lock profile {profile} readback: {raw!r}"
+            )
+        return values
+
+    def recall_rx_fastlock_profile(self, profile: int) -> None:
+        """Issue one RX Fast Lock recall write without arming an RX buffer."""
+
+        _validate_fastlock_profile(profile)
+        device = self._require_bufferless_device()
+        _rx_fastlock_channel(device).attrs["fastlock_recall"].value = str(profile)
+
+    def read_active_rx_fastlock_profile(self) -> int | None:
+        """Read the active RX Fast Lock profile, or ``None`` when inactive."""
+
+        device = self._require_bufferless_device()
+        attribute = _rx_fastlock_channel(device).attrs["fastlock_recall"]
+        try:
+            active = int(attribute.value)
+        except OSError as error:
+            if error.errno == errno.EINVAL:
+                return None
+            raise
+        except (TypeError, ValueError) as error:
+            raise RadioConfigurationError("RX Fast Lock active-profile readback failed") from error
+        _validate_fastlock_profile(active)
+        return active
+
+    def _require_bufferless_device(self) -> Any:
+        device = self._require_device()
+        if self._metadata_capture is not None or getattr(device, "_rxbuf", None) is not None:
+            raise RadioConfigurationError(
+                "RX Fast Lock control requires no ordinary or metadata RX buffer"
+            )
+        return device
 
     def begin_metadata_capture(
         self,
@@ -436,6 +587,10 @@ def resolve_iio_uri(
 ) -> str:
     normalized = uri.removeprefix("pluto://")
     if not serial or not normalized.startswith("usb:"):
+        return normalized
+    if _CONCRETE_USB_URI.fullmatch(normalized):
+        # The caller has already selected one physical bus/device/interface.
+        # Open-time context attestation below still requires the exact serial.
         return normalized
     if contexts is None:
         try:
@@ -521,6 +676,13 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_metadata_raw": metadata.raw,
         "buffer_metadata_state": metadata.state.value,
         "tandem_agc": _device_exists(context, "tandem-agc"),
+        "tandem_agc_state": _optional_device_int_attribute(context, "tandem-agc", "state"),
+        "tandem_agc_ownership_epoch": _optional_device_int_attribute(
+            context, "tandem-agc", "ownership_epoch"
+        ),
+        "tandem_agc_fault_flags": _optional_device_int_attribute(
+            context, "tandem-agc", "fault_flags"
+        ),
         "rx_scan_channels": _scan_channel_ids(context, "cf-ad9361-lpc"),
     }
 
@@ -544,6 +706,54 @@ def _scan_channel_ids(context: Any, device_name: str) -> tuple[str, ...]:
 def _device_exists(context: Any, device_name: str) -> bool:
     find_device = getattr(context, "find_device", None)
     return bool(callable(find_device) and find_device(device_name) is not None)
+
+
+def _optional_device_int_attribute(
+    context: Any, device_name: str, attribute_name: str
+) -> int | None:
+    find_device = getattr(context, "find_device", None)
+    device = find_device(device_name) if callable(find_device) else None
+    attributes = getattr(device, "attrs", {}) if device is not None else {}
+    attribute = attributes.get(attribute_name) if hasattr(attributes, "get") else None
+    if attribute is None:
+        return None
+    try:
+        return int(attribute.value)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _tandem_owner_snapshot(context: Any) -> tuple[int | None, int | None, int | None]:
+    """Read a second owner snapshot in reverse attribute order to reject torn state."""
+
+    faults = _optional_device_int_attribute(context, "tandem-agc", "fault_flags")
+    epoch = _optional_device_int_attribute(context, "tandem-agc", "ownership_epoch")
+    state = _optional_device_int_attribute(context, "tandem-agc", "state")
+    return state, epoch, faults
+
+
+def _validate_fastlock_profile(profile: int) -> None:
+    if not isinstance(profile, int) or isinstance(profile, bool):
+        raise ValueError("Fast Lock profile must be an integer")
+    if not 0 <= profile < AD9361_FASTLOCK_PROFILE_COUNT:
+        raise ValueError(
+            f"Fast Lock profile must be between 0 and {AD9361_FASTLOCK_PROFILE_COUNT - 1}"
+        )
+
+
+def _rx_fastlock_channel(device: Any) -> Any:
+    context = getattr(device, "ctx", None)
+    find_device = getattr(context, "find_device", None)
+    phy = find_device("ad9361-phy") if callable(find_device) else None
+    find_channel = getattr(phy, "find_channel", None)
+    channel = find_channel("altvoltage0", True) if callable(find_channel) else None
+    required = {"fastlock_store", "fastlock_recall", "fastlock_save"}
+    attributes = getattr(channel, "attrs", {}) if channel is not None else {}
+    if channel is None or not required.issubset(attributes):
+        raise RadioConfigurationError(
+            "AD9361 RX LO channel does not expose the required Fast Lock attributes"
+        )
+    return channel
 
 
 def _mute_transmit(device: Any) -> None:
@@ -630,14 +840,33 @@ def _require_canonical_rx_layout(facts: Mapping[str, object]) -> None:
 
 
 def _release_device(device: Any) -> None:
+    errors: list[BaseException] = []
     try:
         device.rx_destroy_buffer()
-    finally:
+    except BaseException as error:
+        errors.append(error)
+    try:
         _mute_transmit(device)
-        context = getattr(device, "ctx", None)
-        close = getattr(context, "close", None)
-        if callable(close):
+    except BaseException as error:
+        errors.append(error)
+    context = getattr(device, "ctx", None)
+    close = getattr(context, "close", None)
+    if callable(close):
+        try:
             close()
+        except BaseException as error:
+            errors.append(error)
+    if errors:
+        raise errors[0]
+
+
+def _close_context_only(device: Any) -> None:
+    """Release an unattested host context without touching the opened radio."""
+
+    context = getattr(device, "ctx", None)
+    close = getattr(context, "close", None)
+    if callable(close):
+        close()
 
 
 def _optional_string(value: object) -> str | None:
