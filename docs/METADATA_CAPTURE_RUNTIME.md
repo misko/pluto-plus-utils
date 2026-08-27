@@ -103,6 +103,11 @@ that buffer, and opens a fresh metadata buffer. The returned session is the
 only object allowed to read that generation. Closing and resetting are
 idempotent; a closed session cannot read again.
 
+The default tandem AUTO request scales its cooldown for the refill size so the
+fixed 64-entry event array always covers the worst-case transition count. An
+explicit caller-supplied request is never rewritten and still fails before I/O
+when its event capacity cannot cover the requested refill.
+
 Every `SampleBlockV2` carries IQ plus the actual metadata ABI, stream ID,
 buffer sequence, FPGA first-sample sequence, flags, an upstream gap count, and
 the fitted realtime/monotonic sample interval with uncertainty when counter
@@ -119,4 +124,19 @@ uv run pluto radio metadata-ladder EXACT_SERIAL \
   --metadata-abi 3 --channels rx1 --samples 262144,131072
 uv run pluto radio metadata-ladder EXACT_SERIAL \
   --metadata-abi 3 --channels dual --samples 262144,131072
+```
+
+When several USB-attached Plutos share the default `192.168.2.1` endpoint, bind
+an IP ladder to one serial and sysfs path with the receipt-backed isolation
+gate. `--report` writes an absent-only canonical JSON evidence file beneath an
+existing owned mode-0700 directory:
+
+```bash
+uv run pluto radio metadata-ladder 192.168.2.1 \
+  --transport ip --expect-serial EXACT_SERIAL \
+  --usb-sysfs-path /sys/bus/usb/devices/EXACT_PORT \
+  --isolate-usb-route --isolation-confirm 'ISOLATE USB SSH EXACT_INTERFACE' \
+  --metadata-abi 3 --channels rx0 --sample-rate-hz 2500000 \
+  --rf-bandwidth-hz 2500000 --samples 4194304,2097152,1048576,524288 \
+  --frames 6 --kernel-buffers 4 --report /ABSOLUTE/PRIVATE/PATH/rx0.json
 ```

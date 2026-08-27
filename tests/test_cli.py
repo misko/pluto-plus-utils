@@ -22,6 +22,7 @@ from pluto_plus.cli import (
     app,
 )
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
+from pluto_plus.metadata_ladder import MetadataContinuityCell, MetadataContinuityLadderReport
 from pluto_plus.models import Transport
 
 runner = CliRunner()
@@ -1691,6 +1692,128 @@ def test_doctor_route_isolation_requires_exact_generated_confirmation(
     assert result.exit_code == 2, result.output
     assert "host_isolation_confirmation_required" in result.output
     assert "ISOLATE USB SSH enx001" in result.output
+
+
+def test_metadata_ladder_ip_isolation_requires_exact_usb_identity_and_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            confirmation_phrase="ISOLATE USB SSH enx001"
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "192.168.2.1",
+            "--transport",
+            "ip",
+            "--expect-serial",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--isolate-usb-route",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "host_isolation_confirmation_required" in result.output
+    assert "ISOLATE USB SSH enx001" in result.output
+
+
+def test_metadata_ladder_writes_an_absent_only_private_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = MetadataContinuityLadderReport(
+        serial="SERIAL_A",
+        uri="usb:",
+        transport="iio_usb",
+        model="PlutoSDR Rev.C",
+        firmware_version="v0.42-plutoplus-spf-single-rx-metadata-rc1",
+        metadata_abi=3,
+        sample_rate_hz=2_500_000,
+        rf_bandwidth_hz=2_500_000,
+        channels=(0,),
+        kernel_buffers=4,
+        cells=(
+            MetadataContinuityCell(
+                samples_per_channel=262_144,
+                requested_frames=2,
+                observed_frames=2,
+                observed_sample_count=524_288,
+                device_span_sample_count=524_288,
+                missing_sample_count=0,
+                gap_count=0,
+                overflow_count=0,
+                elapsed_seconds=1.0,
+                observed_fraction=1.0,
+                passed=True,
+            ),
+        ),
+        failures=(),
+        largest_passing_samples_per_channel=262_144,
+        original_settings_restored=True,
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment", lambda **_kwargs: SimpleNamespace(healthy=True)
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.run_metadata_continuity_ladder", lambda **_kwargs: report
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(mode=0o700)
+    destination = evidence / "rx0.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "SERIAL_A",
+            "--transport",
+            "usb",
+            "--metadata-abi",
+            "3",
+            "--channels",
+            "rx0",
+            "--samples",
+            "262144",
+            "--frames",
+            "2",
+            "--report",
+            str(destination),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert destination.stat().st_mode & 0o777 == 0o600
+    assert json.loads(destination.read_text())["serial"] == "SERIAL_A"
+
+    repeated = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "SERIAL_A",
+            "--metadata-abi",
+            "3",
+            "--channels",
+            "rx0",
+            "--samples",
+            "262144",
+            "--frames",
+            "2",
+            "--report",
+            str(destination),
+        ],
+    )
+    assert repeated.exit_code == 5, repeated.output
+    assert "contract destination already exists" in repeated.output
 
 
 def test_remediation_offers_cover_stale_firmware_and_broken_host_libiio() -> None:

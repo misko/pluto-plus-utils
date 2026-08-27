@@ -91,6 +91,22 @@ class TandemSessionRequestV1:
     large_adc_overload_threshold: int = 49
     small_adc_overload_threshold: int = 48
 
+    @classmethod
+    def auto_for_sample_count(cls, samples_per_channel: int) -> TandemSessionRequestV1:
+        """Build AUTO settings whose fixed event array covers one full refill."""
+
+        if samples_per_channel <= 0:
+            raise ValueError("samples_per_channel must be positive")
+        request = cls(mode=TandemMode.AUTO)
+        events_denominator = request.event_capacity * request.power_measurement_samples
+        minimum_periods = (
+            samples_per_channel + events_denominator - 1
+        ) // events_denominator
+        return dataclasses.replace(
+            request,
+            cooldown_periods=max(request.cooldown_periods, minimum_periods - 1),
+        )
+
     def pack(self, samples_per_channel: int) -> bytes:
         if not 0 <= self.minimum_gain_db <= self.initial_gain_db <= self.maximum_gain_db <= 62:
             raise ValueError("tandem gains must be ordered within 0..62 dB")

@@ -28,7 +28,6 @@ from pluto_plus.hardware.sample_clock import (
 from pluto_plus.tandem import (
     RadioMetadataV5,
     RadioMetadataV6,
-    TandemMode,
     TandemSessionRequestV1,
 )
 
@@ -189,7 +188,9 @@ class IioMetadataCaptureSession:
         self._kernel_buffers = int(kernel_buffers)
         self._metadata_abi = metadata_abi
         self._metadata_capacity = int(metadata_capacity)
-        self._tandem_request = tandem_request or TandemSessionRequestV1(mode=TandemMode.AUTO)
+        self._tandem_request = tandem_request or TandemSessionRequestV1.auto_for_sample_count(
+            samples_per_channel
+        )
         self._channels = tuple(int(item) for item in sdr.rx_enabled_channels)
         if self._channels not in {(0,), (1,), (0, 1)}:
             raise ValueError("metadata capture receiver selection is not canonical")

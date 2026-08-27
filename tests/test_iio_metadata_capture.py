@@ -642,6 +642,20 @@ def test_abi2_uses_request_constructor_and_persists_overflow_flag() -> None:
         radio.close()
 
 
+def test_default_metadata_request_scales_auto_cooldown_to_refill_size() -> None:
+    session = iio_adapter.IioMetadataCaptureSession(
+        SimpleNamespace(rx_enabled_channels=(0, 1)),
+        FakeMetadataBufferFactory(),
+        sample_rate_hz=2_500_000,
+        samples_per_channel=4_194_304,
+        kernel_buffers=4,
+        metadata_abi=3,
+    )
+
+    assert session._tandem_request.cooldown_periods == 63  # noqa: SLF001
+    assert len(session._tandem_request.pack(4_194_304)) == 104  # noqa: SLF001
+
+
 @pytest.mark.parametrize(
     ("channels", "mask", "receivers", "iq_payload_bytes"),
     (

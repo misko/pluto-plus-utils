@@ -40,6 +40,13 @@ def test_tandem_request_is_exact_and_capacity_bounded() -> None:
         ).pack(65_536)
 
 
+def test_default_auto_request_covers_the_largest_metadata_ladder_refill() -> None:
+    request = TandemSessionRequestV1.auto_for_sample_count(4_194_304)
+
+    assert request.cooldown_periods == 63
+    assert len(request.pack(4_194_304)) == 104
+
+
 def test_auto_stimulus_stays_within_normalized_dds_bounds() -> None:
     assert 0 < qualification.TONE_SCALE < qualification.AUTO_TONE_SCALE <= 1
 
