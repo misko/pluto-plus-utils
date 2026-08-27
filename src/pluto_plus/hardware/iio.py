@@ -20,6 +20,7 @@ from pluto_plus.hardware.base import DEFAULT_RESTORE_LO_SEARCH_HZ, SampleBlock
 from pluto_plus.hardware.iio_metadata import (
     IioMetadataCaptureSession,
     configure_iio_context_timeout,
+    metadata_iio_context_timeout_ms,
 )
 from pluto_plus.hardware.preflight import MetadataRuntimeVerification, verify_metadata_runtime
 from pluto_plus.models import (
@@ -673,6 +674,11 @@ class IioRadioDevice:
             raise RadioConfigurationError(
                 "radio was not opened with a matched continuity-observable metadata runtime"
             )
+        sample_rate_hz = round(float(device.sample_rate))
+        configure_iio_context_timeout(
+            device.ctx,
+            timeout_ms=metadata_iio_context_timeout_ms(sample_rate_hz, sample_count),
+        )
         module = self._iio_module
         if module is None:
             raise RadioConfigurationError(
@@ -685,7 +691,7 @@ class IioRadioDevice:
         session = IioMetadataCaptureSession(
             device,
             metadata_buffer_type,
-            sample_rate_hz=round(float(device.sample_rate)),
+            sample_rate_hz=sample_rate_hz,
             samples_per_channel=sample_count,
             kernel_buffers=actual_kernel_buffers,
             metadata_abi=int(metadata_abi),

@@ -25,7 +25,12 @@ from pluto_plus.direct_radio.usb import (
 )
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.iio import IioRadioDevice
-from pluto_plus.hardware.iio_metadata import IIO_CONTEXT_TIMEOUT_MS
+from pluto_plus.hardware.iio_metadata import (
+    IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER,
+    IIO_CONTEXT_TIMEOUT_MAX_MS,
+    IIO_CONTEXT_TIMEOUT_MS,
+    metadata_iio_context_timeout_ms,
+)
 from pluto_plus.tandem import (
     AD9361_TEMPERATURE_FEATURE,
     TANDEM_METADATA_FEATURE,
@@ -364,7 +369,11 @@ def test_context_timeout_precedes_reads_and_read_timeout_allows_cleanup() -> Non
     assert device.events == [f"timeout:{IIO_CONTEXT_TIMEOUT_MS}"]
 
     capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8)
-    assert device.events[:2] == [f"timeout:{IIO_CONTEXT_TIMEOUT_MS}", "read"]
+    assert device.events[:3] == [
+        f"timeout:{IIO_CONTEXT_TIMEOUT_MS}",
+        f"timeout:{IIO_CONTEXT_TIMEOUT_MS}",
+        "read",
+    ]
     device.rx_failure = TimeoutError(errno.ETIMEDOUT, "IIO context timed out")
 
     with pytest.raises(TimeoutError, match="IIO context timed out") as caught:
@@ -375,6 +384,59 @@ def test_context_timeout_precedes_reads_and_read_timeout_allows_cleanup() -> Non
     assert factory.instances[0].closed
     radio.close()
     assert device.context_close_count == 1
+
+
+@pytest.mark.parametrize(
+    ("sample_rate_hz", "samples_per_channel", "expected_timeout_ms"),
+    (
+        (2_500_000, 262_144, 5_000),
+        (2_500_000, 4_194_304, 13_424),
+        (3_000_000, 4_194_304, 11_192),
+        (5_000_000, 4_194_304, 6_712),
+        (1, 4_194_304, 30_000),
+    ),
+)
+def test_metadata_context_timeout_scales_with_native_refill_duration(
+    sample_rate_hz: int,
+    samples_per_channel: int,
+    expected_timeout_ms: int,
+) -> None:
+    assert IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER == 8
+    assert IIO_CONTEXT_TIMEOUT_MAX_MS == 30_000
+    assert (
+        metadata_iio_context_timeout_ms(sample_rate_hz, samples_per_channel) == expected_timeout_ms
+    )
+
+
+@pytest.mark.parametrize(
+    ("sample_rate_hz", "samples_per_channel"),
+    ((0, 1), (1, 0), (True, 1), (1, False)),
+)
+def test_metadata_context_timeout_rejects_invalid_geometry(
+    sample_rate_hz: int,
+    samples_per_channel: int,
+) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        metadata_iio_context_timeout_ms(sample_rate_hz, samples_per_channel)
+
+
+def test_metadata_capture_applies_rate_resolved_timeout_before_priming() -> None:
+    radio, adi, _factory = _open_radio([])
+    assert adi.device is not None
+    device = adi.device
+    device.sample_rate = 1
+
+    capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8)
+    try:
+        assert device.timeout_calls == [IIO_CONTEXT_TIMEOUT_MS, IIO_CONTEXT_TIMEOUT_MAX_MS]
+        assert device.events[:3] == [
+            f"timeout:{IIO_CONTEXT_TIMEOUT_MS}",
+            f"timeout:{IIO_CONTEXT_TIMEOUT_MAX_MS}",
+            "read",
+        ]
+    finally:
+        capture.close()
+        radio.close()
 
 
 def test_abi1_capture_surfaces_a_whole_refill_gap() -> None:

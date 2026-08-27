@@ -29,9 +29,12 @@ from pluto_plus.tandem import RadioMetadataV5, TandemMode, TandemSessionRequestV
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
 DEFAULT_METADATA_CAPACITY = 64 * 1024
 # A 262,144-sample dual-RX refill spans about 105 ms at 2.5 MS/s. Five
-# seconds leaves more than 47 refill intervals for transport jitter while
-# ensuring a disconnected USB or IP context cannot block a campaign forever.
+# seconds leaves more than 47 refill intervals for transport jitter. Larger
+# safe buffers receive eight native frame intervals, capped at 30 seconds, so
+# a disconnected USB or IP context still cannot block a campaign forever.
 IIO_CONTEXT_TIMEOUT_MS = 5_000
+IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER = 8
+IIO_CONTEXT_TIMEOUT_MAX_MS = 30_000
 INITIAL_TIME_ANCHOR_COUNT = 8
 MAX_TIME_ANCHORS = 32
 TIME_ANCHOR_WINDOW_NS = 10_000_000_000
@@ -40,8 +43,41 @@ _OPEN_MAX_ATTEMPTS = 3
 _OPEN_RETRY_DELAY_SECONDS = 0.05
 
 
-def configure_iio_context_timeout(context: Any) -> None:
+def metadata_iio_context_timeout_ms(
+    sample_rate_hz: int,
+    samples_per_channel: int,
+) -> int:
+    """Return one bounded timeout with margin for the configured native-rate refill."""
+
+    for name, value in (
+        ("sample_rate_hz", sample_rate_hz),
+        ("samples_per_channel", samples_per_channel),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    frame_duration_ms = (samples_per_channel * 1_000 + sample_rate_hz - 1) // sample_rate_hz
+    return min(
+        IIO_CONTEXT_TIMEOUT_MAX_MS,
+        max(
+            IIO_CONTEXT_TIMEOUT_MS,
+            frame_duration_ms * IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER,
+        ),
+    )
+
+
+def configure_iio_context_timeout(
+    context: Any,
+    *,
+    timeout_ms: int = IIO_CONTEXT_TIMEOUT_MS,
+) -> None:
     """Fail closed unless libiio applies the bounded metadata I/O timeout."""
+
+    if (
+        isinstance(timeout_ms, bool)
+        or not isinstance(timeout_ms, int)
+        or not IIO_CONTEXT_TIMEOUT_MS <= timeout_ms <= IIO_CONTEXT_TIMEOUT_MAX_MS
+    ):
+        raise ValueError("IIO context timeout is outside the reviewed bounded range")
 
     setter = getattr(context, "set_timeout", None)
     if not callable(setter):
@@ -49,7 +85,7 @@ def configure_iio_context_timeout(context: Any) -> None:
             "installed libiio binding cannot configure a finite context timeout"
         )
     try:
-        setter(IIO_CONTEXT_TIMEOUT_MS)
+        setter(timeout_ms)
     except Exception as error:
         raise RadioConfigurationError(
             "failed to configure the finite IIO context timeout"
