@@ -198,19 +198,38 @@ formulas, layouts, fleet commands, drift thresholds, and failure behavior.
 ### Standalone USB/IP speed ladder
 
 `radio ladder` opens one exact radio directly and does not require `plutod`. It
-uses ordinary standard-libiio paired-RX buffers, never enables TX, and restores
-the original RX settings before returning. USB targets are serial numbers; IP
-targets are literal IPv4 addresses, with an exact expected serial strongly
-recommended:
+uses ordinary standard-libiio RX0-only, RX1-only, or dual-RX buffers, never
+enables TX, and restores the original RX settings before returning. USB targets
+are serial numbers; IP targets are literal IPv4 addresses and require an exact
+expected serial:
 
 ```bash
 uv run pluto radio ladder 104000b29905000e17000800065934759d --transport usb
 uv run pluto radio ladder 192.168.1.15 --transport ip \
   --expect-serial 104000b29905000e17000800065934759d
 uv run pluto radio ladder 192.168.1.15 --transport ip \
-  --rates 1M,2M,3M,5M --frames 12 --samples 262144 \
+  --expect-serial 104000b29905000e17000800065934759d \
+  --channels rx0 --rates 1M,2M,3M,5M --frames 12 --samples 262144 \
   --kernel-buffers 8 --format json
 ```
+
+When several USB-attached Plutos share `192.168.2.1`, bind the IP ladder to one
+serial and sysfs path with the receipt-backed isolation gate. `--report` writes
+an absent-only canonical JSON evidence file beneath an existing owned mode-0700
+directory:
+
+```bash
+uv run pluto radio ladder 192.168.2.1 --transport ip \
+  --expect-serial EXACT_SERIAL --usb-sysfs-path /sys/bus/usb/devices/EXACT_PORT \
+  --isolate-usb-route --isolation-confirm 'ISOLATE USB SSH EXACT_INTERFACE' \
+  --channels dual --rates 1M,2.5M,5M,7.5M,10M,12.5M,15M \
+  --frames 12 --samples 262144 --kernel-buffers 8 --format json \
+  --report /ABSOLUTE/PRIVATE/PATH/ip-dual.json
+```
+
+`kept_pace` compares delivered sample periods with the configured rate. The
+ordinary-buffer ladder measures host transport performance; it does not claim a
+gapless FPGA timeline. Use `radio metadata-ladder` for counter-proven continuity.
 
 The ladder runs the same passive environment preflight before opening its exact
 target. Missing Python hardware packages, missing native libiio, an incompatible

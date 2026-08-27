@@ -68,7 +68,7 @@ class FakeLadderRadio:
             raise OSError("injected refill failure")
         return SampleBlock(
             utc_ns=1,
-            samples=np.ones((2, sample_count), dtype=np.complex64),
+            samples=np.ones((len(self.settings.channels), sample_count), dtype=np.complex64),
         )
 
 
@@ -94,12 +94,16 @@ def test_rate_ladder_parser_accepts_decimal_suffixes_and_rejects_ambiguity() -> 
             parse_rate_ladder(invalid)
 
 
-def test_ladder_measures_paired_wire_payload_and_restores_original_settings() -> None:
+@pytest.mark.parametrize("channels", ((0,), (1,), (0, 1)))
+def test_ladder_measures_selected_wire_payload_and_restores_original_settings(
+    channels: tuple[int, ...],
+) -> None:
     radio = FakeLadderRadio()
     report = run_iio_ladder(
         uri="ip:192.168.1.15",
         serial="SERIAL_A",
         rates_hz=(1_000_000, 2_000_000),
+        channels=channels,
         samples_per_channel=16_384,
         frames=2,
         warmup_frames=1,
@@ -111,7 +115,8 @@ def test_ladder_measures_paired_wire_payload_and_restores_original_settings() ->
     assert radio.settings == radio.original
     assert radio.applied[-1] == radio.original
     assert report.serial == "SERIAL_A"
-    assert report.wire_bytes_per_sample_period == 8
+    assert report.channels == channels
+    assert report.wire_bytes_per_sample_period == len(channels) * 4
     assert report.kernel_buffers == 8
     assert report.kernel_buffer_configuration_basis == "readback"
     assert radio.kernel_buffers == 8
@@ -119,8 +124,8 @@ def test_ladder_measures_paired_wire_payload_and_restores_original_settings() ->
     assert len(report.cells) == 2
     assert report.failures == ()
     first = report.cells[0]
-    assert first.wire_bytes == 2 * 16_384 * 8
-    assert first.offered_payload_mbps == 8.0
+    assert first.wire_bytes == 2 * 16_384 * len(channels) * 4
+    assert first.offered_payload_mbps == len(channels) * 4.0
     assert first.achieved_payload_mbps > 0
     assert first.transferred_mb_per_minute == pytest.approx(first.achieved_payload_mbps * 60)
 
@@ -161,3 +166,15 @@ def test_ladder_rejects_out_of_range_rates_without_skipping_other_cells() -> Non
     assert [cell.sample_rate_hz for cell in report.cells] == [1_000_000]
     assert report.failures[0].sample_rate_hz == 100_000
     assert "below device minimum" in report.failures[0].message
+
+
+@pytest.mark.parametrize("channels", ((), (1, 0), (0, 0), (2,)))
+def test_ladder_rejects_noncanonical_receive_layouts(channels: tuple[int, ...]) -> None:
+    with pytest.raises(ValueError, match="rx0, rx1, or dual"):
+        run_iio_ladder(
+            uri="usb:",
+            serial="SERIAL_A",
+            rates_hz=(1_000_000,),
+            channels=channels,
+            radio_factory=lambda _uri, _serial: FakeLadderRadio(),
+        )

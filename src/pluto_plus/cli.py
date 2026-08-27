@@ -45,7 +45,13 @@ from pluto_plus.inventory import (
     local_ipv4_discovery_networks,
     scan_local_usb_plutos,
 )
-from pluto_plus.ladder import DEFAULT_RATE_LADDER, LadderReport, parse_rate_ladder, run_iio_ladder
+from pluto_plus.ladder import (
+    DEFAULT_RATE_LADDER,
+    LADDER_CHANNEL_SELECTIONS,
+    LadderReport,
+    parse_rate_ladder,
+    run_iio_ladder,
+)
 from pluto_plus.metadata_ladder import (
     DEFAULT_METADATA_SAMPLE_LADDER,
     METADATA_CHANNEL_SELECTIONS,
@@ -980,12 +986,17 @@ def radio_ladder(
         "--rates",
         help="Strictly increasing comma-separated Hz/K/M/G sample-rate rungs.",
     ),
+    channels: str = typer.Option(
+        "dual",
+        "--channels",
+        help="Canonical receive layout: rx0, rx1, or dual.",
+    ),
     samples: int = typer.Option(
         262_144,
         "--samples",
         min=16_384,
         max=4_194_304,
-        help="Samples per channel in each paired-RX frame.",
+        help="Samples per channel in each receive frame.",
     ),
     frames: int = typer.Option(
         12, "--frames", min=1, max=100, help="Timed frames captured at each rung."
@@ -1007,8 +1018,33 @@ def radio_ladder(
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Output format: table or json."
     ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--report",
+        help="Absent-only private canonical JSON report path beneath an owned mode-0700 parent.",
+    ),
+    usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--usb-sysfs-path",
+        help="Exact local USB sysfs node anchoring an isolated IP transport.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing Pluto NICs/routes around an IP ladder.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="Exact phrase ISOLATE USB SSH <interface> for temporary route isolation.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for durable host-isolation receipts.",
+    ),
 ) -> None:
-    """Directly ladder-test paired-RX USB or IP throughput without plutod."""
+    """Directly ladder-test RX0, RX1, or dual USB/IP throughput without plutod."""
 
     normalized_transport = transport.strip().lower()
     uri: str
@@ -1030,14 +1066,56 @@ def radio_ladder(
             _fail("invalid_radio_target", "IP ladder target must be a literal IP address", 2)
         if address.version != 4:
             _fail("invalid_radio_target", "IP ladder currently supports IPv4 targets", 2)
+        if expect_serial is None:
+            _fail("missing_radio_identity", "IP ladder requires --expect-serial", 2)
         uri = f"ip:{address}"
         serial = expect_serial
     else:
         _fail("invalid_ladder_transport", "ladder transport must be usb or ip", 2)
 
+    isolation_plan = None
+    pluto_interfaces: tuple[str, ...] = ()
+    if isolate_usb_route:
+        if normalized_transport != "ip" or usb_sysfs_path is None:
+            _fail(
+                "host_isolation_target_required",
+                "throughput ladder route isolation requires IP transport and --usb-sysfs-path",
+                2,
+            )
+        from pluto_plus.host_isolation import HostIsolationError, prepare_usb_ssh_isolation
+
+        local_devices = scan_local_usb_plutos()
+        selected = [
+            item
+            for item in local_devices
+            if item.serial == serial and item.usb_path == str(usb_sysfs_path)
+        ]
+        if len(selected) != 1 or len(selected[0].host_network_interfaces) != 1:
+            _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
+        pluto_interfaces = tuple(
+            interface.name for item in local_devices for interface in item.host_network_interfaces
+        )
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                selected[0].host_network_interfaces[0].name,
+                uri.removeprefix("ip:"),
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        if isolation_confirmation != isolation_plan.confirmation_phrase:
+            _fail(
+                "host_isolation_confirmation_required",
+                f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
+                2,
+            )
+
     normalized_format = output_format.strip().lower()
     if normalized_format not in {"table", "json"}:
         _fail("invalid_ladder_format", "ladder format must be table or json", 2)
+    normalized_channels = channels.strip().lower()
+    if normalized_channels not in LADDER_CHANNEL_SELECTIONS:
+        _fail("ladder_failed", "channels must be rx0, rx1, or dual", 5)
     try:
         parsed_rates = parse_rate_ladder(rates)
     except ValueError as error:
@@ -1045,22 +1123,68 @@ def radio_ladder(
     environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
     if not environment.healthy:
         _fail(environment.status.value, environment.actionable_message, 5)
-    try:
-        report = run_iio_ladder(
+
+    def ladder_action() -> Any:
+        return run_iio_ladder(
             uri=uri,
             serial=serial,
             rates_hz=parsed_rates,
+            channels=LADDER_CHANNEL_SELECTIONS[normalized_channels],
             samples_per_channel=samples,
             frames=frames,
             warmup_frames=warmup_frames,
             kernel_buffers=kernel_buffers,
         )
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            report = ladder_action()
+        else:
+            from pluto_plus.host_isolation import (
+                HostIsolationError,
+                HostIsolationExecutionError,
+                execute_usb_ssh_isolated,
+            )
+
+            try:
+                report, isolation_receipt = execute_usb_ssh_isolated(
+                    isolation_plan,
+                    confirmation=isolation_confirmation or "",
+                    receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                    action=ladder_action,
+                    pluto_interfaces=pluto_interfaces,
+                )
+            except HostIsolationExecutionError as error:
+                _emit({"host_isolation": asdict(error.receipt)})
+                raise typer.Exit(5) from error
+            except HostIsolationError as error:
+                _fail("host_isolation_failed", str(error), 4)
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         _fail("ladder_failed", str(error), 5)
+    if report_path is not None:
+        from pluto_plus.release_candidate import (
+            ReleaseCandidateContractError,
+            write_private_contract,
+        )
+
+        try:
+            write_private_contract(report_path.expanduser().absolute(), report)
+        except (OSError, ReleaseCandidateContractError) as error:
+            _fail("ladder_report_failed", str(error), 5)
     if normalized_format == "json":
-        _emit(report.model_dump(mode="json"))
+        payload = report.model_dump(mode="json")
+        _emit(
+            payload
+            if isolation_receipt is None
+            else {"host_isolation": asdict(isolation_receipt), "result": payload}
+        )
     else:
         typer.echo(_ladder_table(report))
+        if isolation_receipt is not None:
+            typer.echo(f"Host isolation receipt: {isolation_receipt.receipt_path}")
+        if report_path is not None:
+            typer.echo(f"Report: {report_path.expanduser().absolute()}")
     if report.failures:
         raise typer.Exit(5)
 
