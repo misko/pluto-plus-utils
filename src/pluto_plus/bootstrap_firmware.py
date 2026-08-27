@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
-from pluto_plus.diagnostic_profiles import DIAGNOSTIC_PROFILES
+from pluto_plus.diagnostic_profiles import DIAGNOSTIC_PROFILES, SUPPORTED_AD936X_PHY_MODELS
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
@@ -424,9 +424,10 @@ def prepare_lan_ssh_host_key_enrollment(
             f"LAN IIOD firmware is {observed_firmware!r}, expected {expected_firmware!r}"
         )
     observed_phy = str(facts.get("ad9361-phy,model") or "").strip()
-    if observed_phy != "ad9361":
+    if observed_phy not in SUPPORTED_AD936X_PHY_MODELS:
         raise BootstrapFirmwareError(
-            f"LAN IIOD PHY is {observed_phy!r}, expected canonical 'ad9361'"
+            f"LAN IIOD PHY is {observed_phy!r}, expected one of "
+            f"{SUPPORTED_AD936X_PHY_MODELS!r}"
         )
     observed_metadata = str(facts.get("iio,buffer-metadata") or "").strip()
     if observed_metadata != str(expected_metadata_abi):
@@ -1187,8 +1188,20 @@ def reconcile_usb_flash_receipt(
         raise BootstrapFirmwareError("standalone receipt identity or schema is invalid")
     if receipt.get("outcome") != "unknown":
         raise BootstrapFirmwareError("only an unknown standalone flash may be reconciled")
-    if receipt.get("transport") != "bound_ssh_frm":
-        raise BootstrapFirmwareError("standalone reconciliation requires a bound SSH receipt")
+    receipt_transport = receipt.get("transport")
+    receipt_phases = receipt.get("phases")
+    mass_storage_post_eject = (
+        (receipt_transport is None or receipt_transport == "mass_storage")
+        and isinstance(receipt_phases, list)
+        and "eject_requested" in receipt_phases
+        and receipt.get("failure_classification") == "post_eject_uncertain"
+        and receipt.get("retryable") is False
+    )
+    if receipt_transport != "bound_ssh_frm" and not mass_storage_post_eject:
+        raise BootstrapFirmwareError(
+            "standalone reconciliation requires bound SSH evidence or a "
+            "non-retryable post-eject mass-storage receipt"
+        )
     raw_plan = receipt.get("plan")
     if not isinstance(raw_plan, dict):
         raise BootstrapFirmwareError("standalone receipt has no valid plan")

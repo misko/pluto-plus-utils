@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import gc
 import time
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Any
 
@@ -24,7 +25,12 @@ from pluto_plus.hardware.sample_clock import (
     capture_host_realtime_mapping,
     fit_sample_clock,
 )
-from pluto_plus.tandem import RadioMetadataV5, TandemMode, TandemSessionRequestV1
+from pluto_plus.tandem import (
+    RadioMetadataV5,
+    RadioMetadataV6,
+    TandemMode,
+    TandemSessionRequestV1,
+)
 
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
 DEFAULT_METADATA_CAPACITY = 64 * 1024
@@ -41,6 +47,54 @@ TIME_ANCHOR_WINDOW_NS = 10_000_000_000
 MAX_STARTUP_FRAME_DISCARDS = 64
 _OPEN_MAX_ATTEMPTS = 3
 _OPEN_RETRY_DELAY_SECONDS = 0.05
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataLayoutCapability:
+    scan_mask: int
+    receiver_count: int
+    iq_bytes_per_sample: int
+    sample_count_multiple: int
+
+
+ABI3_METADATA_LAYOUTS = (
+    MetadataLayoutCapability(0x03, 1, 4, 2),
+    MetadataLayoutCapability(0x0C, 1, 4, 2),
+    MetadataLayoutCapability(0x0F, 2, 8, 1),
+)
+ABI3_METADATA_LAYOUTS_TEXT = "00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1"
+
+
+def parse_metadata_layout_capabilities(value: object) -> tuple[MetadataLayoutCapability, ...]:
+    """Parse the advertised ABI3 layouts without accepting aliases or duplicates."""
+
+    if not isinstance(value, str) or not value:
+        raise ValueError("metadata layout capability is absent")
+    layouts: list[MetadataLayoutCapability] = []
+    for encoded in value.split(","):
+        fields = encoded.split(":")
+        if len(fields) != 4:
+            raise ValueError("metadata layout capability has the wrong field count")
+        mask_text, receivers_text, iq_bytes_text, multiple_text = fields
+        try:
+            mask = int(mask_text, 16)
+            receivers = int(receivers_text, 10)
+            iq_bytes = int(iq_bytes_text, 10)
+            multiple = int(multiple_text, 10)
+        except ValueError as error:
+            raise ValueError("metadata layout capability is not numeric") from error
+        if (
+            mask_text != f"{mask:08x}"
+            or receivers not in {1, 2}
+            or iq_bytes not in {4, 8}
+            or multiple not in {1, 2}
+        ):
+            raise ValueError("metadata layout capability is not canonical")
+        layout = MetadataLayoutCapability(mask, receivers, iq_bytes, multiple)
+        if any(existing.scan_mask == mask for existing in layouts):
+            raise ValueError("metadata layout capability repeats a scan mask")
+        layouts.append(layout)
+    return tuple(layouts)
 
 
 def metadata_iio_context_timeout_ms(
@@ -124,8 +178,8 @@ class IioMetadataCaptureSession:
             raise ValueError("samples_per_channel must be positive")
         if kernel_buffers <= 0:
             raise ValueError("kernel_buffers must be positive")
-        if metadata_abi not in {1, 2}:
-            raise ValueError("metadata_abi must be one of the supported ABIs 1 or 2")
+        if metadata_abi not in {1, 2, 3}:
+            raise ValueError("metadata_abi must be one of the supported ABIs 1, 2, or 3")
         if metadata_capacity <= 0:
             raise ValueError("metadata_capacity must be positive")
         self._sdr = sdr
@@ -136,6 +190,13 @@ class IioMetadataCaptureSession:
         self._metadata_abi = metadata_abi
         self._metadata_capacity = int(metadata_capacity)
         self._tandem_request = tandem_request or TandemSessionRequestV1(mode=TandemMode.AUTO)
+        self._channels = tuple(int(item) for item in sdr.rx_enabled_channels)
+        if self._channels not in {(0,), (1,), (0, 1)}:
+            raise ValueError("metadata capture receiver selection is not canonical")
+        if metadata_abi in {1, 2} and self._channels != (0, 1):
+            raise ValueError("metadata ABI 1 and 2 require paired RX channels")
+        if metadata_abi == 3 and len(self._channels) == 1 and samples_per_channel & 1:
+            raise ValueError("metadata ABI 3 single-RX sample count must be even")
         self._buffer: Any | None = None
         self._time_anchors: list[HostTimeAnchorMeasurement] = []
         self._next_anchor_request_id = 1
@@ -169,8 +230,10 @@ class IioMetadataCaptureSession:
         self._sdr.rx_buffer_size = self._samples_per_channel
         ordinary_buffer = None
         try:
+            if tuple(int(item) for item in self._sdr.rx_enabled_channels) != self._channels:
+                raise RuntimeError("RX channel selection changed while metadata capture was armed")
             signal = np.asarray(self._sdr.rx())
-            expected = (len(tuple(self._sdr.rx_enabled_channels)), self._samples_per_channel)
+            expected = (len(self._channels), self._samples_per_channel)
             if expected[0] == 1 and signal.ndim == 1:
                 signal = signal[np.newaxis, :]
             if signal.shape != expected or not np.iscomplexobj(signal):
@@ -243,7 +306,9 @@ class IioMetadataCaptureSession:
                     raise
         host_after_ns = time.time_ns()
         signal = np.asarray(raw_signal)
-        expected_receivers = len(tuple(self._sdr.rx_enabled_channels))
+        if tuple(int(item) for item in self._sdr.rx_enabled_channels) != self._channels:
+            raise RuntimeError("RX channel selection changed during metadata capture")
+        expected_receivers = len(self._channels)
         if expected_receivers == 1 and signal.ndim == 1:
             signal = signal[np.newaxis, :]
         if signal.ndim != 2 or signal.shape != (
@@ -257,15 +322,22 @@ class IioMetadataCaptureSession:
         raw_metadata = self._buffer.metadata
         if raw_metadata is None:
             raise RuntimeError("metadata buffer refill returned no metadata header")
+        declared_missing: int | None = None
         if self._metadata_abi == 1:
             metadata = RadioMetadataV3.unpack(raw_metadata)
-        else:
+        elif self._metadata_abi == 2:
             parsed = RadioMetadataV5.unpack(raw_metadata)
             metadata = parsed.base
             if len(raw_metadata) != parsed.header_bytes:
                 raise RuntimeError("metadata refill returned trailing bytes")
+        else:
+            parsed_v6 = RadioMetadataV6.unpack(raw_metadata)
+            metadata = parsed_v6.base
+            declared_missing = parsed_v6.missing_samples_before
+            if len(raw_metadata) != parsed_v6.header_bytes:
+                raise RuntimeError("metadata refill returned trailing bytes")
         self._validate_header(metadata)
-        missing = self._validate_sequence(metadata)
+        missing = self._validate_sequence(metadata, declared_missing=declared_missing)
         self._refresh_time_anchors(initial=False)
         timing = self._capture_time(metadata.first_sample_sequence)
         utc_ns = (
@@ -302,20 +374,33 @@ class IioMetadataCaptureSession:
     def _validate_header(self, metadata: Any) -> None:
         if metadata.samples_per_channel != self._samples_per_channel:
             raise RuntimeError("metadata sample count does not match the IIO buffer")
-        if metadata.iq_payload_bytes != self._samples_per_channel * 8:
-            raise RuntimeError("metadata IQ byte count does not match dual-CS16 IIO")
-        if metadata.enabled_scan_mask != 0x0F or metadata.channel_count != 2:
-            raise RuntimeError("metadata scan layout does not match dual-channel IIO")
+        expected_mask, expected_receivers, expected_bytes = {
+            (0,): (0x03, 1, 4),
+            (1,): (0x0C, 1, 4),
+            (0, 1): (0x0F, 2, 8),
+        }[self._channels]
+        if metadata.iq_payload_bytes != self._samples_per_channel * expected_bytes:
+            raise RuntimeError("metadata IQ byte count does not match the selected CI16 layout")
+        if (
+            metadata.enabled_scan_mask != expected_mask
+            or metadata.channel_count != expected_receivers
+        ):
+            raise RuntimeError("metadata scan layout does not match the selected receivers")
         if not metadata.flags & MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID:
             raise RuntimeError("IIO metadata lacks a valid FPGA sample counter")
 
-    def _validate_sequence(self, metadata: Any) -> int:
+    def _validate_sequence(self, metadata: Any, *, declared_missing: int | None) -> int:
         stream_id = int(metadata.stream_id)
         buffer_sequence = int(metadata.buffer_sequence)
         first_sample = int(metadata.first_sample_sequence)
         if self._stream_id is None:
             if buffer_sequence != 0:
                 raise RuntimeError("new metadata capture did not begin at buffer sequence zero")
+            if (
+                declared_missing not in {None, 0}
+                or metadata.flags & MetadataFlags.SAMPLE_GAP_BEFORE
+            ):
+                raise RuntimeError("new metadata capture declared a preceding gap")
             self._stream_id = stream_id
             self._previous_buffer_sequence = buffer_sequence
             self._previous_sample_end = first_sample + self._samples_per_channel
@@ -331,7 +416,14 @@ class IioMetadataCaptureSession:
         if missing < 0:
             raise RuntimeError("FPGA sample counter repeated or regressed")
         skipped_buffers = buffer_delta - 1
-        if missing != skipped_buffers * self._samples_per_channel:
+        if self._metadata_abi == 3:
+            if declared_missing != missing:
+                raise RuntimeError("metadata exact gap count disagrees with the FPGA counter")
+            if bool(metadata.flags & MetadataFlags.SAMPLE_GAP_BEFORE) != bool(missing):
+                raise RuntimeError("metadata gap flag disagrees with the FPGA counter")
+            if skipped_buffers != missing // self._samples_per_channel:
+                raise RuntimeError("metadata buffer and FPGA sample sequences disagree")
+        elif missing != skipped_buffers * self._samples_per_channel:
             raise RuntimeError("metadata buffer and FPGA sample sequences disagree")
         self._previous_buffer_sequence = buffer_sequence
         self._previous_sample_end = first_sample + self._samples_per_channel

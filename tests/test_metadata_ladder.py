@@ -16,10 +16,17 @@ from pluto_plus.models import RadioCapabilities, RadioIdentity, RadioSettings, T
 
 
 class _Capture:
-    def __init__(self, samples: int, sequences: tuple[int, ...], kernel_buffers: int) -> None:
+    def __init__(
+        self,
+        samples: int,
+        sequences: tuple[int, ...],
+        kernel_buffers: int,
+        receiver_count: int,
+    ) -> None:
         self.samples = samples
         self.sequences: Iterator[int] = iter(sequences)
         self.kernel_buffers = kernel_buffers
+        self.receiver_count = receiver_count
         self.closed = False
         self.previous_sequence: int | None = None
 
@@ -33,7 +40,7 @@ class _Capture:
         self.previous_sequence = sequence
         return SampleBlockV2(
             utc_ns=1,
-            samples=np.ones((2, self.samples), dtype=np.complex64),
+            samples=np.ones((self.receiver_count, self.samples), dtype=np.complex64),
             stream_id=1,
             buffer_sequence=sequence,
             first_sample_sequence=1_000 + sequence * self.samples,
@@ -85,7 +92,12 @@ class _Radio:
         return settings
 
     def begin_metadata_capture(self, sample_count: int, *, kernel_buffers: int) -> _Capture:
-        return _Capture(sample_count, self.sequences[sample_count], kernel_buffers)
+        return _Capture(
+            sample_count,
+            self.sequences[sample_count],
+            kernel_buffers,
+            len(self.settings.channels),
+        )
 
 
 def test_parse_metadata_sample_ladder_is_strictly_descending() -> None:
@@ -146,3 +158,52 @@ def test_metadata_ladder_requires_native_bandwidth_and_four_kernel_buffers() -> 
                 kernel_buffers=kernel_buffers,
                 radio_factory=lambda _uri, _serial, _abi: radio,
             )
+
+
+@pytest.mark.parametrize("channels", ((0,), (1,), (0, 1)))
+def test_metadata_ladder_supports_every_abi3_layout(channels: tuple[int, ...]) -> None:
+    radio = _Radio({262_144: (0, 1)})
+    ticks = iter((0, 1_000_000_000))
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=5_000_000,
+        rf_bandwidth_hz=5_000_000,
+        metadata_abi=3,
+        channels=channels,
+        samples_per_channel=(262_144,),
+        frames=2,
+        kernel_buffers=4,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=lambda: next(ticks),
+    )
+    assert report.channels == channels
+    assert report.cells[0].passed
+
+
+def test_metadata_ladder_rejects_single_rx_before_abi3_and_odd_abi3_counts() -> None:
+    radio = _Radio({262_144: (0, 1)})
+    with pytest.raises(ValueError, match="require dual RX"):
+        run_metadata_continuity_ladder(
+            uri="ip:192.0.2.1",
+            serial="SERIAL_A",
+            sample_rate_hz=5_000_000,
+            rf_bandwidth_hz=5_000_000,
+            metadata_abi=2,
+            channels=(0,),
+            samples_per_channel=(262_144,),
+            frames=2,
+            radio_factory=lambda _uri, _serial, _abi: radio,
+        )
+    with pytest.raises(ValueError, match="must be even"):
+        run_metadata_continuity_ladder(
+            uri="ip:192.0.2.1",
+            serial="SERIAL_A",
+            sample_rate_hz=5_000_000,
+            rf_bandwidth_hz=5_000_000,
+            metadata_abi=3,
+            channels=(1,),
+            samples_per_channel=(262_145,),
+            frames=2,
+            radio_factory=lambda _uri, _serial, _abi: radio,
+        )

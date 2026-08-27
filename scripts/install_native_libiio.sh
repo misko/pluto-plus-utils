@@ -16,7 +16,7 @@ source_commit=""
 usage() {
     cat <<EOF
 Usage: scripts/install_native_libiio.sh --uv-bin ABSOLUTE_PATH
-       [--python PATH] [--prefix PATH] [--jobs N] [--metadata-abi 1|2]
+       [--python PATH] [--prefix PATH] [--jobs N] [--metadata-abi 1|2|3]
 
 Builds the exact host libiio matched to the selected firmware metadata ABI with
 USB support. The default ABI is 1 for the currently deployed production radios.
@@ -46,8 +46,12 @@ case "$metadata_abi" in
     source_ref="tandem-agc-v8-rc2-source/libiio-v1"
     source_commit="6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7"
     ;;
+3)
+    source_ref="single-rx-metadata-rc1-source/libiio-v1"
+    source_commit="5dc200af10961e50d3b019cd38bdb8dd3c0e8c3c"
+    ;;
 *)
-    printf 'ERROR: --metadata-abi must be 1 or 2\n' >&2
+    printf 'ERROR: --metadata-abi must be 1, 2, or 3\n' >&2
     exit 2
     ;;
 esac
@@ -137,7 +141,14 @@ parameters = tuple(inspect.signature(iio.MetadataBuffer.__init__).parameters)
 expected = (
     ("self", "device", "samples_count", "metadata_capacity")
     if abi == 1
-    else ("self", "device", "samples_count", "request", "metadata_capacity")
+    else (
+        "self",
+        "device",
+        "samples_count",
+        "request",
+        "metadata_capacity",
+        *( ("batch_frames",) if abi == 3 else () ),
+    )
 )
 assert parameters == expected, (parameters, expected)
 prefix = Path(os.environ["PLUTO_METADATA_PREFIX"]).resolve(strict=True)

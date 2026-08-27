@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1536,6 +1537,64 @@ def test_standalone_reconcile_cli_forwards_exact_receipt_path_and_profile(
     }
 
 
+def test_setup_reconcile_local_emits_the_verified_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @dataclass(frozen=True)
+    class ReconciledReceipt:
+        receipt_id: str
+        outcome: str
+        success: bool
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    monkeypatch.setattr(
+        "pluto_plus.cli.scan_local_usb_plutos",
+        lambda: (_recovery_usb(),),
+    )
+
+    class Manager:
+        def reconcile(self, receipt_id: str) -> ReconciledReceipt:
+            return ReconciledReceipt(receipt_id, "reconciled_verified", True)
+
+    monkeypatch.setattr(
+        "pluto_plus.setup_repair.ssh_manager_factory",
+        lambda credentials: lambda identity: Manager(),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "setup",
+            "reconcile-local",
+            "receipt-a",
+            "--serial",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--firmware",
+            "v-test",
+            "--known-hosts-file",
+            str(known_hosts),
+            "--password-file",
+            str(password),
+            "--host",
+            "192.168.1.14",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "outcome": "reconciled_verified",
+        "receipt_id": "receipt-a",
+        "success": True,
+    }
+
+
 def test_doctor_defaults_to_standalone_local_usb_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1600,6 +1659,38 @@ def test_doctor_setup_inspection_requires_one_exact_radio(tmp_path: Path) -> Non
 
     assert result.exit_code == 2, result.output
     assert "setup_probe_target_required" in result.output
+
+
+def test_doctor_route_isolation_requires_exact_generated_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            confirmation_phrase="ISOLATE USB SSH enx001"
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "doctor",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--setup-known-hosts-file",
+            str(known_hosts),
+            "--isolate-usb-route",
+            "--no-fix",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "host_isolation_confirmation_required" in result.output
+    assert "ISOLATE USB SSH enx001" in result.output
 
 
 def test_remediation_offers_cover_stale_firmware_and_broken_host_libiio() -> None:

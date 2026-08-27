@@ -14,13 +14,15 @@ from typing import Any, Literal
 
 import numpy as np
 
-from pluto_plus.diagnostic_profiles import parse_metadata_abi
+from pluto_plus.diagnostic_profiles import SUPPORTED_AD936X_PHY_MODELS, parse_metadata_abi
 from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
 from pluto_plus.hardware.base import DEFAULT_RESTORE_LO_SEARCH_HZ, SampleBlock
 from pluto_plus.hardware.iio_metadata import (
+    ABI3_METADATA_LAYOUTS,
     IioMetadataCaptureSession,
     configure_iio_context_timeout,
     metadata_iio_context_timeout_ms,
+    parse_metadata_layout_capabilities,
 )
 from pluto_plus.hardware.preflight import MetadataRuntimeVerification, verify_metadata_runtime
 from pluto_plus.models import (
@@ -88,8 +90,8 @@ class IioRadioDevice:
         iio_contexts: Mapping[str, str] | None = None,
         expected_metadata_abi: int | None = None,
     ) -> None:
-        if expected_metadata_abi not in {None, 1, 2}:
-            raise ValueError("expected_metadata_abi must be 1, 2, or None")
+        if expected_metadata_abi not in {None, 1, 2, 3}:
+            raise ValueError("expected_metadata_abi must be 1, 2, 3, or None")
         normalized = uri.removeprefix("pluto://")
         self._configured_uri = normalized
         self._requested_serial = serial
@@ -247,7 +249,13 @@ class IioRadioDevice:
                     f"radio={actual_metadata_abi!r}, host={self._expected_metadata_abi}"
                 )
             injected_runtime = self._adi_module is not None and self._iio_module is not None
-            runtime_ready = actual_metadata_abi in {1, 2} and (
+            if actual_metadata_abi == 3 and facts.get("buffer_metadata_layouts") != (
+                ABI3_METADATA_LAYOUTS
+            ):
+                raise RadioConfigurationError(
+                    "metadata ABI 3 radio did not advertise the canonical RX layouts"
+                )
+            runtime_ready = actual_metadata_abi in {1, 2, 3} and (
                 self._metadata_runtime is not None or injected_runtime
             )
             if runtime_ready:
@@ -654,18 +662,33 @@ class IioRadioDevice:
         device = self._require_device()
         self.reset_receive_buffer()
         channels = tuple(int(item) for item in device.rx_enabled_channels)
-        if channels != (0, 1):
-            raise RadioConfigurationError("metadata capture requires paired RX channels (0, 1)")
+        if channels not in {(0,), (1,), (0, 1)}:
+            raise RadioConfigurationError("metadata capture receiver selection is not canonical")
         require_safe_iio_buffer(sample_count, len(channels))
         facts = context_facts(device.ctx)
         metadata_abi = facts.get("buffer_metadata_abi")
-        if metadata_abi not in {1, 2}:
+        if metadata_abi not in {1, 2, 3}:
             raise RadioConfigurationError(
-                "metadata capture requires supported context capability iio,buffer-metadata=1 or 2"
+                "metadata capture requires supported context capability "
+                "iio,buffer-metadata=1, 2, or 3"
             )
-        if metadata_abi == 2 and not facts.get("tandem_agc"):
+        if metadata_abi in {1, 2} and channels != (0, 1):
+            raise RadioConfigurationError("metadata ABI 1 and 2 require paired RX channels")
+        if metadata_abi == 3:
+            layouts = facts.get("buffer_metadata_layouts")
+            if layouts != ABI3_METADATA_LAYOUTS:
+                raise RadioConfigurationError(
+                    "metadata ABI 3 requires the exact canonical RX layout capability"
+                )
+            expected_mask = {(0,): 0x03, (1,): 0x0C, (0, 1): 0x0F}[channels]
+            layout = next(item for item in layouts if item.scan_mask == expected_mask)
+            if sample_count % layout.sample_count_multiple:
+                raise RadioConfigurationError(
+                    "metadata sample count violates the advertised RX layout multiple"
+                )
+        if metadata_abi in {2, 3} and not facts.get("tandem_agc"):
             raise RadioConfigurationError(
-                "metadata ABI 2 capture requires the tandem-agc IIO device"
+                "metadata ABI 2 and 3 capture requires the tandem-agc IIO device"
             )
         if not (
             self._capabilities.supports_device_sample_counter
@@ -801,6 +824,13 @@ def find_usb_sysfs_path(serial: str, usb_root: Path = Path("/sys/bus/usb/devices
 def context_facts(context: Any) -> dict[str, object]:
     attrs = dict(getattr(context, "attrs", {}) or {})
     metadata = parse_metadata_abi(attrs.get("iio,buffer-metadata"))
+    layouts_raw = attrs.get("iio,buffer-metadata-layouts")
+    try:
+        layouts = parse_metadata_layout_capabilities(layouts_raw)
+        layouts_state = "available"
+    except ValueError:
+        layouts = ()
+        layouts_state = "absent" if layouts_raw in {None, ""} else "malformed"
     return {
         "serial": attrs.get("hw_serial") or attrs.get("usb,serial"),
         "model": attrs.get("hw_model") or attrs.get("usb,product"),
@@ -813,6 +843,9 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_metadata_abi": metadata.abi,
         "buffer_metadata_raw": metadata.raw,
         "buffer_metadata_state": metadata.state.value,
+        "buffer_metadata_layouts_raw": layouts_raw,
+        "buffer_metadata_layouts": layouts,
+        "buffer_metadata_layouts_state": layouts_state,
         "tandem_agc": _device_exists(context, "tandem-agc"),
         "tandem_agc_state": _optional_device_int_attribute(context, "tandem-agc", "state"),
         "tandem_agc_ownership_epoch": _optional_device_int_attribute(
@@ -968,11 +1001,11 @@ def _require_canonical_rx_layout(facts: Mapping[str, object]) -> None:
         else ()
     )
     required = {"voltage0", "voltage1", "voltage2", "voltage3"}
-    wrong_phy = phy_model is not None and phy_model != "ad9361"
+    wrong_phy = phy_model is not None and phy_model not in SUPPORTED_AD936X_PHY_MODELS
     incomplete_scan = bool(scan_channels) and not required.issubset(scan_channels)
     if wrong_phy or incomplete_scan:
         raise RadioSetupRequiredError(
-            "radio requires canonical AD9361/2R2T setup "
+            "radio requires a supported AD936x paired-RX setup "
             f"(phy_model={phy_model or 'unknown'}, rx_scan_channels={scan_channels})"
         )
 

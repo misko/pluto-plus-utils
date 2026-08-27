@@ -61,7 +61,7 @@ class FakeSetupBackend:
     def provision(self, plan: object) -> SetupExecutionResult:
         self.plans.append(plan)
         self.current = _observation(
-            live_phy_model="ad9361",
+            live_phy_model="ad9363a",
             uboot=CANONICAL_UBOOT,
             environment_sha256="3" * 64,
             boot_provenance="qspi_reboot_verified",
@@ -187,7 +187,7 @@ def test_setup_success_is_verified_and_receipted(tmp_path: Path) -> None:
     assert receipt.success
     assert receipt.after is not None
     assert receipt.after.uboot == CANONICAL_UBOOT
-    assert receipt.after.live_phy_model == "ad9361"
+    assert receipt.after.live_phy_model == "ad9363a"
     assert receipt.backup_sha256 == "4" * 64
     assert len(manager.list_receipts()) == 1
     assert next((tmp_path / "receipts").glob("*.json")).is_file()

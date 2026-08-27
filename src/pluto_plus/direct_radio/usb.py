@@ -49,9 +49,13 @@ class MetadataFeatures(enum.IntFlag):
     RSSI_ENDPOINT_SNAPSHOTS = 1 << 5
     GAIN_OBSERVATION_SERIES = 1 << 6
     HARDWARE_SAMPLE_COUNTER = 1 << 7
+    CANONICAL_RX_LAYOUT = 1 << 10
+    EXACT_GAP_ACCOUNTING = 1 << 11
 
 
 KNOWN_FEATURES = MetadataFeatures(0xFF)
+KNOWN_FEATURES_V3 = KNOWN_FEATURES
+KNOWN_FEATURES_V6 = MetadataFeatures(0xCFF)
 
 
 class MetadataFlags(enum.IntFlag):
@@ -77,9 +81,12 @@ class MetadataFlags(enum.IntFlag):
     GAIN_OBSERVATIONS_VALID = 1 << 19
     GAIN_OBSERVATION_OVERFLOW = 1 << 20
     HARDWARE_SAMPLE_COUNTER_VALID = 1 << 21
+    SAMPLE_GAP_BEFORE = 1 << 23
 
 
 KNOWN_FLAGS = MetadataFlags((1 << 22) - 1)
+KNOWN_FLAGS_V3 = KNOWN_FLAGS
+KNOWN_FLAGS_V6 = MetadataFlags((1 << 24) - 1)
 
 
 class GainObservationFlags(enum.IntFlag):
@@ -557,7 +564,9 @@ class RadioMetadataV3:
         )
 
     def _validate(self) -> None:
-        if int(self.features) & ~int(KNOWN_FEATURES) or int(self.flags) & ~int(KNOWN_FLAGS):
+        if int(self.features) & ~int(KNOWN_FEATURES_V3) or int(self.flags) & ~int(
+            KNOWN_FLAGS_V3
+        ):
             raise ProtocolError("unknown metadata feature or flag bits")
         required_features = MetadataFeatures(0xF7)
         if self.features & required_features != required_features:

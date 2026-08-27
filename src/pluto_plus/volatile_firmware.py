@@ -595,7 +595,7 @@ def _attest_ram_return(
             )
             if serial != plan.serial or firmware != plan.expected_firmware:
                 raise VolatileFirmwareError("returned RAM image identity/version is wrong")
-            if phy != "ad9361" or metadata != str(plan.expected_metadata_abi):
+            if phy != plan.before_phy or metadata != str(plan.expected_metadata_abi):
                 raise VolatileFirmwareError("returned RAM image PHY/metadata ABI is wrong")
             if ("tandem-agc" in device_names) is not plan.expected_tandem_agc:
                 raise VolatileFirmwareError("returned RAM image tandem capability is wrong")

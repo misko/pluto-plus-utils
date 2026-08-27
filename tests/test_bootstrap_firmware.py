@@ -1337,6 +1337,67 @@ def test_standalone_reconciliation_is_read_only_and_verifies_exact_fit(
     assert persisted["outcome"] == "reconciled_verified"
 
 
+def test_standalone_reconciliation_accepts_proven_post_eject_mass_storage_receipt(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
+        planned, tmp_path, monkeypatch
+    )
+    receipt_path = receipt_directory / f"{receipt_id}.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt.pop("transport")
+    receipt.update(
+        {
+            "failure_classification": "post_eject_uncertain",
+            "retryable": False,
+            "phases": ["preflight_revalidated", "eject_requested", "media_ejected"],
+        }
+    )
+    bootstrap._write_receipt(receipt_path, receipt)
+    transport = ReadOnlyReconciliationTransport(plan)
+
+    result = bootstrap.reconcile_usb_flash_receipt(
+        receipt_id,
+        receipt_directory=receipt_directory,
+        usb_sysfs_path=Path(plan.usb_sysfs_path),
+        mutation_profile_id=plan.mutation_profile_id,
+        transport=transport,
+    )
+
+    assert result.outcome == "reconciled_verified"
+    assert result.tx_safe is True
+    assert len(transport.calls) == 1
+
+
+def test_standalone_reconciliation_rejects_ambiguous_mass_storage_receipt(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
+        planned, tmp_path, monkeypatch
+    )
+    receipt_path = receipt_directory / f"{receipt_id}.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt.pop("transport")
+    receipt["phases"] = ["preflight_revalidated", "mounted"]
+    bootstrap._write_receipt(receipt_path, receipt)
+    transport = ReadOnlyReconciliationTransport(plan)
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="post-eject"):
+        bootstrap.reconcile_usb_flash_receipt(
+            receipt_id,
+            receipt_directory=receipt_directory,
+            usb_sysfs_path=Path(plan.usb_sysfs_path),
+            mutation_profile_id=plan.mutation_profile_id,
+            transport=transport,
+        )
+
+    assert transport.calls == []
+
+
 def test_standalone_reconciliation_rejects_profile_mismatch_before_remote_access(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     tmp_path: Path,

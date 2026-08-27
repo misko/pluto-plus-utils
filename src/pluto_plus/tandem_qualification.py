@@ -22,6 +22,7 @@ from pluto_plus.hardware.iio_metadata import configure_iio_context_timeout
 from pluto_plus.inventory import scan_local_usb_plutos
 from pluto_plus.tandem import (
     RadioMetadataV5,
+    RadioMetadataV6,
     TandemEventDirection,
     TandemGainTable,
     TandemMode,
@@ -102,7 +103,11 @@ class _MetadataReceiver:
         raw = self.buffer.metadata
         if raw is None:
             raise TandemQualificationError("metadata refill returned no header")
-        metadata = RadioMetadataV5.unpack(raw)
+        metadata = (
+            RadioMetadataV6.unpack(raw).tandem
+            if self.sdr._ctx.attrs.get("iio,buffer-metadata") == "3"
+            else RadioMetadataV5.unpack(raw)
+        )
         if signal.shape != (2, SAMPLES_PER_CHANNEL):
             raise TandemQualificationError("metadata IQ shape is not paired")
         return signal, metadata
@@ -138,9 +143,9 @@ def prepare_tandem_qualification(
             f"unknown tandem qualification profile {profile_id!r}; expected one of "
             f"{sorted(STANDALONE_FLASH_PROFILES)}"
         )
-    if not profile.tandem_agc or profile.metadata_abi != 2:
+    if not profile.tandem_agc or profile.metadata_abi not in {2, 3}:
         raise TandemQualificationError(
-            f"profile {profile_id!r} is not an ABI-2 tandem-AGC profile"
+            f"profile {profile_id!r} is not an ABI-2/3 tandem-AGC profile"
         )
     matches = [
         item

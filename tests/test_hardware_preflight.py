@@ -194,6 +194,73 @@ def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
     assert result.pylibiio_path == str(binding)
 
 
+def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "release/.venv"
+    native = prefix / "lib/libiio.so.0.25"
+    binding = prefix / "lib/python3.11/site-packages/iio.py"
+    receipt = prefix / "share/pluto-plus-utils/metadata-runtime.json"
+    native.parent.mkdir(parents=True)
+    binding.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    native.write_bytes(b"exact ABI3 native build")
+    binding.write_text("# exact ABI3 binding\n")
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "metadata_abi": 3,
+                "source_ref": "single-rx-metadata-rc1-source/libiio-v1",
+                "source_commit": "5dc200af10961e50d3b019cd38bdb8dd3c0e8c3c",
+                "native_libiio_path": str(native),
+                "native_libiio_sha256": _sha256(native),
+                "pylibiio_path": str(binding),
+                "pylibiio_sha256": _sha256(binding),
+                "metadata_buffer_parameters": [
+                    "self",
+                    "device",
+                    "samples_count",
+                    "request",
+                    "metadata_capacity",
+                    "batch_frames",
+                ],
+            }
+        )
+    )
+
+    class MetadataBuffer:
+        def __init__(
+            self,
+            device: object,
+            samples_count: int,
+            request: bytes,
+            metadata_capacity: int = 64 * 1024,
+            batch_frames: int = 1,
+        ) -> None:
+            pass
+
+    module = SimpleNamespace(MetadataBuffer=MetadataBuffer, __file__=str(binding))
+    monkeypatch.setattr(preflight.sys, "prefix", str(prefix))
+    monkeypatch.setattr(preflight, "CDLL", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(preflight, "_mapped_libiio_paths", lambda: (native,))
+    monkeypatch.setattr(preflight.importlib, "import_module", lambda _name: module)
+    monkeypatch.setattr(
+        preflight,
+        "inspect_iio_environment",
+        lambda **_kwargs: SimpleNamespace(
+            healthy=True,
+            native_libiio_path=str(native),
+            actionable_message="",
+        ),
+    )
+
+    result = verify_metadata_runtime(expected_abi=3)
+
+    assert result.metadata_abi == 3
+    assert result.source_commit == "5dc200af10961e50d3b019cd38bdb8dd3c0e8c3c"
+
+
 def test_metadata_runtime_gate_rejects_missing_receipt_and_changed_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

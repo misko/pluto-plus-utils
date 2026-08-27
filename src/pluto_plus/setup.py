@@ -17,6 +17,7 @@ from typing import Literal, Protocol
 
 from pydantic import Field, field_validator
 
+from pluto_plus.diagnostic_profiles import SUPPORTED_AD936X_PHY_MODELS
 from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
 from pluto_plus.models import ApiModel
 
@@ -436,8 +437,8 @@ class CanonicalSetupManager:
         self._validate_identity(identity, observation)
         if observation.uboot != CANONICAL_UBOOT:
             raise SetupPreconditionError("canonical U-Boot tuple did not persist")
-        if observation.live_phy_model != "ad9361":
-            raise SetupPreconditionError("live PHY did not return as AD9361")
+        if observation.live_phy_model not in SUPPORTED_AD936X_PHY_MODELS:
+            raise SetupPreconditionError("live PHY did not return as a supported AD936x")
         required = {"voltage0", "voltage1", "voltage2", "voltage3"}
         if not required.issubset(observation.rx_scan_channels):
             raise SetupPreconditionError("dual receiver scan channels did not return")

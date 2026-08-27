@@ -18,6 +18,7 @@ from pydantic import Field, model_validator
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.iio import context_facts, resolve_iio_uri
 from pluto_plus.hardware.iio_metadata import configure_iio_context_timeout
+from pluto_plus.hardware.preflight import inspect_iio_environment
 from pluto_plus.models import ApiModel
 
 DEFAULT_DATA_PLANE_PROBE_SAMPLES = 65_536
@@ -154,6 +155,14 @@ def probe_iio_data_plane(
     receiver_count: int | None = None
     wire_bytes: int | None = None
     try:
+        if adi_module is None:
+            environment = inspect_iio_environment(
+                require_usb=uri.strip().casefold().startswith("usb:")
+            )
+            if not environment.healthy:
+                raise DataPlaneRecoveryError(
+                    f"IIO environment preflight failed: {environment.actionable_message}"
+                )
         module = adi_module or importlib.import_module("adi")
         resolved_uri = resolve_iio_uri(uri, serial, contexts=iio_contexts)
         device = module.ad9361(uri=resolved_uri)
@@ -304,6 +313,8 @@ def _probe_failure_kind(
     if isinstance(error, ImportError):
         return "environment"
     message = str(error)
+    if "IIO environment preflight failed" in message:
+        return "environment"
     if "attested serial" in message:
         return "identity"
     if "refill returned" in message or "no enabled RX channels" in message:

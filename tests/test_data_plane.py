@@ -90,6 +90,24 @@ def test_bounded_data_plane_probe_reports_timeout_without_throwing() -> None:
     assert probe.error is not None and "TimeoutError" in probe.error
 
 
+def test_bounded_data_plane_probe_preloads_exact_native_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.inspect_iio_environment",
+        lambda **kwargs: SimpleNamespace(
+            healthy=False,
+            actionable_message="exact metadata runtime is unavailable",
+        ),
+    )
+
+    probe = probe_iio_data_plane("usb:", "SERIAL_A")
+
+    assert probe.status == "fail"
+    assert probe.failure_kind == "environment"
+    assert probe.error is not None and "exact metadata runtime" in probe.error
+
+
 def test_bounded_data_plane_probe_rejects_wrong_context_identity() -> None:
     probe = probe_iio_data_plane(
         "usb:",

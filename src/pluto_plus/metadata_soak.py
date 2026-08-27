@@ -23,7 +23,13 @@ from pluto_plus.hardware.iio_metadata import configure_iio_context_timeout
 from pluto_plus.hardware.preflight import inspect_iio_environment
 from pluto_plus.models import ApiModel
 from pluto_plus.setup_helper import SetupTransport
-from pluto_plus.tandem import RadioMetadataV5, TandemMode, TandemSessionRequestV1, TandemState
+from pluto_plus.tandem import (
+    RadioMetadataV5,
+    RadioMetadataV6,
+    TandemMode,
+    TandemSessionRequestV1,
+    TandemState,
+)
 
 MAX_SLOTS = 936
 MAX_CLOSE_SECONDS = 2.0
@@ -367,7 +373,11 @@ def _execute_live_metadata_slot(
                     raw = buffer.metadata
                     if raw is None:
                         raise MetadataSoakError("metadata refill returned no header")
-                    metadata = RadioMetadataV5.unpack(raw)
+                    metadata = (
+                        RadioMetadataV6.unpack(raw).tandem
+                        if plan.expected_metadata_abi == 3
+                        else RadioMetadataV5.unpack(raw)
+                    )
                     if metadata.tandem_state is not TandemState.ARMED_HOLD:
                         raise MetadataSoakError("metadata refill lost tandem HOLD ownership")
                     frames += 1
@@ -646,8 +656,8 @@ def prepare_metadata_soak(
     if not 1 <= slots <= MAX_SLOTS:
         raise MetadataSoakError(f"metadata soak slots must be between 1 and {MAX_SLOTS}")
     profile = STANDALONE_FLASH_PROFILES.get(profile_id)
-    if profile is None or not profile.tandem_agc or profile.metadata_abi != 2:
-        raise MetadataSoakError("metadata soak requires a known ABI-2 tandem profile")
+    if profile is None or not profile.tandem_agc or profile.metadata_abi not in {2, 3}:
+        raise MetadataSoakError("metadata soak requires a known ABI-2/3 tandem profile")
     return MetadataSoakPlan(
         profile_id=profile_id,
         target=str(address),

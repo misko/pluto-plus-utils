@@ -126,7 +126,7 @@ class FastLockProbeReport(ApiModel):
     duration_seconds: float = Field(ge=0)
     plan: FastLockProbePlan
     identity: RadioIdentity
-    firmware_metadata_abi: Literal[1, 2]
+    firmware_metadata_abi: Literal[1, 2, 3]
     counter_preflight_advance_low32: int = Field(gt=0, le=0xFFFFFFFF)
     profiles: tuple[FastLockProfileReceipt, FastLockProfileReceipt]
     measurements: tuple[FastLockHopMeasurement, ...]
@@ -296,7 +296,7 @@ def run_usb_fastlock_probe(
         original = radio.read_settings()
         facts = dict(radio.diagnostic_facts())
         metadata_abi = facts.get("buffer_metadata_abi")
-        if metadata_abi not in {1, 2}:
+        if metadata_abi not in {1, 2, 3}:
             raise FastLockProbeError(
                 "firmware does not attest the FPGA sample-counter metadata capability"
             )
@@ -392,7 +392,7 @@ def run_usb_fastlock_probe(
         duration_seconds=max(0.0, (finished_at - started_at).total_seconds()),
         plan=plan,
         identity=identity,
-        firmware_metadata_abi=cast(Literal[1, 2], metadata_abi),
+        firmware_metadata_abi=cast(Literal[1, 2, 3], metadata_abi),
         counter_preflight_advance_low32=counter_preflight_advance,
         profiles=profiles,
         measurements=measurements,

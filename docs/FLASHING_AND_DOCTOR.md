@@ -147,8 +147,10 @@ A safe provisioner must perform this entire transaction:
 4. Back up `/opt/VERSIONS` and the complete output of `fw_printenv`.
 5. Change only mismatching fields, preferably with one `fw_setenv -s` batch.
 6. Sync and reboot; reacquire the same serial and physical path.
-7. Reread all four values and require the live PHY to report `ad9361`.
-8. Require scan elements 0–3 and take a paired two-receiver sample.
+7. Reread all four values and require a supported AD936x PHY identity. A Rev.C may
+   truthfully retain its native `ad9363a` compatible string after the tuple is fixed.
+8. Require scan elements 0–3 and take a paired two-receiver sample; this layout,
+   rather than the PHY marketing string, is the 2R2T invariant.
 9. Keep DDS/TX buffers disabled and set/read back TX1 and TX2 attenuation to the safe minimum.
 
 SSH trust should normally be enrolled through an exact USB physical path. If
@@ -191,7 +193,18 @@ serial attestation, atomically archives the previous key, and records both finge
 and file digests in the receipt. This recovery is deliberately unavailable for a LAN
 endpoint, whose changed key still requires independent out-of-band verification. If an
 execution receipt reports an unknown outcome, do not retry provisioning; preserve its
-receipt and backup and use the dedicated read-only reconciliation action.
+receipt and backup and use the dedicated read-only reconciliation action. A standalone
+doctor transaction can be reconciled without a daemon:
+
+```bash
+pluto setup reconcile-local RECEIPT_ID \
+  --serial SERIAL --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --firmware EXACT_VERSION --known-hosts-file /private/SERIAL.known_hosts
+```
+
+With duplicate `192.168.2.1` Pluto gadget networks, add `--isolate-usb-route` and
+the exact generated `--isolation-confirm 'ISOLATE USB SSH <interface>'` phrase.
+The action is read-only and restores every isolated host route before returning.
 
 ## Firmware update contract
 
@@ -248,9 +261,15 @@ uv run pluto firmware ram-boot ./CANDIDATE.dfu \
 
 Execution additionally requires `--execute --confirm 'RAM BOOT <serial>'`.
 After loading, the command requires the exact serial/path to return with the
-profile firmware, ABI, tandem capability, AD9361 PHY, and TX-safe readback.
+profile firmware, ABI, tandem capability, unchanged supported AD936x PHY, and
+TX-safe readback.
 Power cycling returns to the unchanged QSPI image. Persistent promotion always
 requires a separate profile whose manifest is hardware-qualified.
+
+For a host with several Pluto USB gadget NICs, `ram-boot` also accepts
+`--isolate-usb-route` plus the exact generated isolation confirmation. The
+isolation receipt is returned alongside the RAM-boot receipt and all host
+network state is restored on success or failure.
 
 The dry-run plan reports `raw_usb_write_access`. If it is false, install the
 repository rule and reconnect the radios before execution:
@@ -289,14 +308,18 @@ subsequent firmware operations must use the normal serial-attested plan/token
 workflow. Never retry an `unknown` bootstrap receipt without read-only
 reconciliation.
 
-An uncertain serial-attested standalone SSH receipt is reconciled independently
-of the daemon with `pluto firmware reconcile-local RECEIPT_ID`. Supply the exact
+An uncertain serial-attested standalone receipt is reconciled independently of
+the daemon with `pluto firmware reconcile-local RECEIPT_ID`. This includes a
+bound-SSH receipt or a utility-produced mass-storage receipt that proves a
+non-retryable post-eject uncertainty. Supply the exact
 recorded `--usb-sysfs-path`, persistent `--profile`, pinned
 `--ssh-known-hosts-file`, and endpoint. The command performs only readback: it
 validates the durable receipt and qualified profile, correlates USB and IIOD
 identity, verifies the active firmware and TX/DDS safe state, and hashes exactly
 the recorded FIT length from `mtd3`. It has no updater, QSPI-write, RF-write, or
 reboot operation; any mismatch remains unresolved and must not trigger a retry.
+Duplicate USB-gadget routes use the same explicit `--isolate-usb-route` and
+`--isolation-confirm` guard as RAM boot and setup reconciliation.
 
 `--return-timeout` is bounded to 30–1800 seconds and defaults to 180. A failure
 before the SCSI eject request is a known `qspi_write_not_started` result: the FIT

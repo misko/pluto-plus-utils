@@ -26,6 +26,7 @@ from pluto_plus.direct_radio.usb import (
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.hardware.iio_metadata import (
+    ABI3_METADATA_LAYOUTS_TEXT,
     IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER,
     IIO_CONTEXT_TIMEOUT_MAX_MS,
     IIO_CONTEXT_TIMEOUT_MS,
@@ -33,8 +34,12 @@ from pluto_plus.hardware.iio_metadata import (
 )
 from pluto_plus.tandem import (
     AD9361_TEMPERATURE_FEATURE,
+    CANONICAL_RX_LAYOUT_FEATURE,
+    EXACT_GAP_ACCOUNTING_FEATURE,
+    SAMPLE_GAP_BEFORE_FLAG,
     TANDEM_METADATA_FEATURE,
     TANDEM_METADATA_VALID_FLAG,
+    RadioMetadataV6,
     TandemGainTable,
     TandemState,
 )
@@ -166,6 +171,45 @@ def _metadata_v5(**kwargs: int | bool) -> bytes:
     return bytes(output)
 
 
+def _metadata_v6(
+    *,
+    channels: tuple[int, ...] = (0, 1),
+    missing_samples_before: int = 0,
+    **kwargs: int | bool,
+) -> bytes:
+    raw = bytearray(_metadata_v5(**kwargs))
+    struct.pack_into("<H", raw, 4, 6)
+    struct.pack_into(
+        "<I",
+        raw,
+        8,
+        struct.unpack_from("<I", raw, 8)[0]
+        | CANONICAL_RX_LAYOUT_FEATURE
+        | EXACT_GAP_ACCOUNTING_FEATURE,
+    )
+    flags = struct.unpack_from("<I", raw, 12)[0]
+    if missing_samples_before:
+        flags |= SAMPLE_GAP_BEFORE_FLAG
+    struct.pack_into("<I", raw, 12, flags)
+    mask, receivers, iq_bytes = {
+        (0,): (0x03, 1, SAMPLE_COUNT * 4),
+        (1,): (0x0C, 1, SAMPLE_COUNT * 4),
+        (0, 1): (0x0F, 2, SAMPLE_COUNT * 8),
+    }[channels]
+    struct.pack_into("<II", raw, 44, iq_bytes, mask)
+    raw[54] = receivers
+    struct.pack_into(
+        "<II",
+        raw,
+        116,
+        missing_samples_before & 0xFFFFFFFF,
+        missing_samples_before >> 32,
+    )
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
 class FakeRxAdc:
     def __init__(self, headers: list[bytes], *, preserve_readback: bool = True) -> None:
         self.headers = deque(headers)
@@ -212,6 +256,7 @@ class FakeAd9361:
         headers: list[bytes],
         *,
         metadata_abi: int | None,
+        metadata_layouts: str | None,
         preserve_readback: bool = True,
     ) -> None:
         self.uri = uri
@@ -227,6 +272,8 @@ class FakeAd9361:
         }
         if metadata_abi is not None:
             attrs["iio,buffer-metadata"] = str(metadata_abi)
+        if metadata_layouts is not None:
+            attrs["iio,buffer-metadata-layouts"] = metadata_layouts
         channels = tuple(
             SimpleNamespace(id=f"voltage{index}", scan_element=True) for index in range(4)
         )
@@ -236,7 +283,7 @@ class FakeAd9361:
                 SimpleNamespace(channels=channels)
                 if name == "cf-ad9361-lpc"
                 else SimpleNamespace(channels=())
-                if name == "tandem-agc" and metadata_abi == 2
+                if name == "tandem-agc" and metadata_abi in {2, 3}
                 else None
             ),
             set_timeout=self._set_timeout,
@@ -282,7 +329,14 @@ class FakeAd9361:
         if self.rx_failure is not None:
             raise self.rx_failure
         axis = np.arange(self.rx_buffer_size, dtype=np.float32)
-        return np.stack((axis + 1j * axis, 2 * axis + 3j * axis)).astype(np.complex64)
+        receivers = (
+            axis + 1j * axis,
+            2 * axis + 3j * axis,
+        )
+        selected = tuple(receivers[channel] for channel in self.rx_enabled_channels)
+        if len(selected) == 1:
+            return np.asarray(selected[0], dtype=np.complex64)
+        return np.stack(selected).astype(np.complex64)
 
 
 class FakeAdi:
@@ -291,10 +345,16 @@ class FakeAdi:
         headers: list[bytes],
         *,
         metadata_abi: int | None = 1,
+        metadata_layouts: str | None = None,
         preserve_readback: bool = True,
     ) -> None:
         self.headers = headers
         self.metadata_abi = metadata_abi
+        self.metadata_layouts = (
+            ABI3_METADATA_LAYOUTS_TEXT
+            if metadata_abi == 3 and metadata_layouts is None
+            else metadata_layouts
+        )
         self.preserve_readback = preserve_readback
         self.device: FakeAd9361 | None = None
 
@@ -303,6 +363,7 @@ class FakeAdi:
             uri,
             self.headers,
             metadata_abi=self.metadata_abi,
+            metadata_layouts=self.metadata_layouts,
             preserve_readback=self.preserve_readback,
         )
         return self.device
@@ -312,12 +373,15 @@ def _open_radio(
     headers: list[bytes],
     *,
     metadata_abi: int | None = 1,
+    metadata_layouts: str | None = None,
+    channels: tuple[int, ...] = (0, 1),
     include_metadata_buffer: bool = True,
     preserve_readback: bool = True,
 ) -> tuple[IioRadioDevice, FakeAdi, FakeMetadataBufferFactory]:
     adi = FakeAdi(
         headers,
         metadata_abi=metadata_abi,
+        metadata_layouts=metadata_layouts,
         preserve_readback=preserve_readback,
     )
     factory = FakeMetadataBufferFactory()
@@ -329,6 +393,8 @@ def _open_radio(
         iio_module=iio,
     )
     radio.open()
+    assert adi.device is not None
+    adi.device.rx_enabled_channels = list(channels)
     return radio, adi, factory
 
 
@@ -572,6 +638,129 @@ def test_abi2_uses_request_constructor_and_persists_overflow_flag() -> None:
         assert factory.instances[0].signature[0] == SAMPLE_COUNT
         assert isinstance(factory.instances[0].signature[1], bytes)
         assert factory.instances[0].signature[2] == 64 * 1024
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize(
+    ("channels", "mask", "receivers", "iq_payload_bytes"),
+    (
+        ((0,), 0x03, 1, SAMPLE_COUNT * 4),
+        ((1,), 0x0C, 1, SAMPLE_COUNT * 4),
+        ((0, 1), 0x0F, 2, SAMPLE_COUNT * 8),
+    ),
+)
+def test_v6_parser_accepts_only_canonical_rx_layouts(
+    channels: tuple[int, ...],
+    mask: int,
+    receivers: int,
+    iq_payload_bytes: int,
+) -> None:
+    declared_gap = (1 << 32) + 7
+    parsed = RadioMetadataV6.unpack(
+        _metadata_v6(channels=channels, missing_samples_before=declared_gap)
+    )
+    assert parsed.base.enabled_scan_mask == mask
+    assert parsed.base.channel_count == receivers
+    assert parsed.base.iq_payload_bytes == iq_payload_bytes
+    assert parsed.missing_samples_before == declared_gap
+
+    malformed = bytearray(_metadata_v6(channels=channels))
+    struct.pack_into("<I", malformed, 48, 0x01)
+    malformed[-4:] = bytes(4)
+    malformed[-4:] = struct.pack("<I", zlib.crc32(malformed))
+    with pytest.raises(ProtocolError, match="scan mask"):
+        RadioMetadataV6.unpack(malformed)
+
+
+def test_v6_parser_rejects_odd_single_rx_and_gap_flag_disagreement() -> None:
+    odd = bytearray(_metadata_v6(channels=(0,)))
+    struct.pack_into("<II", odd, 40, 3, 12)
+    odd[-4:] = bytes(4)
+    odd[-4:] = struct.pack("<I", zlib.crc32(odd))
+    with pytest.raises(ProtocolError, match="must be even"):
+        RadioMetadataV6.unpack(odd)
+
+    missing_flag = bytearray(_metadata_v6(channels=(0,)))
+    struct.pack_into("<II", missing_flag, 116, 1, 0)
+    missing_flag[-4:] = bytes(4)
+    missing_flag[-4:] = struct.pack("<I", zlib.crc32(missing_flag))
+    with pytest.raises(ProtocolError, match="gap flag"):
+        RadioMetadataV6.unpack(missing_flag)
+
+
+def test_abi3_single_rx_capture_preserves_exact_sub_refill_gap() -> None:
+    headers = [
+        _metadata_v6(channels=(0,), buffer_sequence=0, first_sample_sequence=1_000),
+        _metadata_v6(
+            channels=(0,),
+            buffer_sequence=1,
+            first_sample_sequence=1_005,
+            missing_samples_before=1,
+        ),
+    ]
+    radio, _adi, factory = _open_radio(headers, metadata_abi=3, channels=(0,))
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8)
+        first = capture.read_block()
+        second = capture.read_block()
+        assert first.samples.shape == (1, SAMPLE_COUNT)
+        assert first.metadata_abi == 3
+        assert second.missing_samples_before == 1
+        assert second.buffer_sequence == 1
+        assert len(factory.instances[0].signature) == 3
+        assert factory.instances[0].signature[0] == SAMPLE_COUNT
+    finally:
+        radio.close()
+
+
+def test_abi3_rx1_and_dual_rx_captures_bind_to_the_requested_layout() -> None:
+    for channels in ((1,), (0, 1)):
+        radio, _adi, _factory = _open_radio(
+            [_metadata_v6(channels=channels)],
+            metadata_abi=3,
+            channels=channels,
+        )
+        try:
+            capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8)
+            assert capture.read_block().samples.shape == (len(channels), SAMPLE_COUNT)
+        finally:
+            radio.close()
+
+
+def test_abi3_capability_sample_multiple_and_exact_gap_fail_closed() -> None:
+    with pytest.raises(RadioConfigurationError, match="canonical RX layouts"):
+        _open_radio(
+            [],
+            metadata_abi=3,
+            metadata_layouts="00000003:1:4:1",
+        )
+
+
+def test_abi3_odd_single_rx_and_counter_gap_disagreement_fail_closed() -> None:
+    radio, _adi, _factory = _open_radio([], metadata_abi=3, channels=(0,))
+    try:
+        with pytest.raises(RadioConfigurationError, match="sample count"):
+            radio.begin_metadata_capture(3, kernel_buffers=8)
+    finally:
+        radio.close()
+
+    headers = [
+        _metadata_v6(channels=(0,), buffer_sequence=0, first_sample_sequence=1_000),
+        _metadata_v6(
+            channels=(0,),
+            buffer_sequence=1,
+            first_sample_sequence=1_005,
+            missing_samples_before=2,
+        ),
+    ]
+    radio, _adi, _factory = _open_radio(headers, metadata_abi=3, channels=(0,))
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match="exact gap count"):
+            capture.read_block()
+        assert not capture.is_open
     finally:
         radio.close()
 

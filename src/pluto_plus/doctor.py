@@ -13,6 +13,7 @@ from typing import Any
 
 from pluto_plus.diagnostic_profiles import (
     DIAGNOSTIC_PROFILES,
+    SUPPORTED_AD936X_PHY_MODELS,
     MetadataAbiState,
     parse_metadata_abi,
     select_diagnostic_profile,
@@ -207,15 +208,16 @@ def diagnose_radio(
     )
 
     phy_model = _string(observed.get("phy_model"))
+    phy_supported = phy_model in SUPPORTED_AD936X_PHY_MODELS
     findings.append(
         _comparison(
             "rf.phy_model",
-            phy_model == "ad9361",
-            "RF PHY identifies as AD9361"
-            if phy_model == "ad9361"
-            else "RF PHY is not canonical AD9361",
+            phy_supported,
+            "RF PHY identifies as a supported AD936x"
+            if phy_supported
+            else "RF PHY is not a supported AD936x",
             phy_model,
-            "ad9361",
+            SUPPORTED_AD936X_PHY_MODELS,
             "ad9361-phy model attribute",
             remediation=_setup_remediation(),
             unknown=phy_model is None,

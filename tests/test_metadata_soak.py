@@ -149,7 +149,7 @@ def test_prepare_soak_is_exact_profile_and_bounded() -> None:
     )
 
     for profile in ("libiio-continuous-metadata", "unknown"):
-        with pytest.raises(MetadataSoakError, match="ABI-2 tandem"):
+        with pytest.raises(MetadataSoakError, match="ABI-2/3 tandem"):
             prepare_metadata_soak("192.168.1.15", SERIAL, profile_id=profile, slots=1)
     for target in ("radio.local", "8.8.8.8"):
         with pytest.raises(MetadataSoakError, match="private IPv4"):

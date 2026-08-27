@@ -22,6 +22,13 @@ DEFAULT_METADATA_SAMPLE_LADDER = "4194304,2097152,1048576,524288,262144,131072"
 MAX_METADATA_SAMPLE_RUNGS = 16
 MAX_METADATA_FRAMES = 32
 MINIMUM_OBSERVED_FRACTION = 0.95
+MetadataAbi = Literal[1, 2, 3]
+MetadataChannels = Literal["rx0", "rx1", "dual"]
+METADATA_CHANNEL_SELECTIONS: dict[MetadataChannels, tuple[int, ...]] = {
+    "rx0": (0,),
+    "rx1": (1,),
+    "dual": (0, 1),
+}
 
 
 class MetadataContinuityCell(ApiModel):
@@ -76,10 +83,10 @@ class MetadataContinuityLadderReport(ApiModel):
     transport: str
     model: str
     firmware_version: str | None
-    metadata_abi: Literal[1, 2]
+    metadata_abi: MetadataAbi
     sample_rate_hz: int = Field(gt=0)
     rf_bandwidth_hz: int = Field(gt=0)
-    channels: tuple[int, int]
+    channels: tuple[int, ...]
     kernel_buffers: int = Field(ge=4, le=64)
     minimum_observed_fraction: float = Field(
         default=MINIMUM_OBSERVED_FRACTION,
@@ -95,7 +102,7 @@ class MetadataContinuityLadderReport(ApiModel):
     )
     original_settings_restored: bool
     continuity_claim: str = (
-        "passed binds FPGA counter coverage >=95%, zero overflow, exact paired-RX geometry, "
+        "passed binds FPGA counter coverage >=95%, zero overflow, exact selected-RX geometry, "
         "and at least four kernel buffers; it is not inferred from host throughput"
     )
 
@@ -141,11 +148,12 @@ def run_metadata_continuity_ladder(
     serial: str,
     sample_rate_hz: int,
     rf_bandwidth_hz: int,
-    metadata_abi: Literal[1, 2] = 1,
+    metadata_abi: MetadataAbi = 1,
+    channels: tuple[int, ...] = (0, 1),
     samples_per_channel: Sequence[int],
     frames: int = 6,
     kernel_buffers: int = 4,
-    radio_factory: Callable[[str, str, Literal[1, 2]], MetadataLadderRadio] | None = None,
+    radio_factory: Callable[[str, str, MetadataAbi], MetadataLadderRadio] | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> MetadataContinuityLadderReport:
     """Measure device-axis continuity for each refill size and restore RX settings."""
@@ -157,6 +165,17 @@ def run_metadata_continuity_ladder(
         frames=frames,
         kernel_buffers=kernel_buffers,
     )
+    selected_channels = tuple(channels)
+    if metadata_abi not in {1, 2, 3}:
+        raise ValueError("metadata ABI must be 1, 2, or 3")
+    if selected_channels not in set(METADATA_CHANNEL_SELECTIONS.values()):
+        raise ValueError("metadata channels must be RX0, RX1, or dual")
+    if metadata_abi in {1, 2} and selected_channels != (0, 1):
+        raise ValueError("metadata ABI 1 and 2 require dual RX")
+    if metadata_abi == 3 and len(selected_channels) == 1 and any(
+        samples & 1 for samples in samples_per_channel
+    ):
+        raise ValueError("metadata ABI 3 single-RX sample counts must be even")
     factory = radio_factory or _default_radio_factory
     radio = factory(uri, serial, metadata_abi)
     opened = False
@@ -172,14 +191,14 @@ def run_metadata_continuity_ladder(
             update={
                 "sample_rate_hz": sample_rate_hz,
                 "bandwidth_hz": rf_bandwidth_hz,
-                "channels": (0, 1),
+                "channels": selected_channels,
             }
         )
         actual = radio.apply_settings(requested)
         if (
             round(actual.sample_rate_hz) != sample_rate_hz
             or round(actual.bandwidth_hz) != rf_bandwidth_hz
-            or tuple(actual.channels) != (0, 1)
+            or tuple(actual.channels) != selected_channels
         ):
             raise RuntimeError("metadata ladder RX settings did not read back exactly")
         identity = radio.identity
@@ -191,6 +210,7 @@ def run_metadata_continuity_ladder(
                         samples_per_channel=samples,
                         frames=frames,
                         kernel_buffers=kernel_buffers,
+                        receiver_count=len(selected_channels),
                         clock_ns=clock_ns,
                     )
                 )
@@ -220,7 +240,7 @@ def run_metadata_continuity_ladder(
         metadata_abi=metadata_abi,
         sample_rate_hz=sample_rate_hz,
         rf_bandwidth_hz=rf_bandwidth_hz,
-        channels=(0, 1),
+        channels=selected_channels,
         kernel_buffers=kernel_buffers,
         cells=tuple(cells),
         failures=tuple(failures),
@@ -238,6 +258,7 @@ def _run_cell(
     samples_per_channel: int,
     frames: int,
     kernel_buffers: int,
+    receiver_count: int,
     clock_ns: Callable[[], int],
 ) -> MetadataContinuityCell:
     blocks: list[SampleBlockV2] = []
@@ -250,8 +271,8 @@ def _run_cell(
             raise RuntimeError("metadata ladder kernel-buffer readback is not exact")
         for _ in range(frames):
             block = capture.read_block()
-            if block.samples.shape != (2, samples_per_channel):
-                raise RuntimeError("metadata ladder block shape is not exact paired RX")
+            if block.samples.shape != (receiver_count, samples_per_channel):
+                raise RuntimeError("metadata ladder block shape is not the selected RX layout")
             blocks.append(block)
     elapsed_seconds = (clock_ns() - started_ns) / 1_000_000_000
     if elapsed_seconds <= 0:
@@ -302,7 +323,7 @@ def _validate_request(
 def _default_radio_factory(
     uri: str,
     serial: str,
-    metadata_abi: Literal[1, 2],
+    metadata_abi: MetadataAbi,
 ) -> MetadataLadderRadio:
     return cast(
         MetadataLadderRadio,

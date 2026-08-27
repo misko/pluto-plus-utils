@@ -11,10 +11,18 @@ not make continuity observable and must not be accepted as a fallback.
 | --- | --- | --- | --- |
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
+| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `single-rx-metadata-rc1-source/libiio-v1` | `5dc200af10961e50d3b019cd38bdb8dd3c0e8c3c` |
 
 The currently deployed `.20` and `.21` radios advertise ABI 1. ABI 2 is a
 separate, gated firmware and host-runtime migration; it must not be selected
 only because newer code is available.
+
+ABI 3 is the additive single-RX candidate. The radio must also advertise the
+exact capability string
+`00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1`: RX0 and RX1 use four bytes
+per sample with an even sample count, while dual RX uses eight bytes per sample.
+V6 records arbitrary FPGA-counter gaps exactly; ABI 1/2 parsing and geometry
+remain unchanged.
 
 Build the matched native library and binding into a release-local virtual
 environment:
@@ -90,7 +98,7 @@ with radio.begin_metadata_capture(samples, kernel_buffers=8) as capture:
 ```
 
 `begin_metadata_capture()` resets any prior buffer, sets and reads back the
-kernel-buffer count, performs the required ordinary dual-RX prime, destroys
+kernel-buffer count, performs an ordinary prime with the selected RX layout, destroys
 that buffer, and opens a fresh metadata buffer. The returned session is the
 only object allowed to read that generation. Closing and resetting are
 idempotent; a closed session cannot read again.
@@ -99,5 +107,16 @@ Every `SampleBlockV2` carries IQ plus the actual metadata ABI, stream ID,
 buffer sequence, FPGA first-sample sequence, flags, an upstream gap count, and
 the fitted realtime/monotonic sample interval with uncertainty when counter
 register anchors are available. Consumers must independently recompute gaps
-from counters. An upstream `missing_samples_before` value is convenience, not
-the persisted integrity oracle.
+from counters. ABI 3 additionally requires the header's exact gap count and gap
+flag to agree with both FPGA counters and the buffer-sequence quotient.
+
+Exercise each ABI 3 layout through the supported utility path:
+
+```bash
+uv run pluto radio metadata-ladder EXACT_SERIAL \
+  --metadata-abi 3 --channels rx0 --samples 262144,131072
+uv run pluto radio metadata-ladder EXACT_SERIAL \
+  --metadata-abi 3 --channels rx1 --samples 262144,131072
+uv run pluto radio metadata-ladder EXACT_SERIAL \
+  --metadata-abi 3 --channels dual --samples 262144,131072
+```

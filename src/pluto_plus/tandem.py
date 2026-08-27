@@ -19,6 +19,7 @@ from pluto_plus.direct_radio.usb import (
     HEADER_PREFIX_BYTES_V3,
     VERSION_V3,
     MetadataFeatures,
+    MetadataFlags,
     ProtocolError,
     RadioMetadataV3,
 )
@@ -27,9 +28,13 @@ TANDEM_REQUEST_MAGIC: Final = 0x54465053
 TANDEM_ABI_VERSION: Final = 1
 TANDEM_REQUIRED_FEATURES: Final = 0x7
 VERSION_V5: Final = 5
+VERSION_V6: Final = 6
 TANDEM_METADATA_FEATURE: Final = 1 << 8
 AD9361_TEMPERATURE_FEATURE: Final = 1 << 9
 TANDEM_METADATA_VALID_FLAG: Final = 1 << 22
+CANONICAL_RX_LAYOUT_FEATURE: Final = 1 << 10
+EXACT_GAP_ACCOUNTING_FEATURE: Final = 1 << 11
+SAMPLE_GAP_BEFORE_FLAG: Final = 1 << 23
 HEADER_EXTENSION_BYTES_V5: Final = 56
 HEADER_PREFIX_BYTES_V5: Final = HEADER_PREFIX_BYTES_V3 + HEADER_EXTENSION_BYTES_V5
 TEMPERATURE_INVALID: Final = -(1 << 31)
@@ -328,3 +333,94 @@ class RadioMetadataV5:
             None if temperature_mdeg_c == TEMPERATURE_INVALID else temperature_mdeg_c,
             tuple(events),
         )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RadioMetadataV6:
+    """ABI3 tandem metadata with canonical variable RX layout and exact gaps."""
+
+    base: RadioMetadataV3
+    tandem: RadioMetadataV5
+    header_bytes: int
+    missing_samples_before: int
+
+    @classmethod
+    def unpack(cls, header: bytes | bytearray | memoryview) -> RadioMetadataV6:
+        raw = bytes(header)
+        if len(raw) < HEADER_PREFIX_BYTES_V5 + 4:
+            raise ProtocolError("short protocol v6 metadata header")
+        magic, version, header_bytes, features, flags = _IDENTITY.unpack_from(raw)
+        if (magic, version) != (0x314D4753, VERSION_V6) or len(raw) != header_bytes:
+            raise ProtocolError("bad protocol v6 identity or length")
+        required_features = (
+            0xFF
+            | TANDEM_METADATA_FEATURE
+            | AD9361_TEMPERATURE_FEATURE
+            | CANONICAL_RX_LAYOUT_FEATURE
+            | EXACT_GAP_ACCOUNTING_FEATURE
+        )
+        if features != required_features:
+            raise ProtocolError("protocol v6 feature set is not canonical")
+        if flags & ~((1 << 24) - 1) or not flags & TANDEM_METADATA_VALID_FLAG:
+            raise ProtocolError("protocol v6 flags are invalid")
+
+        scratch = bytearray(raw)
+        received_crc = struct.unpack_from("<I", scratch, header_bytes - 4)[0]
+        scratch[-4:] = bytes(4)
+        if received_crc != zlib.crc32(scratch) & 0xFFFFFFFF:
+            raise ProtocolError("protocol v6 metadata CRC mismatch")
+
+        samples_per_channel = struct.unpack_from("<I", raw, 40)[0]
+        iq_payload_bytes = struct.unpack_from("<I", raw, 44)[0]
+        enabled_scan_mask = struct.unpack_from("<I", raw, 48)[0]
+        channel_count = raw[54]
+        if enabled_scan_mask in {0x03, 0x0C}:
+            expected_channels = 1
+            bytes_per_sample = 4
+            if samples_per_channel & 1:
+                raise ProtocolError("protocol v6 single-RX sample count must be even")
+        elif enabled_scan_mask == 0x0F:
+            expected_channels = 2
+            bytes_per_sample = 8
+        else:
+            raise ProtocolError("protocol v6 scan mask is not canonical")
+        if (
+            channel_count != expected_channels
+            or not samples_per_channel
+            or iq_payload_bytes != samples_per_channel * bytes_per_sample
+        ):
+            raise ProtocolError("protocol v6 RX geometry is inconsistent")
+
+        v3_extension = _V3_EXTENSION.unpack_from(raw, 92)
+        missing_samples_before = v3_extension[-2] | (v3_extension[-1] << 32)
+        if bool(flags & SAMPLE_GAP_BEFORE_FLAG) != bool(missing_samples_before):
+            raise ProtocolError("protocol v6 gap flag and exact count disagree")
+
+        synthetic = bytearray(raw)
+        struct.pack_into("<H", synthetic, 4, VERSION_V5)
+        struct.pack_into(
+            "<I",
+            synthetic,
+            8,
+            features & ~(CANONICAL_RX_LAYOUT_FEATURE | EXACT_GAP_ACCOUNTING_FEATURE),
+        )
+        struct.pack_into("<I", synthetic, 12, flags & ~SAMPLE_GAP_BEFORE_FLAG)
+        struct.pack_into("<II", synthetic, 116, 0, 0)
+        if channel_count == 1:
+            struct.pack_into("<I", synthetic, 44, samples_per_channel * 8)
+            struct.pack_into("<I", synthetic, 48, 0x0F)
+            synthetic[54] = 2
+        synthetic[-4:] = bytes(4)
+        struct.pack_into("<I", synthetic, len(synthetic) - 4, zlib.crc32(synthetic))
+        tandem = RadioMetadataV5.unpack(synthetic)
+        base = dataclasses.replace(
+            tandem.base,
+            features=MetadataFeatures(
+                features & ~(TANDEM_METADATA_FEATURE | AD9361_TEMPERATURE_FEATURE)
+            ),
+            flags=MetadataFlags(flags & ~TANDEM_METADATA_VALID_FLAG),
+            iq_payload_bytes=iq_payload_bytes,
+            enabled_scan_mask=enabled_scan_mask,
+            channel_count=channel_count,
+        )
+        return cls(base, tandem, header_bytes, missing_samples_before)

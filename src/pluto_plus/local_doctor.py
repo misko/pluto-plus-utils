@@ -16,6 +16,7 @@ from pluto_plus.bootstrap_firmware import (
 from pluto_plus.data_plane import DataPlaneProbe
 from pluto_plus.diagnostic_profiles import (
     DIAGNOSTIC_PROFILES,
+    SUPPORTED_AD936X_PHY_MODELS,
     UPGRADE_TARGET_PROFILE,
     MetadataAbiState,
     parse_metadata_abi,
@@ -267,13 +268,16 @@ def _diagnose_radio(
         else "Active firmware is at or newer than the newest qualified release",
     )
     phy = str(facts.get("ad9361-phy,model") or "").strip() or None
+    phy_supported = phy in SUPPORTED_AD936X_PHY_MODELS
     _check(
         checks,
         "rf.phy_model",
-        "pass" if phy == "ad9361" else "fail",
+        "pass" if phy_supported else "fail",
         phy,
-        "ad9361",
-        "Live PHY is AD9361" if phy == "ad9361" else "Live PHY is not AD9361",
+        SUPPORTED_AD936X_PHY_MODELS,
+        "Live PHY is a supported AD936x"
+        if phy_supported
+        else "Live PHY is not a supported AD936x",
     )
     metadata = parse_metadata_abi(facts.get("iio,buffer-metadata"))
     metadata_ok = profile is not None and metadata.abi in profile.metadata_abis
@@ -369,7 +373,7 @@ def _unknown_facts(checks: list[LocalDoctorCheck]) -> None:
             tuple(item.firmware_version for item in DIAGNOSTIC_PROFILES),
         ),
         ("firmware.release_currency", UPGRADE_TARGET_PROFILE.firmware_version),
-        ("rf.phy_model", "ad9361"),
+        ("rf.phy_model", SUPPORTED_AD936X_PHY_MODELS),
         ("transport.buffer_metadata", "metadata ABI selected by a known profile"),
         ("rf.paired_rx_device", ("ad9361-phy", "cf-ad9361-lpc")),
         ("transport.tandem_agc", "capability selected by a known profile"),

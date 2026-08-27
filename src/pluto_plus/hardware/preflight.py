@@ -24,10 +24,19 @@ METADATA_RUNTIME_RECEIPT = Path("share/pluto-plus-utils/metadata-runtime.json")
 METADATA_RUNTIME_SOURCE_COMMITS = {
     1: "c26258bfa33098c2b215e19cf85d448e89499b1a",
     2: "6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7",
+    3: "5dc200af10961e50d3b019cd38bdb8dd3c0e8c3c",
 }
 METADATA_BUFFER_PARAMETERS = {
     1: ("self", "device", "samples_count", "metadata_capacity"),
     2: ("self", "device", "samples_count", "request", "metadata_capacity"),
+    3: (
+        "self",
+        "device",
+        "samples_count",
+        "request",
+        "metadata_capacity",
+        "batch_frames",
+    ),
 }
 
 
@@ -92,7 +101,7 @@ def verify_metadata_runtime(expected_abi: int = 1) -> MetadataRuntimeVerificatio
     """
 
     if expected_abi not in METADATA_RUNTIME_SOURCE_COMMITS:
-        raise ValueError("expected metadata ABI must be 1 or 2")
+        raise ValueError("expected metadata ABI must be 1, 2, or 3")
     prefix = Path(sys.prefix).resolve(strict=True)
     try:
         receipt_path = (prefix / METADATA_RUNTIME_RECEIPT).resolve(strict=True)

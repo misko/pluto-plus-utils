@@ -433,7 +433,7 @@ def test_iio_adapter_retains_facts_and_types_noncanonical_1r1t() -> None:
         iio_contexts={"usb:1": "serial=SERIAL_A"},
     )
 
-    with pytest.raises(RadioSetupRequiredError, match="AD9361/2R2T"):
+    with pytest.raises(RadioSetupRequiredError, match="AD936x paired-RX"):
         radio.open()
 
     assert radio.identity.serial == "SERIAL_A"

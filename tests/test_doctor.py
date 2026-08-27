@@ -69,13 +69,12 @@ def test_doctor_does_not_infer_persistence_from_active_firmware_or_channels() ->
 
     assert not report.healthy
     assert findings["firmware.device_version"].status is DoctorStatus.PASS
-    assert findings["rf.phy_model"].status is DoctorStatus.FAIL
+    assert findings["rf.phy_model"].status is DoctorStatus.PASS
     assert findings["setup.uboot_2r2t"].status is DoctorStatus.UNKNOWN
     assert findings["firmware.boot_provenance"].status is DoctorStatus.UNKNOWN
     assert findings["identity.usb_path"].status is DoctorStatus.WARN
     assert findings["firmware.helper"].status is DoctorStatus.WARN
-    assert findings["rf.phy_model"].remediation is not None
-    assert findings["rf.phy_model"].remediation.automatable
+    assert findings["rf.phy_model"].remediation is None
 
 
 def test_old_firmware_recommends_only_guarded_profile_aware_flash() -> None:

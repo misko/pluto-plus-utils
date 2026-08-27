@@ -103,7 +103,7 @@ def test_local_doctor_flags_blank_identity_old_firmware_and_wrong_phy(
             "hw_serial": "",
             "hw_model": "Analog Devices PlutoSDR Rev.C",
             "fw_version": "v0.32-dirty",
-            "ad9361-phy,model": "ad9363a",
+            "ad9361-phy,model": "unsupported-phy",
             "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
         },
     )
