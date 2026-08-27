@@ -46,6 +46,11 @@ from pluto_plus.inventory import (
     scan_local_usb_plutos,
 )
 from pluto_plus.ladder import DEFAULT_RATE_LADDER, LadderReport, parse_rate_ladder, run_iio_ladder
+from pluto_plus.metadata_ladder import (
+    DEFAULT_METADATA_SAMPLE_LADDER,
+    parse_metadata_sample_ladder,
+    run_metadata_continuity_ladder,
+)
 from pluto_plus.metadata_soak import (
     MAX_SLOTS,
     MetadataSoakError,
@@ -1056,6 +1061,120 @@ def radio_ladder(
     else:
         typer.echo(_ladder_table(report))
     if report.failures:
+        raise typer.Exit(5)
+
+
+@radio_app.command("metadata-ladder")
+def radio_metadata_ladder(
+    target: str = typer.Argument(
+        ...,
+        help="USB serial when --transport=usb, or a literal IPv4 address when using IP.",
+    ),
+    transport: str = typer.Option(
+        "usb", "--transport", "-t", help="Metadata libiio transport: usb or ip."
+    ),
+    expect_serial: str | None = typer.Option(
+        None,
+        "--expect-serial",
+        help="Require this exact radio serial (required for IP).",
+    ),
+    sample_rate_hz: int = typer.Option(
+        5_000_000,
+        "--sample-rate-hz",
+        min=1,
+        help="Exact native sample rate used for every refill-size rung.",
+    ),
+    rf_bandwidth_hz: int = typer.Option(
+        5_000_000,
+        "--rf-bandwidth-hz",
+        min=1,
+        help="Exact analog RF bandwidth; must not exceed the sample rate.",
+    ),
+    samples: str = typer.Option(
+        DEFAULT_METADATA_SAMPLE_LADDER,
+        "--samples",
+        help="Strictly descending comma-separated samples/channel rungs.",
+    ),
+    frames: int = typer.Option(
+        6,
+        "--frames",
+        min=2,
+        max=32,
+        help="Counter-observed metadata frames requested at each rung.",
+    ),
+    kernel_buffers: int = typer.Option(
+        4,
+        "--kernel-buffers",
+        min=4,
+        max=64,
+        help="Explicit RX kernel-buffer count; at least four are required.",
+    ),
+) -> None:
+    """Find the largest refill preserving FPGA-counter continuity."""
+
+    normalized_transport = transport.strip().lower()
+    uri: str
+    serial: str
+    if normalized_transport == "usb":
+        if expect_serial is not None and expect_serial != target:
+            _fail(
+                "radio_identity_mismatch",
+                "for USB, TARGET is the serial and must equal --expect-serial",
+                2,
+            )
+        uri = "usb:"
+        serial = target
+    elif normalized_transport == "ip":
+        candidate = target.removeprefix("ip:")
+        try:
+            address = ip_address(candidate)
+        except ValueError:
+            _fail(
+                "invalid_radio_target",
+                "IP metadata ladder target must be a literal IP address",
+                2,
+            )
+        if address.version != 4:
+            _fail(
+                "invalid_radio_target",
+                "IP metadata ladder currently supports IPv4 targets",
+                2,
+            )
+        if expect_serial is None:
+            _fail(
+                "missing_radio_identity",
+                "IP metadata ladder requires --expect-serial",
+                2,
+            )
+        uri = f"ip:{address}"
+        serial = expect_serial
+    else:
+        _fail(
+            "invalid_metadata_ladder_transport",
+            "metadata ladder transport must be usb or ip",
+            2,
+        )
+    try:
+        parsed_samples = parse_metadata_sample_ladder(samples)
+    except ValueError as error:
+        _fail("metadata_ladder_failed", str(error), 5)
+    environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        report = run_metadata_continuity_ladder(
+            uri=uri,
+            serial=serial,
+            sample_rate_hz=sample_rate_hz,
+            rf_bandwidth_hz=rf_bandwidth_hz,
+            samples_per_channel=parsed_samples,
+            frames=frames,
+            kernel_buffers=kernel_buffers,
+        )
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("metadata_ladder_failed", str(error), 5)
+    _emit(report.model_dump(mode="json"))
+    if report.failures or report.largest_passing_samples_per_channel is None:
         raise typer.Exit(5)
 
 
