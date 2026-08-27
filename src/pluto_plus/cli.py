@@ -1338,7 +1338,7 @@ def radio_soak_metadata(
     profile_id: str = typer.Option(
         "tandem-agc-v7-release-ram",
         "--profile",
-        help="Exact immutable ABI-2 tandem firmware profile.",
+        help="Exact immutable ABI-2/3 tandem firmware profile.",
     ),
     ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1358,7 +1358,7 @@ def radio_soak_metadata(
         None, "--confirm", help="With --execute, the exact phrase printed by the dry run."
     ),
 ) -> None:
-    """Soak repeated ABI-2 metadata context/retune/buffer lifecycles."""
+    """Soak repeated ABI-2/3 metadata context/retune/buffer lifecycles."""
 
     try:
         plan = prepare_metadata_soak(
@@ -1463,7 +1463,7 @@ def radio_qualify_tandem(
     profile_id: str = typer.Option(
         "tandem-agc-v7-release-ram",
         "--profile",
-        help="Exact immutable ABI-2 tandem firmware profile to qualify.",
+        help="Exact immutable ABI-2/3 tandem firmware profile to qualify.",
     ),
     execute: bool = typer.Option(
         False,

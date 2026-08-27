@@ -134,6 +134,25 @@ TANDEM_AGC_V7_PERSISTENT_POLICY = TANDEM_AGC_V7_RAM_POLICY.model_copy(
     }
 )
 
+# Exact ABI-3 single-RX candidate produced by the trusted Kalman build. The
+# sealed bundle passed the complete offline release gate, but these bytes have
+# not yet passed the physical-radio matrix. Keeping only a RAM policy makes a
+# power cycle the recovery path and prevents any command from selecting it for
+# QSPI persistence before an explicit hardware promotion.
+SINGLE_RX_METADATA_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="single-rx-metadata-rc1-ram",
+    release_tag="plutoplus-spf-single-rx-metadata-rc1-33ffb70b2e4a",
+    device_firmware="v0.42-plutoplus-spf-single-rx-metadata-rc1",
+    asset_name="plutoplus-spf-single-rx-metadata-rc1-33ffb70b2e4a-pluto.dfu",
+    asset_sha256="f681573fb52a568820e1e9a201c26927d5c17e454985523fb5ecbdd3c1ae8e58",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33101837372",
+    source_commit="33ffb70b2e4aeeffa01806b3efa0fe7488a85b5c",
+    fit_body_sha256="bfb90bf0cf9fb1e47e3f4d9bb1a479e0493c9ff1d0f44a780755413443e723a0",
+    fit_body_size=12_792_719,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 27, 18, 45, 37, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,

@@ -29,6 +29,7 @@ from typing import Any, Literal, Protocol, cast
 from pluto_plus.diagnostic_profiles import DIAGNOSTIC_PROFILES, SUPPORTED_AD936X_PHY_MODELS
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
+    SINGLE_RX_METADATA_RC1_RAM_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
     TANDEM_V6_DEVELOPMENT_POLICY,
@@ -87,6 +88,9 @@ STANDALONE_FLASH_PROFILES = {
     ),
     TANDEM_AGC_V7_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
         TANDEM_AGC_V7_PERSISTENT_POLICY, 2, True
+    ),
+    SINGLE_RX_METADATA_RC1_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        SINGLE_RX_METADATA_RC1_RAM_POLICY, 3, True, persistent_allowed=False
     ),
 }
 
