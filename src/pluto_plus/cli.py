@@ -979,7 +979,7 @@ def radio_ladder(
     expect_serial: str | None = typer.Option(
         None,
         "--expect-serial",
-        help="Require this exact radio serial (recommended for IP).",
+        help="Require this exact radio serial (required for IP).",
     ),
     rates: str = typer.Option(
         DEFAULT_RATE_LADDER,
