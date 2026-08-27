@@ -317,6 +317,25 @@ def test_iio_adapter_applies_reads_back_and_captures_paired_rx() -> None:
     assert radio.diagnostic_facts() == {}
 
 
+def test_iio_adapter_records_setter_basis_when_kernel_buffer_readback_is_absent() -> None:
+    module = FakeAdi()
+    radio = IioRadioDevice(
+        "pluto://usb:",
+        serial="SERIAL_A",
+        adi_module=module,
+        iio_contexts={"usb:1.2.3": "Pluto serial=SERIAL_A"},
+    )
+    radio.open()
+    try:
+        assert module.device is not None
+        module.device._rxadc = SimpleNamespace(set_kernel_buffers_count=lambda _count: 0)
+
+        assert radio.configure_kernel_buffers(8) == 8
+        assert radio.kernel_buffer_configuration_basis == "setter_accepted"
+    finally:
+        radio.close()
+
+
 def test_iio_adapter_refuses_single_buffer_above_half_cma() -> None:
     module = FakeAdi()
     radio = IioRadioDevice(

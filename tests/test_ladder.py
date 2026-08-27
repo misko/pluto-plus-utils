@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 import pytest
 
@@ -30,6 +32,7 @@ class FakeLadderRadio:
         self.closed = False
         self.applied: list[RadioSettings] = []
         self.kernel_buffers: int | None = None
+        self._kernel_buffer_configuration_basis: Literal["setter_accepted", "readback"] = "readback"
 
     @property
     def identity(self) -> RadioIdentity:
@@ -38,6 +41,10 @@ class FakeLadderRadio:
     @property
     def capabilities(self) -> RadioCapabilities:
         return self._capabilities
+
+    @property
+    def kernel_buffer_configuration_basis(self) -> Literal["setter_accepted", "readback"]:
+        return self._kernel_buffer_configuration_basis
 
     def open(self) -> None:
         self.opened = True
@@ -106,6 +113,7 @@ def test_ladder_measures_paired_wire_payload_and_restores_original_settings() ->
     assert report.serial == "SERIAL_A"
     assert report.wire_bytes_per_sample_period == 8
     assert report.kernel_buffers == 8
+    assert report.kernel_buffer_configuration_basis == "readback"
     assert radio.kernel_buffers == 8
     assert report.original_settings_restored
     assert len(report.cells) == 2

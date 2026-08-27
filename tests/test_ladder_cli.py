@@ -41,6 +41,7 @@ def _report(uri: str, serial: str) -> LadderReport:
         firmware_version="v6",
         channels=(0, 1),
         kernel_buffers=8,
+        kernel_buffer_configuration_basis="readback",
         wire_bytes_per_sample_period=8,
         warmup_frames=2,
         cells=(

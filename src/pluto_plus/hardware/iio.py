@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -104,6 +104,9 @@ class IioRadioDevice:
         self._device: Any | None = None
         self._buffer_size: int | None = None
         self._metadata_capture: IioMetadataCaptureSession | None = None
+        self._kernel_buffer_configuration_basis: Literal[
+            "not_configured", "setter_accepted", "readback"
+        ] = "not_configured"
         self._diagnostic_facts: dict[str, object] = {}
         transport = Transport.IIO_USB if normalized.startswith("usb:") else Transport.IIO_IP
         self._identity = RadioIdentity(
@@ -128,6 +131,14 @@ class IioRadioDevice:
     @property
     def capabilities(self) -> RadioCapabilities:
         return self._capabilities
+
+    @property
+    def kernel_buffer_configuration_basis(
+        self,
+    ) -> Literal["not_configured", "setter_accepted", "readback"]:
+        """State whether kernel-buffer configuration had an independent readback."""
+
+        return self._kernel_buffer_configuration_basis
 
     def open(self) -> None:
         if self._device is not None:
@@ -476,13 +487,13 @@ class IioRadioDevice:
             )
         actual = getattr(rx_device, "kernel_buffers_count", None)
         if actual is None:
-            raise RadioConfigurationError(
-                "installed libiio binding cannot read back RX kernel buffers"
-            )
+            self._kernel_buffer_configuration_basis = "setter_accepted"
+            return count
         if int(actual) != count:
             raise RadioConfigurationError(
                 f"RX kernel buffer read-back is {actual}, expected {count}"
             )
+        self._kernel_buffer_configuration_basis = "readback"
         return int(actual)
 
     def read_kernel_buffers_count(self) -> int:

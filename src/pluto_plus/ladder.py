@@ -6,7 +6,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Sequence
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 from pydantic import Field
@@ -59,6 +59,7 @@ class LadderReport(ApiModel):
     firmware_version: str | None
     channels: tuple[int, ...]
     kernel_buffers: int = Field(ge=1, le=64)
+    kernel_buffer_configuration_basis: Literal["setter_accepted", "readback"]
     wire_bytes_per_sample_period: int
     warmup_frames: int
     cells: tuple[LadderCell, ...]
@@ -76,6 +77,11 @@ class LadderRadio(Protocol):
 
     @property
     def capabilities(self) -> RadioCapabilities: ...
+
+    @property
+    def kernel_buffer_configuration_basis(
+        self,
+    ) -> Literal["not_configured", "setter_accepted", "readback"]: ...
 
     def open(self) -> None: ...
 
@@ -140,6 +146,9 @@ def run_iio_ladder(
         opened = True
         original = radio.read_settings()
         radio.configure_kernel_buffers(kernel_buffers)
+        kernel_buffer_configuration_basis = radio.kernel_buffer_configuration_basis
+        if kernel_buffer_configuration_basis == "not_configured":
+            raise RuntimeError("RX kernel-buffer configuration has no verification basis")
         channels = tuple(radio.capabilities.receiver_channels)
         if len(channels) < 2:
             raise RuntimeError("speed ladder requires a paired-RX Pluto context")
@@ -224,6 +233,7 @@ def run_iio_ladder(
         firmware_version=identity.firmware_version,
         channels=channels,
         kernel_buffers=kernel_buffers,
+        kernel_buffer_configuration_basis=kernel_buffer_configuration_basis,
         wire_bytes_per_sample_period=len(channels) * WIRE_BYTES_PER_COMPLEX_SAMPLE,
         warmup_frames=warmup_frames,
         cells=tuple(cells),

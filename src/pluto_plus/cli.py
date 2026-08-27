@@ -433,7 +433,8 @@ def _ladder_table(report: LadderReport) -> str:
     identity = (
         f"Radio {report.serial} · {report.uri} · {report.model} · "
         f"firmware {report.firmware_version or 'unknown'} · "
-        f"kernel buffers {report.kernel_buffers}"
+        f"kernel buffers {report.kernel_buffers} "
+        f"({report.kernel_buffer_configuration_basis.replace('_', ' ')})"
     )
     restore = "Original RX settings restored: yes"
     return "\n".join((identity, header, separator, *body, restore, report.continuity_claim))
