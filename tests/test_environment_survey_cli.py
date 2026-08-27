@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from click import unstyle
 from typer.main import get_command
 from typer.testing import CliRunner
 
@@ -249,7 +250,7 @@ def test_plan_cli_rejects_removed_analysis_knobs_before_inventory(
 
     assert result.exit_code == 2
     assert called is False
-    assert "No such option: --sample-rate" in result.output
+    assert "No such option: --sample-rate" in unstyle(result.output)
 
 
 def test_fleet_select_rejects_bad_inventory_pin_before_source_or_evidence(

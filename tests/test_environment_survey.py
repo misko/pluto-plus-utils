@@ -923,7 +923,10 @@ def test_percentiles_use_type7_linear_power_then_db_and_bursts_are_strict() -> N
     threshold = 10.0 ** (6.0 / 10.0)
     burst_powers = [1.0] * 30 + [threshold, np.nextafter(threshold, np.inf)]
     burst_windows = tuple(
-        _window(index, (10.0 * np.log10(value), -50.0)) for index, value in enumerate(burst_powers)
+        _window(index, (10.0 * np.log10(value), -50.0)).model_copy(
+            update={"receiver_integrated_power_fs": (value, 1e-5)}
+        )
+        for index, value in enumerate(burst_powers)
     )
     *_, burst_occupancy, burst_flags = survey._summarize_windows(burst_windows)
     assert burst_occupancy == pytest.approx((1 / 32, 0.0))
