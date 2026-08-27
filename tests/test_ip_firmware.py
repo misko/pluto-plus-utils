@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -25,6 +26,7 @@ from pluto_plus.ip_firmware import (
     PinnedSshFirmwareTransport,
     SshCommandResult,
     UsbSshRouteAmbiguous,
+    pinned_ssh_host_key_fingerprint,
     require_unambiguous_usb_ssh_route,
 )
 from pluto_plus.network_config import (
@@ -818,6 +820,26 @@ def test_pinned_transport_rejects_hostnames_loose_files_and_changed_key(
             private_key_file=private_key,
             command_runner=runner,
         )
+
+
+def test_pinned_fingerprint_accepts_an_exact_openssh_hashed_host(tmp_path: Path) -> None:
+    endpoint = "192.168.2.1"
+    salt = b"deterministic-test-salt"
+    host_digest = hmac.new(salt, endpoint.encode(), hashlib.sha1).digest()  # noqa: S324
+    key = b"synthetic-ed25519-public-key"
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(
+        "|1|"
+        f"{base64.b64encode(salt).decode()}|{base64.b64encode(host_digest).decode()} "
+        f"ssh-ed25519 {base64.b64encode(key).decode()}\n"
+    )
+    known_hosts.chmod(0o600)
+
+    assert pinned_ssh_host_key_fingerprint(known_hosts, endpoint) == (
+        "SHA256:" + base64.b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
+    )
+    with pytest.raises(ValueError, match="exactly one pinned key"):
+        pinned_ssh_host_key_fingerprint(known_hosts, "192.168.2.2")
 
 
 def test_pinned_transport_rejects_credential_file_changes_after_enrollment(

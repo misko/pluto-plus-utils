@@ -1454,7 +1454,10 @@ def _pinned_host_key(path: Path, endpoint: str, port: int) -> tuple[str, str]:
         if not stripped or stripped.startswith("#") or stripped.startswith("@"):
             continue
         fields = stripped.split()
-        if len(fields) < 3 or expected_host not in fields[0].split(","):
+        if len(fields) < 3 or not any(
+            _known_host_pattern_matches(pattern, expected_host)
+            for pattern in fields[0].split(",")
+        ):
             continue
         algorithm, encoded = fields[1], fields[2]
         if not re.fullmatch(
@@ -1471,9 +1474,30 @@ def _pinned_host_key(path: Path, endpoint: str, port: int) -> tuple[str, str]:
         matches.append((f"SHA256:{digest}", algorithm))
     if len(matches) != 1:
         raise ValueError(
-            "SSH known-hosts must contain exactly one plain pinned key for the endpoint"
+            "SSH known-hosts must contain exactly one pinned key for the endpoint"
         )
     return matches[0]
+
+
+def _known_host_pattern_matches(pattern: str, expected_host: str) -> bool:
+    if pattern == expected_host:
+        return True
+    parts = pattern.split("|")
+    if len(parts) != 4 or parts[:2] != ["", "1"]:
+        return False
+    try:
+        salt = base64.b64decode(parts[2], validate=True)
+        expected_digest = base64.b64decode(parts[3], validate=True)
+    except (ValueError, binascii.Error):
+        return False
+    if not salt or len(expected_digest) != hashlib.sha1().digest_size:  # noqa: S324
+        return False
+    observed_digest = hmac.new(
+        salt,
+        expected_host.encode(),
+        digestmod=hashlib.sha1,  # noqa: S324 - OpenSSH known_hosts format is fixed to HMAC-SHA1.
+    ).digest()
+    return hmac.compare_digest(observed_digest, expected_digest)
 
 
 def _parse_report(output: str) -> dict[str, str]:
