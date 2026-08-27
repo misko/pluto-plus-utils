@@ -69,6 +69,7 @@ from pluto_plus.network_config import (
     NetworkInterface,
     PlannedNetworkConfig,
 )
+from pluto_plus.radio_lock import shared_radio_lock_root
 from pluto_plus.setup import (
     CanonicalSetupManager,
     PlannedSetup,
@@ -137,6 +138,7 @@ class PlutoService:
                     self.catalog,
                     capture_free_bytes=capture_free_bytes,
                     capture_reserve_bytes=capture_reserve_bytes,
+                    radio_lock_root=shared_radio_lock_root(),
                 )
                 if controller.radio_id in self._controllers:
                     controller.close()

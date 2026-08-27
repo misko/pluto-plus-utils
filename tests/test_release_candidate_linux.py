@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
+from pluto_plus.radio_lock import RadioLockError, acquire_radio_lock
 from pluto_plus.release_candidate import (
     HostRouteReceipt,
     QspiObservation,
@@ -144,6 +145,7 @@ class RouteRunner:
 def _backend(tmp_path: Path, runner: RouteRunner | None = None) -> LinuxReleaseCandidateBackend:
     return LinuxReleaseCandidateBackend(
         state_root=(tmp_path / "state").absolute(),
+        radio_lock_root=(tmp_path / "radio-locks").absolute(),
         scanner=lambda: (_local(),),
         command_runner=runner or RouteRunner(),
     )
@@ -193,6 +195,30 @@ def test_global_daemon_lock_refuses_concurrent_candidate_transaction(tmp_path: P
         second.transaction_locks(_target(), "192.168.2.1"),
     ):
         pytest.fail("second transaction unexpectedly acquired the lock")
+
+
+def test_survey_shared_lock_refuses_candidate_transaction(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    lock_root = (tmp_path / "radio-locks").absolute()
+
+    with (
+        acquire_radio_lock(SERIAL, root=lock_root),
+        pytest.raises(ReleaseCandidateLifecycleError, match="already owned"),
+        backend.transaction_locks(_target(), "192.168.2.1"),
+    ):
+        pytest.fail("candidate transaction bypassed the survey radio lease")
+
+
+def test_candidate_transaction_refuses_survey_shared_lock(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    lock_root = (tmp_path / "radio-locks").absolute()
+
+    with (
+        backend.transaction_locks(_target(), "192.168.2.1"),
+        pytest.raises(RadioLockError, match="already owned"),
+        acquire_radio_lock(SERIAL, root=lock_root),
+    ):
+        pytest.fail("survey lease bypassed the candidate transaction")
 
 
 def test_sealed_dfu_descriptor_is_immutable_and_disappears_after_scope(tmp_path: Path) -> None:
@@ -445,7 +471,10 @@ def test_clean_tool_repository_attestation_rejects_dirty_tree(tmp_path: Path) ->
     subprocess.run(("git", "-C", str(repository), "config", "user.name", "Test"), check=True)
     tracked = repository / "tracked.txt"
     tracked.write_text("one\n")
-    subprocess.run(("git", "-C", str(repository), "add", "tracked.txt"), check=True)
+    package_file = repository / "src/pluto_plus/__init__.py"
+    package_file.parent.mkdir(parents=True)
+    package_file.write_text("__version__ = 'test'\n")
+    subprocess.run(("git", "-C", str(repository), "add", "."), check=True)
     subprocess.run(("git", "-C", str(repository), "commit", "-qm", "initial"), check=True)
     subprocess.run(
         (
@@ -463,6 +492,12 @@ def test_clean_tool_repository_attestation_rejects_dirty_tree(tmp_path: Path) ->
     source = attest_clean_tool_repository(repository)
     assert len(source.commit) == 40
     assert source.repository == "misko/pluto-plus-utils"
+    assert attest_clean_tool_repository(repository, imported_package_file=package_file) == source
+    assert attest_clean_tool_repository(repository, imported_source_files=(package_file,)) == source
+    outside = tmp_path / "outside.py"
+    outside.write_text("pass\n")
+    with pytest.raises(ReleaseCandidateLifecycleError, match="outside"):
+        attest_clean_tool_repository(repository, imported_source_files=(package_file, outside))
     tracked.write_text("two\n")
     with pytest.raises(ReleaseCandidateLifecycleError, match="fully clean"):
         attest_clean_tool_repository(repository)

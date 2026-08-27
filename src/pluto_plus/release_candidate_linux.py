@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
+from pluto_plus.radio_lock import RadioLockError, acquire_radio_lock, shared_radio_lock_root
 from pluto_plus.release_candidate import (
     CleanupReceipt,
     HostRouteReceipt,
@@ -163,6 +164,7 @@ class LinuxReleaseCandidateBackend:
         runtime_attestor: RuntimeAttestor | None = None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        radio_lock_root: Path | None = None,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("Linux candidate lifecycle timeout must be positive")
@@ -176,6 +178,7 @@ class LinuxReleaseCandidateBackend:
         self.runtime_attestor = runtime_attestor or self._attest_runtime_linux
         self.sleep = sleep
         self.monotonic = monotonic
+        self.radio_lock_root = radio_lock_root or shared_radio_lock_root()
         self._active_target: UsbInventoryTarget | None = None
         self._active_route: HostRouteReceipt | None = None
         self._sealed_descriptor: int | None = None
@@ -186,34 +189,38 @@ class LinuxReleaseCandidateBackend:
     def transaction_locks(self, target: UsbInventoryTarget, ssh_host: str) -> Iterator[None]:
         """Exclude the daemon, this radio, and all users of the shared endpoint."""
 
-        self._prepare_state_root()
-        locks = self.state_root / "locks"
-        locks.mkdir(mode=0o700, exist_ok=True)
-        _require_private_directory(locks, label="candidate lock directory")
-        route_token = hashlib.sha256(ssh_host.encode()).hexdigest()[:24]
-        radio_token = hashlib.sha256(target.serial.encode()).hexdigest()[:24]
-        with ExitStack() as stack:
-            daemon = stack.enter_context(_exclusive_lock(self.state_root / ".plutod.lock"))
-            route = stack.enter_context(
-                _exclusive_lock(locks / f"release-route-{route_token}.lock")
-            )
-            radio = stack.enter_context(
-                _exclusive_lock(locks / f"release-radio-{radio_token}.lock")
-            )
-            for stream, label in (
-                (daemon, "daemon-exclusion"),
-                (route, f"route={ssh_host}"),
-                (radio, f"serial={target.serial}"),
-            ):
-                stream.seek(0)
-                stream.truncate()
-                stream.write(f"pid={os.getpid()} operation=candidate-ram {label}\n")
-                stream.flush()
-            self._active_target = target
-            try:
-                yield
-            finally:
-                self._active_target = None
+        try:
+            with acquire_radio_lock(target.serial, root=self.radio_lock_root):
+                self._prepare_state_root()
+                locks = self.state_root / "locks"
+                locks.mkdir(mode=0o700, exist_ok=True)
+                _require_private_directory(locks, label="candidate lock directory")
+                route_token = hashlib.sha256(ssh_host.encode()).hexdigest()[:24]
+                radio_token = hashlib.sha256(target.serial.encode()).hexdigest()[:24]
+                with ExitStack() as stack:
+                    daemon = stack.enter_context(_exclusive_lock(self.state_root / ".plutod.lock"))
+                    route = stack.enter_context(
+                        _exclusive_lock(locks / f"release-route-{route_token}.lock")
+                    )
+                    radio = stack.enter_context(
+                        _exclusive_lock(locks / f"release-radio-{radio_token}.lock")
+                    )
+                    for stream, label in (
+                        (daemon, "daemon-exclusion"),
+                        (route, f"route={ssh_host}"),
+                        (radio, f"serial={target.serial}"),
+                    ):
+                        stream.seek(0)
+                        stream.truncate()
+                        stream.write(f"pid={os.getpid()} operation=candidate-ram {label}\n")
+                        stream.flush()
+                    self._active_target = target
+                    try:
+                        yield
+                    finally:
+                        self._active_target = None
+        except RadioLockError as error:
+            raise ReleaseCandidateLifecycleError(str(error)) from error
 
     @contextmanager
     def sealed_dfu(self, payload: bytes) -> Iterator[Path]:
@@ -949,7 +956,12 @@ class LinuxReleaseCandidateBackend:
         _require_private_directory(self.state_root, label="candidate state root")
 
 
-def attest_clean_tool_repository(path: Path) -> ToolSourceAttestation:
+def attest_clean_tool_repository(
+    path: Path,
+    *,
+    imported_package_file: Path | None = None,
+    imported_source_files: Sequence[Path] = (),
+) -> ToolSourceAttestation:
     """Return the exact clean utility repository and commit used for live I/O."""
 
     if not path.is_absolute() or ".." in path.parts:
@@ -988,6 +1000,25 @@ def attest_clean_tool_repository(path: Path) -> ToolSourceAttestation:
     if status:
         raise ReleaseCandidateLifecycleError(
             "tool repository must be fully clean, including untracked files"
+        )
+    bound_sources = (() if imported_package_file is None else (imported_package_file,)) + tuple(
+        imported_source_files
+    )
+    for imported_package_file in bound_sources:
+        try:
+            imported = imported_package_file.resolve(strict=True)
+            relative = imported.relative_to(resolved)
+        except (OSError, ValueError) as error:
+            raise ReleaseCandidateLifecycleError(
+                "executing pluto_plus package is outside the attested tool repository"
+            ) from error
+        if relative.parts[:2] != ("src", "pluto_plus"):
+            raise ReleaseCandidateLifecycleError(
+                "executing pluto_plus package is not the attested repository src/pluto_plus tree"
+            )
+        runner.run(
+            ("git", "-C", str(resolved), "ls-files", "--error-unmatch", str(relative)),
+            timeout_s=10,
         )
     return ToolSourceAttestation(
         repository=origin_match.group("repository"),

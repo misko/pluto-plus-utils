@@ -122,6 +122,79 @@ when you specifically want managed/discovered daemon state correlated into the
 table. Standalone discovery never tunes, captures, or writes radio state and does
 not require native libiio.
 
+### Plan-gated RX environment survey
+
+`environment-survey` is the standalone, exact-USB chamber survey path. Planning
+uses only the passive sysfs inventory. Execution requires the plan's exact
+serial/topology/bus/device identity, the same clean utility commit, a shared
+per-serial OS lock, the printed plan SHA-256 and confirmation phrase, and a second
+explicit `--ensure-mute` gate. The imported `pluto_plus` package must be the
+tracked `src/pluto_plus` tree inside that exact clean checkout. It never uses SSH,
+changes a host route, enters DFU,
+reboots, reads or writes QSPI, or authorizes Pluto transmit.
+
+Create a private result root and plan file, then execute the printed command:
+
+```bash
+install -d -m 0700 /private/pluto-surveys /private/pluto-survey-plans
+uv run pluto environment-survey plan \
+  --serial EXACT_SERIAL \
+  --usb-path /sys/bus/usb/devices/3-7 \
+  --emitter-inventory /private/chamber/emitter-inventory.json \
+  --emitter-inventory-sha256 EXACT_SHA256 \
+  --result-root /private/pluto-surveys \
+  --output /private/pluto-survey-plans/radio-plan.json \
+  --ensure-mute
+
+uv run pluto environment-survey execute \
+  --plan /private/pluto-survey-plans/radio-plan.json \
+  --expected-plan-sha256 EXACT_PLAN_SHA256 \
+  --ensure-mute \
+  --confirm 'EXECUTE RX ENVIRONMENT SURVEY EXACT_SERIAL PLAN_ID'
+
+uv run pluto environment-survey receipt-verify \
+  /private/pluto-surveys/PLAN_ID/receipt.json
+```
+
+Before any pyadi adapter is opened, execution requires both TX gains, TX
+buffer/data/scan state, all eight DDS raw and scale attributes, all four FPGA
+DAC selectors, and tandem state/FIFO/fault/overflow through the exact raw USB-IIO
+context. The explicitly authorized mute sets gains to `-80 dB`, clears exposed
+TX buffer and scan selection, zeros every DDS source, selects FPGA ZERO on all
+four DAC lanes, and must read back completely safe. The same full predicate is
+required again after exact RX-setting restoration. Cleanup preserves an original
+RX0-only, RX1-only, or paired channel layout; it requires exact readback of every
+settable field (including each originally manual gain), while retaining but not
+equality-gating the dynamic gain reported by an original AGC mode.
+
+The acquisition is not CLI-tunable: it captures a 2.445 GHz pre-anchor, sweeps
+all 91 integer-MHz centers from 2.400 through 2.490 GHz, captures TX-muted
+authorizing baselines at 1.05/1.55/2.05/5.8 GHz, then captures a 2.445 GHz
+post-anchor. Every center uses 2.5 MS/s, 1.5 MHz RF bandwidth, manual gain 40,
+and 32 dual-RX windows of 65,536 samples. Both anchors and all four authorizing
+baselines must remain unclipped. Analysis uses a
+periodic Hann (`4096`, hop `2048`), full density-normalized PSD/STFT in
+`dBFS/Hz`, percentiles over linear integrated power before dB conversion,
+burst occupancy, and AD9361 12-bit clipping.
+Every 32-window block retains exact paired-RX settings plus the required shared
+AD9361 temperature immediately after tuning and after its last window. The
+settings evidence enumerates every raw RX channel exposing the shared PHY sample
+rate and bandwidth attributes; all values must match the pyadi scalar. No
+per-window attribute reads disturb the cadence.
+
+A required private, SHA-pinned worst-normal inventory binds every 2.4 and 5 GHz
+emitter; selection excludes the expanded union of its non-touching 2.4 GHz
+occupied spans. A control must also be unclipped. Run the exact full survey in
+canonical order on all four reserved radios, using an independent serial-scoped
+result root and 5 GiB gate each. `fleet-select` consumes each matching PASS
+manifest and receipt, re-verifies all evidence, and ranks by worst p99 across
+all four radios/eight RX paths, then worst occupancy, then frequency. Execution
+requires at least `5,368,709,120` free bytes; per-radio raw plus spectral payload
+is `4,882,169,856` bytes with an exact 64 MiB failure reserve and a retained
+400 MiB manifest allowance at every per-center free-space check. See
+[the evidence contract](docs/environment-survey.md) for inventory schema,
+formulas, layouts, fleet commands, drift thresholds, and failure behavior.
+
 ### Standalone USB/IP speed ladder
 
 `radio ladder` opens one exact radio directly and does not require `plutod`. It

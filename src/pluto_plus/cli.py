@@ -75,6 +75,9 @@ DEFAULT_SETUP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/setup-rece
 DEFAULT_DATA_PLANE_RECOVERY_RECEIPTS = (
     Path.home() / ".local/state/pluto-plus-utils/data-plane-recovery-receipts"
 )
+DEFAULT_ENVIRONMENT_SURVEY_REPORTS = (
+    Path.home() / ".local/state/pluto-plus-utils/environment-surveys"
+)
 API_PREFIX = "api/v1"
 
 app = typer.Typer(
@@ -93,6 +96,10 @@ candidate_ram_app = typer.Typer(
     no_args_is_help=True,
     help="Plan, execute, and verify local release-candidate RAM deployments.",
 )
+environment_survey_app = typer.Typer(
+    no_args_is_help=True,
+    help="Plan, execute, and verify exact-USB RX-only RF environment surveys.",
+)
 setup_app = typer.Typer(
     no_args_is_help=True, help="Plan and execute guarded canonical AD9361/2R2T setup."
 )
@@ -110,6 +117,7 @@ app.add_typer(artifact_app, name="artifact")
 app.add_typer(scan_app, name="scan")
 app.add_typer(firmware_app, name="firmware")
 firmware_app.add_typer(candidate_ram_app, name="candidate-ram")
+app.add_typer(environment_survey_app, name="environment-survey")
 app.add_typer(setup_app, name="setup")
 app.add_typer(config_app, name="config")
 
@@ -2722,6 +2730,419 @@ def firmware_flash_usb(
         ssh_host=ssh_host,
         return_timeout_s=return_timeout_s,
         mutation_profile_id=profile,
+    )
+
+
+@environment_survey_app.command("plan")
+def environment_survey_plan(
+    serial: str = typer.Option(..., "--serial", help="Exact local runtime USB serial."),
+    usb_path: Path = typer.Option(  # noqa: B008
+        ...,
+        "--usb-path",
+        help="Exact direct /sys/bus/usb/devices topology path for that serial.",
+    ),
+    emitter_inventory: Path = typer.Option(  # noqa: B008
+        ...,
+        "--emitter-inventory",
+        help="Private canonical worst-normal Wi-Fi emitter inventory JSON.",
+    ),
+    emitter_inventory_sha256: str = typer.Option(
+        ...,
+        "--emitter-inventory-sha256",
+        help="Expected lowercase SHA-256 of the exact canonical emitter inventory bytes.",
+    ),
+    result_root: Path = typer.Option(  # noqa: B008
+        DEFAULT_ENVIRONMENT_SURVEY_REPORTS,
+        "--result-root",
+        help="Existing owned mode-0700 parent for raw, PSD, STFT, manifest, and receipt.",
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent private survey-plan JSON output."
+    ),
+    ensure_mute: bool = typer.Option(
+        False,
+        "--ensure-mute",
+        help="Authorize only the complete fail-closed TX mute before RX surveying.",
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout whose exact commit is bound into the plan.",
+    ),
+) -> None:
+    """Create a passive exact-USB survey plan; never open IIO or touch the radio."""
+
+    import pluto_plus.environment_survey as survey_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyEmitterInventory,
+        EnvironmentSurveyError,
+        EnvironmentSurveyParameters,
+        prepare_environment_survey,
+        project_occupied_2_4_spans,
+    )
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
+        load_private_contract,
+        model_file_identity,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    if not ensure_mute:
+        _fail(
+            "environment_survey_mute_not_authorized",
+            "plan creation requires explicit --ensure-mute authority",
+            2,
+        )
+    if (
+        len(emitter_inventory_sha256) != 64
+        or emitter_inventory_sha256 != emitter_inventory_sha256.lower()
+        or any(value not in "0123456789abcdef" for value in emitter_inventory_sha256)
+    ):
+        _fail(
+            "environment_survey_inventory_digest_invalid",
+            "--emitter-inventory-sha256 must be exactly 64 lowercase hexadecimal characters",
+            2,
+        )
+    try:
+        inventory_path = emitter_inventory.expanduser().absolute()
+        inventory = load_private_contract(inventory_path, EnvironmentSurveyEmitterInventory)
+        inventory_identity = model_file_identity(inventory_path, inventory)
+        if inventory_identity.sha256 != emitter_inventory_sha256:
+            raise EnvironmentSurveyError("emitter inventory SHA-256 differs from the CLI pin")
+        parameters = EnvironmentSurveyParameters(
+            occupied_2_4_spans_hz=project_occupied_2_4_spans(inventory),
+        )
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(Path(__file__), Path(survey_source.__file__)),
+        )
+        plan = prepare_environment_survey(
+            scan_local_usb_plutos(),
+            serial=serial,
+            usb_path=usb_path.expanduser().absolute(),
+            output_root=result_root.expanduser().absolute(),
+            emitter_inventory_file=inventory_identity,
+            emitter_inventory=inventory,
+            parameters=parameters,
+            tool_source=source,
+            tool_version=__version__,
+        )
+        identity = write_private_contract(output.expanduser().absolute(), plan)
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_plan_failed", str(error), 4)
+    _emit(
+        {
+            "mode": "passive_plan",
+            "hardware_accessed": False,
+            "pluto_tx_authorized": False,
+            "ssh_authorized": False,
+            "route_mutation_authorized": False,
+            "firmware_mutation_authorized": False,
+            "plan": plan.model_dump(mode="json", by_alias=True),
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+            "next_command": (
+                "pluto environment-survey execute --plan "
+                f"{identity.path} --expected-plan-sha256 {identity.sha256} "
+                "--ensure-mute --confirm "
+                f"{json.dumps(plan.confirmation_phrase)}"
+            ),
+        }
+    )
+
+
+@environment_survey_app.command("execute")
+def environment_survey_execute(
+    plan: Path = typer.Option(  # noqa: B008
+        ..., "--plan", help="Private plan produced by environment-survey plan."
+    ),
+    expected_plan_sha256: str = typer.Option(
+        ...,
+        "--expected-plan-sha256",
+        help="Exact lowercase SHA-256 printed when the approved plan was created.",
+    ),
+    confirmation: str = typer.Option(
+        ..., "--confirm", help="Exact serial- and survey-specific phrase printed by plan."
+    ),
+    ensure_mute: bool = typer.Option(
+        False,
+        "--ensure-mute",
+        help="Explicitly apply and verify the complete TX mute before and after RX capture.",
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Same clean checkout and commit bound into the retained plan.",
+    ),
+) -> None:
+    """Run one local USB-IIO RX survey with no SSH, route, firmware, QSPI, or TX."""
+
+    import pluto_plus.environment_survey as survey_source
+    import pluto_plus.environment_survey_linux as survey_linux_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyError,
+        EnvironmentSurveyExecutionError,
+        execute_environment_survey,
+    )
+    from pluto_plus.environment_survey_linux import LinuxEnvironmentSurveyBackend
+    from pluto_plus.release_candidate import ReleaseCandidateContractError
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    environment = inspect_iio_environment(require_usb=True)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        if (
+            len(expected_plan_sha256) != 64
+            or expected_plan_sha256 != expected_plan_sha256.lower()
+            or any(value not in "0123456789abcdef" for value in expected_plan_sha256)
+        ):
+            raise EnvironmentSurveyError(
+                "--expected-plan-sha256 must be exactly 64 lowercase hexadecimal characters"
+            )
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(
+                Path(__file__),
+                Path(survey_source.__file__),
+                Path(survey_linux_source.__file__),
+            ),
+        )
+        receipt, digest = execute_environment_survey(
+            plan.expanduser().absolute(),
+            expected_plan_sha256=expected_plan_sha256,
+            confirmation=confirmation,
+            ensure_mute=ensure_mute,
+            backend=LinuxEnvironmentSurveyBackend(),
+            tool_source=source,
+            tool_version=__version__,
+        )
+    except EnvironmentSurveyExecutionError as error:
+        _fail(
+            "environment_survey_execute_failed",
+            f"{error}; durable receipt={error.receipt_path} sha256={error.receipt_sha256}",
+            5,
+        )
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_execute_failed", str(error), 5)
+    _emit(
+        {
+            "outcome": receipt.outcome,
+            "selected_control_frequency_hz": receipt.selected_control_frequency_hz,
+            "receipt": str(receipt.manifest.path.parent / "receipt.json"),
+            "receipt_sha256": digest,
+            "manifest": str(receipt.manifest.path),
+            "pluto_tx_enabled": False,
+        }
+    )
+
+
+@environment_survey_app.command("receipt-verify")
+def environment_survey_receipt_verify(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout bound into the receipt.",
+    ),
+) -> None:
+    """Verify the plan, manifest, and every retained raw/PSD/STFT SHA-256."""
+
+    import pluto_plus.environment_survey as survey_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyError,
+        verify_environment_survey_receipt,
+    )
+    from pluto_plus.release_candidate import ReleaseCandidateContractError
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    try:
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(Path(__file__), Path(survey_source.__file__)),
+        )
+        verified = verify_environment_survey_receipt(receipt.expanduser().absolute())
+        if (
+            verified.tool_repository != source.repository
+            or verified.tool_source_commit != source.commit
+            or verified.tool_version != __version__
+        ):
+            raise EnvironmentSurveyError(
+                "receipt tool source differs from the executing attested package"
+            )
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_receipt_invalid", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "outcome": verified.outcome,
+            "serial": verified.target.serial,
+            "selected_control_frequency_hz": verified.selected_control_frequency_hz,
+            "receipt": str(receipt.expanduser().absolute()),
+        }
+    )
+
+
+@environment_survey_app.command("fleet-select")
+def environment_survey_fleet_select(
+    manifests: list[Path] = typer.Option(  # noqa: B008
+        ..., "--manifest", help="Manifest path, repeated exactly four times in reserved order."
+    ),
+    receipts: list[Path] = typer.Option(  # noqa: B008
+        ..., "--receipt", help="Matching PASS receipt, repeated exactly four times."
+    ),
+    emitter_inventory: Path = typer.Option(  # noqa: B008
+        ..., "--emitter-inventory", help="Exact private worst-normal emitter inventory."
+    ),
+    emitter_inventory_sha256: str = typer.Option(
+        ..., "--emitter-inventory-sha256", help="Pinned lowercase inventory SHA-256."
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent private fleet-selection JSON output."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout matching all four surveys.",
+    ),
+) -> None:
+    """Deep-verify four surveys and select one global quiet 2.4 GHz center."""
+
+    import pluto_plus.environment_survey as survey_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyEmitterInventory,
+        EnvironmentSurveyError,
+        build_environment_survey_fleet_selection,
+    )
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
+        load_private_contract,
+        model_file_identity,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    if (
+        len(emitter_inventory_sha256) != 64
+        or emitter_inventory_sha256 != emitter_inventory_sha256.lower()
+        or any(value not in "0123456789abcdef" for value in emitter_inventory_sha256)
+    ):
+        _fail(
+            "environment_survey_inventory_digest_invalid",
+            "--emitter-inventory-sha256 must be exactly 64 lowercase hexadecimal characters",
+            2,
+        )
+    try:
+        inventory_path = emitter_inventory.expanduser().absolute()
+        inventory = load_private_contract(inventory_path, EnvironmentSurveyEmitterInventory)
+        inventory_identity = model_file_identity(inventory_path, inventory)
+        if inventory_identity.sha256 != emitter_inventory_sha256:
+            raise EnvironmentSurveyError("emitter inventory SHA-256 differs from the CLI pin")
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(Path(__file__), Path(survey_source.__file__)),
+        )
+        selection = build_environment_survey_fleet_selection(
+            tuple(path.expanduser().absolute() for path in manifests),
+            tuple(path.expanduser().absolute() for path in receipts),
+            emitter_inventory_file=inventory_identity,
+            emitter_inventory=inventory,
+            tool_source=source,
+            tool_version=__version__,
+        )
+        identity = write_private_contract(output.expanduser().absolute(), selection)
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_fleet_selection_failed", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "selected_control_frequency_hz": selection.selected_control_frequency_hz,
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+            "receipts_and_artifacts_verified": True,
+        }
+    )
+
+
+@environment_survey_app.command("fleet-verify")
+def environment_survey_fleet_verify(
+    selection: Path = typer.Argument(...),  # noqa: B008
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout bound into the fleet selection.",
+    ),
+) -> None:
+    """Reverify a fleet selection from all four receipts and retained artifacts."""
+
+    import pluto_plus.environment_survey as survey_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyError,
+        verify_environment_survey_fleet_selection,
+    )
+    from pluto_plus.release_candidate import ReleaseCandidateContractError
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    try:
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(Path(__file__), Path(survey_source.__file__)),
+        )
+        verified = verify_environment_survey_fleet_selection(
+            selection.expanduser().absolute(),
+            tool_source=source,
+            tool_version=__version__,
+        )
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_fleet_selection_invalid", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "selected_control_frequency_hz": verified.selected_control_frequency_hz,
+            "selection": str(selection.expanduser().absolute()),
+            "receipts_and_artifacts_verified": True,
+        }
     )
 
 

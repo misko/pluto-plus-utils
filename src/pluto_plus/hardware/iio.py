@@ -7,6 +7,7 @@ import importlib
 import re
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -15,7 +16,7 @@ import numpy as np
 
 from pluto_plus.diagnostic_profiles import parse_metadata_abi
 from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
-from pluto_plus.hardware.base import SampleBlock
+from pluto_plus.hardware.base import DEFAULT_RESTORE_LO_SEARCH_HZ, SampleBlock
 from pluto_plus.hardware.iio_metadata import (
     IioMetadataCaptureSession,
     configure_iio_context_timeout,
@@ -35,6 +36,38 @@ PLUTO_RUNTIME_PRODUCT = "b673"
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
 AD9361_FASTLOCK_PROFILE_COUNT = 8
 _CONCRETE_USB_URI = re.compile(r"^usb:[0-9]+[.][0-9]+[.][0-9]+$")
+
+
+@dataclass(frozen=True, slots=True)
+class IioReceiverSettingsReadback:
+    center_frequency_hz: float
+    sample_rate_hz: float
+    bandwidth_hz: float
+    channels: tuple[int, ...]
+    gain_modes: tuple[GainMode, ...]
+    gain_db: tuple[float, ...]
+
+
+def _receiver_settings_restored(
+    snapshot: IioReceiverSettingsReadback,
+    readback: IioReceiverSettingsReadback,
+) -> bool:
+    """Compare exact settable state while treating AGC gain as observation only."""
+
+    if (
+        readback.center_frequency_hz != snapshot.center_frequency_hz
+        or readback.sample_rate_hz != snapshot.sample_rate_hz
+        or readback.bandwidth_hz != snapshot.bandwidth_hz
+        or readback.channels != snapshot.channels
+        or readback.gain_modes != snapshot.gain_modes
+    ):
+        return False
+    return all(
+        mode is not GainMode.MANUAL or actual == expected
+        for mode, actual, expected in zip(
+            snapshot.gain_modes, readback.gain_db, snapshot.gain_db, strict=True
+        )
+    )
 
 
 class IioRadioDevice:
@@ -301,6 +334,94 @@ class IioRadioDevice:
                 setattr(device, f"rx_hardwaregain_chan{channel}", settings.gain_db)
         _mute_transmit(device)
         return self.read_settings()
+
+    def ensure_transmit_muted(self) -> None:
+        """Apply and read back the adapter's ordinary fail-closed TX guard."""
+
+        _mute_transmit(self._require_device())
+
+    def read_receiver_gain_state(
+        self, channels: tuple[int, ...] = (0, 1)
+    ) -> tuple[tuple[GainMode, ...], tuple[float, ...]]:
+        """Read each requested RX channel's mode and gain without changing cadence."""
+
+        if (
+            not channels
+            or len(set(channels)) != len(channels)
+            or any(channel not in (0, 1) for channel in channels)
+        ):
+            raise ValueError("receiver gain-state channels must be unique RX0/RX1 values")
+        device = self._require_device()
+        modes = tuple(
+            GainMode(str(getattr(device, f"gain_control_mode_chan{channel}")))
+            for channel in channels
+        )
+        gains = tuple(
+            float(getattr(device, f"rx_hardwaregain_chan{channel}")) for channel in channels
+        )
+        if not all(np.isfinite(gain) for gain in gains):
+            raise RadioConfigurationError("receiver gain readback is non-finite")
+        return modes, gains
+
+    def read_receiver_settings_readback(self) -> IioReceiverSettingsReadback:
+        """Read exact paired-RX fields without collapsing per-channel gains."""
+
+        device = self._require_device()
+        channels = tuple(int(item) for item in device.rx_enabled_channels)
+        modes, gains = self.read_receiver_gain_state(channels)
+        numeric = (
+            float(device.rx_lo),
+            float(device.sample_rate),
+            float(device.rx_rf_bandwidth),
+        )
+        if not all(np.isfinite(value) for value in numeric):
+            raise RadioConfigurationError("receiver settings readback is non-finite")
+        return IioReceiverSettingsReadback(
+            center_frequency_hz=numeric[0],
+            sample_rate_hz=numeric[1],
+            bandwidth_hz=numeric[2],
+            channels=channels,
+            gain_modes=modes,
+            gain_db=gains,
+        )
+
+    def restore_receiver_settings_readback(
+        self,
+        snapshot: IioReceiverSettingsReadback,
+        *,
+        maximum_lo_offset_hz: int = DEFAULT_RESTORE_LO_SEARCH_HZ,
+    ) -> IioReceiverSettingsReadback:
+        """Restore every settable RX field and require its exact hardware readback."""
+
+        if maximum_lo_offset_hz < 0:
+            raise ValueError("maximum LO restoration offset cannot be negative")
+        device = self._require_device()
+        self.reset_receive_buffer()
+        device.sample_rate = round(snapshot.sample_rate_hz)
+        device.rx_rf_bandwidth = round(snapshot.bandwidth_hz)
+        device.rx_enabled_channels = list(snapshot.channels)
+        for channel, mode, gain_db in zip(
+            snapshot.channels, snapshot.gain_modes, snapshot.gain_db, strict=True
+        ):
+            setattr(device, f"gain_control_mode_chan{channel}", mode.value)
+            if mode is GainMode.MANUAL:
+                setattr(device, f"rx_hardwaregain_chan{channel}", gain_db)
+        _mute_transmit(device)
+        requested_lo = round(snapshot.center_frequency_hz)
+        offsets = (
+            0,
+            *tuple(value for step in range(1, maximum_lo_offset_hz + 1) for value in (-step, step)),
+        )
+        last: IioReceiverSettingsReadback | None = None
+        for offset in offsets:
+            device.rx_lo = requested_lo + offset
+            last = self.read_receiver_settings_readback()
+            if _receiver_settings_restored(snapshot, last):
+                return last
+        raise RadioConfigurationError(
+            "lossless per-channel RX settings restoration did not read back exactly: "
+            f"snapshot={snapshot!r} last={last!r}"
+        )
 
     def read_block(self, sample_count: int) -> SampleBlock:
         """Read legacy host-timed IQ with continuity explicitly unobservable."""
