@@ -29,6 +29,7 @@ from pluto_plus.hardware.iio_metadata import (
     IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER,
     IIO_CONTEXT_TIMEOUT_MAX_MS,
     IIO_CONTEXT_TIMEOUT_MS,
+    INITIAL_TIME_ANCHOR_COUNT,
     metadata_iio_context_timeout_ms,
 )
 from pluto_plus.tandem import (
@@ -171,6 +172,7 @@ class FakeRxAdc:
         self.headers = deque(headers)
         self.kernel_buffers_count = 4
         self.preserve_readback = preserve_readback
+        self.reg_read_count = 0
 
     def set_kernel_buffers_count(self, count: int) -> int:
         if self.preserve_readback:
@@ -178,6 +180,7 @@ class FakeRxAdc:
         return 0
 
     def reg_read(self, _address: int) -> int:
+        self.reg_read_count += 1
         return 1_004
 
 
@@ -337,11 +340,15 @@ def test_abi1_capture_reports_contiguous_counter_time_and_exact_constructor() ->
         _metadata_v3(buffer_sequence=0, first_sample_sequence=1_000).pack(),
         _metadata_v3(buffer_sequence=1, first_sample_sequence=1_004).pack(),
     ]
-    radio, _adi, factory = _open_radio(headers)
+    radio, adi, factory = _open_radio(headers)
     try:
         with radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8) as capture:
+            assert adi.device is not None
+            startup_reg_reads = adi.device._rxadc.reg_read_count
+            assert startup_reg_reads >= INITIAL_TIME_ANCHOR_COUNT
             first = capture.read_block()
             second = capture.read_block()
+            assert adi.device._rxadc.reg_read_count == startup_reg_reads
             assert capture.kernel_buffers == 8
         assert first.metadata_abi == 1
         assert first.stream_generation == STREAM

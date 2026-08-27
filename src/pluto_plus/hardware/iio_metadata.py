@@ -266,7 +266,13 @@ class IioMetadataCaptureSession:
                 raise RuntimeError("metadata refill returned trailing bytes")
         self._validate_header(metadata)
         missing = self._validate_sequence(metadata)
-        self._refresh_time_anchors(initial=False)
+        # Do not issue control-plane register reads while the DMA stream is in
+        # its hot refill loop.  On the supported IP Pluto transport a register
+        # read can take longer than a maximum-sized native-rate refill, causing
+        # the kernel ring to advance before the next READBUFM request.  The
+        # bounded startup anchors already define the affine counter-to-host
+        # mapping; SampleClockFit truthfully grows its uncertainty when a frame
+        # is extrapolated beyond those anchors.
         timing = self._capture_time(metadata.first_sample_sequence)
         utc_ns = (
             timing["sample_time_realtime_start_ns"]
