@@ -786,6 +786,35 @@ def test_pinned_transport_reads_redacted_config_and_applies_only_bound_network_p
     assert b"device_reboot" not in apply_stdin
 
 
+def test_pinned_transport_accepts_an_empty_generated_config_txt(tmp_path: Path) -> None:
+    values = {
+        "ipaddr": "192.168.2.1",
+        "ipaddr_host": "192.168.2.10",
+        "netmask": "255.255.255.0",
+        "ipaddr_eth": "192.168.1.183",
+        "netmask_eth": "255.255.255.0",
+    }
+    lines = [
+        "PPU\tserial\tSERIAL_A",
+        "PPU\thostname\tpluto",
+        *(f"PPU\t{key}\t{value}" for key, value in values.items()),
+        f"PPU\tenvironment_sha256\t{persistent_environment_sha256(values)}",
+        f"PPU\tconfig_txt_sha256\t{hashlib.sha256(b'').hexdigest()}",
+        "PPU\tconfig_txt_redacted_b64\t",
+    ]
+    transport = _ssh_transport(
+        tmp_path,
+        RecordingSshRunner(
+            [SshCommandResult(0, ("\n".join(lines) + "\n").encode(), b"")]
+        ),
+    )
+
+    observed = transport.inspect_network_config("SERIAL_A")
+
+    assert observed.config_txt_redacted == ""
+    assert observed.ethernet_address == "192.168.1.183"
+
+
 def test_pinned_transport_rejects_hostnames_loose_files_and_changed_key(
     tmp_path: Path,
 ) -> None:

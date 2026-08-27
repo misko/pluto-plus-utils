@@ -583,7 +583,9 @@ class SshNetworkConfigBackend:
         )
         if _required(fields, "serial") != serial:
             raise IpFirmwareError("network-config inspection returned another serial")
-        encoded = _required(fields, "config_txt_redacted_b64")
+        if "config_txt_redacted_b64" not in fields:
+            raise IpFirmwareError("remote report omitted config_txt_redacted_b64")
+        encoded = fields["config_txt_redacted_b64"]
         try:
             config_bytes = base64.b64decode(encoded, validate=True)
             config_text = config_bytes.decode("utf-8")
