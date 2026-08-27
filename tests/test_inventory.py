@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
+from pluto_plus import inventory as inventory_module
 from pluto_plus.inventory import (
     LocalUsbPluto,
     build_radio_inventory,
@@ -52,6 +56,11 @@ def _usb_device(
     if serial:
         properties.append(f"E:ID_SERIAL_SHORT={serial}")
     (udev_root / f"c189:{minor}").write_text("\n".join(properties) + "\n")
+    physical_interface_count = 7 if "+" in product else 5
+    _attribute(device, "bNumInterfaces", str(physical_interface_count))
+    _attribute(device, "bConfigurationValue", "1")
+    for interface_number in range(physical_interface_count):
+        (device / f"{name}:1.{interface_number}").mkdir()
     return device
 
 
@@ -117,8 +126,8 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
     network_function = plus / "3-8:1.0"
     terminal_function = plus / "3-8:1.3"
     storage_partition = plus / "3-8:1.2" / "host" / "block" / "sdb" / "sdb1"
-    network_function.mkdir()
-    terminal_function.mkdir()
+    network_function.mkdir(exist_ok=True)
+    terminal_function.mkdir(exist_ok=True)
     storage_partition.mkdir(parents=True)
     (storage_partition / "partition").write_text("1\n")
     _class_device(net_root, "enx001", network_function, device_link=True)
@@ -164,6 +173,7 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
     assert devices[0].advertised_max_power_ma == 500
     assert devices[0].runtime_power_status == "active"
     assert devices[0].runtime_power_control == "on"
+    assert devices[0].interface_count == 7
     assert devices[0].direct_to_root_hub is True
     assert devices[0].intermediate_hub_count == 0
     assert devices[0].link_faults is not None
@@ -171,6 +181,253 @@ def test_sysfs_scan_correlates_network_terminal_storage_and_blank_serial(
     assert devices[0].link_faults.disconnect_count == 1
     assert devices[0].link_faults.port_power_cycle_count == 1
     assert devices[1].serial is None
+
+
+def test_sysfs_scan_uses_physical_interfaces_when_udev_class_tokens_are_collapsed(
+    tmp_path: Path,
+) -> None:
+    usb_root = tmp_path / "usb"
+    udev_root = tmp_path / "udev"
+    _usb_device(
+        usb_root,
+        udev_root,
+        "3-7",
+        serial="winbond-db6968136727402c",
+        product="PlutoSDR+ with timestamp support",
+        bus=3,
+        device_number=47,
+    )
+
+    (device,) = scan_local_usb_plutos(
+        usb_root,
+        udev_data_root=udev_root,
+        kernel_log_reader=lambda: "",
+    )
+
+    # The real udev property contains six unique class signatures because the
+    # two CDC-data functions share 0a0000. The descriptor and kernel expose
+    # seven distinct physical interface instances, numbered 0 through 6.
+    assert device.interface_count == 7
+
+
+def test_sysfs_scan_fails_closed_when_interface_evidence_is_missing_or_mismatched(
+    tmp_path: Path,
+) -> None:
+    usb_root = tmp_path / "usb"
+    udev_root = tmp_path / "udev"
+    missing = _usb_device(
+        usb_root,
+        udev_root,
+        "3-7",
+        serial="MISSING_DESCRIPTOR",
+        product="PlutoSDR+ with timestamp support",
+        bus=3,
+        device_number=47,
+    )
+    mismatch = _usb_device(
+        usb_root,
+        udev_root,
+        "3-8",
+        serial="MISMATCHED_INTERFACES",
+        product="PlutoSDR+ with timestamp support",
+        bus=3,
+        device_number=50,
+    )
+    missing_configuration = _usb_device(
+        usb_root,
+        udev_root,
+        "5-1",
+        serial="MISSING_CONFIGURATION",
+        product="PlutoSDR+ with timestamp support",
+        bus=5,
+        device_number=49,
+    )
+    unconfigured = _usb_device(
+        usb_root,
+        udev_root,
+        "5-2",
+        serial="UNCONFIGURED",
+        product="PlutoSDR+ with timestamp support",
+        bus=5,
+        device_number=51,
+    )
+    (missing / "bNumInterfaces").unlink()
+    (mismatch / "3-8:1.6").rmdir()
+    (missing_configuration / "bConfigurationValue").unlink()
+    _attribute(unconfigured, "bConfigurationValue", "0")
+
+    devices = scan_local_usb_plutos(
+        usb_root,
+        udev_data_root=udev_root,
+        kernel_log_reader=lambda: "",
+    )
+
+    assert {device.serial: device.interface_count for device in devices} == {
+        "MISSING_DESCRIPTOR": None,
+        "MISMATCHED_INTERFACES": None,
+        "MISSING_CONFIGURATION": None,
+        "UNCONFIGURED": None,
+    }
+
+
+def test_sysfs_scan_rejects_foreign_interface_directory_symlink(tmp_path: Path) -> None:
+    usb_root = tmp_path / "usb"
+    udev_root = tmp_path / "udev"
+    device = _usb_device(
+        usb_root,
+        udev_root,
+        "3-7",
+        serial="FOREIGN_CHILD",
+        product="PlutoSDR+ with timestamp support",
+        bus=3,
+        device_number=47,
+    )
+    foreign = tmp_path / "foreign-interface"
+    foreign.mkdir()
+    planted = device / "3-7:1.6"
+    planted.rmdir()
+    planted.symlink_to(foreign, target_is_directory=True)
+
+    (observed,) = scan_local_usb_plutos(
+        usb_root,
+        udev_data_root=udev_root,
+        kernel_log_reader=lambda: "",
+    )
+
+    assert observed.interface_count is None
+
+
+def test_sysfs_scan_rejects_candidate_retarget_during_interface_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usb_root = tmp_path / "usb"
+    usb_root.mkdir()
+    udev_root = tmp_path / "udev"
+    first = _usb_device(
+        tmp_path / "physical-a",
+        udev_root,
+        "3-7",
+        serial="BOUND_A",
+        product="PlutoSDR+ with timestamp support",
+        bus=3,
+        device_number=47,
+    )
+    second = _usb_device(
+        tmp_path / "physical-b",
+        tmp_path / "other-udev",
+        "3-7",
+        serial="BOUND_B",
+        product="PlutoSDR+ with timestamp support",
+        bus=4,
+        device_number=52,
+    )
+    candidate = usb_root / "3-7"
+    candidate.symlink_to(first, target_is_directory=True)
+    real_run = subprocess.run
+    retargeted = False
+
+    def retargeting_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal retargeted
+        completed = real_run(*args, **kwargs)  # type: ignore[call-overload]
+        if not retargeted and args and args[0] == ("cat",):
+            candidate.unlink()
+            candidate.symlink_to(second, target_is_directory=True)
+            retargeted = True
+        return completed  # type: ignore[return-value]
+
+    monkeypatch.setattr("pluto_plus.inventory.subprocess.run", retargeting_run)
+
+    observed = scan_local_usb_plutos(
+        usb_root,
+        udev_data_root=udev_root,
+        kernel_log_reader=lambda: "",
+    )
+
+    assert retargeted is True
+    assert observed == ()
+
+
+def test_sysfs_scan_rejects_same_port_replacement_after_identity_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usb_root = tmp_path / "usb"
+    udev_root = tmp_path / "udev"
+    first = _usb_device(
+        usb_root,
+        udev_root,
+        "3-7",
+        serial="BOUND_A",
+        product="PlutoSDR+ with timestamp support",
+        bus=3,
+        device_number=47,
+    )
+    second = _usb_device(
+        tmp_path / "staged-replacement",
+        tmp_path / "replacement-udev",
+        "3-7",
+        serial="BOUND_B",
+        product="PlutoSDR+ with timestamp support",
+        bus=3,
+        device_number=52,
+    )
+    removed = tmp_path / "removed-a"
+    real_udev_properties = inventory_module._udev_properties
+    replaced = False
+
+    def replacing_udev_properties(*args: object, **kwargs: object) -> dict[str, str]:
+        nonlocal replaced
+        properties = real_udev_properties(*args, **kwargs)  # type: ignore[arg-type]
+        if not replaced:
+            first.rename(removed)
+            second.rename(first)
+            replaced = True
+        return properties
+
+    monkeypatch.setattr(inventory_module, "_udev_properties", replacing_udev_properties)
+
+    observed = scan_local_usb_plutos(
+        usb_root,
+        udev_data_root=udev_root,
+        kernel_log_reader=lambda: "",
+    )
+
+    assert replaced is True
+    assert observed == ()
+
+
+def test_sysfs_scan_reports_seven_interfaces_for_the_reserved_four(
+    tmp_path: Path,
+) -> None:
+    usb_root = tmp_path / "usb"
+    udev_root = tmp_path / "udev"
+    expected = (
+        ("3-7", "winbond-db6968136727402c", 3, 47),
+        ("3-8", "1040007c4a94000211000b009186843ef2", 3, 50),
+        ("5-1", "winbond-db620818a328172c", 5, 49),
+        ("5-2", "104000bac4950008230026001b440a003a", 5, 51),
+    )
+    for path, serial, bus, device_number in expected:
+        _usb_device(
+            usb_root,
+            udev_root,
+            path,
+            serial=serial,
+            product="PlutoSDR+ with timestamp support",
+            bus=bus,
+            device_number=device_number,
+        )
+
+    devices = scan_local_usb_plutos(
+        usb_root,
+        udev_data_root=udev_root,
+        kernel_log_reader=lambda: "",
+    )
+
+    assert tuple(
+        (Path(device.usb_path).name, device.serial, device.interface_count) for device in devices
+    ) == tuple((path, serial, 7) for path, serial, _bus, _number in expected)
 
 
 def test_sysfs_scan_reports_intermediate_hub_and_nearest_pci_controller(

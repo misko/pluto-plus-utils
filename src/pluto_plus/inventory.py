@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import fcntl
 import ipaddress
+import os
 import re
 import socket
+import stat
 import struct
 import subprocess
 from collections.abc import Callable, Iterable
@@ -135,6 +137,16 @@ def scan_local_usb_plutos(
     log_text = (kernel_log_reader or _recent_kernel_usb_log)()
     devices: list[LocalUsbPluto] = []
     for candidate in sorted(usb_root.iterdir(), key=lambda item: item.name):
+        try:
+            resolved = candidate.resolve(strict=True)
+            initial_device = os.stat(resolved, follow_symlinks=False)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(initial_device.st_mode):
+            continue
+        device_identity = _inode_identity(initial_device)
+        if not _device_alias_is_bound(candidate, resolved, device_identity):
+            continue
         event = _key_value_lines(_read(candidate / "uevent"))
         if event.get("DEVTYPE") != "usb_device":
             continue
@@ -160,7 +172,6 @@ def scan_local_usb_plutos(
             event.get("MAJOR"),
             event.get("MINOR"),
         )
-        resolved = candidate.resolve()
         network_names = _class_devices_below(net_root, resolved, device_link=True)
         terminals = tuple(
             f"/dev/{name}"
@@ -174,13 +185,10 @@ def scan_local_usb_plutos(
         storage_names = partitions or tuple(
             name for name in block_names if not (block_root / name / "partition").exists()
         )
-        interface_count = (
-            len(
-                tuple(
-                    value for value in properties.get("ID_USB_INTERFACES", "").split(":") if value
-                )
-            )
-            or None
+        interface_count = _physical_usb_interface_count(
+            candidate,
+            resolved,
+            device_identity,
         )
         interfaces = tuple(
             HostNetworkInterface(name=name, ipv4_addresses=address_reader(name))
@@ -193,6 +201,33 @@ def scan_local_usb_plutos(
         speed = _optional_float(_bounded_sysfs_read(candidate / "speed"))
         usb_version = _normalized_optional(_bounded_sysfs_read(candidate / "version"))
         advertised_power = _parse_milliamps(_bounded_sysfs_read(candidate / "bMaxPower"))
+        runtime_power_status = _normalized_optional(
+            _bounded_sysfs_read(candidate / "power" / "runtime_status")
+        )
+        runtime_power_control = _normalized_optional(
+            _bounded_sysfs_read(candidate / "power" / "control")
+        )
+        root_controller_vendor_id = (
+            None
+            if controller_path is None
+            else _normalized_hex_id(_read(controller_path / "vendor"))
+        )
+        root_controller_device_id = (
+            None
+            if controller_path is None
+            else _normalized_hex_id(_read(controller_path / "device"))
+        )
+        if (
+            not _device_alias_is_bound(candidate, resolved, device_identity)
+            or _key_value_lines(_read(candidate / "uevent")) != event
+            or _udev_properties(
+                udev_data_root,
+                event.get("MAJOR"),
+                event.get("MINOR"),
+            )
+            != properties
+        ):
+            continue
         port_name = candidate.name
         devices.append(
             LocalUsbPluto(
@@ -212,28 +247,16 @@ def scan_local_usb_plutos(
                 interface_count=interface_count,
                 usb_spec_version=usb_version,
                 advertised_max_power_ma=advertised_power,
-                runtime_power_status=_normalized_optional(
-                    _bounded_sysfs_read(candidate / "power" / "runtime_status")
-                ),
-                runtime_power_control=_normalized_optional(
-                    _bounded_sysfs_read(candidate / "power" / "control")
-                ),
+                runtime_power_status=runtime_power_status,
+                runtime_power_control=runtime_power_control,
                 resolved_parent_path=resolved_path,
                 direct_to_root_hub=_direct_to_root_hub(port_name),
                 intermediate_hub_count=_intermediate_hub_count(port_name),
                 root_controller_pci_address=(
                     None if controller_path is None else controller_path.name
                 ),
-                root_controller_vendor_id=(
-                    None
-                    if controller_path is None
-                    else _normalized_hex_id(_read(controller_path / "vendor"))
-                ),
-                root_controller_device_id=(
-                    None
-                    if controller_path is None
-                    else _normalized_hex_id(_read(controller_path / "device"))
-                ),
+                root_controller_vendor_id=root_controller_vendor_id,
+                root_controller_device_id=root_controller_device_id,
                 link_faults=_usb_link_fault_summary(log_text, port_name),
                 host_network_interfaces=interfaces,
                 terminal_devices=terminals,
@@ -588,6 +611,217 @@ def _bounded_sysfs_read(path: Path) -> str:
     if completed.returncode != 0 or len(completed.stdout) > 256:
         return ""
     return completed.stdout.strip()
+
+
+def _physical_usb_interface_count(
+    device: Path,
+    resolved_device: Path,
+    expected_device_identity: tuple[int, int],
+) -> int | None:
+    """Return the descriptor count only when this device exposes every interface.
+
+    ``ID_USB_INTERFACES`` is a set of interface class signatures, not an
+    interface-instance list. In particular, udev collapses the two CDC-data
+    Pluto+ functions into one ``0a0000`` token. Bind the count to the selected
+    physical device instead: the active configuration's descriptor count and
+    its kernel-created interface nodes must agree. A disappearing, unconfigured,
+    or internally inconsistent device is reported with an unknown count so
+    callers which require a canonical function set fail closed.
+    """
+
+    try:
+        device_fd = os.open(
+            resolved_device,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except OSError:
+        return None
+    try:
+        device_identity = _directory_identity(device_fd)
+        if (
+            device_identity is None
+            or device_identity != expected_device_identity
+            or not _device_alias_is_bound(device, resolved_device, expected_device_identity)
+        ):
+            return None
+        descriptor_count = _optional_decimal(
+            _bounded_dirfd_attribute_read(device_fd, "bNumInterfaces")
+        )
+        configuration = _optional_decimal(
+            _bounded_dirfd_attribute_read(device_fd, "bConfigurationValue")
+        )
+        if (
+            descriptor_count is None
+            or descriptor_count <= 0
+            or configuration is None
+            or configuration <= 0
+        ):
+            return None
+        interface_pattern = re.compile(rf"{re.escape(resolved_device.name)}:{configuration}\.(\d+)")
+        try:
+            names = os.listdir(device_fd)
+        except OSError:
+            return None
+        interface_identities: dict[str, tuple[int, int]] = {}
+        interface_numbers: set[int] = set()
+        for name in names:
+            match = interface_pattern.fullmatch(name)
+            if match is None:
+                continue
+            identity = _direct_child_directory_identity(
+                device_fd,
+                name,
+                expected_device_identity,
+            )
+            if identity is None:
+                return None
+            interface_identities[name] = identity
+            interface_numbers.add(int(match.group(1), 10))
+        if len(interface_numbers) != descriptor_count:
+            return None
+        if not _directory_entries_still_match(device_fd, interface_pattern, interface_identities):
+            return None
+        if (
+            _optional_decimal(_bounded_dirfd_attribute_read(device_fd, "bNumInterfaces"))
+            != descriptor_count
+            or _optional_decimal(_bounded_dirfd_attribute_read(device_fd, "bConfigurationValue"))
+            != configuration
+        ):
+            return None
+        if not _device_alias_is_bound(device, resolved_device, expected_device_identity):
+            return None
+        return descriptor_count
+    finally:
+        os.close(device_fd)
+
+
+def _bounded_dirfd_attribute_read(directory_fd: int, name: str) -> str:
+    """Read one no-follow attribute bound to an already-open device directory."""
+
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            return ""
+        attribute_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
+        )
+    except OSError:
+        return ""
+    try:
+        opened = os.fstat(attribute_fd)
+        if not stat.S_ISREG(opened.st_mode) or _inode_identity(before) != _inode_identity(opened):
+            return ""
+        try:
+            completed = subprocess.run(
+                ("cat",),
+                check=False,
+                stdin=attribute_fd,
+                capture_output=True,
+                text=True,
+                timeout=0.25,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        try:
+            after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError:
+            return ""
+        if _inode_identity(after) != _inode_identity(opened):
+            return ""
+        if completed.returncode != 0 or len(completed.stdout) > 256:
+            return ""
+        return completed.stdout.strip()
+    finally:
+        os.close(attribute_fd)
+
+
+def _directory_identity(directory_fd: int) -> tuple[int, int] | None:
+    try:
+        observed = os.fstat(directory_fd)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(observed.st_mode):
+        return None
+    return _inode_identity(observed)
+
+
+def _device_alias_is_bound(
+    device: Path,
+    resolved_device: Path,
+    expected_identity: tuple[int, int],
+) -> bool:
+    try:
+        alias = os.stat(device, follow_symlinks=True)
+        resolved = os.stat(resolved_device, follow_symlinks=False)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(alias.st_mode)
+        and stat.S_ISDIR(resolved.st_mode)
+        and _inode_identity(alias) == expected_identity
+        and _inode_identity(resolved) == expected_identity
+    )
+
+
+def _direct_child_directory_identity(
+    parent_fd: int,
+    name: str,
+    parent_identity: tuple[int, int],
+) -> tuple[int, int] | None:
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(before.st_mode):
+            return None
+        child_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(child_fd)
+        owning_parent = os.stat("..", dir_fd=child_fd, follow_symlinks=False)
+        after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return None
+    finally:
+        os.close(child_fd)
+    identity = _inode_identity(opened)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or _inode_identity(before) != identity
+        or _inode_identity(after) != identity
+        or _inode_identity(owning_parent) != parent_identity
+    ):
+        return None
+    return identity
+
+
+def _directory_entries_still_match(
+    directory_fd: int,
+    interface_pattern: re.Pattern[str],
+    expected: dict[str, tuple[int, int]],
+) -> bool:
+    try:
+        current_names = {
+            name for name in os.listdir(directory_fd) if interface_pattern.fullmatch(name)
+        }
+        if current_names != set(expected):
+            return False
+        for name, identity in expected.items():
+            observed = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(observed.st_mode) or _inode_identity(observed) != identity:
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _inode_identity(observed: os.stat_result) -> tuple[int, int]:
+    return observed.st_dev, observed.st_ino
 
 
 def _direct_to_root_hub(port_name: str) -> bool | None:
