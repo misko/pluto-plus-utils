@@ -96,6 +96,10 @@ candidate_ram_app = typer.Typer(
     no_args_is_help=True,
     help="Plan, execute, and verify local release-candidate RAM deployments.",
 )
+comparator_ram_app = typer.Typer(
+    no_args_is_help=True,
+    help="Plan, execute, and verify the immutable approved-v7 comparator RAM boot.",
+)
 environment_survey_app = typer.Typer(
     no_args_is_help=True,
     help="Plan, execute, and verify exact-USB RX-only RF environment surveys.",
@@ -117,6 +121,7 @@ app.add_typer(artifact_app, name="artifact")
 app.add_typer(scan_app, name="scan")
 app.add_typer(firmware_app, name="firmware")
 firmware_app.add_typer(candidate_ram_app, name="candidate-ram")
+firmware_app.add_typer(comparator_ram_app, name="comparator-ram")
 app.add_typer(environment_survey_app, name="environment-survey")
 app.add_typer(setup_app, name="setup")
 app.add_typer(config_app, name="config")
@@ -3142,6 +3147,272 @@ def environment_survey_fleet_verify(
             "selected_control_frequency_hz": verified.selected_control_frequency_hz,
             "selection": str(selection.expanduser().absolute()),
             "receipts_and_artifacts_verified": True,
+        }
+    )
+
+
+@comparator_ram_app.command("plan")
+def firmware_comparator_ram_plan(
+    retained_bundle: Path = typer.Option(  # noqa: B008
+        ..., "--retained-bundle", help="Exact retained approved-v7 build bundle."
+    ),
+    dfu: Path = typer.Option(  # noqa: B008
+        ..., "--dfu", help="Exact retained approved-v7 DFU beside the build bundle."
+    ),
+    usb_inventory: Path = typer.Option(  # noqa: B008
+        ..., "--usb-inventory", help="Private strict inventory from candidate-ram inventory."
+    ),
+    serial: str = typer.Option(..., "--serial", help="Exact pilot USB serial."),
+    expected_current_firmware: str = typer.Option(
+        ..., "--expected-current-firmware", help="Exact preboot firmware version."
+    ),
+    expected_current_hardware_model: str = typer.Option(
+        ..., "--expected-current-hardware-model", help="Exact preboot Pluto+ hardware model."
+    ),
+    expected_current_metadata_abi: str = typer.Option(
+        ..., "--expected-current-metadata-abi", help="Exact preboot frame-metadata ABI."
+    ),
+    expected_current_capability: list[str] = typer.Option(  # noqa: B008
+        ...,
+        "--expected-current-capability",
+        help="Exact sorted preboot capability; repeat for each capability.",
+    ),
+    receipt: Path = typer.Option(  # noqa: B008
+        ..., "--receipt", help="Absent serial-scoped comparator receipt output."
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent mode-private comparator plan output."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout to bind into the comparator plan.",
+    ),
+    validity_seconds: int = typer.Option(
+        900,
+        "--validity-seconds",
+        min=60,
+        max=1800,
+        help="Bounded file-only plan approval window.",
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1", "--ssh-host", help="Private USB-gadget SSH endpoint."
+    ),
+) -> None:
+    """Create a native approved-v7 comparator plan without opening hardware."""
+
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    import pluto_plus.comparator_ram as comparator_source
+    from pluto_plus import __version__
+    from pluto_plus.comparator_ram import (
+        ComparatorRamError,
+        attest_comparator_tool_repository,
+        prepare_comparator_ram_plan,
+    )
+    from pluto_plus.release_candidate import (
+        ExpectedRuntime,
+        ReleaseCandidateContractError,
+        ReleaseUsbInventory,
+        load_private_contract,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        inventory_path = usb_inventory.expanduser().absolute()
+        inventory = load_private_contract(inventory_path, ReleaseUsbInventory)
+        repository = tool_repository.expanduser().absolute()
+        tool = attest_comparator_tool_repository(
+            repository,
+            version=__version__,
+            wrapper_path=Path(comparator_source.__file__).absolute(),
+        )
+        created = datetime.now(UTC)
+        plan = prepare_comparator_ram_plan(
+            inventory,
+            inventory_path=inventory_path,
+            retained_bundle_path=retained_bundle.expanduser().absolute(),
+            dfu_path=dfu.expanduser().absolute(),
+            serial=serial,
+            expected_current_runtime=ExpectedRuntime(
+                firmware_version=expected_current_firmware,
+                hardware_model=expected_current_hardware_model,
+                metadata_abi=expected_current_metadata_abi,
+                capabilities=tuple(expected_current_capability),
+            ),
+            receipt_path=receipt.expanduser().absolute(),
+            tool=tool,
+            created_at=created,
+            expires_at=created + timedelta(seconds=validity_seconds),
+            plan_id=uuid.uuid4().hex,
+            ssh_host=ssh_host,
+        )
+        identity = write_private_contract(output.expanduser().absolute(), plan)
+    except (
+        OSError,
+        ValueError,
+        ComparatorRamError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("comparator_ram_plan_failed", str(error), 4)
+    _emit(
+        {
+            "mode": "offline_plan",
+            "hardware_accessed": False,
+            "will_write_qspi": False,
+            "will_load_volatile_ram": False,
+            "plan": plan.model_dump(mode="json", by_alias=True),
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+            "next_command": (
+                "pluto firmware comparator-ram execute --plan "
+                f"{identity.path} --expected-plan-sha256 {identity.sha256} "
+                "--ssh-password-file <private-file> "
+                f"--confirm {json.dumps(plan.confirmation_phrase)}"
+            ),
+        }
+    )
+
+
+@comparator_ram_app.command("execute")
+def firmware_comparator_ram_execute(
+    plan: Path = typer.Option(  # noqa: B008
+        ..., "--plan", help="Private plan produced by comparator-ram plan."
+    ),
+    expected_plan_sha256: str = typer.Option(
+        ..., "--expected-plan-sha256", help="Exact reviewed comparator plan SHA-256."
+    ),
+    ssh_password_file: Path = typer.Option(  # noqa: B008
+        ..., "--ssh-password-file", help="Owned mode-0600 one-line radio password file."
+    ),
+    confirmation: str = typer.Option(
+        ..., "--confirm", help="Exact COMPARATOR RAM BOOT <serial> phrase."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Same clean checkout bound into the comparator plan.",
+    ),
+    state_root: Path = typer.Option(  # noqa: B008
+        DEFAULT_STATE_ROOT,
+        "--state-root",
+        help="Private state root used for shared and maintenance locks.",
+    ),
+    timeout_s: float = typer.Option(
+        45.0, "--timeout", min=5.0, max=600.0, help="Per-transition wait timeout."
+    ),
+) -> None:
+    """RAM-boot the exact approved-v7 comparator without persistent authority."""
+
+    import pluto_plus.comparator_ram as comparator_source
+    from pluto_plus import __version__
+    from pluto_plus.comparator_ram import (
+        ComparatorRamError,
+        ComparatorRamPlan,
+        attest_comparator_tool_repository,
+        execute_comparator_ram,
+    )
+    from pluto_plus.release_candidate import ReleaseCandidateContractError, load_private_contract
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import LinuxReleaseCandidateBackend
+
+    environment = inspect_iio_environment(require_usb=True)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    planned: ComparatorRamPlan | None = None
+    try:
+        selected_plan = plan.expanduser().absolute()
+        planned = load_private_contract(selected_plan, ComparatorRamPlan)
+        tool = attest_comparator_tool_repository(
+            tool_repository.expanduser().absolute(),
+            version=__version__,
+            wrapper_path=Path(comparator_source.__file__).absolute(),
+        )
+        backend = LinuxReleaseCandidateBackend(
+            state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
+        )
+        receipt, digest = execute_comparator_ram(
+            selected_plan,
+            expected_plan_sha256=expected_plan_sha256,
+            password_path=ssh_password_file.expanduser().absolute(),
+            confirmation=confirmation,
+            backend=backend,
+            tool=tool,
+            timeout_s=timeout_s,
+        )
+    except (
+        OSError,
+        ValueError,
+        ComparatorRamError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        detail = ""
+        if isinstance(error, ComparatorRamError) and error.receipt is not None:
+            path = planned.receipt_path if planned is not None else "unknown"
+            detail = (
+                f"; durable {error.receipt.outcome} receipt={path} sha256={error.receipt_sha256}"
+            )
+        _fail("comparator_ram_execute_failed", f"{error}{detail}", 5)
+    _emit(
+        {
+            "outcome": receipt.outcome,
+            "receipt": receipt.model_dump(mode="json", by_alias=True),
+            "receipt_path": str(planned.receipt_path),
+            "receipt_sha256": digest,
+            "persistent_write": False,
+        }
+    )
+
+
+@comparator_ram_app.command("receipt-verify")
+def firmware_comparator_ram_receipt_verify(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout bound into the comparator plan.",
+    ),
+) -> None:
+    """Deep-replay a native comparator receipt and every retained input."""
+
+    import pluto_plus.comparator_ram as comparator_source
+    from pluto_plus import __version__
+    from pluto_plus.comparator_ram import (
+        ComparatorRamError,
+        attest_comparator_tool_repository,
+        verify_comparator_ram_receipt,
+    )
+    from pluto_plus.release_candidate import ReleaseCandidateContractError
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        tool = attest_comparator_tool_repository(
+            tool_repository.expanduser().absolute(),
+            version=__version__,
+            wrapper_path=Path(comparator_source.__file__).absolute(),
+        )
+        selected = receipt.expanduser().absolute()
+        verified = verify_comparator_ram_receipt(selected, tool=tool)
+    except (
+        OSError,
+        ValueError,
+        ComparatorRamError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("comparator_ram_receipt_invalid", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "outcome": verified.outcome,
+            "receipt": str(selected),
+            "serial": verified.target.serial,
+            "profile": verified.artifact.profile_id,
+            "persistent_write": False,
         }
     )
 

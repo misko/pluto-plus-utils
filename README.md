@@ -559,6 +559,55 @@ and persistent targets are outside this command.
 The full ownership and migration decision is recorded in
 [`docs/adr/0006-release-candidate-device-lifecycle.md`](docs/adr/0006-release-candidate-device-lifecycle.md).
 
+### Immutable approved-v7 comparator RAM lifecycle
+
+`firmware comparator-ram` is a separate, native evidence boundary for the
+RC21 same-board approved-v7 comparator. It does not relabel a release-candidate
+plan or receipt. The plan hard-binds the retained v7 bundle, DFU and extracted
+FIT bytes, profile/tag/source commit, historical qualification harness, exact
+pilot USB inventory target and current runtime, and the clean current utility
+tree plus its comparator execution wrapper.
+
+Create the plan from retained files only. The strict USB inventory can be the
+private output of `firmware candidate-ram inventory`:
+
+```bash
+uv run pluto firmware comparator-ram plan \
+  --retained-bundle /private/v7/plutoplus-spf-tandem-agc-v2-e0049c2d0077.tar.gz \
+  --dfu /private/v7/plutoplus-spf-tandem-agc-v2-e0049c2d0077-pluto.dfu \
+  --usb-inventory /private/rc21/usb-inventory.json \
+  --serial EXACT_SERIAL \
+  --expected-current-firmware EXACT_CURRENT_VERSION \
+  --expected-current-hardware-model 'EXACT MODEL' \
+  --expected-current-metadata-abi frame-metadata-v5 \
+  --expected-current-capability tandem-agc \
+  --receipt /private/rc21/EXACT_SERIAL/comparator-ram-receipt.json \
+  --output /private/rc21/EXACT_SERIAL-comparator-ram-plan.json
+```
+
+Review the complete plan and its printed SHA-256 before executing its bounded
+approval window:
+
+```bash
+uv run pluto firmware comparator-ram execute \
+  --plan /private/rc21/EXACT_SERIAL-comparator-ram-plan.json \
+  --expected-plan-sha256 EXACT_PLAN_SHA256 \
+  --ssh-password-file /private/credentials/EXACT_SERIAL.password \
+  --confirm 'COMPARATOR RAM BOOT EXACT_SERIAL'
+
+uv run pluto firmware comparator-ram receipt-verify \
+  /private/rc21/EXACT_SERIAL/comparator-ram-receipt.json
+```
+
+The executor shares the normal per-radio lock, owns and removes one exact
+`/32` USB-gadget route, re-attests the serial/topology/interface and current
+runtime, copies the reverified DFU into a sealed descriptor, and accepts only
+the paired `0456:b673,0456:b674` selector on `firmware.dfu` followed by detach.
+A PASS receipt requires a changed boot ID, exact approved-v7 runtime, unchanged
+`qspi-linux` size/hash, released route, and complete TX/DDS/DAC/tandem safe
+state. `-R`, `-S`, serial-only selectors, arbitrary alternates, QSPI writes,
+and every persistent target are outside this command.
+
 Firmware is fail-closed unless the service is constructed with an explicit
 privileged executor. The normal workflow is inspect → upload → plan → verify the
 serial/path/hash/mode/expected version → execute the short-lived one-time token.
