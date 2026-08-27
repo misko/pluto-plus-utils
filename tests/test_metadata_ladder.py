@@ -115,7 +115,7 @@ def test_metadata_ladder_selects_largest_counter_continuous_refill_and_restores(
         samples_per_channel=(1_048_576, 262_144),
         frames=6,
         kernel_buffers=4,
-        radio_factory=lambda _uri, _serial: radio,
+        radio_factory=lambda _uri, _serial, _abi: radio,
         clock_ns=lambda: next(ticks),
     )
 
@@ -144,5 +144,5 @@ def test_metadata_ladder_requires_native_bandwidth_and_four_kernel_buffers() -> 
                 samples_per_channel=(262_144,),
                 frames=2,
                 kernel_buffers=kernel_buffers,
-                radio_factory=lambda _uri, _serial: radio,
+                radio_factory=lambda _uri, _serial, _abi: radio,
             )

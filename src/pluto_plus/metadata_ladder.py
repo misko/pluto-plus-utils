@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from pydantic import Field, model_validator
 
@@ -76,6 +76,7 @@ class MetadataContinuityLadderReport(ApiModel):
     transport: str
     model: str
     firmware_version: str | None
+    metadata_abi: Literal[1, 2]
     sample_rate_hz: int = Field(gt=0)
     rf_bandwidth_hz: int = Field(gt=0)
     channels: tuple[int, int]
@@ -140,10 +141,11 @@ def run_metadata_continuity_ladder(
     serial: str,
     sample_rate_hz: int,
     rf_bandwidth_hz: int,
+    metadata_abi: Literal[1, 2] = 1,
     samples_per_channel: Sequence[int],
     frames: int = 6,
     kernel_buffers: int = 4,
-    radio_factory: Callable[[str, str], MetadataLadderRadio] | None = None,
+    radio_factory: Callable[[str, str, Literal[1, 2]], MetadataLadderRadio] | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> MetadataContinuityLadderReport:
     """Measure device-axis continuity for each refill size and restore RX settings."""
@@ -156,7 +158,7 @@ def run_metadata_continuity_ladder(
         kernel_buffers=kernel_buffers,
     )
     factory = radio_factory or _default_radio_factory
-    radio = factory(uri, serial)
+    radio = factory(uri, serial, metadata_abi)
     opened = False
     original: RadioSettings | None = None
     cells: list[MetadataContinuityCell] = []
@@ -215,6 +217,7 @@ def run_metadata_continuity_ladder(
         transport=identity.transport.value,
         model=identity.model,
         firmware_version=identity.firmware_version,
+        metadata_abi=metadata_abi,
         sample_rate_hz=sample_rate_hz,
         rf_bandwidth_hz=rf_bandwidth_hz,
         channels=(0, 1),
@@ -296,5 +299,17 @@ def _validate_request(
         raise ValueError("metadata ladder requires between 4 and 64 kernel buffers")
 
 
-def _default_radio_factory(uri: str, serial: str) -> MetadataLadderRadio:
-    return cast(MetadataLadderRadio, IioRadioDevice(uri, serial=serial, radio_id=serial))
+def _default_radio_factory(
+    uri: str,
+    serial: str,
+    metadata_abi: Literal[1, 2],
+) -> MetadataLadderRadio:
+    return cast(
+        MetadataLadderRadio,
+        IioRadioDevice(
+            uri,
+            serial=serial,
+            radio_id=serial,
+            expected_metadata_abi=metadata_abi,
+        ),
+    )

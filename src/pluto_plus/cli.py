@@ -1090,6 +1090,13 @@ def radio_metadata_ladder(
         min=1,
         help="Exact analog RF bandwidth; must not exceed the sample rate.",
     ),
+    metadata_abi: int = typer.Option(
+        1,
+        "--metadata-abi",
+        min=1,
+        max=2,
+        help="Exact release-local and radio metadata ABI to attest.",
+    ),
     samples: str = typer.Option(
         DEFAULT_METADATA_SAMPLE_LADDER,
         "--samples",
@@ -1161,12 +1168,15 @@ def radio_metadata_ladder(
     environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
     if not environment.healthy:
         _fail(environment.status.value, environment.actionable_message, 5)
+    if metadata_abi not in {1, 2}:
+        _fail("metadata_ladder_failed", "metadata ABI must be 1 or 2", 5)
     try:
         report = run_metadata_continuity_ladder(
             uri=uri,
             serial=serial,
             sample_rate_hz=sample_rate_hz,
             rf_bandwidth_hz=rf_bandwidth_hz,
+            metadata_abi=cast(Any, metadata_abi),
             samples_per_channel=parsed_samples,
             frames=frames,
             kernel_buffers=kernel_buffers,
