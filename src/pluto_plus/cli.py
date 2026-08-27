@@ -3554,6 +3554,14 @@ def firmware_candidate_ram_inventory(
         "--output",
         help="Absent mode-private output for the strict USB inventory.",
     ),
+    serial: str | None = typer.Option(
+        None,
+        "--serial",
+        help=(
+            "Restrict the retained inventory to exactly one matching USB runtime; "
+            "the selected device must still pass every Pluto+ release check."
+        ),
+    ),
 ) -> None:
     """Capture strict runtime USB topology without opening IIO, SSH, or DFU."""
 
@@ -3566,8 +3574,18 @@ def firmware_candidate_ram_inventory(
     from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
 
     try:
+        scanned = scan_local_usb_plutos()
+        selected = scanned
+        if serial is not None:
+            if not serial or serial.strip() != serial:
+                raise ValueError("release USB inventory serial filter is not exact")
+            selected = tuple(device for device in scanned if device.serial == serial)
+            if len(selected) != 1:
+                raise ValueError(
+                    "release USB inventory requires exactly one runtime matching --serial"
+                )
         inventory = build_release_usb_inventory(
-            scan_local_usb_plutos(), created_at=datetime.now(UTC)
+            selected, created_at=datetime.now(UTC)
         )
         identity = write_private_contract(output.expanduser().absolute(), inventory)
     except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
@@ -3576,7 +3594,9 @@ def firmware_candidate_ram_inventory(
         {
             "mode": "read_only_usb_inventory",
             "hardware_accessed": False,
+            "scanned_device_count": len(scanned),
             "device_count": len(inventory.devices),
+            "serial_filter": serial,
             "output": str(identity.path),
             "sha256": identity.sha256,
         }

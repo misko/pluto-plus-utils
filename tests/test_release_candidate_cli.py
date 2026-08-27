@@ -90,6 +90,7 @@ def test_candidate_ram_help_has_native_plan_execute_and_no_known_hosts() -> None
     assert "--expected-return-firmware" in recover_options
     assert "--output" in recover_options
     assert not any("known-host" in option for option in recover_options)
+    assert "--serial" in options("inventory")
 
 
 def test_candidate_ram_defaults_to_the_source_checkout() -> None:
@@ -114,6 +115,85 @@ def test_candidate_ram_inventory_is_read_only_and_private(
     assert output.stat().st_mode & 0o777 == 0o600
     inventory = load_private_contract(output, ReleaseUsbInventory)
     assert inventory.devices[0].serial == SERIAL
+
+
+def test_candidate_ram_inventory_can_select_one_plus_from_a_mixed_usb_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path.chmod(0o700)
+    output = tmp_path / "usb-inventory.json"
+    ordinary = _local().model_copy(
+        update={
+            "usb_path": "/sys/bus/usb/devices/3-11",
+            "bus_number": 3,
+            "device_number": 31,
+            "product": "PlutoSDR (ADALM-PLUTO)",
+            "serial": "104473b80a16000de6ff2000f8a6beca79",
+            "host_network_interfaces": (
+                HostNetworkInterface(
+                    name="enx00e022abcdef", ipv4_addresses=("192.168.4.10",)
+                ),
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.scan_local_usb_plutos", lambda: (ordinary, _local())
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "candidate-ram",
+            "inventory",
+            "--serial",
+            SERIAL,
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.output)
+    assert document["hardware_accessed"] is False
+    assert document["scanned_device_count"] == 2
+    assert document["device_count"] == 1
+    assert document["serial_filter"] == SERIAL
+    inventory = load_private_contract(output, ReleaseUsbInventory)
+    assert tuple(device.serial for device in inventory.devices) == (SERIAL,)
+
+
+@pytest.mark.parametrize("matches", [0, 2])
+def test_candidate_ram_inventory_serial_filter_requires_one_exact_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, matches: int
+) -> None:
+    tmp_path.chmod(0o700)
+    devices = tuple(
+        _local().model_copy(
+            update={
+                "usb_path": f"/sys/bus/usb/devices/3-{7 + index}",
+                "device_number": 29 + index,
+            }
+        )
+        for index in range(matches)
+    )
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: devices)
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "candidate-ram",
+            "inventory",
+            "--serial",
+            SERIAL,
+            "--output",
+            str(tmp_path / "usb-inventory.json"),
+        ],
+    )
+
+    assert result.exit_code == 4
+    assert "requires exactly one runtime matching --serial" in result.output
 
 
 def test_candidate_ram_plan_consumes_retained_files_only(tmp_path: Path) -> None:
