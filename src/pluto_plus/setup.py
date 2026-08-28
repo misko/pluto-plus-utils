@@ -227,9 +227,15 @@ class CanonicalSetupManager:
         self._validate_identity(identity, observation)
         return observation
 
+    def inspect_qualified(self, identity: SetupIdentity) -> SetupObservation:
+        """Inspect and prove the exact active/QSPI setup policy without mutation."""
+
+        observation = self.inspect(identity)
+        self._validate_preconditions(observation)
+        return observation
+
     def create_plan(self, identity: SetupIdentity) -> PlannedSetup:
-        before = self.inspect(identity)
-        self._validate_preconditions(before)
+        before = self.inspect_qualified(identity)
         changes = tuple(
             (key, expected)
             for key, expected in CANONICAL_UBOOT.items()

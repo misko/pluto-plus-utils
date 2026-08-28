@@ -145,6 +145,24 @@ def test_probe_passes_and_never_mutates_a_canonical_radio(tmp_path: Path) -> Non
     assert backend.provisioned == []
 
 
+def test_probe_never_passes_canonical_tuple_with_wrong_qspi_hash(tmp_path: Path) -> None:
+    backend = FakeBackend(
+        _observation(
+            uboot=dict(CANONICAL_UBOOT),
+            qspi_firmware_sha256="f" * 64,
+            boot_provenance="unknown",
+        )
+    )
+
+    outcome = _probe(backend, tmp_path)
+
+    assert outcome.status == "unknown"
+    assert outcome.actual is None
+    assert outcome.repair is None
+    assert "QSPI firmware hash does not match setup policy" in outcome.summary
+    assert backend.provisioned == []
+
+
 def test_unreachable_radio_degrades_to_unknown_instead_of_raising(tmp_path: Path) -> None:
     def build(identity: SetupIdentity) -> CanonicalSetupManager:
         raise SetupHelperError("ssh: connect to host 192.168.2.1 port 22: No route to host")
