@@ -178,6 +178,28 @@ def test_ladder_rejects_hardware_proven_unsafe_kernel_queue_before_open(
     assert not radio.opened
 
 
+def test_ladder_allows_audited_unsafe_kernel_queue_override() -> None:
+    radio = FakeLadderRadio()
+
+    report = run_iio_ladder(
+        uri="ip:192.168.1.187",
+        serial="SERIAL_A",
+        rates_hz=(1_000_000,),
+        channels=(0,),
+        samples_per_channel=2_097_152,
+        frames=1,
+        warmup_frames=0,
+        kernel_buffers=3,
+        allow_unsafe_kernel_queue=True,
+        radio_factory=lambda _uri, _serial: radio,
+        clock_ns=AdvancingClock(),
+    )
+
+    assert report.kernel_queue_bytes == 24 * 1024 * 1024
+    assert report.unsafe_kernel_queue_override is True
+    assert report.original_settings_restored is True
+
+
 def test_ladder_rejects_out_of_range_rates_without_skipping_other_cells() -> None:
     radio = FakeLadderRadio()
     report = run_iio_ladder(

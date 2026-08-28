@@ -48,6 +48,7 @@ from pluto_plus.inventory import (
 from pluto_plus.ladder import (
     DEFAULT_RATE_LADDER,
     LADDER_CHANNEL_SELECTIONS,
+    UNSAFE_KERNEL_QUEUE_CONFIRMATION,
     LadderReport,
     parse_rate_ladder,
     run_iio_ladder,
@@ -449,8 +450,11 @@ def _ladder_table(report: LadderReport) -> str:
         f"Radio {report.serial} · {report.uri} · {report.model} · "
         f"firmware {report.firmware_version or 'unknown'} · "
         f"kernel buffers {report.kernel_buffers} "
-        f"({report.kernel_buffer_configuration_basis.replace('_', ' ')})"
+        f"({report.kernel_buffer_configuration_basis.replace('_', ' ')}) · "
+        f"RX queue {report.kernel_queue_bytes / (1024 * 1024):g} MiB"
     )
+    if report.unsafe_kernel_queue_override:
+        identity += " (UNVALIDATED OVERRIDE)"
     restore = "Original RX settings restored: yes"
     return "\n".join((identity, header, separator, *body, restore, report.continuity_claim))
 
@@ -1129,6 +1133,14 @@ def radio_ladder(
         max=64,
         help="Explicit libiio RX kernel-buffer count.",
     ),
+    unsafe_kernel_queue_confirmation: str | None = typer.Option(
+        None,
+        "--unsafe-kernel-queue-confirm",
+        help=(
+            "Exact phrase ALLOW UNVALIDATED RX QUEUE to exceed the hardware-validated "
+            "16 MiB aggregate RX queue ceiling."
+        ),
+    ),
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Output format: table or json."
     ),
@@ -1234,6 +1246,16 @@ def radio_ladder(
         parsed_rates = parse_rate_ladder(rates)
     except ValueError as error:
         _fail("ladder_failed", str(error), 5)
+    allow_unsafe_kernel_queue = unsafe_kernel_queue_confirmation is not None
+    if (
+        allow_unsafe_kernel_queue
+        and unsafe_kernel_queue_confirmation != UNSAFE_KERNEL_QUEUE_CONFIRMATION
+    ):
+        _fail(
+            "unsafe_kernel_queue_confirmation_invalid",
+            f"--unsafe-kernel-queue-confirm must be exactly {UNSAFE_KERNEL_QUEUE_CONFIRMATION!r}",
+            2,
+        )
     environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
     if not environment.healthy:
         _fail(environment.status.value, environment.actionable_message, 5)
@@ -1248,6 +1270,7 @@ def radio_ladder(
             frames=frames,
             warmup_frames=warmup_frames,
             kernel_buffers=kernel_buffers,
+            allow_unsafe_kernel_queue=allow_unsafe_kernel_queue,
         )
 
     try:

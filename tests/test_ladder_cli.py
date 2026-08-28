@@ -10,7 +10,11 @@ from typer.testing import CliRunner
 
 from pluto_plus.cli import app
 from pluto_plus.hardware.preflight import IioEnvironmentReport, IioEnvironmentStatus
-from pluto_plus.ladder import LadderCell, LadderReport
+from pluto_plus.ladder import (
+    UNSAFE_KERNEL_QUEUE_CONFIRMATION,
+    LadderCell,
+    LadderReport,
+)
 
 runner = CliRunner()
 
@@ -44,6 +48,8 @@ def _report(uri: str, serial: str, channels: tuple[int, ...] = (0, 1)) -> Ladder
         channels=channels,
         kernel_buffers=8,
         kernel_buffer_configuration_basis="readback",
+        kernel_queue_bytes=262_144 * len(channels) * 4 * 8,
+        unsafe_kernel_queue_override=False,
         wire_bytes_per_sample_period=len(channels) * 4,
         warmup_frames=2,
         cells=(
@@ -112,7 +118,59 @@ def test_ip_ladder_is_standalone_and_forwards_exact_identity(
     assert calls[0]["channels"] == (0,)
     assert calls[0]["frames"] == 4
     assert calls[0]["kernel_buffers"] == 8
+    assert calls[0]["allow_unsafe_kernel_queue"] is False
     assert json.loads(result.stdout)["original_settings_restored"] is True
+
+
+def test_ip_ladder_forwards_exact_unsafe_kernel_queue_confirmation(
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def run(**kwargs: Any) -> LadderReport:
+        calls.append(kwargs)
+        return _report(kwargs["uri"], kwargs["serial"], channels=(0,))
+
+    monkeypatch.setattr("pluto_plus.cli.run_iio_ladder", run)
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "ladder",
+            "192.168.1.187",
+            "--transport",
+            "ip",
+            "--expect-serial",
+            "SERIAL_A",
+            "--channels",
+            "rx0",
+            "--unsafe-kernel-queue-confirm",
+            UNSAFE_KERNEL_QUEUE_CONFIRMATION,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["allow_unsafe_kernel_queue"] is True
+
+
+def test_ip_ladder_rejects_inexact_unsafe_kernel_queue_confirmation() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "ladder",
+            "192.168.1.187",
+            "--transport",
+            "ip",
+            "--expect-serial",
+            "SERIAL_A",
+            "--unsafe-kernel-queue-confirm",
+            "yes",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "must be exactly" in result.output
 
 
 def test_usb_ladder_table_includes_bandwidth_and_restore_status(monkeypatch: Any) -> None:

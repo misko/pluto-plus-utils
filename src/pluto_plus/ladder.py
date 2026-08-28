@@ -28,6 +28,7 @@ KEEP_PACE_FRACTION = 0.90
 # permanently wedge RX-DMAC completion after the first timeout, while the
 # 16 MiB envelope remains healthy across single and dual 1--15 MS/s ladders.
 MAX_SAFE_KERNEL_QUEUE_BYTES = 16 * 1024 * 1024
+UNSAFE_KERNEL_QUEUE_CONFIRMATION = "ALLOW UNVALIDATED RX QUEUE"
 _RATE_PATTERN = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([kKmMgG]?)$")
 _RATE_MULTIPLIERS = {"": 1, "k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
 
@@ -65,6 +66,8 @@ class LadderReport(ApiModel):
     channels: tuple[int, ...]
     kernel_buffers: int = Field(ge=1, le=64)
     kernel_buffer_configuration_basis: Literal["setter_accepted", "readback"]
+    kernel_queue_bytes: int = Field(gt=0)
+    unsafe_kernel_queue_override: bool
     wire_bytes_per_sample_period: int
     warmup_frames: int
     cells: tuple[LadderCell, ...]
@@ -134,19 +137,21 @@ def run_iio_ladder(
     frames: int = 12,
     warmup_frames: int = 2,
     kernel_buffers: int = 8,
+    allow_unsafe_kernel_queue: bool = False,
     radio_factory: Callable[[str, str | None], LadderRadio] | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> LadderReport:
     """Run a bounded RX-layout ladder and restore the exact original RX settings."""
 
     selected_channels = tuple(channels)
-    _validate_shape(
+    kernel_queue_bytes = _validate_shape(
         rates_hz,
         selected_channels,
         samples_per_channel,
         frames,
         warmup_frames,
         kernel_buffers,
+        allow_unsafe_kernel_queue,
     )
     factory = radio_factory or _default_radio_factory
     radio = factory(uri, serial)
@@ -260,6 +265,8 @@ def run_iio_ladder(
         channels=selected_channels,
         kernel_buffers=kernel_buffers,
         kernel_buffer_configuration_basis=kernel_buffer_configuration_basis,
+        kernel_queue_bytes=kernel_queue_bytes,
+        unsafe_kernel_queue_override=(kernel_queue_bytes > MAX_SAFE_KERNEL_QUEUE_BYTES),
         wire_bytes_per_sample_period=len(selected_channels) * WIRE_BYTES_PER_COMPLEX_SAMPLE,
         warmup_frames=warmup_frames,
         cells=tuple(cells),
@@ -279,7 +286,8 @@ def _validate_shape(
     frames: int,
     warmup_frames: int,
     kernel_buffers: int,
-) -> None:
+    allow_unsafe_kernel_queue: bool,
+) -> int:
     if not rates_hz or len(rates_hz) > MAX_RATE_RUNGS:
         raise ValueError(f"speed ladder requires between 1 and {MAX_RATE_RUNGS} rungs")
     if any(right <= left for left, right in zip(rates_hz, rates_hz[1:], strict=False)):
@@ -298,18 +306,17 @@ def _validate_shape(
     if not 1 <= kernel_buffers <= 64:
         raise ValueError("kernel buffer count must be between 1 and 64")
     queue_bytes = (
-        samples_per_channel
-        * len(channels)
-        * WIRE_BYTES_PER_COMPLEX_SAMPLE
-        * kernel_buffers
+        samples_per_channel * len(channels) * WIRE_BYTES_PER_COMPLEX_SAMPLE * kernel_buffers
     )
-    if queue_bytes > MAX_SAFE_KERNEL_QUEUE_BYTES:
+    if queue_bytes > MAX_SAFE_KERNEL_QUEUE_BYTES and not allow_unsafe_kernel_queue:
         raise ValueError(
             "RX kernel queue requires "
             f"{queue_bytes / (1024 * 1024):.1f} MiB, above the hardware-validated "
             f"{MAX_SAFE_KERNEL_QUEUE_BYTES / (1024 * 1024):.1f} MiB safety ceiling; "
-            "reduce --samples or --kernel-buffers"
+            "reduce --samples or --kernel-buffers, or provide the explicit unsafe "
+            "qualification override"
         )
+    return queue_bytes
 
 
 def _validate_rate(rate: int, capabilities: RadioCapabilities) -> None:
