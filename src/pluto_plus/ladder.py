@@ -24,6 +24,10 @@ MAX_TIMED_FRAMES = 100
 MAX_WARMUP_FRAMES = 20
 WIRE_BYTES_PER_COMPLEX_SAMPLE = 4
 KEEP_PACE_FRACTION = 0.90
+# Live Pluto+ qualification found that a 32 MiB four-buffer RX queue can
+# permanently wedge RX-DMAC completion after the first timeout, while the
+# 16 MiB envelope remains healthy across single and dual 1--15 MS/s ladders.
+MAX_SAFE_KERNEL_QUEUE_BYTES = 16 * 1024 * 1024
 _RATE_PATTERN = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([kKmMgG]?)$")
 _RATE_MULTIPLIERS = {"": 1, "k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
 
@@ -293,6 +297,19 @@ def _validate_shape(
         raise ValueError(f"warmup frames must be between 0 and {MAX_WARMUP_FRAMES}")
     if not 1 <= kernel_buffers <= 64:
         raise ValueError("kernel buffer count must be between 1 and 64")
+    queue_bytes = (
+        samples_per_channel
+        * len(channels)
+        * WIRE_BYTES_PER_COMPLEX_SAMPLE
+        * kernel_buffers
+    )
+    if queue_bytes > MAX_SAFE_KERNEL_QUEUE_BYTES:
+        raise ValueError(
+            "RX kernel queue requires "
+            f"{queue_bytes / (1024 * 1024):.1f} MiB, above the hardware-validated "
+            f"{MAX_SAFE_KERNEL_QUEUE_BYTES / (1024 * 1024):.1f} MiB safety ceiling; "
+            "reduce --samples or --kernel-buffers"
+        )
 
 
 def _validate_rate(rate: int, capabilities: RadioCapabilities) -> None:

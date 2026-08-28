@@ -150,6 +150,34 @@ def test_ladder_records_a_failed_rung_and_still_restores() -> None:
     assert radio.closed
 
 
+@pytest.mark.parametrize(
+    ("channels", "samples_per_channel"),
+    (
+        ((0,), 2_097_152),
+        ((0, 1), 1_048_576),
+    ),
+)
+def test_ladder_rejects_hardware_proven_unsafe_kernel_queue_before_open(
+    channels: tuple[int, ...], samples_per_channel: int
+) -> None:
+    radio = FakeLadderRadio()
+
+    with pytest.raises(ValueError, match="32.0 MiB.*16.0 MiB safety ceiling"):
+        run_iio_ladder(
+            uri="ip:192.168.1.187",
+            serial="SERIAL_A",
+            rates_hz=(1_000_000,),
+            channels=channels,
+            samples_per_channel=samples_per_channel,
+            frames=1,
+            warmup_frames=0,
+            kernel_buffers=4,
+            radio_factory=lambda _uri, _serial: radio,
+        )
+
+    assert not radio.opened
+
+
 def test_ladder_rejects_out_of_range_rates_without_skipping_other_cells() -> None:
     radio = FakeLadderRadio()
     report = run_iio_ladder(
