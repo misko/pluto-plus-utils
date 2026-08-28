@@ -78,6 +78,26 @@ class IiodRestartEvidence(ApiModel):
     cma_free_after_bytes: int = Field(ge=0)
 
 
+class DataPlaneRuntimeStatus(ApiModel):
+    """Read-only radio runtime evidence around one bounded RX probe."""
+
+    serial: str = Field(min_length=1, max_length=128)
+    iiod_pid: int = Field(gt=0)
+    iiod_start_ticks: int = Field(gt=0)
+    iiod_generation: int = Field(gt=0)
+    active_rx_buffers: int = Field(ge=0)
+    rx_buffer_length: int | None = Field(default=None, ge=0)
+    rx_data_available: int | None = Field(default=None, ge=0)
+    rx_device_path: str = Field(min_length=1, max_length=1024)
+    cma_total_bytes: int = Field(gt=0)
+    cma_free_bytes: int = Field(ge=0)
+    interrupt_total: int = Field(ge=0)
+    fpga_devices: tuple[str, ...] = Field(max_length=64)
+    dma_devices: tuple[str, ...] = Field(max_length=32)
+    interrupt_lines: tuple[str, ...] = Field(max_length=64)
+    kernel_events: tuple[str, ...] = Field(max_length=64)
+
+
 class IiodRecoveryReceipt(ApiModel):
     schema_id: Literal["pluto-plus-utils.iiod-recovery-receipt.v1"] = Field(
         IIOD_RECOVERY_SCHEMA, alias="schema"
@@ -283,6 +303,54 @@ def restart_attested_iiod(
     return evidence
 
 
+def inspect_data_plane_runtime(
+    transport: RecoveryTransport,
+    serial: str,
+) -> DataPlaneRuntimeStatus:
+    """Collect fixed process, buffer, CMA, DMA, IRQ, and kernel evidence."""
+
+    if not _SERIAL_PATTERN.fullmatch(serial):
+        raise ValueError("invalid radio serial")
+    output = transport.run(
+        f"sh -s -- {serial}",
+        stdin=_INSPECT_DATA_PLANE_SCRIPT,
+        timeout_s=20,
+    )
+    fields = _parse_recovery_report(output)
+    if fields.get("serial") != serial:
+        raise DataPlaneRecoveryError("data-plane status returned a different radio serial")
+    try:
+        return DataPlaneRuntimeStatus(
+            serial=serial,
+            iiod_pid=int(fields["iiod_pid"]),
+            iiod_start_ticks=int(fields["iiod_start_ticks"]),
+            iiod_generation=int(fields["iiod_generation"]),
+            active_rx_buffers=int(fields["active_rx_buffers"]),
+            rx_buffer_length=_optional_report_int(fields, "rx_buffer_length"),
+            rx_data_available=_optional_report_int(fields, "rx_data_available"),
+            rx_device_path=fields["rx_device_path"],
+            cma_total_bytes=int(fields["cma_total_kib"]) * 1024,
+            cma_free_bytes=int(fields["cma_free_kib"]) * 1024,
+            interrupt_total=int(fields["interrupt_total"]),
+            fpga_devices=_decode_hex_report_lines(
+                fields, "fpga_devices_hex", maximum_bytes=8192
+            ),
+            dma_devices=_decode_hex_report_lines(
+                fields, "dma_devices_hex", maximum_bytes=4096
+            ),
+            interrupt_lines=_decode_hex_report_lines(
+                fields, "interrupt_lines_hex", maximum_bytes=16_384
+            ),
+            kernel_events=_decode_hex_report_lines(
+                fields, "kernel_events_hex", maximum_bytes=16_384
+            ),
+        )
+    except (KeyError, ValueError) as error:
+        raise DataPlaneRecoveryError(
+            "data-plane runtime report is incomplete or invalid"
+        ) from error
+
+
 def new_recovery_receipt_id() -> str:
     return uuid.uuid4().hex
 
@@ -332,6 +400,88 @@ def _parse_recovery_report(output: str) -> dict[str, str]:
             raise DataPlaneRecoveryError("malformed or duplicate iiOD recovery report field")
         fields[parts[1]] = parts[2]
     return fields
+
+
+def _optional_report_int(fields: Mapping[str, str], key: str) -> int | None:
+    value = fields.get(key, "")
+    return None if not value else int(value)
+
+
+def _decode_hex_report_lines(
+    fields: Mapping[str, str], key: str, *, maximum_bytes: int
+) -> tuple[str, ...]:
+    encoded = fields.get(key)
+    if encoded is None:
+        raise ValueError(f"remote report omitted {key}")
+    try:
+        decoded = bytes.fromhex(encoded)
+        text = decoded.decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise ValueError(f"remote report contained invalid {key}") from error
+    if len(decoded) > maximum_bytes or "\x00" in text:
+        raise ValueError(f"remote report exceeded the {key} limit")
+    return tuple(line for line in text.splitlines() if line)
+
+
+_INSPECT_DATA_PLANE_SCRIPT = rb"""set -eu
+serial_expected="$1"
+serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
+[ "$serial" = "$serial_expected" ]
+emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
+emit_hex() { encoded=$(printf '%s' "$2" | od -An -tx1 | tr -d ' \n'); emit "$1" "$encoded"; }
+pid_file=/var/run/iiod-child.pid
+[ -r "$pid_file" ]
+iiod_pid=$(cat "$pid_file")
+case "$iiod_pid" in ''|*[!0-9]*) exit 21;; esac
+[ -r "/proc/$iiod_pid/stat" ]
+iiod_start_ticks=$(awk '{print $22}' "/proc/$iiod_pid/stat")
+iiod_generation=$(cat /run/iiod-generation)
+rx_device=''
+rx_count=0
+for candidate in /sys/bus/iio/devices/iio:device*; do
+  [ "$(cat "$candidate/name" 2>/dev/null || true)" = cf-ad9361-lpc ] || continue
+  rx_device="$candidate"
+  rx_count=$((rx_count + 1))
+done
+[ "$rx_count" -eq 1 ]
+rx_device_path=$(readlink -f "$rx_device")
+rx_bus_path=$(dirname "$(dirname "$rx_device_path")")
+read_optional() { [ -r "$1" ] && cat "$1" || true; }
+active_rx_buffers=$(read_optional "$rx_device/buffer/enable")
+[ -n "$active_rx_buffers" ] || active_rx_buffers=0
+rx_buffer_length=$(read_optional "$rx_device/buffer/length")
+rx_data_available=$(read_optional "$rx_device/buffer/data_available")
+cma_total_kib=$(awk '$1 == "CmaTotal:" {print $2; exit}' /proc/meminfo)
+cma_free_kib=$(awk '$1 == "CmaFree:" {print $2; exit}' /proc/meminfo)
+interrupt_total=$(awk '$1 == "intr" {print $2; exit}' /proc/stat)
+fpga_devices=$(for candidate in "$rx_bus_path"/*; do
+  printf '%s\n' "$candidate"
+done)
+dma_devices=$(for candidate in "$rx_bus_path"/*; do
+  name=${candidate##*/}
+  compatible=''
+  [ ! -r "$candidate/of_node/compatible" ] \
+    || compatible=$(tr '\000' '\n' <"$candidate/of_node/compatible")
+  case "$name:$compatible" in *dma*) printf '%s\n' "$candidate";; esac
+done)
+interrupt_lines=$(cat /proc/interrupts)
+kernel_events=$(dmesg | grep -Ei 'dma|cf-ad9361|iio|timeout|overflow' | tail -40 || true)
+emit serial "$serial"
+emit iiod_pid "$iiod_pid"
+emit iiod_start_ticks "$iiod_start_ticks"
+emit iiod_generation "$iiod_generation"
+emit active_rx_buffers "$active_rx_buffers"
+emit rx_buffer_length "$rx_buffer_length"
+emit rx_data_available "$rx_data_available"
+emit rx_device_path "$rx_device_path"
+emit cma_total_kib "$cma_total_kib"
+emit cma_free_kib "$cma_free_kib"
+emit interrupt_total "$interrupt_total"
+emit_hex fpga_devices_hex "$fpga_devices"
+emit_hex dma_devices_hex "$dma_devices"
+emit_hex interrupt_lines_hex "$interrupt_lines"
+emit_hex kernel_events_hex "$kernel_events"
+"""
 
 
 _RESTART_IIOD_SCRIPT = rb"""set -eu

@@ -950,6 +950,117 @@ def radio_reboot_local(
         _emit({"host_isolation": asdict(isolation_receipt), "result": asdict(receipt)})
 
 
+@radio_app.command("reboot-lan")
+def radio_reboot_lan(
+    serial: str = typer.Argument(..., help="Exact serial of the LAN radio with detached USB."),
+    ssh_host: str = typer.Option(
+        ...,
+        "--ssh-host",
+        help="Exact canonical private LAN IPv4; the shared USB address is rejected.",
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts pinned to this exact LAN endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Private one-line root password file; otherwise prompt without echo.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Mute TX, dispatch the reboot, and verify the exact serial returns over USB.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase REBOOT LAN <serial>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_LOCAL_REBOOT_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for the durable LAN reboot receipt.",
+    ),
+    timeout_s: float = typer.Option(
+        60,
+        "--timeout",
+        min=5,
+        max=300,
+        help="Seconds to wait for the exact serial to return over local USB.",
+    ),
+) -> None:
+    """Guardedly reboot one LAN-attested radio whose USB gadget is absent."""
+
+    from pluto_plus.lan_reboot import (
+        LanRebootError,
+        LanRebootExecutionError,
+        execute_lan_reboot,
+        prepare_lan_reboot,
+    )
+    from pluto_plus.local_reboot import FixedSshLocalRebootTransport
+
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    password = (
+        typer.prompt("Radio SSH password", hide_input=True)
+        if ssh_password_file is None
+        else _read_private_text_file(
+            ssh_password_file.expanduser().absolute(), label="radio SSH password"
+        )
+    )
+    transport = FixedSshLocalRebootTransport(
+        BoundSshTransport(
+            host=ssh_host,
+            interface=None,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+    )
+    try:
+        plan = prepare_lan_reboot(
+            serial,
+            ssh_host=ssh_host,
+            known_hosts_file=selected_known_hosts,
+            transport=transport,
+        )
+    except (LanRebootError, OSError, ValueError) as error:
+        _fail("lan_reboot_preflight_failed", str(error), 4)
+    if not execute:
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_reboot": False,
+                "plan": asdict(plan),
+                "next_command": (
+                    f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
+                ),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "lan_reboot_confirmation_required",
+            f"--execute requires --confirm {plan.confirmation_phrase!r}",
+            2,
+        )
+    try:
+        receipt = execute_lan_reboot(
+            plan,
+            confirmation=confirmation or "",
+            transport=transport,
+            known_hosts_file=selected_known_hosts,
+            receipt_directory=receipt_directory.expanduser().absolute(),
+            timeout_s=timeout_s,
+        )
+    except LanRebootExecutionError as error:
+        _emit(asdict(error.receipt))
+        raise typer.Exit(5) from error
+    except (LanRebootError, OSError, ValueError) as error:
+        _fail("lan_reboot_failed", str(error), 4)
+    _emit(asdict(receipt))
+
+
 @app.command("environment")
 def environment_preflight(
     output_format: str = typer.Option(
@@ -1847,6 +1958,91 @@ def radio_recover(
         execute=execute,
         confirmation=confirmation,
         receipt_directory=receipt_directory,
+    )
+
+
+@radio_app.command("data-plane-status")
+def radio_data_plane_status(
+    serial: str = typer.Argument(..., help="Exact serial of the network radio."),
+    ssh_host: str = typer.Option(
+        ...,
+        "--ssh-host",
+        help="Exact private LAN IPv4 used for both pinned SSH and the IIO probe.",
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts pinned to this exact LAN endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Private one-line root password file; otherwise prompt without echo.",
+    ),
+    probe: bool = typer.Option(
+        False,
+        "--probe",
+        help="Bracket one bounded two-receiver LAN refill with runtime snapshots.",
+    ),
+) -> None:
+    """Read exact-radio IIOD, IIO-buffer, DMA, IRQ, and kernel runtime evidence."""
+
+    from pluto_plus.data_plane import (
+        DataPlaneRecoveryError,
+        inspect_data_plane_runtime,
+        probe_iio_data_plane,
+    )
+    from pluto_plus.setup_helper import SetupHelperError
+
+    try:
+        address = ip_address(ssh_host)
+    except ValueError:
+        _fail("invalid_data_plane_status_host", "--ssh-host must be a literal IPv4", 2)
+    if address.version != 4 or not address.is_private or str(address) != ssh_host:
+        _fail(
+            "invalid_data_plane_status_host",
+            "--ssh-host must be a canonical private IPv4",
+            2,
+        )
+    if ssh_host == "192.168.2.1":
+        _fail(
+            "invalid_data_plane_status_host",
+            "data-plane status currently requires a unique LAN endpoint, not shared USB SSH",
+            2,
+        )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    _read_private_file_bytes(
+        selected_known_hosts,
+        label="data-plane status known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    password = (
+        typer.prompt("Radio SSH password", hide_input=True)
+        if ssh_password_file is None
+        else _read_private_text_file(
+            ssh_password_file.expanduser().absolute(), label="radio SSH password"
+        )
+    )
+    try:
+        transport = BoundSshTransport(
+            host=ssh_host,
+            interface=None,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+        before = inspect_data_plane_runtime(transport, serial)
+        bounded_probe = (
+            probe_iio_data_plane(f"ip:{ssh_host}", serial) if probe else None
+        )
+        after = inspect_data_plane_runtime(transport, serial) if probe else None
+    except (DataPlaneRecoveryError, SetupHelperError, OSError, ValueError) as error:
+        _fail("data_plane_status_failed", str(error), 4)
+    _emit(
+        {
+            "before": before.model_dump(mode="json"),
+            "probe": None if bounded_probe is None else bounded_probe.model_dump(mode="json"),
+            "after": None if after is None else after.model_dump(mode="json"),
+        }
     )
 
 

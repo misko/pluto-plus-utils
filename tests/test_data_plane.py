@@ -10,6 +10,7 @@ from pluto_plus.data_plane import (
     DataPlaneProbe,
     DataPlaneRecoveryError,
     iio_buffer_wire_bytes,
+    inspect_data_plane_runtime,
     probe_iio_data_plane,
     require_safe_iio_buffer,
     restart_attested_iiod,
@@ -178,6 +179,54 @@ def _restart_report(*, serial: str = "SERIAL_A") -> str:
             "PPU\tcma_free_after_kib\t65000",
         )
     )
+
+
+def _runtime_report(*, serial: str = "SERIAL_A") -> str:
+    def encode(value: str) -> str:
+        return value.encode().hex()
+
+    dma_devices = encode("7c400000.dma\n")
+    fpga_devices = encode("7c400000.dma\n79020000.cf-ad9361-lpc\n")
+    interrupt_lines = encode("54: 9 0 dma0chan0\n")
+    kernel_events = encode("axi-dmac initialized\n")
+    return "\n".join(
+        (
+            f"PPU\tserial\t{serial}",
+            "PPU\tiiod_pid\t4371",
+            "PPU\tiiod_start_ticks\t352201",
+            "PPU\tiiod_generation\t2",
+            "PPU\tactive_rx_buffers\t0",
+            "PPU\trx_buffer_length\t65536",
+            "PPU\trx_data_available\t0",
+            "PPU\trx_device_path\t/sys/devices/fpga-axi/iio:device1",
+            "PPU\tcma_total_kib\t65536",
+            "PPU\tcma_free_kib\t64620",
+            "PPU\tinterrupt_total\t1234",
+            f"PPU\tfpga_devices_hex\t{fpga_devices}",
+            f"PPU\tdma_devices_hex\t{dma_devices}",
+            f"PPU\tinterrupt_lines_hex\t{interrupt_lines}",
+            f"PPU\tkernel_events_hex\t{kernel_events}",
+        )
+    )
+
+
+def test_inspect_data_plane_runtime_uses_read_only_fixed_script() -> None:
+    transport = _RecoveryTransport(_runtime_report())
+
+    status = inspect_data_plane_runtime(transport, "SERIAL_A")
+
+    assert transport.command == "sh -s -- SERIAL_A"
+    assert transport.stdin is not None
+    assert b"/proc/interrupts" in transport.stdin
+    assert b"rx_bus_path" in transport.stdin
+    assert b"kill " not in transport.stdin
+    assert b">\"$rx_device" not in transport.stdin
+    assert status.iiod_pid == 4371
+    assert status.cma_free_bytes == 64_620 * 1024
+    assert status.interrupt_total == 1234
+    assert status.fpga_devices == ("7c400000.dma", "79020000.cf-ad9361-lpc")
+    assert status.dma_devices == ("7c400000.dma",)
+    assert status.interrupt_lines == ("54: 9 0 dma0chan0",)
 
 
 def test_restart_attested_iiod_uses_fixed_script_and_records_generation() -> None:

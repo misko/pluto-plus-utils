@@ -672,6 +672,111 @@ def test_data_plane_recovery_never_restarts_a_wrong_identity_failure(
     assert "identity" in result.output
 
 
+def test_data_plane_status_brackets_lan_probe_with_runtime_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneProbe, DataPlaneRuntimeStatus
+
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+    transports: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "pluto_plus.cli.BoundSshTransport",
+        lambda **kwargs: transports.append(kwargs) or SimpleNamespace(bound=kwargs),
+    )
+    snapshots = iter(
+        DataPlaneRuntimeStatus(
+            serial="SERIAL_A",
+            iiod_pid=4371,
+            iiod_start_ticks=352201,
+            iiod_generation=2,
+            active_rx_buffers=0,
+            rx_buffer_length=65_536,
+            rx_data_available=0,
+            rx_device_path="/sys/devices/fpga-axi/iio:device1",
+            cma_total_bytes=64 * 1024 * 1024,
+            cma_free_bytes=63 * 1024 * 1024,
+            interrupt_total=1_234,
+            fpga_devices=("7c400000.dma", "79020000.cf-ad9361-lpc"),
+            dma_devices=("7c400000.dma",),
+            interrupt_lines=(f"54: {count} dma0chan0",),
+            kernel_events=(),
+        )
+        for count in (9, 9)
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.inspect_data_plane_runtime",
+        lambda transport, serial: next(snapshots),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.probe_iio_data_plane",
+        lambda uri, serial: DataPlaneProbe(
+            status="fail",
+            serial=serial,
+            uri=uri,
+            samples_per_channel=65_536,
+            receiver_count=2,
+            wire_bytes=524_288,
+            elapsed_ms=5_000,
+            failure_kind="timeout",
+            error="TimeoutError: [Errno 110]",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "data-plane-status",
+            "SERIAL_A",
+            "--ssh-host",
+            "192.168.1.183",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--probe",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert transports == [
+        {
+            "host": "192.168.1.183",
+            "interface": None,
+            "password": "analog",
+            "known_hosts_file": known_hosts,
+        }
+    ]
+    assert payload["before"]["interrupt_lines"] == ["54: 9 dma0chan0"]
+    assert payload["probe"]["uri"] == "ip:192.168.1.183"
+    assert payload["probe"]["failure_kind"] == "timeout"
+    assert payload["after"]["interrupt_lines"] == ["54: 9 dma0chan0"]
+
+
+def test_data_plane_status_rejects_shared_usb_address(tmp_path: Path) -> None:
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "data-plane-status",
+            "SERIAL_A",
+            "--ssh-host",
+            "192.168.2.1",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "unique LAN endpoint" in result.output
+
+
 @pytest.mark.parametrize(
     ("arguments", "method", "path", "expected_body"),
     [
