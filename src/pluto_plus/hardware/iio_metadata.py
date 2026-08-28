@@ -379,16 +379,19 @@ class IioMetadataCaptureSession:
         if raw_metadata is None:
             raise RuntimeError("metadata buffer refill returned no metadata header")
         declared_missing: int | None = None
+        tandem_metadata: RadioMetadataV5 | None = None
         if self._metadata_abi == 1:
             metadata = RadioMetadataV3.unpack(raw_metadata)
         elif self._metadata_abi == 2:
             parsed = RadioMetadataV5.unpack(raw_metadata)
             metadata = parsed.base
+            tandem_metadata = parsed
             if len(raw_metadata) != parsed.header_bytes:
                 raise RuntimeError("metadata refill returned trailing bytes")
         else:
             parsed_v6 = RadioMetadataV6.unpack(raw_metadata)
             metadata = parsed_v6.base
+            tandem_metadata = parsed_v6.tandem
             declared_missing = parsed_v6.missing_samples_before
             if len(raw_metadata) != parsed_v6.header_bytes:
                 raise RuntimeError("metadata refill returned trailing bytes")
@@ -425,6 +428,7 @@ class IioMetadataCaptureSession:
             sample_time_uncertainty_ns=(
                 None if timing is None else timing["sample_time_uncertainty_ns"]
             ),
+            tandem_metadata=tandem_metadata,
         )
 
     def _validate_header(self, metadata: Any) -> None:
