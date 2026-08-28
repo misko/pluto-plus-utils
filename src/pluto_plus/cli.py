@@ -1352,6 +1352,13 @@ def radio_metadata_ladder(
         "--expect-serial",
         help="Require this exact radio serial (required for IP).",
     ),
+    ip_port: int = typer.Option(
+        30_431,
+        "--ip-port",
+        min=1,
+        max=65_535,
+        help="IIO network port; accepted only with --transport=ip.",
+    ),
     sample_rate_hz: int = typer.Option(
         5_000_000,
         "--sample-rate-hz",
@@ -1434,7 +1441,14 @@ def radio_metadata_ladder(
     normalized_transport = transport.strip().lower()
     uri: str
     serial: str
+    isolation_endpoint: str | None = None
     if normalized_transport == "usb":
+        if ip_port != 30_431:
+            _fail(
+                "invalid_metadata_ladder_port",
+                "--ip-port is accepted only with --transport=ip",
+                2,
+            )
         if expect_serial is not None and expect_serial != target:
             _fail(
                 "radio_identity_mismatch",
@@ -1465,7 +1479,8 @@ def radio_metadata_ladder(
                 "IP metadata ladder requires --expect-serial",
                 2,
             )
-        uri = f"ip:{address}"
+        isolation_endpoint = str(address)
+        uri = f"ip:{address}" if ip_port == 30_431 else f"ip:{address}:{ip_port}"
         serial = expect_serial
     else:
         _fail(
@@ -1498,7 +1513,7 @@ def radio_metadata_ladder(
         try:
             isolation_plan = prepare_usb_ssh_isolation(
                 selected[0].host_network_interfaces[0].name,
-                uri.removeprefix("ip:"),
+                isolation_endpoint or "",
                 pluto_interfaces=pluto_interfaces,
             )
         except HostIsolationError as error:
