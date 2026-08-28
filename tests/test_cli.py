@@ -2094,7 +2094,7 @@ def test_metadata_ladder_writes_an_absent_only_private_report(
             "--samples",
             "262144",
             "--frames",
-            "2",
+            "50",
             "--report",
             str(destination),
         ],
