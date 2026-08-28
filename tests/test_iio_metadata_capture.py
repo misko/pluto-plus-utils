@@ -691,7 +691,7 @@ def test_default_metadata_request_scales_auto_cooldown_to_refill_size() -> None:
         metadata_abi=3,
     )
 
-    assert session._tandem_request.cooldown_periods == 63  # noqa: SLF001
+    assert session._tandem_request.cooldown_periods == 127  # noqa: SLF001
     assert len(session._tandem_request.pack(4_194_304)) == 104  # noqa: SLF001
 
 
