@@ -673,6 +673,8 @@ def test_abi2_uses_request_constructor_and_persists_overflow_flag() -> None:
         block = capture.read_block()
         assert block.metadata_abi == 2
         assert block.overflow_observed
+        assert block.tandem_metadata is not None
+        assert block.tandem_metadata.ownership_epoch == 9
         assert len(factory.instances[0].signature) == 3
         assert factory.instances[0].signature[0] == SAMPLE_COUNT
         assert isinstance(factory.instances[0].signature[1], bytes)
@@ -758,6 +760,8 @@ def test_abi3_single_rx_capture_preserves_exact_sub_refill_gap() -> None:
         first = capture.read_block()
         second = capture.read_block()
         assert first.samples.shape == (1, SAMPLE_COUNT)
+        assert first.tandem_metadata is not None
+        assert first.tandem_metadata.ownership_epoch == 9
         assert first.metadata_abi == 3
         assert second.missing_samples_before == 1
         assert second.buffer_sequence == 1
