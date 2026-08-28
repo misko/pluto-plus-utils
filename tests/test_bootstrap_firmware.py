@@ -811,6 +811,7 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
     mountpoint.mkdir()
     (mountpoint / "info.html").write_text("Pluto")
     commands: list[tuple[str, ...]] = []
+    path_waits: list[tuple[bool, float]] = []
 
     monkeypatch.setattr(
         bootstrap,
@@ -823,7 +824,11 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
     monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: commands.append(tuple(argv)))
     monkeypatch.setattr(bootstrap, "_validate_scsi_eject_target", lambda **kwargs: None)
     monkeypatch.setattr(bootstrap, "_eject_scsi_media", lambda **kwargs: None)
-    monkeypatch.setattr(bootstrap, "_wait_for_path", lambda path, present, timeout_s: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_wait_for_path",
+        lambda path, present, timeout_s: path_waits.append((present, timeout_s)),
+    )
     monkeypatch.setattr(
         bootstrap,
         "_one_local_target",
@@ -845,6 +850,7 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
         frm,
         confirmation=plan.confirmation_phrase,
         receipt_directory=tmp_path / "receipts",
+        return_timeout_s=75,
     )
 
     assert result.outcome == "success"
@@ -856,6 +862,7 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
         ("udisksctl", "unmount", "--block-device", "/dev/sdb1"),
     ]
     assert "media_ejected" in result.phases
+    assert path_waits == [(False, 75), (True, 75)]
     receipt_path = Path(result.receipt_path)
     assert receipt_path.stat().st_mode & 0o777 == 0o600
     assert json.loads(receipt_path.read_text())["outcome"] == "success"
@@ -1318,12 +1325,17 @@ def test_bound_ssh_force_flash_verifies_stage_mtd3_and_return(
 ) -> None:
     plan, frm, target = planned
     transport = FakeSshTransport(plan)
+    path_waits: list[tuple[bool, float]] = []
     monkeypatch.setattr(
         bootstrap,
         "prepare_usb_flash_plan",
         lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
-    monkeypatch.setattr(bootstrap, "_wait_for_path", lambda path, present, timeout_s: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_wait_for_path",
+        lambda path, present, timeout_s: path_waits.append((present, timeout_s)),
+    )
     monkeypatch.setattr(
         bootstrap,
         "_one_local_target",
@@ -1346,6 +1358,7 @@ def test_bound_ssh_force_flash_verifies_stage_mtd3_and_return(
         confirmation=plan.confirmation_phrase,
         receipt_directory=tmp_path / "receipts",
         transport=transport,
+        return_timeout_s=75,
     )
 
     assert result.outcome == "success"
@@ -1353,6 +1366,7 @@ def test_bound_ssh_force_flash_verifies_stage_mtd3_and_return(
     stage = next(call for call in transport.calls if call[0] == "upload_frm")
     assert stage[1] == frm
     assert transport.calls[-1][0] == bootstrap._REMOTE_REBOOT_COMMAND
+    assert path_waits == [(False, 75), (True, 75)]
 
 
 def test_bound_ssh_ambiguous_updater_result_is_unknown(

@@ -3855,7 +3855,7 @@ def firmware_flash_usb(
         "--return-timeout",
         min=30,
         max=1800,
-        help="Seconds to wait for the exact radio to return after flashing.",
+        help="Seconds to wait for the exact radio to disappear and return after flashing.",
     ),
 ) -> None:
     """Flash one exact qualified profile onto a serial-attested local USB Pluto."""
