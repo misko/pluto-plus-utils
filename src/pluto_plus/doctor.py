@@ -226,6 +226,25 @@ DDR_BURST_V1_RC5_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 12, 48, 35, tzinfo=UTC),
 )
 
+# RC1 fixes two released DDR-burst failures without changing the FPGA, Linux,
+# metadata ABI, gadget, or memory geometry: iiOD compares the native 8-bit
+# tandem transition status modulo 256, and both client and server validate the
+# complete two-frame AUTO arm window. The protected bundle is release-eligible
+# offline, but these exact bytes remain RAM-only until hardware qualification.
+DDR_BURST_V2_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v2-rc1-ram",
+    release_tag="ddr-burst-v2-rc1-e2a6458ae9fa",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v2-rc1",
+    asset_name="plutoplus-spf-ddr-burst-v2-rc1-e2a6458ae9fa-pluto.dfu",
+    asset_sha256="c1e80d1f5748e33e7668a2641961e4de07e725d5b8c6588830f61e45c7a14b60",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33196445808",
+    source_commit="e2a6458ae9fabafdf4a7dfa56bc9294d5355bc3d",
+    fit_body_sha256="4088680502052e828e81380dad0a9b0aa9ae0cf4a0c891933897f62e2fdcabd4",
+    fit_body_size=12_797_471,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 18, 10, 54, tzinfo=UTC),
+)
+
 # Exact final-version-stamped DDR burst image from protected main run
 # 33174605592. The release label does not transfer RC5's hardware evidence:
 # these byte-distinct DFU/FIT objects remain RAM-only until they pass the final
