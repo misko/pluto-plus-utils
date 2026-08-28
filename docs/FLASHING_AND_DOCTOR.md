@@ -365,6 +365,13 @@ identity: the daemon requires one private enrollment binding the literal endpoin
 the exact managed IIO serial and an out-of-band verified SSH host key. Only key-based
 root SSH is accepted. Discovery does not enroll a radio.
 
+The selected persistent-upgrade policy is
+`ddr-burst-v1-release-persistent-promotion`, which binds the published
+`v0.42-plutoplus-spf-ddr-burst-v1` DFU/FIT bytes. This is deliberately separate
+from the older canonical setup-repair policy: repairing the U-Boot tuple must not
+silently choose a firmware upgrade, and selecting the current release must not
+weaken the setup transaction.
+
 This transport is deliberately narrower than the USB firmware surface:
 
 - only `persistent_qspi` is accepted;
