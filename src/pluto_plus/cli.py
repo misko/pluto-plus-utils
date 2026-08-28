@@ -55,6 +55,7 @@ from pluto_plus.ladder import (
 )
 from pluto_plus.metadata_ladder import (
     DEFAULT_METADATA_SAMPLE_LADDER,
+    MAX_METADATA_FRAMES,
     METADATA_CHANNEL_SELECTIONS,
     parse_metadata_sample_ladder,
     run_metadata_continuity_ladder,
@@ -1373,7 +1374,7 @@ def radio_metadata_ladder(
         6,
         "--frames",
         min=2,
-        max=32,
+        max=MAX_METADATA_FRAMES,
         help="Counter-observed metadata frames requested at each rung.",
     ),
     kernel_buffers: int = typer.Option(

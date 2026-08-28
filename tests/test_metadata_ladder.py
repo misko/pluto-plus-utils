@@ -8,6 +8,7 @@ import pytest
 
 from pluto_plus.hardware.base import SampleBlockV2
 from pluto_plus.metadata_ladder import (
+    MAX_METADATA_FRAMES,
     MINIMUM_OBSERVED_FRACTION,
     parse_metadata_sample_ladder,
     run_metadata_continuity_ladder,
@@ -230,6 +231,34 @@ def test_metadata_ladder_qualifies_exact_single_rx_ddr_burst() -> None:
     assert report.cells[0].ddr_burst_requested_iq_bytes == 4_194_304
     assert report.cells[0].ddr_burst_admitted_iq_bytes == 4_194_304
     assert report.cells[0].ddr_burst_frames == 4
+    assert report.cells[0].passed
+
+
+def test_metadata_ladder_qualifies_exact_200_mb_release_burst_geometry() -> None:
+    samples = 1_000_000
+    release_frames = 50
+    radio = _Radio({samples: tuple(range(release_frames))})
+    ticks = iter((0, 1_000_000_000))
+
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=25_000_000,
+        rf_bandwidth_hz=20_000_000,
+        metadata_abi=3,
+        channels=(0,),
+        samples_per_channel=(samples,),
+        frames=release_frames,
+        kernel_buffers=4,
+        ddr_burst=True,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=lambda: next(ticks),
+    )
+
+    assert release_frames <= MAX_METADATA_FRAMES
+    assert report.cells[0].ddr_burst_requested_iq_bytes == 200_000_000
+    assert report.cells[0].ddr_burst_admitted_iq_bytes == 200_000_000
+    assert report.cells[0].ddr_burst_frames == release_frames
     assert report.cells[0].passed
 
 

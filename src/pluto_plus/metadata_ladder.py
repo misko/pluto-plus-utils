@@ -20,7 +20,10 @@ from pluto_plus.models import ApiModel, RadioSettings
 
 DEFAULT_METADATA_SAMPLE_LADDER = "4194304,2097152,1048576,524288,262144,131072"
 MAX_METADATA_SAMPLE_RUNGS = 16
-MAX_METADATA_FRAMES = 32
+# Fifty 1,000,000-sample CI16 frames are the reviewed 200-MB/two-second
+# single-RX burst geometry at 25 MS/s. Keep a small bounded margin above that
+# exact release gate without encouraging larger DMA frames or unbounded runs.
+MAX_METADATA_FRAMES = 64
 MINIMUM_OBSERVED_FRACTION = 0.95
 MetadataAbi = Literal[1, 2, 3]
 MetadataChannels = Literal["rx0", "rx1", "dual"]
