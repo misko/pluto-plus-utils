@@ -35,6 +35,7 @@ TANDEM_METADATA_VALID_FLAG: Final = 1 << 22
 CANONICAL_RX_LAYOUT_FEATURE: Final = 1 << 10
 EXACT_GAP_ACCOUNTING_FEATURE: Final = 1 << 11
 SAMPLE_GAP_BEFORE_FLAG: Final = 1 << 23
+TANDEM_EVENT_RETENTION_FRAMES: Final = 2
 HEADER_EXTENSION_BYTES_V5: Final = 56
 HEADER_PREFIX_BYTES_V5: Final = HEADER_PREFIX_BYTES_V3 + HEADER_EXTENSION_BYTES_V5
 TEMPERATURE_INVALID: Final = -(1 << 31)
@@ -93,15 +94,14 @@ class TandemSessionRequestV1:
 
     @classmethod
     def auto_for_sample_count(cls, samples_per_channel: int) -> TandemSessionRequestV1:
-        """Build AUTO settings whose fixed event array covers one full refill."""
+        """Build AUTO settings that cover a refill plus its arm-safety window."""
 
         if samples_per_channel <= 0:
             raise ValueError("samples_per_channel must be positive")
         request = cls(mode=TandemMode.AUTO)
         events_denominator = request.event_capacity * request.power_measurement_samples
-        minimum_periods = (
-            samples_per_channel + events_denominator - 1
-        ) // events_denominator
+        retention_samples = samples_per_channel * TANDEM_EVENT_RETENTION_FRAMES
+        minimum_periods = (retention_samples + events_denominator - 1) // events_denominator
         return dataclasses.replace(
             request,
             cooldown_periods=max(request.cooldown_periods, minimum_periods - 1),
@@ -115,13 +115,14 @@ class TandemSessionRequestV1:
         if samples_per_channel <= 0:
             raise ValueError("samples_per_channel must be positive")
         minimum_transition_samples = self.power_measurement_samples * (self.cooldown_periods + 1)
-        maximum_events = (
+        retention_samples = samples_per_channel * TANDEM_EVENT_RETENTION_FRAMES
+        maximum_retained_events = (
             0
             if self.mode is TandemMode.HOLD
-            else 1 + (samples_per_channel - 1) // minimum_transition_samples
+            else 1 + (retention_samples - 1) // minimum_transition_samples
         )
-        if maximum_events > self.event_capacity:
-            raise ValueError("event capacity cannot cover worst-case AUTO transitions")
+        if maximum_retained_events > self.event_capacity:
+            raise ValueError("event capacity cannot cover the worst-case AUTO arm window")
         byte_values = (
             self.low_power_threshold,
             self.large_lmt_overload_threshold,
