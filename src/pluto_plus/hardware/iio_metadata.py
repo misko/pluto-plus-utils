@@ -30,10 +30,12 @@ ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
 DEFAULT_METADATA_CAPACITY = 64 * 1024
 # A 262,144-sample dual-RX refill spans about 105 ms at 2.5 MS/s. Five
 # seconds leaves more than 47 refill intervals for transport jitter. Larger
-# safe buffers receive eight native frame intervals, capped at 30 seconds, so
-# a disconnected USB or IP context still cannot block a campaign forever.
+# safe buffers receive eighteen native frame intervals, capped at 30 seconds.
+# The largest reviewed dual-RX rung at 2.5 MS/s needs the cap to tolerate the
+# kernel-queue startup latency observed on native IP without weakening the
+# finite disconnect bound.
 IIO_CONTEXT_TIMEOUT_MS = 5_000
-IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER = 8
+IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER = 18
 IIO_CONTEXT_TIMEOUT_MAX_MS = 30_000
 INITIAL_TIME_ANCHOR_COUNT = 8
 MAX_TIME_ANCHORS = 32

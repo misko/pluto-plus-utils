@@ -390,9 +390,9 @@ def test_context_timeout_precedes_reads_and_read_timeout_allows_cleanup() -> Non
     ("sample_rate_hz", "samples_per_channel", "expected_timeout_ms"),
     (
         (2_500_000, 262_144, 5_000),
-        (2_500_000, 4_194_304, 13_424),
-        (3_000_000, 4_194_304, 11_192),
-        (5_000_000, 4_194_304, 6_712),
+        (2_500_000, 4_194_304, 30_000),
+        (3_000_000, 4_194_304, 25_182),
+        (5_000_000, 4_194_304, 15_102),
         (1, 4_194_304, 30_000),
     ),
 )
@@ -401,7 +401,7 @@ def test_metadata_context_timeout_scales_with_native_refill_duration(
     samples_per_channel: int,
     expected_timeout_ms: int,
 ) -> None:
-    assert IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER == 8
+    assert IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER == 18
     assert IIO_CONTEXT_TIMEOUT_MAX_MS == 30_000
     assert (
         metadata_iio_context_timeout_ms(sample_rate_hz, samples_per_channel) == expected_timeout_ms
