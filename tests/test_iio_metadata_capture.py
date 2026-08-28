@@ -28,6 +28,7 @@ from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.hardware.iio_metadata import (
     IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER,
     IIO_CONTEXT_TIMEOUT_MAX_MS,
+    IIO_CONTEXT_TIMEOUT_MAX_REFILL_SAMPLES,
     IIO_CONTEXT_TIMEOUT_MS,
     metadata_iio_context_timeout_ms,
 )
@@ -391,8 +392,9 @@ def test_context_timeout_precedes_reads_and_read_timeout_allows_cleanup() -> Non
     (
         (2_500_000, 262_144, 5_000),
         (2_500_000, 4_194_304, 30_000),
-        (3_000_000, 4_194_304, 25_182),
-        (5_000_000, 4_194_304, 15_102),
+        (3_000_000, 4_194_304, 30_000),
+        (5_000_000, 4_194_304, 30_000),
+        (5_000_000, 2_097_152, 7_560),
         (1, 4_194_304, 30_000),
     ),
 )
@@ -403,6 +405,7 @@ def test_metadata_context_timeout_scales_with_native_refill_duration(
 ) -> None:
     assert IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER == 18
     assert IIO_CONTEXT_TIMEOUT_MAX_MS == 30_000
+    assert IIO_CONTEXT_TIMEOUT_MAX_REFILL_SAMPLES == 4_194_304
     assert (
         metadata_iio_context_timeout_ms(sample_rate_hz, samples_per_channel) == expected_timeout_ms
     )

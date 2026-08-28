@@ -37,6 +37,7 @@ DEFAULT_METADATA_CAPACITY = 64 * 1024
 IIO_CONTEXT_TIMEOUT_MS = 5_000
 IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER = 18
 IIO_CONTEXT_TIMEOUT_MAX_MS = 30_000
+IIO_CONTEXT_TIMEOUT_MAX_REFILL_SAMPLES = 4_194_304
 INITIAL_TIME_ANCHOR_COUNT = 8
 MAX_TIME_ANCHORS = 32
 TIME_ANCHOR_WINDOW_NS = 10_000_000_000
@@ -57,6 +58,8 @@ def metadata_iio_context_timeout_ms(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
+    if samples_per_channel >= IIO_CONTEXT_TIMEOUT_MAX_REFILL_SAMPLES:
+        return IIO_CONTEXT_TIMEOUT_MAX_MS
     frame_duration_ms = (samples_per_channel * 1_000 + sample_rate_hz - 1) // sample_rate_hz
     return min(
         IIO_CONTEXT_TIMEOUT_MAX_MS,
