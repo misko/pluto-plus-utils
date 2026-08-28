@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Self
+from typing import TYPE_CHECKING, Protocol, Self
 
 import numpy as np
 
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.models import RadioCapabilities, RadioIdentity, RadioSettings
+
+if TYPE_CHECKING:
+    from pluto_plus.tandem import RadioMetadataV5
 
 DEFAULT_RESTORE_LO_SEARCH_HZ = 16
 
@@ -89,6 +92,7 @@ class SampleBlockV2:
     sample_time_monotonic_start_ns: int | None = None
     sample_time_monotonic_end_ns: int | None = None
     sample_time_uncertainty_ns: int | None = None
+    tandem_metadata: RadioMetadataV5 | None = None
 
     def __post_init__(self) -> None:
         if self.utc_ns <= 0:
