@@ -696,6 +696,8 @@ def test_data_plane_status_brackets_lan_probe_with_runtime_evidence(
             rx_device_path="/sys/devices/fpga-axi/iio:device1",
             cma_total_bytes=64 * 1024 * 1024,
             cma_free_bytes=63 * 1024 * 1024,
+            memory_total_bytes=492_560 * 1024,
+            memory_available_bytes=401_234 * 1024,
             interrupt_total=1_234,
             fpga_devices=("7c400000.dma", "79020000.cf-ad9361-lpc"),
             dma_devices=("7c400000.dma",),
