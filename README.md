@@ -715,9 +715,11 @@ standalone preview/execute flow and requires the exact `FLASH <serial>` phrase:
 
 ```bash
 uv run pluto firmware flash /absolute/path/to/qualified-pluto.dfu \
-  --usb-sysfs-path /sys/bus/usb/devices/3-8
+  --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --profile ddr-burst-v1-release-persistent-promotion
 uv run pluto firmware flash /absolute/path/to/qualified-pluto.dfu \
   --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --profile ddr-burst-v1-release-persistent-promotion \
   --execute --confirm 'FLASH EXACT_SERIAL'
 ```
 
