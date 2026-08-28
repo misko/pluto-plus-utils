@@ -263,6 +263,24 @@ DDR_BURST_V2_RC2_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 19, 35, 41, tzinfo=UTC),
 )
 
+# RC3 raises the deterministic DDR frame-period floor to 12 ms after repeated
+# two-PHY RC2 testing found an intermittent whole-frame loss at 8 ms, while
+# 10 ms and 12 ms each passed 1,280 frames. These exact protected-build bytes
+# remain RAM-only until the final multi-radio hardware gate passes.
+DDR_BURST_V2_RC3_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v2-rc3-ram",
+    release_tag="ddr-burst-v2-rc3-29d61452badb",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v2-rc3",
+    asset_name="plutoplus-spf-ddr-burst-v2-rc3-29d61452badb-pluto.dfu",
+    asset_sha256="f13576d89548416a85b11486d22203acfab5166d97e85e49980a973bd763a599",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33208101532",
+    source_commit="29d61452badb364ca4ab95278de720514ee87a2c",
+    fit_body_sha256="8f788bb1af9f392b2decfcda0477749971083a4edd3d28638bbab550e60aec80",
+    fit_body_size=12_797_807,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 20, 45, 12, tzinfo=UTC),
+)
+
 # Exact final-version-stamped DDR burst image from protected main run
 # 33174605592. The release label does not transfer RC5's hardware evidence:
 # these byte-distinct DFU/FIT objects remain RAM-only until they pass the final
