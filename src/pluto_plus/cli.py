@@ -6106,7 +6106,7 @@ def serve(
         setup_manager=setup_manager,
     )
     if ssh_enrollments:
-        from pluto_plus.doctor import CANONICAL_POLICY
+        from pluto_plus.doctor import PERSISTENT_UPGRADE_POLICY
         from pluto_plus.firmware import (
             FirmwareManager,
             FirmwareTransport,
@@ -6217,7 +6217,8 @@ def serve(
                             observed.serial == enrolled_serial
                             and observed.transport is Transport.IIO_IP
                             and observed.uri == f"ip:{enrolled_host}"
-                            and observed.firmware_version == CANONICAL_POLICY.device_firmware
+                            and observed.firmware_version
+                            == PERSISTENT_UPGRADE_POLICY.device_firmware
                         )
                     except Exception:
                         return False
@@ -6234,7 +6235,7 @@ def serve(
                         host_key_fingerprint=transport.host_key_fingerprint,
                     ),
                     transport=transport,
-                    expected_firmware=CANONICAL_POLICY.device_firmware,
+                    expected_firmware=PERSISTENT_UPGRADE_POLICY.device_firmware,
                     post_reset_probe=post_reset_probe,
                     post_reset_tx_guard=post_reset_tx_guard,
                     evidence_directory=(

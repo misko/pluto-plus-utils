@@ -258,6 +258,12 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
     }
 )
 
+# Persistent firmware mutation is a separate authority from canonical setup
+# repair.  Setup continues to bind the v0.39 image and U-Boot tuple above,
+# while USB and enrolled-network upgrades select the newest release that has
+# completed the persistent hardware gate.
+PERSISTENT_UPGRADE_POLICY = DDR_BURST_V1_RELEASE_PERSISTENT_POLICY
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,
