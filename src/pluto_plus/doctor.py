@@ -226,6 +226,24 @@ DDR_BURST_V1_RC5_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 12, 48, 35, tzinfo=UTC),
 )
 
+# Exact final-version-stamped DDR burst image from protected main run
+# 33174605592. The release label does not transfer RC5's hardware evidence:
+# these byte-distinct DFU/FIT objects remain RAM-only until they pass the final
+# recovery and fleet matrix. A separate reviewed policy must authorize QSPI.
+DDR_BURST_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-release-ram",
+    release_tag="v0.42-plutoplus-spf-ddr-burst-v1",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1",
+    asset_name="plutoplus-spf-ddr-burst-v1-a6b78df100f6-pluto.dfu",
+    asset_sha256="47bb23ff1d498a5899c4503de33bc818aa908c567eab4e0fc535602ffa296877",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33174605592",
+    source_commit="a6b78df100f67c1bcd2528e2fbc0c86b2a8ee2ba",
+    fit_body_sha256="f40542a7b1a53f4f1b06a5733f068e7b69f1eddff7ab0eb46c0f37f9f37d295a",
+    fit_body_size=12_793_395,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 13, 55, 32, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,
