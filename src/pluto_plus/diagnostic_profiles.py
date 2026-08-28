@@ -155,6 +155,15 @@ DDR_BURST_V2_RC2_PROFILE = DiagnosticProfile(
     release_rank=13,
 )
 
+DDR_BURST_V2_RC3_PROFILE = DiagnosticProfile(
+    profile_id="ddr-burst-v2-rc3",
+    firmware_version="v0.42-plutoplus-spf-ddr-burst-v2-rc3",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="RAM-only DDR burst v2 RC3 candidate; never persistence-qualified",
+    release_rank=14,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -169,6 +178,7 @@ DIAGNOSTIC_PROFILES = (
     DDR_BURST_V1_RELEASE_PROFILE,
     DDR_BURST_V2_RC1_PROFILE,
     DDR_BURST_V2_RC2_PROFILE,
+    DDR_BURST_V2_RC3_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
