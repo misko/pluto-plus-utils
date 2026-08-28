@@ -443,6 +443,10 @@ ipaddr_host=$(read_env ipaddr_host); test -n "$ipaddr_host" || ipaddr_host=192.1
 netmask=$(read_env netmask); test -n "$netmask" || netmask=255.255.255.0
 ipaddr_eth=$(read_env ipaddr_eth)
 netmask_eth=$(read_env netmask_eth); test -n "$netmask_eth" || netmask_eth=255.255.255.0
+ethernet_runtime_address=$(
+  ip -4 addr show dev eth0 2>/dev/null |
+  awk '/^[[:space:]]*inet[[:space:]]/ { split($2, address, "/"); print address[1]; exit }'
+)
 env_sha=$({
   printf 'ipaddr=%s\n' "$ipaddr"
   printf 'ipaddr_host=%s\n' "$ipaddr_host"
@@ -464,6 +468,7 @@ emit ipaddr_host "$ipaddr_host"
 emit netmask "$netmask"
 emit ipaddr_eth "$ipaddr_eth"
 emit netmask_eth "$netmask_eth"
+emit ethernet_runtime_address "$ethernet_runtime_address"
 emit environment_sha256 "$env_sha"
 emit config_txt_sha256 "$config_sha"
 emit config_txt_redacted_b64 "$config_redacted"
@@ -621,6 +626,7 @@ class SshNetworkConfigBackend:
             usb_host_address=_required(fields, "ipaddr_host"),
             usb_netmask=_required(fields, "netmask"),
             ethernet_address=fields.get("ipaddr_eth") or None,
+            ethernet_runtime_address=fields.get("ethernet_runtime_address") or None,
             ethernet_netmask=_required(fields, "netmask_eth"),
         )
 

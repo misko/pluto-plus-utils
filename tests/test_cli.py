@@ -72,6 +72,7 @@ def _network_observation(*, ethernet_address: str | None) -> NetworkConfigObserv
         usb_host_address=values["ipaddr_host"],
         usb_netmask=values["netmask"],
         ethernet_address=ethernet_address,
+        ethernet_runtime_address="192.168.1.153",
         ethernet_netmask=values["netmask_eth"],
     )
 
@@ -2004,6 +2005,67 @@ def test_config_bootstrap_ethernet_dry_run_is_exact_and_nonmutating(
     assert payload["plan"]["confirmation"] == "SET STATIC IP SERIAL_A 192.168.1.186"
     assert "confirmation_token" not in result.stdout
     assert _NetworkBootstrapBackend.instances[0].apply_calls == []
+
+
+def test_config_bootstrap_ethernet_inspects_live_address_without_a_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_network_bootstrap(monkeypatch)
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "bootstrap-ethernet",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--inspect-only",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "inspect_only"
+    assert payload["will_persist"] is False
+    assert payload["will_restart"] is False
+    assert payload["observation"]["ethernet_address"] is None
+    assert payload["observation"]["ethernet_runtime_address"] == "192.168.1.153"
+    assert "plan" not in payload
+    assert _NetworkBootstrapBackend.instances[0].apply_calls == []
+
+
+def test_config_bootstrap_ethernet_inspect_only_rejects_mutation_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_network_bootstrap(monkeypatch)
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "bootstrap-ethernet",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--inspect-only",
+            "--address",
+            "192.168.1.186",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "network_bootstrap_inspect_only_conflict" in result.output
 
 
 def test_config_bootstrap_ethernet_executes_one_validated_plan_without_restart(

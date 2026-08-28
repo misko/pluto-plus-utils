@@ -96,6 +96,7 @@ class NetworkConfigObservation(ApiModel):
     usb_host_address: str
     usb_netmask: str
     ethernet_address: str | None
+    ethernet_runtime_address: str | None = None
     ethernet_netmask: str
 
     @field_validator(
@@ -109,7 +110,7 @@ class NetworkConfigObservation(ApiModel):
         _ipv4(value, label="observed network value")
         return value
 
-    @field_validator("ethernet_address")
+    @field_validator("ethernet_address", "ethernet_runtime_address")
     @classmethod
     def validate_optional_ipv4(cls, value: str | None) -> str | None:
         if value is not None:
