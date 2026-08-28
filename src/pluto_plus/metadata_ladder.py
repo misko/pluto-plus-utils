@@ -25,6 +25,7 @@ MAX_METADATA_SAMPLE_RUNGS = 16
 # exact release gate without encouraging larger DMA frames or unbounded runs.
 MAX_METADATA_FRAMES = 64
 MINIMUM_OBSERVED_FRACTION = 0.95
+DDR_BURST_MIN_FRAME_DURATION_US = 8_000
 MetadataAbi = Literal[1, 2, 3]
 MetadataChannels = Literal["rx0", "rx1", "dual"]
 METADATA_CHANNEL_SELECTIONS: dict[MetadataChannels, tuple[int, ...]] = {
@@ -231,6 +232,7 @@ def run_metadata_continuity_ladder(
                     _run_cell(
                         radio,
                         samples_per_channel=samples,
+                        sample_rate_hz=sample_rate_hz,
                         frames=frames,
                         kernel_buffers=kernel_buffers,
                         receiver_count=len(selected_channels),
@@ -281,12 +283,23 @@ def _run_cell(
     radio: MetadataLadderRadio,
     *,
     samples_per_channel: int,
+    sample_rate_hz: int,
     frames: int,
     kernel_buffers: int,
     receiver_count: int,
     ddr_burst: bool,
     clock_ns: Callable[[], int],
 ) -> MetadataContinuityCell:
+    if ddr_burst:
+        frame_duration_us = samples_per_channel * 1_000_000 / sample_rate_hz
+        if samples_per_channel * 1_000_000 < (
+            sample_rate_hz * DDR_BURST_MIN_FRAME_DURATION_US
+        ):
+            raise ValueError(
+                "DDR burst requires at least an 8 ms frame period; "
+                f"samples={samples_per_channel} rate={sample_rate_hz} "
+                f"duration_us={frame_duration_us:.3f}"
+            )
     blocks: list[SampleBlockV2] = []
     ddr_burst_bytes = samples_per_channel * receiver_count * 4 * frames if ddr_burst else 0
     started_ns = clock_ns()
