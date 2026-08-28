@@ -1900,6 +1900,53 @@ def test_metadata_ladder_ip_isolation_requires_exact_usb_identity_and_confirmati
     assert "ISOLATE USB SSH enx001" in result.output
 
 
+def test_metadata_ladder_forwards_nondefault_ip_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment", lambda **_kwargs: SimpleNamespace(healthy=True)
+    )
+
+    def fail_with_uri(**kwargs: object) -> None:
+        raise RuntimeError(str(kwargs["uri"]))
+
+    monkeypatch.setattr("pluto_plus.cli.run_metadata_continuity_ladder", fail_with_uri)
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "192.168.2.1",
+            "--transport",
+            "ip",
+            "--expect-serial",
+            "SERIAL_A",
+            "--ip-port",
+            "40431",
+        ],
+    )
+
+    assert result.exit_code == 5, result.output
+    assert "ip:192.168.2.1:40431" in result.output
+
+
+def test_metadata_ladder_rejects_ip_port_for_usb() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "SERIAL_A",
+            "--ip-port",
+            "40431",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "invalid_metadata_ladder_port" in result.output
+
+
 def _patch_network_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
