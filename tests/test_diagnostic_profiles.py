@@ -4,6 +4,7 @@ import pytest
 
 from pluto_plus.diagnostic_profiles import (
     DDR_BURST_V1_RC1_PROFILE,
+    DDR_BURST_V1_RC2_PROFILE,
     SINGLE_RX_METADATA_RC1_PROFILE,
     TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE,
     V5_PROFILE,
@@ -59,6 +60,7 @@ def test_metadata_abi_preserves_exact_observation(
         (TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE, 2, True),
         (SINGLE_RX_METADATA_RC1_PROFILE, 3, True),
         (DDR_BURST_V1_RC1_PROFILE, 3, True),
+        (DDR_BURST_V1_RC2_PROFILE, 3, True),
     ],
 )
 def test_known_profiles_are_accepted_without_changing_mutation_policy(
