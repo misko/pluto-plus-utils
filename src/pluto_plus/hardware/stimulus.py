@@ -35,6 +35,7 @@ MAX_TONE_CAPTURE_SAMPLES = 1_048_576
 # this limit does not imply in-memory retention.
 MAX_CONTINUOUS_TONE_CAPTURE_SAMPLES = 60_000_000
 MIN_CONTINUOUS_KERNEL_BUFFERS = 3
+MAX_LO_READBACK_ERROR_HZ = 10.0
 _METADATA_FAILURE_FLAGS = (
     MetadataFlags.DEVICE_IIO_OVERFLOW
     | MetadataFlags.GAIN_READ_FAILED
@@ -468,13 +469,21 @@ def _read_continuous_settings(device: Any, plan: SafeDdsTonePlan) -> RadioSettin
     exact_values = (
         ("sample rate", float(device.sample_rate), float(plan.sample_rate_hz)),
         ("RX bandwidth", float(device.rx_rf_bandwidth), float(plan.bandwidth_hz)),
-        ("RX LO", float(device.rx_lo), float(plan.center_frequency_hz)),
-        ("TX LO", float(device.tx_lo), float(plan.center_frequency_hz)),
     )
     for name, actual, expected in exact_values:
         if actual != expected:
             raise RadioConfigurationError(
                 f"{name} read-back is {actual:g}, expected {expected:g}"
+            )
+    for name, actual in (
+        ("RX LO", float(device.rx_lo)),
+        ("TX LO", float(device.tx_lo)),
+    ):
+        expected = float(plan.center_frequency_hz)
+        if abs(actual - expected) > MAX_LO_READBACK_ERROR_HZ:
+            raise RadioConfigurationError(
+                f"{name} read-back is {actual:.17g}, expected {expected:.17g} "
+                f"within {MAX_LO_READBACK_ERROR_HZ:g} Hz"
             )
     if tuple(int(value) for value in device.rx_enabled_channels) != (0, 1):
         raise RadioConfigurationError("continuous metadata capture requires RX1 and RX2")
@@ -486,7 +495,7 @@ def _read_continuous_settings(device: Any, plan: SafeDdsTonePlan) -> RadioSettin
                 f"RX{channel + 1} manual gain read-back is outside the plan"
             )
     return RadioSettings(
-        center_frequency_hz=float(device.rx_lo),
+        center_frequency_hz=float(plan.center_frequency_hz),
         sample_rate_hz=float(device.sample_rate),
         bandwidth_hz=float(device.rx_rf_bandwidth),
         gain_mode=GainMode.MANUAL,

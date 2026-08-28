@@ -8,6 +8,7 @@ import pytest
 
 import pluto_plus.hardware.stimulus as stimulus
 from pluto_plus.direct_radio.usb import MetadataFlags
+from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware import (
     SafeDdsTonePlan,
     capture_continuous_safe_dds_tone,
@@ -296,6 +297,31 @@ def test_continuous_capture_uses_fixed_gap_free_frames_and_finishes_muted(
     assert module.device.tx_hardwaregain_chan1 == -80.0
     assert module.device.dds_enabled == [0] * 8
     assert module.device.context_closed
+
+
+def test_continuous_settings_accept_bounded_lo_synthesizer_quantization() -> None:
+    plan = safe_plan()
+    device = FakeToneRadio(plan.uri)
+    device.sample_rate = plan.sample_rate_hz
+    device.rx_rf_bandwidth = plan.bandwidth_hz
+    device.rx_lo = plan.center_frequency_hz + 2
+    device.tx_lo = plan.center_frequency_hz + 2
+
+    settings = stimulus._read_continuous_settings(device, plan)
+
+    assert settings.center_frequency_hz == plan.center_frequency_hz
+
+
+def test_continuous_settings_reject_out_of_tolerance_lo_readback() -> None:
+    plan = safe_plan()
+    device = FakeToneRadio(plan.uri)
+    device.sample_rate = plan.sample_rate_hz
+    device.rx_rf_bandwidth = plan.bandwidth_hz
+    device.rx_lo = plan.center_frequency_hz + 11
+    device.tx_lo = plan.center_frequency_hz + 11
+
+    with pytest.raises(RadioConfigurationError, match="within 10 Hz"):
+        stimulus._read_continuous_settings(device, plan)
 
 
 def test_continuous_capture_rejects_sequence_gap_and_still_mutes(
