@@ -1842,7 +1842,7 @@ def radio_qualify_ddr_recovery(
         help="Delay after victim admission before the process is terminated.",
     ),
     profile_id: str = typer.Option(
-        "ddr-burst-v1-rc3-ram",
+        "ddr-burst-v1-rc5-ram",
         "--profile",
         help="Exact immutable ABI-3 DDR-burst firmware profile.",
     ),

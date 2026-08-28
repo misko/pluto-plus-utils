@@ -207,6 +207,25 @@ DDR_BURST_V1_RC3_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 10, 51, 38, tzinfo=UTC),
 )
 
+# RC5 closes the high-to-low sample-rate recovery defect by resetting the RX
+# timestamp FIFO, with the reset hold implemented as one SRL so the slice-full
+# Z7010 still routes. The protected bundle and both checksum inventories pass,
+# but these bytes remain RAM-only until the repeated disconnect and fleet gates
+# complete; no profile with this identity may authorize persistence.
+DDR_BURST_V1_RC5_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-rc5-ram",
+    release_tag="ddr-burst-v1-rc5-58f382f69776",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1-rc5",
+    asset_name="plutoplus-spf-ddr-burst-v1-rc5-58f382f69776-pluto.dfu",
+    asset_sha256="ba364191cdfd0eb17af81d952f92d69481c7e31fbcdd8baac79590eab8afe98c",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33171059728",
+    source_commit="58f382f69776f39b04eac9e289064d6e22edd433",
+    fit_body_sha256="bd888473054b269643e94e599f835a71fad2ed8cb08f21258c5f418bfd380aab",
+    fit_body_size=12_793_407,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 12, 48, 35, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,

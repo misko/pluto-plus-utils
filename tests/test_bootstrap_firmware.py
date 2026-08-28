@@ -682,6 +682,32 @@ def test_ddr_burst_v1_rc3_profile_is_exactly_bound_and_ram_only() -> None:
     )
 
 
+def test_ddr_burst_v1_rc5_profile_is_exactly_bound_and_ram_only() -> None:
+    policy = bootstrap.DDR_BURST_V1_RC5_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "ddr-burst-v1-rc5-58f382f69776"
+    assert policy.device_firmware == "v0.42-plutoplus-spf-ddr-burst-v1-rc5"
+    assert policy.source_commit == "58f382f69776f39b04eac9e289064d6e22edd433"
+    assert policy.asset_sha256 == (
+        "ba364191cdfd0eb17af81d952f92d69481c7e31fbcdd8baac79590eab8afe98c"
+    )
+    assert policy.fit_body_sha256 == (
+        "bd888473054b269643e94e599f835a71fad2ed8cb08f21258c5f418bfd380aab"
+    )
+    assert policy.fit_body_size == 12_793_407
+    assert policy.hardware_qualified is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert profile.ddr_burst_max_iq_bytes == 200_000_000
+    assert profile.ddr_burst_reserve_bytes == 128 * 1024 * 1024
+    assert not any(
+        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
+        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
+    )
+
+
 def test_normal_flash_requires_matching_stable_usb_and_iiod_serial(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     monkeypatch: pytest.MonkeyPatch,
