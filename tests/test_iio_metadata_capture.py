@@ -30,6 +30,7 @@ from pluto_plus.hardware.iio_metadata import (
     IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER,
     IIO_CONTEXT_TIMEOUT_MAX_MS,
     IIO_CONTEXT_TIMEOUT_MS,
+    IIO_DDR_BURST_TIMEOUT_MAX_MS,
     metadata_iio_context_timeout_ms,
 )
 from pluto_plus.tandem import (
@@ -226,10 +227,17 @@ class FakeRxAdc:
 
 
 class FakeMetadataBuffer:
-    def __init__(self, rxadc: FakeRxAdc, signature: tuple[object, ...]) -> None:
+    def __init__(
+        self,
+        rxadc: FakeRxAdc,
+        signature: tuple[object, ...],
+        keywords: dict[str, object],
+    ) -> None:
         self._rxadc = rxadc
         self.signature = signature
+        self.keywords = keywords
         self.closed = False
+        self.cancelled = False
 
     @property
     def metadata(self) -> bytes | None:
@@ -238,13 +246,18 @@ class FakeMetadataBuffer:
     def close(self) -> None:
         self.closed = True
 
+    def cancel(self) -> None:
+        self.cancelled = True
+
 
 class FakeMetadataBufferFactory:
     def __init__(self) -> None:
         self.instances: list[FakeMetadataBuffer] = []
 
-    def __call__(self, rxadc: FakeRxAdc, *signature: object) -> FakeMetadataBuffer:
-        result = FakeMetadataBuffer(rxadc, signature)
+    def __call__(
+        self, rxadc: FakeRxAdc, *signature: object, **keywords: object
+    ) -> FakeMetadataBuffer:
+        result = FakeMetadataBuffer(rxadc, signature, keywords)
         self.instances.append(result)
         return result
 
@@ -257,6 +270,7 @@ class FakeAd9361:
         *,
         metadata_abi: int | None,
         metadata_layouts: str | None,
+        ddr_burst: bool = False,
         preserve_readback: bool = True,
     ) -> None:
         self.uri = uri
@@ -274,6 +288,14 @@ class FakeAd9361:
             attrs["iio,buffer-metadata"] = str(metadata_abi)
         if metadata_layouts is not None:
             attrs["iio,buffer-metadata-layouts"] = metadata_layouts
+        if ddr_burst:
+            attrs.update(
+                {
+                    "iio,buffer-ddr-burst": "1",
+                    "iio,buffer-ddr-burst-max-iq-bytes": "200000000",
+                    "iio,buffer-ddr-burst-reserve-bytes": "134217728",
+                }
+            )
         channels = tuple(
             SimpleNamespace(id=f"voltage{index}", scan_element=True) for index in range(4)
         )
@@ -347,6 +369,7 @@ class FakeAdi:
         metadata_abi: int | None = 1,
         metadata_layouts: str | None = None,
         preserve_readback: bool = True,
+        ddr_burst: bool = False,
     ) -> None:
         self.headers = headers
         self.metadata_abi = metadata_abi
@@ -356,6 +379,7 @@ class FakeAdi:
             else metadata_layouts
         )
         self.preserve_readback = preserve_readback
+        self.ddr_burst = ddr_burst
         self.device: FakeAd9361 | None = None
 
     def ad9361(self, uri: str) -> FakeAd9361:
@@ -365,6 +389,7 @@ class FakeAdi:
             metadata_abi=self.metadata_abi,
             metadata_layouts=self.metadata_layouts,
             preserve_readback=self.preserve_readback,
+            ddr_burst=self.ddr_burst,
         )
         return self.device
 
@@ -377,12 +402,14 @@ def _open_radio(
     channels: tuple[int, ...] = (0, 1),
     include_metadata_buffer: bool = True,
     preserve_readback: bool = True,
+    ddr_burst: bool = False,
 ) -> tuple[IioRadioDevice, FakeAdi, FakeMetadataBufferFactory]:
     adi = FakeAdi(
         headers,
         metadata_abi=metadata_abi,
         metadata_layouts=metadata_layouts,
         preserve_readback=preserve_readback,
+        ddr_burst=ddr_burst,
     )
     factory = FakeMetadataBufferFactory()
     iio = SimpleNamespace(MetadataBuffer=factory) if include_metadata_buffer else SimpleNamespace()
@@ -474,6 +501,18 @@ def test_metadata_context_timeout_scales_with_native_refill_duration(
     )
 
 
+def test_metadata_context_timeout_covers_complete_ddr_burst() -> None:
+    assert IIO_DDR_BURST_TIMEOUT_MAX_MS == 300_000
+    assert (
+        metadata_iio_context_timeout_ms(
+            25_000_000,
+            1_000_000,
+            ddr_burst_frames=50,
+        )
+        == 9_000
+    )
+
+
 @pytest.mark.parametrize(
     ("sample_rate_hz", "samples_per_channel"),
     ((0, 1), (1, 0), (True, 1), (1, False)),
@@ -494,10 +533,10 @@ def test_metadata_capture_applies_rate_resolved_timeout_before_priming() -> None
 
     capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8)
     try:
-        assert device.timeout_calls == [IIO_CONTEXT_TIMEOUT_MS, IIO_CONTEXT_TIMEOUT_MAX_MS]
+        assert device.timeout_calls == [IIO_CONTEXT_TIMEOUT_MS, 30_000]
         assert device.events[:3] == [
             f"timeout:{IIO_CONTEXT_TIMEOUT_MS}",
-            f"timeout:{IIO_CONTEXT_TIMEOUT_MAX_MS}",
+            "timeout:30000",
             "read",
         ]
     finally:
@@ -724,6 +763,109 @@ def test_abi3_single_rx_capture_preserves_exact_sub_refill_gap() -> None:
         assert second.buffer_sequence == 1
         assert len(factory.instances[0].signature) == 3
         assert factory.instances[0].signature[0] == SAMPLE_COUNT
+    finally:
+        radio.close()
+
+
+def test_abi3_single_rx_ddr_burst_is_per_buffer_and_reports_admission() -> None:
+    headers = [
+        _metadata_v6(
+            channels=(0,),
+            buffer_sequence=sequence,
+            first_sample_sequence=1_000 + sequence * SAMPLE_COUNT,
+        )
+        for sequence in range(3)
+    ]
+    radio, _adi, factory = _open_radio(
+        headers,
+        metadata_abi=3,
+        channels=(0,),
+        ddr_burst=True,
+    )
+    requested_bytes = SAMPLE_COUNT * 4 * 3 + 1
+    try:
+        capture = radio.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_burst_bytes=requested_bytes,
+        )
+        assert capture.ddr_burst_enabled
+        assert capture.ddr_burst_requested_bytes == requested_bytes
+        assert capture.ddr_burst_admitted_bytes == SAMPLE_COUNT * 4 * 3
+        assert capture.ddr_burst_frames == 3
+        assert factory.instances[0].keywords == {
+            "batch_frames": 1,
+            "ddr_burst_bytes": requested_bytes,
+        }
+        assert [capture.read_block().buffer_sequence for _ in range(3)] == [0, 1, 2]
+        capture.close()
+        assert factory.instances[0].closed
+    finally:
+        radio.close()
+
+
+def test_ddr_burst_cancel_reaches_underlying_iio_buffer() -> None:
+    radio, _adi, factory = _open_radio(
+        [],
+        metadata_abi=3,
+        channels=(0,),
+        ddr_burst=True,
+    )
+    try:
+        capture = radio.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_burst_bytes=SAMPLE_COUNT * 4,
+        )
+        capture.cancel()
+        assert factory.instances[0].cancelled
+        assert factory.instances[0].closed
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+def test_ddr_burst_requires_capability_single_rx_and_valid_byte_budget() -> None:
+    radio, _adi, _factory = _open_radio([], metadata_abi=3, channels=(0,))
+    try:
+        with pytest.raises(RadioConfigurationError, match="does not advertise"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_burst_bytes=SAMPLE_COUNT * 4,
+            )
+    finally:
+        radio.close()
+
+    radio, _adi, _factory = _open_radio(
+        [], metadata_abi=3, channels=(0, 1), ddr_burst=True
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="exactly one receiver"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_burst_bytes=SAMPLE_COUNT * 8,
+            )
+    finally:
+        radio.close()
+
+    radio, _adi, _factory = _open_radio(
+        [], metadata_abi=3, channels=(0,), ddr_burst=True
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="one complete IIO frame"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_burst_bytes=SAMPLE_COUNT * 4 - 1,
+            )
+        with pytest.raises(RadioConfigurationError, match="advertised limit"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_burst_bytes=200_000_001,
+            )
     finally:
         radio.close()
 

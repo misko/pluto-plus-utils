@@ -47,8 +47,8 @@ case "$metadata_abi" in
     source_commit="6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7"
     ;;
 3)
-    source_ref="single-rx-metadata-rc1-source/libiio-v1"
-    source_commit="5dc200af10961e50d3b019cd38bdb8dd3c0e8c3c"
+    source_ref="ddr-burst-v1-source/libiio-v1"
+    source_commit="3b2db359ef5a641422dbfb64bdab7e0e6bb3cb42"
     ;;
 *)
     printf 'ERROR: --metadata-abi must be 1, 2, or 3\n' >&2
@@ -147,7 +147,7 @@ expected = (
         "samples_count",
         "request",
         "metadata_capacity",
-        *( ("batch_frames",) if abi == 3 else () ),
+        *( ("batch_frames", "ddr_burst_bytes") if abi == 3 else () ),
     )
 )
 assert parameters == expected, (parameters, expected)

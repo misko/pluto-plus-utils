@@ -652,6 +652,7 @@ class IioRadioDevice:
         *,
         kernel_buffers: int,
         tandem_request: TandemSessionRequestV1 | None = None,
+        ddr_burst_bytes: int = 0,
     ) -> IioMetadataCaptureSession:
         """Reset and arm one fail-closed FPGA-metadata capture generation."""
 
@@ -659,6 +660,10 @@ class IioRadioDevice:
 
         if sample_count <= 0:
             raise ValueError("sample_count must be positive")
+        if isinstance(ddr_burst_bytes, bool) or not isinstance(ddr_burst_bytes, int):
+            raise TypeError("ddr_burst_bytes must be an integer")
+        if ddr_burst_bytes < 0:
+            raise ValueError("ddr_burst_bytes must not be negative")
         device = self._require_device()
         self.reset_receive_buffer()
         channels = tuple(int(item) for item in device.rx_enabled_channels)
@@ -686,6 +691,27 @@ class IioRadioDevice:
                 raise RadioConfigurationError(
                     "metadata sample count violates the advertised RX layout multiple"
                 )
+        if ddr_burst_bytes:
+            if metadata_abi != 3 or len(channels) != 1:
+                raise RadioConfigurationError(
+                    "device DDR burst v1 requires metadata ABI 3 and exactly one receiver"
+                )
+            if facts.get("buffer_ddr_burst") is not True:
+                raise RadioConfigurationError(
+                    "IIO context does not advertise device DDR burst v1"
+                )
+            maximum_burst_bytes = facts.get("buffer_ddr_burst_max_iq_bytes")
+            if not isinstance(maximum_burst_bytes, int) or maximum_burst_bytes <= 0:
+                raise RadioConfigurationError("IIO DDR burst byte limit is invalid")
+            frame_iq_bytes = sample_count * 4
+            if ddr_burst_bytes < frame_iq_bytes:
+                raise RadioConfigurationError(
+                    "device DDR burst byte budget cannot hold one complete IIO frame"
+                )
+            if ddr_burst_bytes > maximum_burst_bytes:
+                raise RadioConfigurationError(
+                    "device DDR burst byte budget exceeds the advertised limit"
+                )
         if metadata_abi in {2, 3} and not facts.get("tandem_agc"):
             raise RadioConfigurationError(
                 "metadata ABI 2 and 3 capture requires the tandem-agc IIO device"
@@ -700,7 +726,13 @@ class IioRadioDevice:
         sample_rate_hz = round(float(device.sample_rate))
         configure_iio_context_timeout(
             device.ctx,
-            timeout_ms=metadata_iio_context_timeout_ms(sample_rate_hz, sample_count),
+            timeout_ms=metadata_iio_context_timeout_ms(
+                sample_rate_hz,
+                sample_count,
+                ddr_burst_frames=(
+                    0 if not ddr_burst_bytes else ddr_burst_bytes // (sample_count * 4)
+                ),
+            ),
         )
         module = self._iio_module
         if module is None:
@@ -719,6 +751,7 @@ class IioRadioDevice:
             kernel_buffers=actual_kernel_buffers,
             metadata_abi=int(metadata_abi),
             tandem_request=tandem_request,
+            ddr_burst_bytes=ddr_burst_bytes,
         )
         try:
             session.open()
@@ -831,6 +864,14 @@ def context_facts(context: Any) -> dict[str, object]:
     except ValueError:
         layouts = ()
         layouts_state = "absent" if layouts_raw in {None, ""} else "malformed"
+    ddr_burst_raw = attrs.get("iio,buffer-ddr-burst")
+    ddr_burst = ddr_burst_raw == "1"
+    try:
+        ddr_burst_max_iq_bytes = int(attrs["iio,buffer-ddr-burst-max-iq-bytes"])
+        ddr_burst_reserve_bytes = int(attrs["iio,buffer-ddr-burst-reserve-bytes"])
+    except (KeyError, TypeError, ValueError):
+        ddr_burst_max_iq_bytes = None
+        ddr_burst_reserve_bytes = None
     return {
         "serial": attrs.get("hw_serial") or attrs.get("usb,serial"),
         "model": attrs.get("hw_model") or attrs.get("usb,product"),
@@ -846,6 +887,10 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_metadata_layouts_raw": layouts_raw,
         "buffer_metadata_layouts": layouts,
         "buffer_metadata_layouts_state": layouts_state,
+        "buffer_ddr_burst": ddr_burst,
+        "buffer_ddr_burst_raw": ddr_burst_raw,
+        "buffer_ddr_burst_max_iq_bytes": ddr_burst_max_iq_bytes,
+        "buffer_ddr_burst_reserve_bytes": ddr_burst_reserve_bytes,
         "tandem_agc": _device_exists(context, "tandem-agc"),
         "tandem_agc_state": _optional_device_int_attribute(context, "tandem-agc", "state"),
         "tandem_agc_ownership_epoch": _optional_device_int_attribute(

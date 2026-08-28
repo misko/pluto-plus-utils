@@ -27,6 +27,10 @@ class _Capture:
         self.sequences: Iterator[int] = iter(sequences)
         self.kernel_buffers = kernel_buffers
         self.receiver_count = receiver_count
+        self.ddr_burst_requested_bytes = 0
+        self.ddr_burst_admitted_bytes = 0
+        self.ddr_burst_frames = 0
+        self.ddr_burst_enabled = False
         self.closed = False
         self.previous_sequence: int | None = None
 
@@ -91,13 +95,20 @@ class _Radio:
         self.settings = settings
         return settings
 
-    def begin_metadata_capture(self, sample_count: int, *, kernel_buffers: int) -> _Capture:
-        return _Capture(
+    def begin_metadata_capture(
+        self, sample_count: int, *, kernel_buffers: int, ddr_burst_bytes: int = 0
+    ) -> _Capture:
+        capture = _Capture(
             sample_count,
             self.sequences[sample_count],
             kernel_buffers,
             len(self.settings.channels),
         )
+        capture.ddr_burst_requested_bytes = ddr_burst_bytes
+        capture.ddr_burst_admitted_bytes = ddr_burst_bytes
+        capture.ddr_burst_frames = ddr_burst_bytes // (sample_count * 4)
+        capture.ddr_burst_enabled = bool(ddr_burst_bytes)
+        return capture
 
 
 def test_parse_metadata_sample_ladder_is_strictly_descending() -> None:
@@ -193,6 +204,48 @@ def test_metadata_ladder_rejects_single_rx_before_abi3_and_odd_abi3_counts() -> 
             channels=(0,),
             samples_per_channel=(262_144,),
             frames=2,
+            radio_factory=lambda _uri, _serial, _abi: radio,
+        )
+
+
+def test_metadata_ladder_qualifies_exact_single_rx_ddr_burst() -> None:
+    radio = _Radio({262_144: (0, 1, 2, 3)})
+    ticks = iter((0, 1_000_000_000))
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=25_000_000,
+        rf_bandwidth_hz=20_000_000,
+        metadata_abi=3,
+        channels=(0,),
+        samples_per_channel=(262_144,),
+        frames=4,
+        kernel_buffers=4,
+        ddr_burst=True,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=lambda: next(ticks),
+    )
+
+    assert report.ddr_burst_enabled
+    assert report.cells[0].ddr_burst_requested_iq_bytes == 4_194_304
+    assert report.cells[0].ddr_burst_admitted_iq_bytes == 4_194_304
+    assert report.cells[0].ddr_burst_frames == 4
+    assert report.cells[0].passed
+
+
+def test_metadata_ladder_rejects_ddr_burst_outside_abi3_single_rx() -> None:
+    radio = _Radio({262_144: (0, 1)})
+    with pytest.raises(ValueError, match="ABI 3 and one receiver"):
+        run_metadata_continuity_ladder(
+            uri="ip:192.0.2.1",
+            serial="SERIAL_A",
+            sample_rate_hz=5_000_000,
+            rf_bandwidth_hz=5_000_000,
+            metadata_abi=3,
+            channels=(0, 1),
+            samples_per_channel=(262_144,),
+            frames=2,
+            ddr_burst=True,
             radio_factory=lambda _uri, _serial, _abi: radio,
         )
     with pytest.raises(ValueError, match="must be even"):

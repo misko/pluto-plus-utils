@@ -1383,6 +1383,14 @@ def radio_metadata_ladder(
         max=64,
         help="Explicit RX kernel-buffer count; at least four are required.",
     ),
+    ddr_burst: bool = typer.Option(
+        False,
+        "--ddr-burst",
+        help=(
+            "Opt in to device-RAM burst capture; each rung requests exactly --frames "
+            "whole IQ frames (metadata ABI 3, one receiver)."
+        ),
+    ),
     report_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--report",
@@ -1513,6 +1521,7 @@ def radio_metadata_ladder(
             samples_per_channel=parsed_samples,
             frames=frames,
             kernel_buffers=kernel_buffers,
+            ddr_burst=ddr_burst,
         )
 
     try:
