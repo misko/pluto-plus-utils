@@ -136,7 +136,7 @@ def probe_and_repair(
             observed_firmware=firmware_version,
         )
         manager = manager_factory(identity)
-        observation = manager.inspect(identity)
+        observation = manager.inspect_qualified(identity)
     except (SetupError, SetupHelperError, OSError, ValueError) as error:
         return SetupProbeOutcome(
             status="unknown",
