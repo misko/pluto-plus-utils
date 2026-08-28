@@ -8,6 +8,7 @@ from pluto_plus.diagnostic_profiles import (
     DDR_BURST_V1_RC3_PROFILE,
     DDR_BURST_V1_RC5_PROFILE,
     DDR_BURST_V1_RELEASE_PROFILE,
+    DDR_BURST_V2_RC1_PROFILE,
     SINGLE_RX_METADATA_RC1_PROFILE,
     TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE,
     V5_PROFILE,
@@ -67,6 +68,7 @@ def test_metadata_abi_preserves_exact_observation(
         (DDR_BURST_V1_RC3_PROFILE, 3, True),
         (DDR_BURST_V1_RC5_PROFILE, 3, True),
         (DDR_BURST_V1_RELEASE_PROFILE, 3, True),
+        (DDR_BURST_V2_RC1_PROFILE, 3, True),
     ],
 )
 def test_known_profiles_are_accepted_without_changing_mutation_policy(

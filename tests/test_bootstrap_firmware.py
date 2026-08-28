@@ -708,6 +708,32 @@ def test_ddr_burst_v1_rc5_profile_is_exactly_bound_and_ram_only() -> None:
     )
 
 
+def test_ddr_burst_v2_rc1_profile_is_exactly_bound_and_ram_only() -> None:
+    policy = bootstrap.DDR_BURST_V2_RC1_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "ddr-burst-v2-rc1-e2a6458ae9fa"
+    assert policy.device_firmware == "v0.42-plutoplus-spf-ddr-burst-v2-rc1"
+    assert policy.source_commit == "e2a6458ae9fabafdf4a7dfa56bc9294d5355bc3d"
+    assert policy.asset_sha256 == (
+        "c1e80d1f5748e33e7668a2641961e4de07e725d5b8c6588830f61e45c7a14b60"
+    )
+    assert policy.fit_body_sha256 == (
+        "4088680502052e828e81380dad0a9b0aa9ae0cf4a0c891933897f62e2fdcabd4"
+    )
+    assert policy.fit_body_size == 12_797_471
+    assert policy.hardware_qualified is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert profile.ddr_burst_max_iq_bytes == 200_000_000
+    assert profile.ddr_burst_reserve_bytes == 128 * 1024 * 1024
+    assert not any(
+        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
+        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
+    )
+
+
 def test_ddr_burst_v1_release_requires_distinct_persistent_promotion() -> None:
     policy = bootstrap.DDR_BURST_V1_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
