@@ -842,9 +842,13 @@ class PinnedSshFirmwareTransport:
 
     @staticmethod
     def _raise_result(result: SshCommandResult) -> None:
-        detail = (result.stderr + result.stdout)[-1000:].decode(errors="replace").strip()
-        if "REMOTE HOST IDENTIFICATION HAS CHANGED" in detail:
+        output = result.stderr + result.stdout
+        # Classify against the complete captured output before bounding the
+        # diagnostic. Long known_hosts paths can otherwise push OpenSSH's
+        # leading host-key-change marker out of the retained error tail.
+        if b"REMOTE HOST IDENTIFICATION HAS CHANGED" in output:
             raise IpFirmwareHostKeyChanged("pinned radio SSH host key changed")
+        detail = output[-1000:].decode(errors="replace").strip()
         raise IpFirmwareError(f"radio SSH command failed ({result.returncode}): {detail}")
 
 

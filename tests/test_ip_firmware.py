@@ -832,7 +832,8 @@ def test_pinned_transport_rejects_hostnames_loose_files_and_changed_key(
             SshCommandResult(
                 255,
                 b"",
-                b"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!",
+                b"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
+                + b"long diagnostic tail\n" * 100,
             )
         ]
     )
