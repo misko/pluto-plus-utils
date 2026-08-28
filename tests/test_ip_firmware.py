@@ -798,6 +798,7 @@ def test_pinned_transport_accepts_an_empty_generated_config_txt(tmp_path: Path) 
         "PPU\tserial\tSERIAL_A",
         "PPU\thostname\tpluto",
         *(f"PPU\t{key}\t{value}" for key, value in values.items()),
+        "PPU\tethernet_runtime_address\t192.168.1.152",
         f"PPU\tenvironment_sha256\t{persistent_environment_sha256(values)}",
         f"PPU\tconfig_txt_sha256\t{hashlib.sha256(b'').hexdigest()}",
         "PPU\tconfig_txt_redacted_b64\t",
@@ -813,6 +814,7 @@ def test_pinned_transport_accepts_an_empty_generated_config_txt(tmp_path: Path) 
 
     assert observed.config_txt_redacted == ""
     assert observed.ethernet_address == "192.168.1.183"
+    assert observed.ethernet_runtime_address == "192.168.1.152"
 
 
 def test_pinned_transport_rejects_hostnames_loose_files_and_changed_key(

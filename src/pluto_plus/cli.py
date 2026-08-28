@@ -2474,6 +2474,11 @@ def config_bootstrap_ethernet(
         "--ssh-password-file",
         help="Private radio password file; otherwise execution prompts without echo.",
     ),
+    inspect_only: bool = typer.Option(
+        False,
+        "--inspect-only",
+        help="Read persistent settings and the live Ethernet IPv4 without planning a change.",
+    ),
     mode: str = typer.Option("static", "--mode", help="Ethernet mode: static or dhcp."),
     address: str | None = typer.Option(None, "--address", help="Static Ethernet IPv4."),
     netmask: str | None = typer.Option(
@@ -2561,6 +2566,14 @@ def config_bootstrap_ethernet(
         selected_mode = NetworkAddressMode(mode)
     except ValueError as error:
         _fail("network_bootstrap_preflight_failed", str(error), 2)
+    if inspect_only and (
+        execute or address is not None or netmask is not None or confirmation is not None
+    ):
+        _fail(
+            "network_bootstrap_inspect_only_conflict",
+            "--inspect-only does not accept mutation planning or execution options",
+            2,
+        )
 
     isolation_plan = None
     if isolate_usb_route:
@@ -2611,6 +2624,8 @@ def config_bootstrap_ethernet(
             backend=backend,
             receipt_directory=receipt_directory.expanduser().absolute(),
         )
+        if inspect_only:
+            return manager.inspect(), None
         planned = manager.create_plan(
             interface=NetworkInterface.ETHERNET,
             mode=selected_mode,
@@ -2660,6 +2675,17 @@ def config_bootstrap_ethernet(
         _fail("network_bootstrap_failed", str(error), 4)
 
     isolation_payload = None if isolation_receipt is None else asdict(isolation_receipt)
+    if inspect_only:
+        _emit(
+            {
+                "mode": "inspect_only",
+                "will_persist": False,
+                "will_restart": False,
+                "observation": plan.model_dump(mode="json"),
+                "host_isolation": isolation_payload,
+            }
+        )
+        return
     if receipt is None:
         _emit(
             {
