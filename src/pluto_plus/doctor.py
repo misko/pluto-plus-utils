@@ -171,6 +171,24 @@ DDR_BURST_V1_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 5, 34, 46, tzinfo=UTC),
 )
 
+# RC2 rebuilds the combined post-PR56 source graph with the reviewed Pluto HDL
+# area strategy that keeps the widened RX DMAC inside the Z7010. The exact
+# trusted-CI bytes remain RAM-only: selecting this profile can never authorize
+# a persistent write, and a future promotion must use a distinct policy.
+DDR_BURST_V1_RC2_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-rc2-ram",
+    release_tag="ddr-burst-v1-rc2-b046b80fd280",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1-rc2",
+    asset_name="plutoplus-spf-ddr-burst-v1-rc2-b046b80fd280-pluto.dfu",
+    asset_sha256="2164eed7450cfe8e29ea1e57ee1b556c06e912a4bbca6f186721f0ecc744d0b8",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33157004273",
+    source_commit="b046b80fd280dc827b8e0eef75374cda8bdf15a6",
+    fit_body_sha256="8c06c17aecebb724e021470f43f31440ed850327ac7fd4d4b0238c5a3563eda7",
+    fit_body_size=12_796_723,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 9, 14, 1, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,
