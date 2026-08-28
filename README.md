@@ -329,7 +329,7 @@ uv run pluto radio qualify-ddr-recovery 192.168.1.15 \
   --expect-serial 104000b29905000e17000800065934759d --cycles 20
 uv run pluto radio qualify-ddr-recovery 192.168.1.15 \
   --expect-serial 104000b29905000e17000800065934759d --cycles 20 \
-  --profile ddr-burst-v1-rc5-ram \
+  --profile ddr-burst-v1-release-ram \
   --ssh-known-hosts-file /private/radio.known_hosts \
   --ssh-password-file /private/radio.password --report /private/recovery.json \
   --execute \
@@ -715,9 +715,11 @@ standalone preview/execute flow and requires the exact `FLASH <serial>` phrase:
 
 ```bash
 uv run pluto firmware flash /absolute/path/to/qualified-pluto.dfu \
-  --usb-sysfs-path /sys/bus/usb/devices/3-8
+  --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --profile ddr-burst-v1-release-persistent-promotion
 uv run pluto firmware flash /absolute/path/to/qualified-pluto.dfu \
   --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --profile ddr-burst-v1-release-persistent-promotion \
   --execute --confirm 'FLASH EXACT_SERIAL'
 ```
 

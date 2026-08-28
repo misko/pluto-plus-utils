@@ -1842,7 +1842,7 @@ def radio_qualify_ddr_recovery(
         help="Delay after victim admission before the process is terminated.",
     ),
     profile_id: str = typer.Option(
-        "ddr-burst-v1-rc5-ram",
+        "ddr-burst-v1-release-ram",
         "--profile",
         help="Exact immutable ABI-3 DDR-burst firmware profile.",
     ),
@@ -3855,7 +3855,7 @@ def firmware_flash_usb(
         "--return-timeout",
         min=30,
         max=1800,
-        help="Seconds to wait for the exact radio to return after flashing.",
+        help="Seconds to wait for the exact radio to disappear and return after flashing.",
     ),
 ) -> None:
     """Flash one exact qualified profile onto a serial-attested local USB Pluto."""

@@ -53,7 +53,10 @@ def test_local_doctor_reports_fresh_canonical_and_unknown_persistence(
     assert statuses["rf.phy_model"] == "pass"
     assert statuses["transport.rx_data_plane"] == "unknown"
     assert statuses["firmware.qspi_boot_provenance"] == "unknown"
-    assert radio.overall == "unknown"
+    # The previously canonical v6 image is now a recognized older release, so
+    # release currency is a binding failure even though persistence provenance
+    # remains unknown.
+    assert radio.overall == "fail"
 
 
 def test_local_doctor_reports_explicit_bounded_data_plane_probe(
@@ -256,8 +259,9 @@ def _healthy_environment() -> IioEnvironmentReport:
     ("firmware", "expected"),
     [
         ("v0.38-plutoplus-spf-libiio-metadata-v5", "fail"),
-        ("v0.39-plutoplus-spf-libiio-metadata-v6", "pass"),
-        ("v0.40-plutoplus-spf-tandem-agc-v7", "pass"),
+        ("v0.39-plutoplus-spf-libiio-metadata-v6", "fail"),
+        ("v0.40-plutoplus-spf-tandem-agc-v7", "fail"),
+        ("v0.42-plutoplus-spf-ddr-burst-v1", "pass"),
         ("v0.32-dirty", "unknown"),
     ],
 )

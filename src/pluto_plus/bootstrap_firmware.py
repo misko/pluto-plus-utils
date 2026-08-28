@@ -33,6 +33,8 @@ from pluto_plus.doctor import (
     DDR_BURST_V1_RC2_RAM_POLICY,
     DDR_BURST_V1_RC3_RAM_POLICY,
     DDR_BURST_V1_RC5_RAM_POLICY,
+    DDR_BURST_V1_RELEASE_PERSISTENT_POLICY,
+    DDR_BURST_V1_RELEASE_RAM_POLICY,
     SINGLE_RX_METADATA_RC1_RAM_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
@@ -127,6 +129,21 @@ STANDALONE_FLASH_PROFILES = {
         3,
         True,
         persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V1_RELEASE_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V1_RELEASE_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V1_RELEASE_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V1_RELEASE_PERSISTENT_POLICY,
+        3,
+        True,
         ddr_burst_max_iq_bytes=200_000_000,
         ddr_burst_reserve_bytes=128 * 1024 * 1024,
     ),
@@ -992,7 +1009,14 @@ def execute_bootstrap_plan(
         )
         phases.append("media_ejected")
         _update_receipt(receipt_path, receipt, phases)
-        _wait_for_path(Path(plan.usb_sysfs_path), present=False, timeout_s=30)
+        # Media removal can be acknowledged before the radio-side updater has
+        # finished its pre-reboot work. Use the operator-selected lifecycle
+        # bound for disappearance as well as return; a fixed 30-second window
+        # produced a false-unknown receipt on a healthy Pluto+ that disconnected
+        # immediately after the old deadline and then reconciled successfully.
+        _wait_for_path(
+            Path(plan.usb_sysfs_path), present=False, timeout_s=return_timeout_s
+        )
         phases.append("disappeared")
         _update_receipt(receipt_path, receipt, phases)
         _wait_for_path(Path(plan.usb_sysfs_path), present=True, timeout_s=return_timeout_s)
@@ -1168,7 +1192,9 @@ def execute_usb_flash_plan_ssh(
         phases.append("reboot_dispatched")
         _update_receipt(receipt_path, receipt, phases)
 
-        _wait_for_path(Path(plan.usb_sysfs_path), present=False, timeout_s=30)
+        _wait_for_path(
+            Path(plan.usb_sysfs_path), present=False, timeout_s=return_timeout_s
+        )
         phases.append("disappeared")
         _update_receipt(receipt_path, receipt, phases)
         _wait_for_path(Path(plan.usb_sysfs_path), present=True, timeout_s=return_timeout_s)

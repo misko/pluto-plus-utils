@@ -20,14 +20,14 @@ from pluto_plus.hardware.preflight import IioEnvironmentReport, IioEnvironmentSt
 from pluto_plus.metadata_soak import MetadataHealth
 
 SERIAL = "104000b29905000e17000800065934759d"
-PROFILE = "ddr-burst-v1-rc5-ram"
+PROFILE = "ddr-burst-v1-release-ram"
 runner = CliRunner()
 
 
 def _health(**updates: Any) -> MetadataHealth:
     values: dict[str, Any] = {
         "serial": SERIAL,
-        "firmware_version": "v0.42-plutoplus-spf-ddr-burst-v1-rc5",
+        "firmware_version": "v0.42-plutoplus-spf-ddr-burst-v1",
         "boot_id": "boot-a",
         "uptime_seconds": 100.0,
         "iiod_pid": 456,
@@ -210,7 +210,7 @@ def test_cli_dry_run_is_non_mutating_and_exact() -> None:
     assert document["execute"] is False
     assert document["plan"]["profile_id"] == PROFILE
     assert document["plan"]["expected_firmware"] == (
-        "v0.42-plutoplus-spf-ddr-burst-v1-rc5"
+        "v0.42-plutoplus-spf-ddr-burst-v1"
     )
     assert document["plan"]["victim_iq_bytes"] == 200_000_000
     assert document["confirmation_phrase"] == f"QUALIFY DDR RECOVERY {SERIAL} 20"

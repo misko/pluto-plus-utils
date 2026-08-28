@@ -128,6 +128,15 @@ DDR_BURST_V1_RC5_PROFILE = DiagnosticProfile(
     release_rank=10,
 )
 
+DDR_BURST_V1_RELEASE_PROFILE = DiagnosticProfile(
+    profile_id="ddr-burst-v1",
+    firmware_version="v0.42-plutoplus-spf-ddr-burst-v1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="hardware-qualified release",
+    release_rank=11,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -139,6 +148,7 @@ DIAGNOSTIC_PROFILES = (
     DDR_BURST_V1_RC2_PROFILE,
     DDR_BURST_V1_RC3_PROFILE,
     DDR_BURST_V1_RC5_PROFILE,
+    DDR_BURST_V1_RELEASE_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
@@ -178,7 +188,7 @@ def parse_metadata_abi(value: object) -> MetadataAbi:
 # hardware-qualified release.  Release candidates, development builds, and
 # RAM-only promotion candidates are deliberately excluded, so doctor never
 # proposes moving a radio onto an image that was not qualified for persistence.
-UPGRADE_TARGET_PROFILE = V6_PROFILE
+UPGRADE_TARGET_PROFILE = DDR_BURST_V1_RELEASE_PROFILE
 
 
 def upgrade_target_for(profile: DiagnosticProfile | None) -> DiagnosticProfile | None:

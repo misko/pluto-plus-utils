@@ -708,6 +708,42 @@ def test_ddr_burst_v1_rc5_profile_is_exactly_bound_and_ram_only() -> None:
     )
 
 
+def test_ddr_burst_v1_release_requires_distinct_persistent_promotion() -> None:
+    policy = bootstrap.DDR_BURST_V1_RELEASE_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "ddr-burst-v1-release-persistent-promotion"
+    ]
+
+    assert policy.release_tag == "v0.42-plutoplus-spf-ddr-burst-v1"
+    assert policy.device_firmware == "v0.42-plutoplus-spf-ddr-burst-v1"
+    assert policy.source_commit == "a6b78df100f67c1bcd2528e2fbc0c86b2a8ee2ba"
+    assert policy.asset_sha256 == (
+        "47bb23ff1d498a5899c4503de33bc818aa908c567eab4e0fc535602ffa296877"
+    )
+    assert policy.fit_body_sha256 == (
+        "f40542a7b1a53f4f1b06a5733f068e7b69f1eddff7ab0eb46c0f37f9f37d295a"
+    )
+    assert policy.fit_body_size == 12_793_395
+    assert policy.hardware_qualified is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert profile.ddr_burst_max_iq_bytes == 200_000_000
+    assert profile.ddr_burst_reserve_bytes == 128 * 1024 * 1024
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.profile_id != policy.profile_id
+    assert promotion.policy.asset_sha256 == policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == policy.fit_body_sha256
+    assert promotion.policy.fit_body_size == policy.fit_body_size
+    assert promotion.policy.source_commit == policy.source_commit
+    assert promotion.policy.hardware_qualified is True
+    assert promotion.metadata_abi == profile.metadata_abi == 3
+    assert promotion.tandem_agc is profile.tandem_agc is True
+    assert promotion.ddr_burst_max_iq_bytes == profile.ddr_burst_max_iq_bytes
+    assert promotion.ddr_burst_reserve_bytes == profile.ddr_burst_reserve_bytes
+
+
 def test_normal_flash_requires_matching_stable_usb_and_iiod_serial(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -775,6 +811,7 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
     mountpoint.mkdir()
     (mountpoint / "info.html").write_text("Pluto")
     commands: list[tuple[str, ...]] = []
+    path_waits: list[tuple[bool, float]] = []
 
     monkeypatch.setattr(
         bootstrap,
@@ -787,7 +824,11 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
     monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: commands.append(tuple(argv)))
     monkeypatch.setattr(bootstrap, "_validate_scsi_eject_target", lambda **kwargs: None)
     monkeypatch.setattr(bootstrap, "_eject_scsi_media", lambda **kwargs: None)
-    monkeypatch.setattr(bootstrap, "_wait_for_path", lambda path, present, timeout_s: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_wait_for_path",
+        lambda path, present, timeout_s: path_waits.append((present, timeout_s)),
+    )
     monkeypatch.setattr(
         bootstrap,
         "_one_local_target",
@@ -809,6 +850,7 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
         frm,
         confirmation=plan.confirmation_phrase,
         receipt_directory=tmp_path / "receipts",
+        return_timeout_s=75,
     )
 
     assert result.outcome == "success"
@@ -820,6 +862,7 @@ def test_execute_writes_only_pluto_frm_and_attests_return(
         ("udisksctl", "unmount", "--block-device", "/dev/sdb1"),
     ]
     assert "media_ejected" in result.phases
+    assert path_waits == [(False, 75), (True, 75)]
     receipt_path = Path(result.receipt_path)
     assert receipt_path.stat().st_mode & 0o777 == 0o600
     assert json.loads(receipt_path.read_text())["outcome"] == "success"
@@ -1282,12 +1325,17 @@ def test_bound_ssh_force_flash_verifies_stage_mtd3_and_return(
 ) -> None:
     plan, frm, target = planned
     transport = FakeSshTransport(plan)
+    path_waits: list[tuple[bool, float]] = []
     monkeypatch.setattr(
         bootstrap,
         "prepare_usb_flash_plan",
         lambda image, path, force_blank_serial, **kwargs: (plan, frm),
     )
-    monkeypatch.setattr(bootstrap, "_wait_for_path", lambda path, present, timeout_s: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_wait_for_path",
+        lambda path, present, timeout_s: path_waits.append((present, timeout_s)),
+    )
     monkeypatch.setattr(
         bootstrap,
         "_one_local_target",
@@ -1310,6 +1358,7 @@ def test_bound_ssh_force_flash_verifies_stage_mtd3_and_return(
         confirmation=plan.confirmation_phrase,
         receipt_directory=tmp_path / "receipts",
         transport=transport,
+        return_timeout_s=75,
     )
 
     assert result.outcome == "success"
@@ -1317,6 +1366,7 @@ def test_bound_ssh_force_flash_verifies_stage_mtd3_and_return(
     stage = next(call for call in transport.calls if call[0] == "upload_frm")
     assert stage[1] == frm
     assert transport.calls[-1][0] == bootstrap._REMOTE_REBOOT_COMMAND
+    assert path_waits == [(False, 75), (True, 75)]
 
 
 def test_bound_ssh_ambiguous_updater_result_is_unknown(
