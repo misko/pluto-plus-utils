@@ -8,6 +8,7 @@ import pytest
 
 from pluto_plus.hardware.base import SampleBlockV2
 from pluto_plus.metadata_ladder import (
+    DDR_BURST_MIN_FRAME_DURATION_US,
     MAX_METADATA_FRAMES,
     MINIMUM_OBSERVED_FRACTION,
     parse_metadata_sample_ladder,
@@ -82,6 +83,7 @@ class _Radio:
         )
         self.capabilities = RadioCapabilities(receiver_channels=(0, 1))
         self.opened = False
+        self.capture_requests: list[int] = []
 
     def open(self) -> None:
         self.opened = True
@@ -99,6 +101,7 @@ class _Radio:
     def begin_metadata_capture(
         self, sample_count: int, *, kernel_buffers: int, ddr_burst_bytes: int = 0
     ) -> _Capture:
+        self.capture_requests.append(sample_count)
         capture = _Capture(
             sample_count,
             self.sequences[sample_count],
@@ -232,6 +235,60 @@ def test_metadata_ladder_qualifies_exact_single_rx_ddr_burst() -> None:
     assert report.cells[0].ddr_burst_admitted_iq_bytes == 4_194_304
     assert report.cells[0].ddr_burst_frames == 4
     assert report.cells[0].passed
+
+
+def test_metadata_ladder_rejects_short_ddr_frames_before_capture() -> None:
+    radio = _Radio({200_000: (0, 1), 125_000: (0, 1)})
+    ticks = iter((0, 1_000_000_000))
+
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=25_000_000,
+        rf_bandwidth_hz=20_000_000,
+        metadata_abi=3,
+        channels=(0,),
+        samples_per_channel=(200_000, 125_000),
+        frames=2,
+        kernel_buffers=4,
+        ddr_burst=True,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=lambda: next(ticks),
+    )
+
+    assert DDR_BURST_MIN_FRAME_DURATION_US == 8_000
+    assert [cell.samples_per_channel for cell in report.cells] == [200_000]
+    assert radio.capture_requests == [200_000]
+    assert len(report.failures) == 1
+    assert report.failures[0].samples_per_channel == 125_000
+    assert report.failures[0].error_type == "ValueError"
+    assert "at least an 8 ms frame period" in report.failures[0].message
+    assert "duration_us=5000.000" in report.failures[0].message
+    assert report.original_settings_restored
+
+
+def test_metadata_ladder_allows_short_frames_without_ddr_burst() -> None:
+    radio = _Radio({125_000: (0, 1)})
+    ticks = iter((0, 1_000_000_000))
+
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=25_000_000,
+        rf_bandwidth_hz=20_000_000,
+        metadata_abi=3,
+        channels=(0,),
+        samples_per_channel=(125_000,),
+        frames=2,
+        kernel_buffers=4,
+        ddr_burst=False,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=lambda: next(ticks),
+    )
+
+    assert report.failures == ()
+    assert report.cells[0].passed
+    assert radio.capture_requests == [125_000]
 
 
 def test_metadata_ladder_qualifies_exact_200_mb_release_burst_geometry() -> None:
