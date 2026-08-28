@@ -299,6 +299,17 @@ DDR_BURST_V2_RELEASE_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 21, 53, 18, tzinfo=UTC),
 )
 
+# The exact same final DFU/FIT receives a distinct QSPI authorization only
+# after both physical PHY types passed the final-byte RAM matrix: 12 ms and
+# 200 MB on RX0/RX1, USB and physical Ethernet, deterministic lower-bound
+# rejection, abrupt-client recovery, and ordinary dual-RX postflight.
+DDR_BURST_V2_RELEASE_PERSISTENT_POLICY = DDR_BURST_V2_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "ddr-burst-v2-release-persistent-promotion",
+        "hardware_qualified": True,
+    }
+)
+
 # Exact final-version-stamped DDR burst image from protected main run
 # 33174605592. The release label does not transfer RC5's hardware evidence:
 # these byte-distinct DFU/FIT objects remain RAM-only until they pass the final
@@ -332,10 +343,42 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 )
 
 # Persistent firmware mutation is a separate authority from canonical setup
-# repair.  Setup continues to bind the v0.39 image and U-Boot tuple above,
-# while USB and enrolled-network upgrades select the newest release that has
-# completed the persistent hardware gate.
-PERSISTENT_UPGRADE_POLICY = DDR_BURST_V1_RELEASE_PERSISTENT_POLICY
+# repair. USB and enrolled-network upgrades select the newest release that has
+# completed the persistent hardware gate; setup keeps the immutable U-Boot
+# tuple but accepts only an exact QSPI image in the allowlist below.
+PERSISTENT_UPGRADE_POLICY = DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+
+# Canonical U-Boot repair may run only while one of these exact, reviewed,
+# hardware-qualified QSPI images is active. The tuple itself remains fixed;
+# this allowlist only advances the firmware/hash provenance accepted around it.
+SETUP_REPAIR_POLICIES = (CANONICAL_POLICY, PERSISTENT_UPGRADE_POLICY)
+
+
+def require_setup_repair_policy(policy: FirmwarePolicy) -> FirmwarePolicy:
+    """Return the shipped exact policy or reject caller-constructed authority."""
+
+    selected = next(
+        (
+            candidate
+            for candidate in SETUP_REPAIR_POLICIES
+            if candidate.profile_id == policy.profile_id
+        ),
+        None,
+    )
+    if selected is None or selected != policy:
+        raise ValueError("setup repair policy is not an exact shipped hardware-qualified policy")
+    return selected
+
+
+def setup_repair_policy_for_firmware(firmware_version: str) -> FirmwarePolicy:
+    """Select setup authority by exact active firmware; never by lexical rank."""
+
+    matches = tuple(
+        policy for policy in SETUP_REPAIR_POLICIES if policy.device_firmware == firmware_version
+    )
+    if len(matches) != 1:
+        raise ValueError("active firmware has no exact shipped setup repair policy")
+    return matches[0]
 
 
 def diagnose_radio(

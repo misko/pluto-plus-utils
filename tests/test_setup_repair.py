@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
+import pytest
+
+from pluto_plus.doctor import (
+    CANONICAL_POLICY,
+    CANONICAL_UBOOT,
+    DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
+    setup_repair_policy_for_firmware,
+)
 from pluto_plus.setup import (
     CanonicalSetupManager,
     SetupExecutionResult,
@@ -88,6 +95,15 @@ def _probe(backend: FakeBackend, tmp_path: Path, *, repair: bool = True):
         manager_factory=_factory(backend, tmp_path),
         repair=repair,
     )
+
+
+def test_setup_repair_policy_is_selected_only_by_exact_firmware() -> None:
+    policy = DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+
+    assert setup_repair_policy_for_firmware(policy.device_firmware) is policy
+    assert setup_repair_policy_for_firmware(CANONICAL_POLICY.device_firmware) is CANONICAL_POLICY
+    with pytest.raises(ValueError, match="no exact shipped setup repair policy"):
+        setup_repair_policy_for_firmware("v0.42-plutoplus-spf-ddr-burst-v2-rc3")
 
 
 def test_probe_repairs_a_reverted_tuple_and_reports_the_deletions(tmp_path: Path) -> None:

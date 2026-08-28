@@ -15,7 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pluto_plus.doctor import CANONICAL_UBOOT
+from pluto_plus.doctor import (
+    CANONICAL_UBOOT,
+    require_setup_repair_policy,
+    setup_repair_policy_for_firmware,
+)
+from pluto_plus.models import FirmwarePolicy
 from pluto_plus.setup import (
     CanonicalSetupManager,
     SetupError,
@@ -70,10 +75,17 @@ class SetupProbeOutcome:
 
 def ssh_manager_factory(
     credentials: SetupCredentials,
+    *,
+    policy: FirmwarePolicy | None = None,
 ) -> ManagerFactory:
     """Build the real SSH-backed manager factory for one radio's credentials."""
 
     def build(identity: SetupIdentity) -> CanonicalSetupManager:
+        selected_policy = (
+            setup_repair_policy_for_firmware(identity.observed_firmware)
+            if policy is None
+            else require_setup_repair_policy(policy)
+        )
         transport = BoundSshTransport(
             host=credentials.host,
             interface=credentials.interface,
@@ -84,11 +96,13 @@ def ssh_manager_factory(
             identity=identity,
             transport=transport,
             state_root=credentials.state_root,
+            policy=selected_policy,
         )
         return CanonicalSetupManager(
             receipt_directory=credentials.receipt_directory,
             inspector=executor.inspect,
             executor=executor,
+            policy=selected_policy,
         )
 
     return build
