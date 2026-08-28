@@ -31,6 +31,7 @@ from pluto_plus.doctor import (
     CANONICAL_POLICY,
     DDR_BURST_V1_RC1_RAM_POLICY,
     DDR_BURST_V1_RC2_RAM_POLICY,
+    DDR_BURST_V1_RC3_RAM_POLICY,
     SINGLE_RX_METADATA_RC1_RAM_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
@@ -106,6 +107,14 @@ STANDALONE_FLASH_PROFILES = {
     ),
     DDR_BURST_V1_RC2_RAM_POLICY.profile_id: StandaloneFlashProfile(
         DDR_BURST_V1_RC2_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V1_RC3_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V1_RC3_RAM_POLICY,
         3,
         True,
         persistent_allowed=False,

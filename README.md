@@ -329,7 +329,7 @@ uv run pluto radio qualify-ddr-recovery 192.168.1.15 \
   --expect-serial 104000b29905000e17000800065934759d --cycles 20
 uv run pluto radio qualify-ddr-recovery 192.168.1.15 \
   --expect-serial 104000b29905000e17000800065934759d --cycles 20 \
-  --profile ddr-burst-v1-rc2-ram \
+  --profile ddr-burst-v1-rc3-ram \
   --ssh-known-hosts-file /private/radio.known_hosts \
   --ssh-password-file /private/radio.password --report /private/recovery.json \
   --execute \
