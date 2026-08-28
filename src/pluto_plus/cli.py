@@ -20,6 +20,16 @@ from urllib.parse import urlsplit
 import httpx
 import typer
 
+from pluto_plus.ddr_recovery import (
+    DEFAULT_DISCONNECT_DELAY_MS,
+    MAX_DISCONNECT_DELAY_MS,
+    MIN_DISCONNECT_DELAY_MS,
+    DdrRecoveryError,
+    execute_ddr_recovery,
+    prepare_ddr_recovery,
+    run_live_ddr_recovery_cycle,
+)
+from pluto_plus.ddr_recovery import MAX_CYCLES as MAX_DDR_RECOVERY_CYCLES
 from pluto_plus.fastlock import (
     DEFAULT_DWELL_US,
     DEFAULT_HOPS_PER_MODE,
@@ -81,6 +91,7 @@ DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qua
 DEFAULT_LOCAL_REBOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/reboot-receipts"
 DEFAULT_RAM_BOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/ram-boot-receipts"
 DEFAULT_METADATA_SOAK_REPORTS = Path.home() / ".local/state/pluto-plus-utils/metadata-soak-reports"
+DEFAULT_DDR_RECOVERY_REPORTS = Path.home() / ".local/state/pluto-plus-utils/ddr-recovery-reports"
 DEFAULT_FASTLOCK_REPORTS = Path.home() / ".local/state/pluto-plus-utils/fastlock-reports"
 DEFAULT_HOST_ISOLATION_RECEIPTS = (
     Path.home() / ".local/state/pluto-plus-utils/host-isolation-receipts"
@@ -1807,6 +1818,129 @@ def radio_soak_metadata(
         )
     except (ImportError, MetadataSoakError, OSError, RuntimeError, ValueError) as error:
         _fail("metadata_soak_failed", str(error), 5)
+    _emit(report.model_dump(mode="json"))
+
+
+@radio_app.command("qualify-ddr-recovery")
+def radio_qualify_ddr_recovery(
+    target: str = typer.Argument(..., help="Literal private IPv4 address of one radio."),
+    expect_serial: str = typer.Option(
+        ..., "--expect-serial", help="Require this exact radio serial over IIO and SSH."
+    ),
+    cycles: int = typer.Option(
+        20,
+        "--cycles",
+        min=1,
+        max=MAX_DDR_RECOVERY_CYCLES,
+        help="Abrupt 200 MB burst disconnect/reopen cycles; RX0 and RX1 alternate.",
+    ),
+    disconnect_delay_ms: int = typer.Option(
+        DEFAULT_DISCONNECT_DELAY_MS,
+        "--disconnect-delay-ms",
+        min=MIN_DISCONNECT_DELAY_MS,
+        max=MAX_DISCONNECT_DELAY_MS,
+        help="Delay after victim admission before the process is terminated.",
+    ),
+    profile_id: str = typer.Option(
+        "ddr-burst-v1-rc2-ram",
+        "--profile",
+        help="Exact immutable ABI-3 DDR-burst firmware profile.",
+    ),
+    ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts file pinned to this exact radio and endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Optional private one-line radio password file; otherwise prompt.",
+    ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None, "--report", help="Absent-only private atomic JSON report path."
+    ),
+    execute: bool = typer.Option(False, "--execute", help="Run the destructive-client workload."),
+    confirmation: str | None = typer.Option(
+        None, "--confirm", help="With --execute, the exact phrase printed by the dry run."
+    ),
+) -> None:
+    """Prove immediate IIO recovery after abrupt high-rate DDR client loss."""
+
+    try:
+        plan = prepare_ddr_recovery(
+            target,
+            expect_serial,
+            cycles=cycles,
+            profile_id=profile_id,
+            disconnect_delay_ms=disconnect_delay_ms,
+        )
+    except DdrRecoveryError as error:
+        _fail("ddr_recovery_plan_failed", str(error), 2)
+    selected_report = (
+        DEFAULT_DDR_RECOVERY_REPORTS / f"ddr-recovery-{plan.serial}-{time.time_ns()}.json"
+        if report_path is None
+        else report_path.expanduser().resolve()
+    )
+    if not execute:
+        _emit(
+            {
+                "execute": False,
+                "plan": plan.model_dump(mode="json"),
+                "confirmation_phrase": plan.confirmation_phrase,
+                "report_path": str(selected_report),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "ddr_recovery_confirmation_required",
+            f"--confirm must be exactly {plan.confirmation_phrase!r}",
+            2,
+        )
+    if ssh_known_hosts_file is None:
+        _fail(
+            "ddr_recovery_known_hosts_required",
+            "--execute requires --ssh-known-hosts-file",
+            2,
+        )
+    if selected_report.exists():
+        _fail(
+            "ddr_recovery_report_exists",
+            "refusing to replace an existing DDR recovery report",
+            2,
+        )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().resolve()
+    _read_private_file_bytes(
+        selected_known_hosts,
+        label="DDR recovery SSH known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    password = (
+        typer.prompt("Radio root password", hide_input=True)
+        if ssh_password_file is None
+        else _read_private_text_file(
+            ssh_password_file.expanduser().resolve(), label="DDR recovery SSH password"
+        )
+    )
+    environment = inspect_iio_environment(require_usb=False)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        transport = BoundSshTransport(
+            host=plan.target,
+            interface=None,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+        probe = SshMetadataHealthProbe(transport, serial=plan.serial)
+        report = execute_ddr_recovery(
+            plan,
+            report_path=selected_report,
+            health_probe=probe,
+            cycle_runner=run_live_ddr_recovery_cycle,
+        )
+    except (DdrRecoveryError, ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("ddr_recovery_failed", str(error), 5)
     _emit(report.model_dump(mode="json"))
 
 
