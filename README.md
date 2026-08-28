@@ -311,6 +311,35 @@ The nine-slot matrix is the practical release regression. The full `--slots
 936` campaign remains the long-soak gate and takes eight hours at the fixed
 period. Stop any competing owner before execution.
 
+### DDR abrupt-disconnect recovery
+
+`radio qualify-ddr-recovery` exercises the shutdown/reopen boundary that a
+normal throughput ladder cannot cover. Each cycle alternates RX0 and RX1,
+admits the exact 200 MB burst geometry at 25 MS/s, terminates that client while
+its refill is active, and immediately opens a fresh DDR capture. It then proves
+an ordinary low-rate metadata capture, exact RX-setting restoration, unchanged
+Linux boot and iiOD process identity, zero leaked buffers, and TX-safe state.
+
+The command is a dry run unless its exact confirmation phrase is supplied. A
+pinned LAN SSH key and private password file are required for execution so that
+data-plane recovery cannot be mistaken for a radio or iiOD restart:
+
+```bash
+uv run pluto radio qualify-ddr-recovery 192.168.1.15 \
+  --expect-serial 104000b29905000e17000800065934759d --cycles 20
+uv run pluto radio qualify-ddr-recovery 192.168.1.15 \
+  --expect-serial 104000b29905000e17000800065934759d --cycles 20 \
+  --profile ddr-burst-v1-rc5-ram \
+  --ssh-known-hosts-file /private/radio.known_hosts \
+  --ssh-password-file /private/radio.password --report /private/recovery.json \
+  --execute \
+  --confirm 'QUALIFY DDR RECOVERY 104000b29905000e17000800065934759d 20'
+```
+
+The report is created atomically with mode 0600 on pass or failure. A failed
+immediate reopen is a firmware release failure; reboot the RAM candidate rather
+than attempting to continue a wedged campaign.
+
 `pluto doctor` is also standalone by default. It reads fresh IIOD facts through
 each exact USB-gadget network interface and reports identity, Rev.C model,
 canonical v5 firmware, AD9361 PHY, paired-RX devices, metadata, and facts that

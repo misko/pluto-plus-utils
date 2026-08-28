@@ -189,6 +189,43 @@ DDR_BURST_V1_RC2_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 9, 14, 1, tzinfo=UTC),
 )
 
+# RC3 retains the exact RC2 userspace/FPGA graph and adds the merged AXI-DMAC
+# hardware-shutdown fence. The trusted bundle is release-eligible offline, but
+# this identity remains RAM-only until abrupt-disconnect and multi-radio gates
+# pass; no policy with the same source commit may authorize persistence.
+DDR_BURST_V1_RC3_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-rc3-ram",
+    release_tag="ddr-burst-v1-rc3-19abd4a4184b",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1-rc3",
+    asset_name="plutoplus-spf-ddr-burst-v1-rc3-19abd4a4184b-pluto.dfu",
+    asset_sha256="18f0ce26e4c242f24fcacbd04e71b633e24ccf5b740332a263dc15e778a231fa",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33163618434",
+    source_commit="19abd4a4184b155153eaf1d1b7fd3b393bcb6ace",
+    fit_body_sha256="0f46a47d41c994c71c4d58d409cfe73ec90b198a07553586a5188ae4321230f9",
+    fit_body_size=12_796_875,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 10, 51, 38, tzinfo=UTC),
+)
+
+# RC5 closes the high-to-low sample-rate recovery defect by resetting the RX
+# timestamp FIFO, with the reset hold implemented as one SRL so the slice-full
+# Z7010 still routes. The protected bundle and both checksum inventories pass,
+# but these bytes remain RAM-only until the repeated disconnect and fleet gates
+# complete; no profile with this identity may authorize persistence.
+DDR_BURST_V1_RC5_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-rc5-ram",
+    release_tag="ddr-burst-v1-rc5-58f382f69776",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1-rc5",
+    asset_name="plutoplus-spf-ddr-burst-v1-rc5-58f382f69776-pluto.dfu",
+    asset_sha256="ba364191cdfd0eb17af81d952f92d69481c7e31fbcdd8baac79590eab8afe98c",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33171059728",
+    source_commit="58f382f69776f39b04eac9e289064d6e22edd433",
+    fit_body_sha256="bd888473054b269643e94e599f835a71fad2ed8cb08f21258c5f418bfd380aab",
+    fit_body_size=12_793_407,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 12, 48, 35, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,
