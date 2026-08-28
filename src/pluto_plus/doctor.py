@@ -245,6 +245,24 @@ DDR_BURST_V2_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 18, 10, 54, tzinfo=UTC),
 )
 
+# RC2 adds a deterministic, pre-hardware 8 ms DDR frame-period floor after
+# full-image RC1 qualification exposed whole-frame loss for short high-rate
+# refills. It also retains sparse iiOD failures in the bounded kernel log.
+# These exact protected-build bytes remain RAM-only until hardware gates pass.
+DDR_BURST_V2_RC2_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v2-rc2-ram",
+    release_tag="ddr-burst-v2-rc2-1b811c744012",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v2-rc2",
+    asset_name="plutoplus-spf-ddr-burst-v2-rc2-1b811c744012-pluto.dfu",
+    asset_sha256="284e5f87e853055ee182c2caa9db8bdacae34a9b20d0f3187dd001f87c0cf011",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33202981068",
+    source_commit="1b811c744012227f01f19a79af17e2d9ba8ca90b",
+    fit_body_sha256="c4f517cb3f442617d6154c1e44779c30181ad4af44325b32300fc5413b7e4891",
+    fit_body_size=12_797_859,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 19, 35, 41, tzinfo=UTC),
+)
+
 # Exact final-version-stamped DDR burst image from protected main run
 # 33174605592. The release label does not transfer RC5's hardware evidence:
 # these byte-distinct DFU/FIT objects remain RAM-only until they pass the final
