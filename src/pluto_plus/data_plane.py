@@ -91,6 +91,8 @@ class DataPlaneRuntimeStatus(ApiModel):
     rx_device_path: str = Field(min_length=1, max_length=1024)
     cma_total_bytes: int = Field(gt=0)
     cma_free_bytes: int = Field(ge=0)
+    memory_total_bytes: int = Field(gt=0)
+    memory_available_bytes: int = Field(ge=0)
     interrupt_total: int = Field(ge=0)
     fpga_devices: tuple[str, ...] = Field(max_length=64)
     dma_devices: tuple[str, ...] = Field(max_length=32)
@@ -331,6 +333,8 @@ def inspect_data_plane_runtime(
             rx_device_path=fields["rx_device_path"],
             cma_total_bytes=int(fields["cma_total_kib"]) * 1024,
             cma_free_bytes=int(fields["cma_free_kib"]) * 1024,
+            memory_total_bytes=int(fields["memory_total_kib"]) * 1024,
+            memory_available_bytes=int(fields["memory_available_kib"]) * 1024,
             interrupt_total=int(fields["interrupt_total"]),
             fpga_devices=_decode_hex_report_lines(
                 fields, "fpga_devices_hex", maximum_bytes=8192
@@ -453,6 +457,8 @@ rx_buffer_length=$(read_optional "$rx_device/buffer/length")
 rx_data_available=$(read_optional "$rx_device/buffer/data_available")
 cma_total_kib=$(awk '$1 == "CmaTotal:" {print $2; exit}' /proc/meminfo)
 cma_free_kib=$(awk '$1 == "CmaFree:" {print $2; exit}' /proc/meminfo)
+memory_total_kib=$(awk '$1 == "MemTotal:" {print $2; exit}' /proc/meminfo)
+memory_available_kib=$(awk '$1 == "MemAvailable:" {print $2; exit}' /proc/meminfo)
 interrupt_total=$(awk '$1 == "intr" {print $2; exit}' /proc/stat)
 fpga_devices=$(for candidate in "$rx_bus_path"/*; do
   printf '%s\n' "$candidate"
@@ -476,6 +482,8 @@ emit rx_data_available "$rx_data_available"
 emit rx_device_path "$rx_device_path"
 emit cma_total_kib "$cma_total_kib"
 emit cma_free_kib "$cma_free_kib"
+emit memory_total_kib "$memory_total_kib"
+emit memory_available_kib "$memory_available_kib"
 emit interrupt_total "$interrupt_total"
 emit_hex fpga_devices_hex "$fpga_devices"
 emit_hex dma_devices_hex "$dma_devices"

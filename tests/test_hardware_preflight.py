@@ -211,8 +211,8 @@ def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
             {
                 "schema_version": 1,
                 "metadata_abi": 3,
-                "source_ref": "single-rx-metadata-rc1-source/libiio-v1",
-                "source_commit": "5dc200af10961e50d3b019cd38bdb8dd3c0e8c3c",
+                "source_ref": "ddr-burst-v1-source/libiio-v2",
+                "source_commit": "6591aa335ee124c32d9ef500f728068d299af71a",
                 "native_libiio_path": str(native),
                 "native_libiio_sha256": _sha256(native),
                 "pylibiio_path": str(binding),
@@ -224,6 +224,7 @@ def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
                     "request",
                     "metadata_capacity",
                     "batch_frames",
+                    "ddr_burst_bytes",
                 ],
             }
         )
@@ -237,6 +238,7 @@ def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
             request: bytes,
             metadata_capacity: int = 64 * 1024,
             batch_frames: int = 1,
+            ddr_burst_bytes: int = 0,
         ) -> None:
             pass
 
@@ -258,7 +260,7 @@ def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
     result = verify_metadata_runtime(expected_abi=3)
 
     assert result.metadata_abi == 3
-    assert result.source_commit == "5dc200af10961e50d3b019cd38bdb8dd3c0e8c3c"
+    assert result.source_commit == "6591aa335ee124c32d9ef500f728068d299af71a"
 
 
 def test_metadata_runtime_gate_rejects_missing_receipt_and_changed_file(

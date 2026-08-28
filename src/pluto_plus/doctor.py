@@ -153,6 +153,24 @@ SINGLE_RX_METADATA_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 27, 22, 38, 52, tzinfo=UTC),
 )
 
+# Exact opt-in DDR burst candidate built from the RC32-based ABI-3 graph. The
+# profile is intentionally RAM-only: its hash authorizes volatile DFU testing,
+# never persistence. A separate promotion identity is required after the USB,
+# IP, cancellation, and memory-reserve hardware matrix passes.
+DDR_BURST_V1_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-rc1-ram",
+    release_tag="ddr-burst-v1-rc1-fdbe3ffaed60",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1-rc1",
+    asset_name="plutoplus-spf-ddr-burst-v1-rc1-fdbe3ffaed60-pluto.dfu",
+    asset_sha256="9024ed3c0ce38efeaf2e30dd71f903e2d65a234b90e7af175d3c196042dc6591",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33145187461",
+    source_commit="fdbe3ffaed604cc83f89252a10d2ec8b51b5be58",
+    fit_body_sha256="b9ceebdbadf144e91be78c2b87aad30691f3ade068f91ad8ab61c72b1b4035d4",
+    fit_body_size=12_796_131,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 5, 34, 46, tzinfo=UTC),
+)
+
 
 def diagnose_radio(
     snapshot: RadioSnapshot,

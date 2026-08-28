@@ -61,6 +61,8 @@ class VolatileFirmwarePlan:
     expected_metadata_abi: int
     expected_tandem_agc: bool
     confirmation_phrase: str
+    expected_ddr_burst_max_iq_bytes: int | None = None
+    expected_ddr_burst_reserve_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +241,8 @@ def prepare_ram_boot_plan(
         expected_metadata_abi=profile.metadata_abi,
         expected_tandem_agc=profile.tandem_agc,
         confirmation_phrase=f"RAM BOOT {local.serial}",
+        expected_ddr_burst_max_iq_bytes=profile.ddr_burst_max_iq_bytes,
+        expected_ddr_burst_reserve_bytes=profile.ddr_burst_reserve_bytes,
     )
 
 
@@ -294,6 +298,8 @@ def execute_ram_boot_plan(
         "expected_firmware",
         "expected_metadata_abi",
         "expected_tandem_agc",
+        "expected_ddr_burst_max_iq_bytes",
+        "expected_ddr_burst_reserve_bytes",
     ):
         if getattr(fresh, field) != getattr(plan, field):
             raise VolatileFirmwareError(f"RAM-boot precondition changed: {field}")
@@ -599,6 +605,26 @@ def _attest_ram_return(
                 raise VolatileFirmwareError("returned RAM image PHY/metadata ABI is wrong")
             if ("tandem-agc" in device_names) is not plan.expected_tandem_agc:
                 raise VolatileFirmwareError("returned RAM image tandem capability is wrong")
+            observed_burst = str(facts.get("iio,buffer-ddr-burst") or "").strip()
+            observed_max = str(
+                facts.get("iio,buffer-ddr-burst-max-iq-bytes") or ""
+            ).strip()
+            observed_reserve = str(
+                facts.get("iio,buffer-ddr-burst-reserve-bytes") or ""
+            ).strip()
+            if plan.expected_ddr_burst_max_iq_bytes is None:
+                if observed_burst or observed_max or observed_reserve:
+                    raise VolatileFirmwareError(
+                        "returned RAM image has an unexpected DDR burst capability"
+                    )
+            elif (
+                observed_burst != "1"
+                or observed_max != str(plan.expected_ddr_burst_max_iq_bytes)
+                or observed_reserve != str(plan.expected_ddr_burst_reserve_bytes)
+            ):
+                raise VolatileFirmwareError(
+                    "returned RAM image DDR burst capability is wrong"
+                )
             mute_returned_radio(plan.serial)
             return serial, firmware, phy
         except BaseException as error:

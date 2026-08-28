@@ -201,6 +201,8 @@ def _runtime_report(*, serial: str = "SERIAL_A") -> str:
             "PPU\trx_device_path\t/sys/devices/fpga-axi/iio:device1",
             "PPU\tcma_total_kib\t65536",
             "PPU\tcma_free_kib\t64620",
+            "PPU\tmemory_total_kib\t492560",
+            "PPU\tmemory_available_kib\t401234",
             "PPU\tinterrupt_total\t1234",
             f"PPU\tfpga_devices_hex\t{fpga_devices}",
             f"PPU\tdma_devices_hex\t{dma_devices}",
@@ -223,6 +225,8 @@ def test_inspect_data_plane_runtime_uses_read_only_fixed_script() -> None:
     assert b">\"$rx_device" not in transport.stdin
     assert status.iiod_pid == 4371
     assert status.cma_free_bytes == 64_620 * 1024
+    assert status.memory_total_bytes == 492_560 * 1024
+    assert status.memory_available_bytes == 401_234 * 1024
     assert status.interrupt_total == 1234
     assert status.fpga_devices == ("7c400000.dma", "79020000.cf-ad9361-lpc")
     assert status.dma_devices == ("7c400000.dma",)

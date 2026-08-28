@@ -45,6 +45,9 @@ class MetadataContinuityCell(ApiModel):
     overflow_count: int = Field(ge=0)
     elapsed_seconds: float = Field(gt=0)
     observed_fraction: float = Field(ge=0.0, le=1.0)
+    ddr_burst_requested_iq_bytes: int = Field(default=0, ge=0)
+    ddr_burst_admitted_iq_bytes: int = Field(default=0, ge=0)
+    ddr_burst_frames: int = Field(default=0, ge=0)
     passed: bool
 
     @model_validator(mode="after")
@@ -65,6 +68,16 @@ class MetadataContinuityCell(ApiModel):
         )
         if self.passed is not expected_pass:
             raise ValueError("metadata ladder pass result is non-canonical")
+        expected_burst_bytes = self.samples_per_channel * 4 * self.requested_frames
+        if self.ddr_burst_requested_iq_bytes:
+            if (
+                self.ddr_burst_requested_iq_bytes != expected_burst_bytes
+                or self.ddr_burst_admitted_iq_bytes != expected_burst_bytes
+                or self.ddr_burst_frames != self.requested_frames
+            ):
+                raise ValueError("metadata ladder DDR burst admission does not close")
+        elif self.ddr_burst_admitted_iq_bytes or self.ddr_burst_frames:
+            raise ValueError("ordinary metadata ladder cannot report DDR burst admission")
         return self
 
 
@@ -88,6 +101,7 @@ class MetadataContinuityLadderReport(ApiModel):
     rf_bandwidth_hz: int = Field(gt=0)
     channels: tuple[int, ...]
     kernel_buffers: int = Field(ge=4, le=64)
+    ddr_burst_enabled: bool = False
     minimum_observed_fraction: float = Field(
         default=MINIMUM_OBSERVED_FRACTION,
         ge=MINIMUM_OBSERVED_FRACTION,
@@ -111,6 +125,8 @@ class MetadataContinuityLadderReport(ApiModel):
         expected = next((cell.samples_per_channel for cell in self.cells if cell.passed), None)
         if self.largest_passing_samples_per_channel != expected:
             raise ValueError("largest passing metadata refill is non-canonical")
+        if any(bool(cell.ddr_burst_frames) is not self.ddr_burst_enabled for cell in self.cells):
+            raise ValueError("metadata ladder DDR burst mode is inconsistent")
         return self
 
 
@@ -120,6 +136,7 @@ class MetadataLadderRadio(RadioDevice, Protocol):
         sample_count: int,
         *,
         kernel_buffers: int,
+        ddr_burst_bytes: int = 0,
     ) -> MetadataCapture: ...
 
 
@@ -153,6 +170,7 @@ def run_metadata_continuity_ladder(
     samples_per_channel: Sequence[int],
     frames: int = 6,
     kernel_buffers: int = 4,
+    ddr_burst: bool = False,
     radio_factory: Callable[[str, str, MetadataAbi], MetadataLadderRadio] | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> MetadataContinuityLadderReport:
@@ -172,6 +190,8 @@ def run_metadata_continuity_ladder(
         raise ValueError("metadata channels must be RX0, RX1, or dual")
     if metadata_abi in {1, 2} and selected_channels != (0, 1):
         raise ValueError("metadata ABI 1 and 2 require dual RX")
+    if ddr_burst and (metadata_abi != 3 or len(selected_channels) != 1):
+        raise ValueError("device DDR burst ladder requires metadata ABI 3 and one receiver")
     if metadata_abi == 3 and len(selected_channels) == 1 and any(
         samples & 1 for samples in samples_per_channel
     ):
@@ -211,6 +231,7 @@ def run_metadata_continuity_ladder(
                         frames=frames,
                         kernel_buffers=kernel_buffers,
                         receiver_count=len(selected_channels),
+                        ddr_burst=ddr_burst,
                         clock_ns=clock_ns,
                     )
                 )
@@ -242,6 +263,7 @@ def run_metadata_continuity_ladder(
         rf_bandwidth_hz=rf_bandwidth_hz,
         channels=selected_channels,
         kernel_buffers=kernel_buffers,
+        ddr_burst_enabled=ddr_burst,
         cells=tuple(cells),
         failures=tuple(failures),
         largest_passing_samples_per_channel=next(
@@ -259,16 +281,26 @@ def _run_cell(
     frames: int,
     kernel_buffers: int,
     receiver_count: int,
+    ddr_burst: bool,
     clock_ns: Callable[[], int],
 ) -> MetadataContinuityCell:
     blocks: list[SampleBlockV2] = []
+    ddr_burst_bytes = samples_per_channel * receiver_count * 4 * frames if ddr_burst else 0
     started_ns = clock_ns()
     with radio.begin_metadata_capture(
         samples_per_channel,
         kernel_buffers=kernel_buffers,
+        ddr_burst_bytes=ddr_burst_bytes,
     ) as capture:
         if capture.kernel_buffers != kernel_buffers:
             raise RuntimeError("metadata ladder kernel-buffer readback is not exact")
+        if (
+            capture.ddr_burst_enabled is not ddr_burst
+            or capture.ddr_burst_requested_bytes != ddr_burst_bytes
+            or capture.ddr_burst_admitted_bytes != ddr_burst_bytes
+            or capture.ddr_burst_frames != (frames if ddr_burst else 0)
+        ):
+            raise RuntimeError("metadata ladder DDR burst admission readback is not exact")
         for _ in range(frames):
             block = capture.read_block()
             if block.samples.shape != (receiver_count, samples_per_channel):
@@ -295,6 +327,9 @@ def _run_cell(
         overflow_count=overflow_count,
         elapsed_seconds=elapsed_seconds,
         observed_fraction=fraction,
+        ddr_burst_requested_iq_bytes=ddr_burst_bytes,
+        ddr_burst_admitted_iq_bytes=ddr_burst_bytes,
+        ddr_burst_frames=frames if ddr_burst else 0,
         passed=fraction >= MINIMUM_OBSERVED_FRACTION and overflow_count == 0,
     )
 

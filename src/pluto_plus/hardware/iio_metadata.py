@@ -40,6 +40,7 @@ DEFAULT_METADATA_CAPACITY = 64 * 1024
 IIO_CONTEXT_TIMEOUT_MS = 5_000
 IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER = 8
 IIO_CONTEXT_TIMEOUT_MAX_MS = 30_000
+IIO_DDR_BURST_TIMEOUT_MAX_MS = 300_000
 INITIAL_TIME_ANCHOR_COUNT = 8
 MAX_TIME_ANCHORS = 32
 TIME_ANCHOR_WINDOW_NS = 10_000_000_000
@@ -99,6 +100,8 @@ def parse_metadata_layout_capabilities(value: object) -> tuple[MetadataLayoutCap
 def metadata_iio_context_timeout_ms(
     sample_rate_hz: int,
     samples_per_channel: int,
+    *,
+    ddr_burst_frames: int = 0,
 ) -> int:
     """Return one bounded timeout with margin for the configured native-rate refill."""
 
@@ -108,7 +111,16 @@ def metadata_iio_context_timeout_ms(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
+    if (
+        isinstance(ddr_burst_frames, bool)
+        or not isinstance(ddr_burst_frames, int)
+        or ddr_burst_frames < 0
+    ):
+        raise ValueError("ddr_burst_frames must be a non-negative integer")
     frame_duration_ms = (samples_per_channel * 1_000 + sample_rate_hz - 1) // sample_rate_hz
+    if ddr_burst_frames:
+        capture_timeout_ms = frame_duration_ms * ddr_burst_frames * 2 + IIO_CONTEXT_TIMEOUT_MS
+        return min(IIO_DDR_BURST_TIMEOUT_MAX_MS, capture_timeout_ms)
     return min(
         IIO_CONTEXT_TIMEOUT_MAX_MS,
         max(
@@ -128,7 +140,7 @@ def configure_iio_context_timeout(
     if (
         isinstance(timeout_ms, bool)
         or not isinstance(timeout_ms, int)
-        or not IIO_CONTEXT_TIMEOUT_MS <= timeout_ms <= IIO_CONTEXT_TIMEOUT_MAX_MS
+        or not IIO_CONTEXT_TIMEOUT_MS <= timeout_ms <= IIO_DDR_BURST_TIMEOUT_MAX_MS
     ):
         raise ValueError("IIO context timeout is outside the reviewed bounded range")
 
@@ -170,6 +182,7 @@ class IioMetadataCaptureSession:
         metadata_abi: int,
         metadata_capacity: int = DEFAULT_METADATA_CAPACITY,
         tandem_request: TandemSessionRequestV1 | None = None,
+        ddr_burst_bytes: int = 0,
     ) -> None:
         if sample_rate_hz <= 0:
             raise ValueError("sample_rate_hz must be positive")
@@ -181,6 +194,10 @@ class IioMetadataCaptureSession:
             raise ValueError("metadata_abi must be one of the supported ABIs 1, 2, or 3")
         if metadata_capacity <= 0:
             raise ValueError("metadata_capacity must be positive")
+        if isinstance(ddr_burst_bytes, bool) or not isinstance(ddr_burst_bytes, int):
+            raise TypeError("ddr_burst_bytes must be an integer")
+        if ddr_burst_bytes < 0:
+            raise ValueError("ddr_burst_bytes must not be negative")
         self._sdr = sdr
         self._metadata_buffer_type = metadata_buffer_type
         self._sample_rate_hz = int(sample_rate_hz)
@@ -188,6 +205,7 @@ class IioMetadataCaptureSession:
         self._kernel_buffers = int(kernel_buffers)
         self._metadata_abi = metadata_abi
         self._metadata_capacity = int(metadata_capacity)
+        self._ddr_burst_requested_bytes = ddr_burst_bytes
         self._tandem_request = tandem_request or TandemSessionRequestV1.auto_for_sample_count(
             samples_per_channel
         )
@@ -198,6 +216,15 @@ class IioMetadataCaptureSession:
             raise ValueError("metadata ABI 1 and 2 require paired RX channels")
         if metadata_abi == 3 and len(self._channels) == 1 and samples_per_channel & 1:
             raise ValueError("metadata ABI 3 single-RX sample count must be even")
+        if ddr_burst_bytes and (metadata_abi != 3 or len(self._channels) != 1):
+            raise ValueError("device DDR burst v1 requires metadata ABI 3 and one receiver")
+        frame_iq_bytes = samples_per_channel * len(self._channels) * 4
+        self._ddr_burst_frames = (
+            0 if not ddr_burst_bytes else ddr_burst_bytes // frame_iq_bytes
+        )
+        self._ddr_burst_admitted_bytes = self._ddr_burst_frames * frame_iq_bytes
+        if ddr_burst_bytes and not self._ddr_burst_frames:
+            raise ValueError("device DDR burst byte budget cannot hold one complete frame")
         self._buffer: Any | None = None
         self._time_anchors: list[HostTimeAnchorMeasurement] = []
         self._next_anchor_request_id = 1
@@ -213,15 +240,34 @@ class IioMetadataCaptureSession:
     def is_open(self) -> bool:
         return self._buffer is not None
 
+    @property
+    def ddr_burst_enabled(self) -> bool:
+        return self._ddr_burst_frames > 0
+
+    @property
+    def ddr_burst_requested_bytes(self) -> int:
+        return self._ddr_burst_requested_bytes
+
+    @property
+    def ddr_burst_admitted_bytes(self) -> int:
+        return self._ddr_burst_admitted_bytes
+
+    @property
+    def ddr_burst_frames(self) -> int:
+        return self._ddr_burst_frames
+
     def open(self) -> None:
         if self._buffer is not None:
             raise RuntimeError("IIO metadata capture is already open")
         self._prime_ordinary_rx()
         self._verify_kernel_buffers()
         try:
+            if self.ddr_burst_enabled:
+                self._refresh_time_anchors(initial=True)
             self._buffer = self._open_metadata_buffer()
             self._sdr._rxbuf = self._buffer
-            self._refresh_time_anchors(initial=True)
+            if not self.ddr_burst_enabled:
+                self._refresh_time_anchors(initial=True)
         except BaseException:
             self.close()
             raise
@@ -272,6 +318,15 @@ class IioMetadataCaptureSession:
                         self._sdr._rxadc,
                         self._samples_per_channel,
                         self._metadata_capacity,
+                    )
+                if self.ddr_burst_enabled:
+                    return self._metadata_buffer_type(
+                        self._sdr._rxadc,
+                        self._samples_per_channel,
+                        request,
+                        self._metadata_capacity,
+                        batch_frames=1,
+                        ddr_burst_bytes=self._ddr_burst_requested_bytes,
                     )
                 return self._metadata_buffer_type(
                     self._sdr._rxadc,
@@ -515,6 +570,15 @@ class IioMetadataCaptureSession:
         finally:
             del buffer
             gc.collect()
+
+    def cancel(self) -> None:
+        """Cancel a blocked refill and synchronously tear down this session."""
+
+        buffer = self._buffer
+        cancel = getattr(buffer, "cancel", None)
+        if callable(cancel):
+            cancel()
+        self.close()
 
     def __enter__(self) -> IioMetadataCaptureSession:
         if not self.is_open:

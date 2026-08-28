@@ -11,7 +11,7 @@ not make continuity observable and must not be accepted as a fallback.
 | --- | --- | --- | --- |
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
-| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `single-rx-metadata-rc1-source/libiio-v1` | `5dc200af10961e50d3b019cd38bdb8dd3c0e8c3c` |
+| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `ddr-burst-v1-source/libiio-v2` | `6591aa335ee124c32d9ef500f728068d299af71a` |
 
 The currently deployed `.20` and `.21` radios advertise ABI 1. ABI 2 is a
 separate, gated firmware and host-runtime migration; it must not be selected
@@ -23,6 +23,28 @@ exact capability string
 per sample with an even sample count, while dual RX uses eight bytes per sample.
 V6 records arbitrary FPGA-counter gaps exactly; ABI 1/2 parsing and geometry
 remain unchanged.
+
+ABI 3 also supports an opt-in, per-buffer device-DDR cache when the radio
+advertises `iio,buffer-ddr-burst=1`. A zero or omitted byte budget is the
+ordinary streaming path. A positive budget is rounded down to complete IQ
+frames and its requested/admitted geometry is observable from Python:
+
+```python
+with radio.begin_metadata_capture(
+    samples_per_refill,
+    kernel_buffers=4,
+    ddr_burst_bytes=100_000_000,
+) as capture:
+    assert capture.ddr_burst_enabled
+    print(capture.ddr_burst_admitted_bytes, capture.ddr_burst_frames)
+    blocks = [capture.read_block() for _ in range(capture.ddr_burst_frames)]
+```
+
+The burst cache is supported only for one selected receiver. It captures the
+admitted whole frames before exposing the first refill, rejects discontinuity
+or overflow atomically, and drains through the same metadata/IQ refill API as
+an ordinary buffer. `radio metadata-ladder --ddr-burst` qualifies that path;
+omitting the flag is the explicit control case.
 
 Build the matched native library and binding into a release-local virtual
 environment:
