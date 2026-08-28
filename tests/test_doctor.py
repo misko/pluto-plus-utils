@@ -3,7 +3,7 @@ from __future__ import annotations
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
     CANONICAL_UBOOT,
-    DDR_BURST_V1_RELEASE_PERSISTENT_POLICY,
+    DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
     PERSISTENT_UPGRADE_POLICY,
     diagnose_radio,
 )
@@ -42,10 +42,10 @@ def _snapshot(
 
 
 def test_persistent_upgrade_policy_selects_hardware_qualified_ddr_burst_release() -> None:
-    assert PERSISTENT_UPGRADE_POLICY is DDR_BURST_V1_RELEASE_PERSISTENT_POLICY
+    assert PERSISTENT_UPGRADE_POLICY is DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
     assert PERSISTENT_UPGRADE_POLICY.hardware_qualified is True
-    assert PERSISTENT_UPGRADE_POLICY.profile_id == "ddr-burst-v1-release-persistent-promotion"
-    assert PERSISTENT_UPGRADE_POLICY.device_firmware == "v0.42-plutoplus-spf-ddr-burst-v1"
+    assert PERSISTENT_UPGRADE_POLICY.profile_id == "ddr-burst-v2-release-persistent-promotion"
+    assert PERSISTENT_UPGRADE_POLICY.device_firmware == "v0.42-plutoplus-spf-ddr-burst-v2"
 
 
 def test_doctor_passes_only_with_complete_persistent_evidence() -> None:

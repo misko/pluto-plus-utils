@@ -20,11 +20,12 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol, cast
 
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
+from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT, require_setup_repair_policy
 from pluto_plus.ip_firmware import (
     UsbSshRouteAmbiguous,
     require_unambiguous_usb_ssh_route,
 )
+from pluto_plus.models import FirmwarePolicy
 from pluto_plus.setup import (
     SetupExecutionResult,
     SetupExecutorFailure,
@@ -342,6 +343,7 @@ class FixedSshSetupExecutor:
         identity: SetupIdentity,
         transport: SetupTransport,
         state_root: Path,
+        policy: FirmwarePolicy = CANONICAL_POLICY,
         reenumeration_timeout_s: float = 45,
         poll_interval_s: float = 0.25,
     ) -> None:
@@ -352,6 +354,7 @@ class FixedSshSetupExecutor:
         self.identity = identity
         self.transport = transport
         self.state_root = state_root
+        self._policy = require_setup_repair_policy(policy)
         self._reenumeration_timeout_s = reenumeration_timeout_s
         self._poll_interval_s = poll_interval_s
 
@@ -375,7 +378,7 @@ class FixedSshSetupExecutor:
         if expected != self.identity:
             raise SetupHelperError("helper is bound to a different radio identity")
         self._attest_local_usb()
-        command = f"sh -s -- {self.identity.serial} {CANONICAL_POLICY.fit_body_size}"
+        command = f"sh -s -- {self.identity.serial} {self._policy.fit_body_size}"
         output = self.transport.run(command, stdin=_INSPECT_SCRIPT, timeout_s=45)
         fields = _parse_report(output)
         if fields.get("serial") != self.identity.serial:
@@ -393,7 +396,7 @@ class FixedSshSetupExecutor:
         tx_safe = _tx_safe(fields)
         qspi_digest = _required_digest(fields, "qspi_sha256")
         provenance = (
-            "qspi_image_verified" if qspi_digest == CANONICAL_POLICY.fit_body_sha256 else "unknown"
+            "qspi_image_verified" if qspi_digest == self._policy.fit_body_sha256 else "unknown"
         )
         return SetupObservation(
             identity=observed_identity,
@@ -411,7 +414,7 @@ class FixedSshSetupExecutor:
     def provision(self, plan: SetupPlan) -> SetupExecutionResult:
         if plan.identity != self.identity:
             raise SetupHelperError("setup plan is bound to a different radio")
-        if plan.profile_id != CANONICAL_POLICY.profile_id:
+        if plan.profile_id != self._policy.profile_id:
             raise SetupHelperError("setup plan selected an unsupported profile")
         before = self.inspect(plan.identity)
         if before != plan.before or before.environment_sha256 != plan.environment_sha256:

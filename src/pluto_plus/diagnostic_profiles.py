@@ -169,7 +169,7 @@ DDR_BURST_V2_RELEASE_PROFILE = DiagnosticProfile(
     firmware_version="v0.42-plutoplus-spf-ddr-burst-v2",
     metadata_abis=(3,),
     tandem_agc_required=True,
-    release_status="final bytes under RAM-only hardware qualification",
+    release_status="hardware-qualified release",
     release_rank=15,
 )
 

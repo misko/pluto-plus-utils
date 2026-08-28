@@ -18,8 +18,8 @@ from typing import Literal, Protocol
 from pydantic import Field, field_validator
 
 from pluto_plus.diagnostic_profiles import SUPPORTED_AD936X_PHY_MODELS
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
-from pluto_plus.models import ApiModel
+from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT, require_setup_repair_policy
+from pluto_plus.models import ApiModel, FirmwarePolicy
 
 
 class SetupError(RuntimeError):
@@ -205,6 +205,7 @@ class CanonicalSetupManager:
         receipt_directory: Path,
         inspector: Callable[[SetupIdentity], SetupObservation],
         executor: SetupExecutor,
+        policy: FirmwarePolicy = CANONICAL_POLICY,
         clock: Callable[[], datetime] | None = None,
         confirmation_ttl: timedelta = timedelta(minutes=5),
     ) -> None:
@@ -213,6 +214,7 @@ class CanonicalSetupManager:
         self._receipts_directory = receipt_directory
         self._inspect = inspector
         self._executor = executor
+        self._policy = require_setup_repair_policy(policy)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._ttl = confirmation_ttl
         self._tokens: dict[str, _TokenRecord] = {}
@@ -241,7 +243,7 @@ class CanonicalSetupManager:
             created_at=now,
             expires_at=now + self._ttl,
             identity=identity,
-            profile_id=CANONICAL_POLICY.profile_id,
+            profile_id=self._policy.profile_id,
             environment_sha256=before.environment_sha256,
             before=before,
             changes_items=changes,
@@ -419,10 +421,12 @@ class CanonicalSetupManager:
     def _validate_preconditions(self, observation: SetupObservation) -> None:
         if observation.board_model != self._BOARD_MODEL:
             raise SetupPreconditionError("canonical setup requires exact PlutoSDR Rev.C")
-        if observation.identity.observed_firmware != CANONICAL_POLICY.device_firmware:
-            raise SetupPreconditionError("active firmware is not the selected canonical release")
-        if observation.qspi_firmware_sha256 != CANONICAL_POLICY.fit_body_sha256:
-            raise SetupPreconditionError("persistent QSPI firmware hash is not canonical")
+        if observation.identity.observed_firmware != self._policy.device_firmware:
+            raise SetupPreconditionError("active firmware is not the selected setup release")
+        if observation.qspi_firmware_sha256 != self._policy.fit_body_sha256:
+            raise SetupPreconditionError(
+                "persistent QSPI firmware hash does not match setup policy"
+            )
         if observation.boot_provenance not in self._SAFE_BOOT_PROVENANCE:
             raise SetupPreconditionError("persistent QSPI boot provenance is not verified")
         if observation.uboot.get("mode") not in {"1r1t", "2r2t", None}:

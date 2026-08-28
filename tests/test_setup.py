@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
+from pluto_plus.doctor import (
+    CANONICAL_POLICY,
+    CANONICAL_UBOOT,
+    DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
+)
 from pluto_plus.setup import (
     CanonicalSetupManager,
     SetupAuthorizationError,
@@ -90,6 +94,36 @@ def test_setup_plan_is_exact_identity_environment_and_policy_bound(tmp_path: Pat
     assert planned.plan.changes == {"compatible": "ad9361"}
     assert "mode" not in planned.plan.changes
     assert planned.plan.tx_mute_required is False
+
+
+def test_setup_plan_accepts_only_exact_shipped_persistent_policy(tmp_path: Path) -> None:
+    policy = DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+    identity = _identity().model_copy(update={"observed_firmware": policy.device_firmware})
+    observation = _observation(
+        identity=identity,
+        qspi_firmware_sha256=policy.fit_body_sha256,
+    )
+    backend = FakeSetupBackend(observation)
+    manager = CanonicalSetupManager(
+        receipt_directory=tmp_path / "receipts",
+        inspector=backend.inspect,
+        executor=backend,
+        policy=policy,
+    )
+
+    planned = manager.create_plan(identity)
+
+    assert planned.plan.profile_id == policy.profile_id
+    assert planned.plan.identity.observed_firmware == policy.device_firmware
+
+    unshipped = policy.model_copy(update={"fit_body_sha256": "f" * 64})
+    with pytest.raises(ValueError, match="exact shipped hardware-qualified"):
+        CanonicalSetupManager(
+            receipt_directory=tmp_path / "unshipped",
+            inspector=backend.inspect,
+            executor=backend,
+            policy=unshipped,
+        )
 
 
 def test_setup_plan_deletes_attr_name_and_attr_val_that_revert_2r2t(
