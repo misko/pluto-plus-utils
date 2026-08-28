@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1160,3 +1162,42 @@ def test_returned_radio_mute_preflights_native_iio_before_radio_access(
         match="returned-radio IIO environment failed.*explicit native libiio",
     ):
         bootstrap.mute_returned_radio("SERIAL_A")
+
+
+def test_returned_radio_mute_uses_binding_compatible_device_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Environment:
+        healthy = True
+        actionable_message = "healthy"
+
+    class ContextWithoutClose:
+        attrs = {"hw_serial": "SERIAL_A"}
+
+    class Device:
+        _ctx = ContextWithoutClose()
+
+    device = Device()
+    monkeypatch.setattr(bootstrap, "inspect_iio_environment", lambda **_kwargs: Environment())
+    monkeypatch.setitem(
+        sys.modules,
+        "iio",
+        SimpleNamespace(
+            scan_contexts=lambda: {
+                "usb:1.3.5": "PlutoSDR+, serial=SERIAL_A",
+            }
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "adi", SimpleNamespace(ad9361=lambda **_kwargs: device))
+
+    import pluto_plus.hardware.iio as hardware_iio
+
+    muted: list[object] = []
+    released: list[object] = []
+    monkeypatch.setattr(hardware_iio, "_mute_transmit", muted.append)
+    monkeypatch.setattr(hardware_iio, "_release_device", released.append)
+
+    bootstrap.mute_returned_radio("SERIAL_A")
+
+    assert muted == [device]
+    assert released == [device]

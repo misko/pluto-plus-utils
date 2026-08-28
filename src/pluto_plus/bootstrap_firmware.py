@@ -1193,7 +1193,7 @@ def mute_returned_radio(serial: str) -> None:
         import adi
         import iio
 
-        from pluto_plus.hardware.iio import _mute_transmit
+        from pluto_plus.hardware.iio import _mute_transmit, _release_device
 
         matches = [
             uri
@@ -1210,8 +1210,7 @@ def mute_returned_radio(serial: str) -> None:
                 raise BootstrapFirmwareError("TX safety context has the wrong serial")
             _mute_transmit(device)
         finally:
-            device.rx_destroy_buffer()
-            device._ctx.close()
+            _release_device(device)
     except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as error:
         if isinstance(error, BootstrapFirmwareError):
             raise
