@@ -25,7 +25,10 @@ MAX_METADATA_SAMPLE_RUNGS = 16
 # exact release gate without encouraging larger DMA frames or unbounded runs.
 MAX_METADATA_FRAMES = 64
 MINIMUM_OBSERVED_FRACTION = 0.95
-DDR_BURST_MIN_FRAME_DURATION_US = 8_000
+# Hardware qualification found intermittent whole-frame loss at 8 ms.  The
+# first passing boundary was 10 ms; retain 50% headroom over the failure point
+# so client admission agrees with iiOD's conservative scheduling envelope.
+DDR_BURST_MIN_FRAME_DURATION_US = 12_000
 MetadataAbi = Literal[1, 2, 3]
 MetadataChannels = Literal["rx0", "rx1", "dual"]
 METADATA_CHANNEL_SELECTIONS: dict[MetadataChannels, tuple[int, ...]] = {
@@ -296,7 +299,7 @@ def _run_cell(
             sample_rate_hz * DDR_BURST_MIN_FRAME_DURATION_US
         ):
             raise ValueError(
-                "DDR burst requires at least an 8 ms frame period; "
+                "DDR burst requires at least a 12 ms frame period; "
                 f"samples={samples_per_channel} rate={sample_rate_hz} "
                 f"duration_us={frame_duration_us:.3f}"
             )

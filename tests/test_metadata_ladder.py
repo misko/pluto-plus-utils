@@ -213,7 +213,7 @@ def test_metadata_ladder_rejects_single_rx_before_abi3_and_odd_abi3_counts() -> 
 
 
 def test_metadata_ladder_qualifies_exact_single_rx_ddr_burst() -> None:
-    radio = _Radio({262_144: (0, 1, 2, 3)})
+    radio = _Radio({300_000: (0, 1, 2, 3)})
     ticks = iter((0, 1_000_000_000))
     report = run_metadata_continuity_ladder(
         uri="ip:192.0.2.1",
@@ -222,7 +222,7 @@ def test_metadata_ladder_qualifies_exact_single_rx_ddr_burst() -> None:
         rf_bandwidth_hz=20_000_000,
         metadata_abi=3,
         channels=(0,),
-        samples_per_channel=(262_144,),
+        samples_per_channel=(300_000,),
         frames=4,
         kernel_buffers=4,
         ddr_burst=True,
@@ -231,14 +231,14 @@ def test_metadata_ladder_qualifies_exact_single_rx_ddr_burst() -> None:
     )
 
     assert report.ddr_burst_enabled
-    assert report.cells[0].ddr_burst_requested_iq_bytes == 4_194_304
-    assert report.cells[0].ddr_burst_admitted_iq_bytes == 4_194_304
+    assert report.cells[0].ddr_burst_requested_iq_bytes == 4_800_000
+    assert report.cells[0].ddr_burst_admitted_iq_bytes == 4_800_000
     assert report.cells[0].ddr_burst_frames == 4
     assert report.cells[0].passed
 
 
 def test_metadata_ladder_rejects_short_ddr_frames_before_capture() -> None:
-    radio = _Radio({200_000: (0, 1), 125_000: (0, 1)})
+    radio = _Radio({300_000: (0, 1), 299_998: (0, 1), 250_000: (0, 1)})
     ticks = iter((0, 1_000_000_000))
 
     report = run_metadata_continuity_ladder(
@@ -248,7 +248,7 @@ def test_metadata_ladder_rejects_short_ddr_frames_before_capture() -> None:
         rf_bandwidth_hz=20_000_000,
         metadata_abi=3,
         channels=(0,),
-        samples_per_channel=(200_000, 125_000),
+        samples_per_channel=(300_000, 299_998, 250_000),
         frames=2,
         kernel_buffers=4,
         ddr_burst=True,
@@ -256,14 +256,16 @@ def test_metadata_ladder_rejects_short_ddr_frames_before_capture() -> None:
         clock_ns=lambda: next(ticks),
     )
 
-    assert DDR_BURST_MIN_FRAME_DURATION_US == 8_000
-    assert [cell.samples_per_channel for cell in report.cells] == [200_000]
-    assert radio.capture_requests == [200_000]
-    assert len(report.failures) == 1
-    assert report.failures[0].samples_per_channel == 125_000
-    assert report.failures[0].error_type == "ValueError"
-    assert "at least an 8 ms frame period" in report.failures[0].message
-    assert "duration_us=5000.000" in report.failures[0].message
+    assert DDR_BURST_MIN_FRAME_DURATION_US == 12_000
+    assert [cell.samples_per_channel for cell in report.cells] == [300_000]
+    assert radio.capture_requests == [300_000]
+    assert [failure.samples_per_channel for failure in report.failures] == [299_998, 250_000]
+    assert all(failure.error_type == "ValueError" for failure in report.failures)
+    assert all(
+        "at least a 12 ms frame period" in failure.message for failure in report.failures
+    )
+    assert "duration_us=11999.920" in report.failures[0].message
+    assert "duration_us=10000.000" in report.failures[1].message
     assert report.original_settings_restored
 
 
