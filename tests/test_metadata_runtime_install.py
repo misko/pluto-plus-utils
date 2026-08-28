@@ -63,5 +63,5 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     assert "pip setuptools" not in text
     assert '"$uv_bin" pip install' in text
     assert "--no-build-isolation" in text
-    assert "ddr-burst-v1-source/libiio-v1" in text
-    assert "3b2db359ef5a641422dbfb64bdab7e0e6bb3cb42" in text
+    assert "ddr-burst-v1-source/libiio-v2" in text
+    assert "6591aa335ee124c32d9ef500f728068d299af71a" in text

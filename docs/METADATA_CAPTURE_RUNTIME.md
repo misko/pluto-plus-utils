@@ -11,7 +11,7 @@ not make continuity observable and must not be accepted as a fallback.
 | --- | --- | --- | --- |
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
-| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `ddr-burst-v1-source/libiio-v1` | `3b2db359ef5a641422dbfb64bdab7e0e6bb3cb42` |
+| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `ddr-burst-v1-source/libiio-v2` | `6591aa335ee124c32d9ef500f728068d299af71a` |
 
 The currently deployed `.20` and `.21` radios advertise ABI 1. ABI 2 is a
 separate, gated firmware and host-runtime migration; it must not be selected

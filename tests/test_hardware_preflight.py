@@ -211,8 +211,8 @@ def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
             {
                 "schema_version": 1,
                 "metadata_abi": 3,
-                "source_ref": "ddr-burst-v1-source/libiio-v1",
-                "source_commit": "3b2db359ef5a641422dbfb64bdab7e0e6bb3cb42",
+                "source_ref": "ddr-burst-v1-source/libiio-v2",
+                "source_commit": "6591aa335ee124c32d9ef500f728068d299af71a",
                 "native_libiio_path": str(native),
                 "native_libiio_sha256": _sha256(native),
                 "pylibiio_path": str(binding),
@@ -260,7 +260,7 @@ def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
     result = verify_metadata_runtime(expected_abi=3)
 
     assert result.metadata_abi == 3
-    assert result.source_commit == "3b2db359ef5a641422dbfb64bdab7e0e6bb3cb42"
+    assert result.source_commit == "6591aa335ee124c32d9ef500f728068d299af71a"
 
 
 def test_metadata_runtime_gate_rejects_missing_receipt_and_changed_file(

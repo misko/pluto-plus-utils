@@ -47,8 +47,8 @@ case "$metadata_abi" in
     source_commit="6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7"
     ;;
 3)
-    source_ref="ddr-burst-v1-source/libiio-v1"
-    source_commit="3b2db359ef5a641422dbfb64bdab7e0e6bb3cb42"
+    source_ref="ddr-burst-v1-source/libiio-v2"
+    source_commit="6591aa335ee124c32d9ef500f728068d299af71a"
     ;;
 *)
     printf 'ERROR: --metadata-abi must be 1, 2, or 3\n' >&2
