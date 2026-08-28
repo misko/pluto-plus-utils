@@ -281,6 +281,24 @@ DDR_BURST_V2_RC3_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 20, 45, 12, tzinfo=UTC),
 )
 
+# Exact final-version-stamped v2 image from protected main run 33212817936.
+# The sealed bundle passed every offline release gate, but the byte-distinct
+# DFU/FIT must repeat the physical-radio matrix before any QSPI authorization
+# exists. This policy therefore permits volatile DFU boot only.
+DDR_BURST_V2_RELEASE_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v2-release-ram",
+    release_tag="v0.42-plutoplus-spf-ddr-burst-v2",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v2",
+    asset_name="plutoplus-spf-ddr-burst-v2-3cc434da22a6-pluto.dfu",
+    asset_sha256="274506a9ce3f283eb9d5cf4cc254ad294c669d70647fa656ebc051358ccb5ad0",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33212817936",
+    source_commit="3cc434da22a655937dc0c2d2e6fb9d97b4b8d1e5",
+    fit_body_sha256="ff93c3335f61f224ae85b414e83d2acab1a2bfd47daa2183ad920586ba94187b",
+    fit_body_size=12_798_367,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 21, 53, 18, tzinfo=UTC),
+)
+
 # Exact final-version-stamped DDR burst image from protected main run
 # 33174605592. The release label does not transfer RC5's hardware evidence:
 # these byte-distinct DFU/FIT objects remain RAM-only until they pass the final
