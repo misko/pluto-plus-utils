@@ -150,6 +150,55 @@ def test_ladder_records_a_failed_rung_and_still_restores() -> None:
     assert radio.closed
 
 
+def test_ladder_duration_rounds_each_rung_to_complete_frames() -> None:
+    radio = FakeLadderRadio()
+    report = run_iio_ladder(
+        uri="ip:192.168.1.20",
+        serial="SERIAL_A",
+        rates_hz=(1_000_000, 2_000_000),
+        channels=(0,),
+        samples_per_channel=16_384,
+        duration_seconds=0.032768,
+        warmup_frames=0,
+        kernel_buffers=4,
+        radio_factory=lambda _uri, _serial: radio,
+        clock_ns=AdvancingClock(),
+    )
+
+    assert report.requested_duration_seconds == 0.032768
+    assert [cell.frames for cell in report.cells] == [2, 4]
+    assert [cell.nominal_capture_seconds for cell in report.cells] == pytest.approx(
+        [0.032768, 0.032768]
+    )
+    assert [cell.wire_bytes for cell in report.cells] == [131_072, 262_144]
+    assert report.original_settings_restored is True
+
+
+def test_ladder_rejects_ambiguous_or_excessive_duration_before_open() -> None:
+    radio = FakeLadderRadio()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        run_iio_ladder(
+            uri="ip:192.168.1.20",
+            serial="SERIAL_A",
+            rates_hz=(5_000_000,),
+            frames=4,
+            duration_seconds=5,
+            radio_factory=lambda _uri, _serial: radio,
+        )
+    assert not radio.opened
+
+    with pytest.raises(ValueError, match="above the bounded limit"):
+        run_iio_ladder(
+            uri="ip:192.168.1.20",
+            serial="SERIAL_A",
+            rates_hz=(30_000_000,),
+            samples_per_channel=16_384,
+            duration_seconds=20,
+            radio_factory=lambda _uri, _serial: radio,
+        )
+    assert not radio.opened
+
+
 @pytest.mark.parametrize(
     ("channels", "samples_per_channel"),
     (

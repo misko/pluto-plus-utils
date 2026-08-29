@@ -20,7 +20,10 @@ LADDER_CHANNEL_SELECTIONS = {"rx0": (0,), "rx1": (1,), "dual": (0, 1)}
 MIN_SAMPLES_PER_CHANNEL = 16_384
 MAX_SAMPLES_PER_CHANNEL = 4_194_304
 MAX_RATE_RUNGS = 32
+DEFAULT_TIMED_FRAMES = 12
 MAX_TIMED_FRAMES = 100
+MAX_DURATION_SECONDS = 60.0
+MAX_DURATION_TIMED_FRAMES = 4_096
 MAX_WARMUP_FRAMES = 20
 WIRE_BYTES_PER_COMPLEX_SAMPLE = 4
 KEEP_PACE_FRACTION = 0.90
@@ -38,6 +41,7 @@ class LadderCell(ApiModel):
     actual_sample_rate_hz: int = Field(gt=0)
     samples_per_channel: int = Field(gt=0)
     frames: int = Field(gt=0)
+    nominal_capture_seconds: float | None = Field(default=None, gt=0)
     wire_bytes: int = Field(ge=0)
     elapsed_seconds: float = Field(ge=0)
     offered_payload_mbps: float = Field(ge=0)
@@ -70,6 +74,7 @@ class LadderReport(ApiModel):
     unsafe_kernel_queue_override: bool
     wire_bytes_per_sample_period: int
     warmup_frames: int
+    requested_duration_seconds: float | None = Field(default=None, gt=0)
     cells: tuple[LadderCell, ...]
     failures: tuple[LadderFailure, ...]
     original_settings_restored: bool
@@ -134,7 +139,8 @@ def run_iio_ladder(
     rates_hz: Sequence[int],
     channels: Sequence[int] = (0, 1),
     samples_per_channel: int = 262_144,
-    frames: int = 12,
+    frames: int | None = None,
+    duration_seconds: float | None = None,
     warmup_frames: int = 2,
     kernel_buffers: int = 8,
     allow_unsafe_kernel_queue: bool = False,
@@ -144,11 +150,12 @@ def run_iio_ladder(
     """Run a bounded RX-layout ladder and restore the exact original RX settings."""
 
     selected_channels = tuple(channels)
-    kernel_queue_bytes = _validate_shape(
+    effective_frames, kernel_queue_bytes = _validate_shape(
         rates_hz,
         selected_channels,
         samples_per_channel,
         frames,
+        duration_seconds,
         warmup_frames,
         kernel_buffers,
         allow_unsafe_kernel_queue,
@@ -190,6 +197,17 @@ def run_iio_ladder(
                         "speed ladder receiver selection did not read back exactly: "
                         f"requested {selected_channels}, actual {actual.channels}"
                     )
+                timed_frames = effective_frames
+                if duration_seconds is not None:
+                    timed_frames = math.ceil(
+                        duration_seconds * actual.sample_rate_hz / samples_per_channel
+                    )
+                    if timed_frames > MAX_DURATION_TIMED_FRAMES:
+                        raise ValueError(
+                            "requested duration requires "
+                            f"{timed_frames} timed frames at {rate} Hz, above the bounded "
+                            f"limit of {MAX_DURATION_TIMED_FRAMES}; increase --samples"
+                        )
                 for _ in range(warmup_frames):
                     _validate_block(
                         radio.read_block(samples_per_channel),
@@ -198,7 +216,7 @@ def run_iio_ladder(
                     )
                 latencies_ns: list[int] = []
                 started_ns = clock_ns()
-                for _ in range(frames):
+                for _ in range(timed_frames):
                     frame_started_ns = clock_ns()
                     block = radio.read_block(samples_per_channel)
                     frame_ended_ns = clock_ns()
@@ -208,20 +226,23 @@ def run_iio_ladder(
                 if elapsed_seconds <= 0:
                     raise RuntimeError("benchmark clock did not advance")
                 wire_bytes = (
-                    frames
+                    timed_frames
                     * samples_per_channel
                     * len(selected_channels)
                     * WIRE_BYTES_PER_COMPLEX_SAMPLE
                 )
                 achieved_mbps = wire_bytes / elapsed_seconds / 1_000_000
-                delivered_rate = frames * samples_per_channel / elapsed_seconds
+                delivered_rate = timed_frames * samples_per_channel / elapsed_seconds
                 fraction = delivered_rate / float(actual.sample_rate_hz)
                 cells.append(
                     LadderCell(
                         sample_rate_hz=rate,
                         actual_sample_rate_hz=round(actual.sample_rate_hz),
                         samples_per_channel=samples_per_channel,
-                        frames=frames,
+                        frames=timed_frames,
+                        nominal_capture_seconds=(
+                            timed_frames * samples_per_channel / actual.sample_rate_hz
+                        ),
                         wire_bytes=wire_bytes,
                         elapsed_seconds=elapsed_seconds,
                         offered_payload_mbps=actual.sample_rate_hz
@@ -269,6 +290,7 @@ def run_iio_ladder(
         unsafe_kernel_queue_override=(kernel_queue_bytes > MAX_SAFE_KERNEL_QUEUE_BYTES),
         wire_bytes_per_sample_period=len(selected_channels) * WIRE_BYTES_PER_COMPLEX_SAMPLE,
         warmup_frames=warmup_frames,
+        requested_duration_seconds=duration_seconds,
         cells=tuple(cells),
         failures=tuple(failures),
         original_settings_restored=restored,
@@ -283,11 +305,12 @@ def _validate_shape(
     rates_hz: Sequence[int],
     channels: tuple[int, ...],
     samples_per_channel: int,
-    frames: int,
+    frames: int | None,
+    duration_seconds: float | None,
     warmup_frames: int,
     kernel_buffers: int,
     allow_unsafe_kernel_queue: bool,
-) -> int:
+) -> tuple[int, int]:
     if not rates_hz or len(rates_hz) > MAX_RATE_RUNGS:
         raise ValueError(f"speed ladder requires between 1 and {MAX_RATE_RUNGS} rungs")
     if any(right <= left for left, right in zip(rates_hz, rates_hz[1:], strict=False)):
@@ -299,8 +322,30 @@ def _validate_shape(
             f"samples per channel must be between {MIN_SAMPLES_PER_CHANNEL} "
             f"and {MAX_SAMPLES_PER_CHANNEL}"
         )
-    if not 1 <= frames <= MAX_TIMED_FRAMES:
-        raise ValueError(f"timed frames must be between 1 and {MAX_TIMED_FRAMES}")
+    if frames is not None and duration_seconds is not None:
+        raise ValueError("--frames and --duration-seconds are mutually exclusive")
+    effective_frames = DEFAULT_TIMED_FRAMES if frames is None else frames
+    if duration_seconds is None:
+        if not 1 <= effective_frames <= MAX_TIMED_FRAMES:
+            raise ValueError(f"timed frames must be between 1 and {MAX_TIMED_FRAMES}")
+    elif (
+        not math.isfinite(duration_seconds)
+        or duration_seconds <= 0
+        or duration_seconds > MAX_DURATION_SECONDS
+    ):
+        raise ValueError(
+            f"duration seconds must be greater than 0 and at most {MAX_DURATION_SECONDS:g}"
+        )
+    else:
+        maximum_required_frames = max(
+            math.ceil(duration_seconds * rate / samples_per_channel) for rate in rates_hz
+        )
+        if maximum_required_frames > MAX_DURATION_TIMED_FRAMES:
+            raise ValueError(
+                "requested duration requires up to "
+                f"{maximum_required_frames} timed frames, above the bounded limit of "
+                f"{MAX_DURATION_TIMED_FRAMES}; increase --samples"
+            )
     if not 0 <= warmup_frames <= MAX_WARMUP_FRAMES:
         raise ValueError(f"warmup frames must be between 0 and {MAX_WARMUP_FRAMES}")
     if not 1 <= kernel_buffers <= 64:
@@ -316,7 +361,7 @@ def _validate_shape(
             "reduce --samples or --kernel-buffers, or provide the explicit unsafe "
             "qualification override"
         )
-    return queue_bytes
+    return effective_frames, queue_bytes
 
 
 def _validate_rate(rate: int, capabilities: RadioCapabilities) -> None:

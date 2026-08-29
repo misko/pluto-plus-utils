@@ -297,6 +297,24 @@ uv run pluto radio ladder 192.168.2.1 --transport ip \
   --report /ABSOLUTE/PRIVATE/PATH/ip-dual.json
 ```
 
+Use `--duration-seconds` when every rate rung should cover the same nominal
+sample time. It is mutually exclusive with `--frames`; the ladder rounds each
+rung up to a complete refill and records both the resulting frame count and
+`nominal_capture_seconds`:
+
+```bash
+uv run pluto radio ladder 192.168.1.20 --transport ip \
+  --expect-serial EXACT_SERIAL --channels rx0 \
+  --rates 5M,10M,15M,20M,25M,30M --samples 1000000 \
+  --duration-seconds 20 --kernel-buffers 4 --format json \
+  --report /ABSOLUTE/PRIVATE/PATH/ip-rx0-20s.json
+```
+
+The duration is source sample-time coverage, not a wall-clock deadline. A
+link-limited rung takes longer to transfer. Duration mode remains bounded to 60
+seconds and 4,096 timed refills per rung; increase `--samples` if the requested
+rate/duration pair would exceed that refill bound.
+
 `kept_pace` compares delivered sample periods with the configured rate. The
 ordinary-buffer ladder measures host transport performance; it does not claim a
 gapless FPGA timeline. Use `radio metadata-ladder` for counter-proven continuity.
