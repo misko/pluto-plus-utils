@@ -261,7 +261,9 @@ def _healthy_environment() -> IioEnvironmentReport:
         ("v0.38-plutoplus-spf-libiio-metadata-v5", "fail"),
         ("v0.39-plutoplus-spf-libiio-metadata-v6", "fail"),
         ("v0.40-plutoplus-spf-tandem-agc-v7", "fail"),
-        ("v0.42-plutoplus-spf-ddr-burst-v1", "pass"),
+        ("v0.42-plutoplus-spf-ddr-burst-v1", "fail"),
+        ("v0.42-plutoplus-spf-ddr-burst-v2", "fail"),
+        ("v0.43-plutoplus-spf-ddr-ring-v1", "pass"),
         ("v0.32-dirty", "unknown"),
     ],
 )

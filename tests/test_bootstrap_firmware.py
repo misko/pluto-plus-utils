@@ -911,9 +911,12 @@ def test_ddr_ring_v1_rc2_profile_is_exactly_bound_and_ram_only() -> None:
     )
 
 
-def test_ddr_ring_v1_release_profile_is_exactly_bound_and_ram_only() -> None:
+def test_ddr_ring_v1_release_requires_distinct_persistent_promotion() -> None:
     policy = bootstrap.DDR_RING_V1_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "ddr-ring-v1-release-persistent-promotion"
+    ]
 
     assert policy.release_tag == "v0.43-plutoplus-spf-ddr-ring-v1"
     assert policy.device_firmware == "v0.43-plutoplus-spf-ddr-ring-v1"
@@ -935,10 +938,20 @@ def test_ddr_ring_v1_release_profile_is_exactly_bound_and_ram_only() -> None:
     assert profile.ddr_ring_max_iq_bytes == 200_000_000
     assert profile.ddr_ring_modes == "finite,continuous"
     assert profile.buffer_metadata_status is True
-    assert not any(
-        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
-        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
-    )
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.profile_id != policy.profile_id
+    assert promotion.policy.asset_sha256 == policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == policy.fit_body_sha256
+    assert promotion.policy.fit_body_size == policy.fit_body_size
+    assert promotion.policy.source_commit == policy.source_commit
+    assert promotion.policy.hardware_qualified is True
+    assert promotion.metadata_abi == profile.metadata_abi == 3
+    assert promotion.tandem_agc is profile.tandem_agc is True
+    assert promotion.ddr_burst_max_iq_bytes == profile.ddr_burst_max_iq_bytes
+    assert promotion.ddr_burst_reserve_bytes == profile.ddr_burst_reserve_bytes
+    assert promotion.ddr_ring_max_iq_bytes == profile.ddr_ring_max_iq_bytes
+    assert promotion.ddr_ring_modes == profile.ddr_ring_modes == "finite,continuous"
+    assert promotion.buffer_metadata_status is profile.buffer_metadata_status is True
 
 
 def test_ddr_burst_v1_release_requires_distinct_persistent_promotion() -> None:

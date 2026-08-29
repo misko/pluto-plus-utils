@@ -84,14 +84,14 @@ def test_reboot_local_binds_hardware_qualified_return_profile(
             "--ssh-known-hosts-file",
             "/private/radio.known_hosts",
             "--expect-return-profile",
-            "ddr-burst-v2-release-persistent-promotion",
+            "ddr-ring-v1-release-persistent-promotion",
         ],
     )
 
     assert result.exit_code == 0, result.output
     document = json.loads(result.output)
     assert document["plan"]["expected_return_firmware"] == (
-        "v0.42-plutoplus-spf-ddr-burst-v2"
+        "v0.43-plutoplus-spf-ddr-ring-v1"
     )
 
 

@@ -8,6 +8,7 @@ from pluto_plus.doctor import (
     CANONICAL_POLICY,
     CANONICAL_UBOOT,
     DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
+    DDR_RING_V1_RELEASE_PERSISTENT_POLICY,
     setup_repair_policy_for_firmware,
 )
 from pluto_plus.setup import (
@@ -98,9 +99,11 @@ def _probe(backend: FakeBackend, tmp_path: Path, *, repair: bool = True):
 
 
 def test_setup_repair_policy_is_selected_only_by_exact_firmware() -> None:
-    policy = DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+    previous = DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+    policy = DDR_RING_V1_RELEASE_PERSISTENT_POLICY
 
     assert setup_repair_policy_for_firmware(policy.device_firmware) is policy
+    assert setup_repair_policy_for_firmware(previous.device_firmware) is previous
     assert setup_repair_policy_for_firmware(CANONICAL_POLICY.device_firmware) is CANONICAL_POLICY
     with pytest.raises(ValueError, match="no exact shipped setup repair policy"):
         setup_repair_policy_for_firmware("v0.42-plutoplus-spf-ddr-burst-v2-rc3")

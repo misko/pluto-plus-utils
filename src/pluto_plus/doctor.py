@@ -358,9 +358,9 @@ DDR_RING_V1_RC2_RAM_POLICY = FirmwarePolicy(
 )
 
 # Exact final-version-stamped DDR ring v1 image from protected main run
-# 33235840830. Its source graph is the hardware-qualified RC2 graph, but the
-# byte-distinct final DFU/FIT remains RAM-only until it repeats the focused
-# USB/IP, wrap, recovery, ordinary-IIO, and QSPI-unchanged hardware gates.
+# 33235840830. Its source graph is the hardware-qualified RC2 graph, but this
+# identity deliberately remains RAM-only: persistent mutation requires the
+# distinct promotion below even though both policies bind the same bytes.
 DDR_RING_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
     profile_id="ddr-ring-v1-release-ram",
     release_tag="v0.43-plutoplus-spf-ddr-ring-v1",
@@ -373,6 +373,18 @@ DDR_RING_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
     fit_body_size=12_809_347,
     hardware_qualified=False,
     published_at=datetime(2026, 8, 29, 5, 46, 5, tzinfo=UTC),
+)
+
+# The exact DDR ring v1 release DFU/FIT receives a distinct QSPI authorization
+# only after both physical PHY types repeated the final-byte gates: RX0/RX1 at
+# 25 MS/s over physical Ethernet, 200 MB ring wrap on RX0/RX1 at 15 MS/s,
+# three wraps on AD9363A, abrupt-client recovery, ordinary dual-RX postflight,
+# TX-safe/idle health, and unchanged QSPI throughout RAM qualification.
+DDR_RING_V1_RELEASE_PERSISTENT_POLICY = DDR_RING_V1_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "ddr-ring-v1-release-persistent-promotion",
+        "hardware_qualified": True,
+    }
 )
 
 # The exact DDR burst v2 release DFU/FIT receives a distinct QSPI authorization
@@ -422,12 +434,16 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 # repair. USB and enrolled-network upgrades select the newest release that has
 # completed the persistent hardware gate; setup keeps the immutable U-Boot
 # tuple but accepts only an exact QSPI image in the allowlist below.
-PERSISTENT_UPGRADE_POLICY = DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+PERSISTENT_UPGRADE_POLICY = DDR_RING_V1_RELEASE_PERSISTENT_POLICY
 
 # Canonical U-Boot repair may run only while one of these exact, reviewed,
 # hardware-qualified QSPI images is active. The tuple itself remains fixed;
 # this allowlist only advances the firmware/hash provenance accepted around it.
-SETUP_REPAIR_POLICIES = (CANONICAL_POLICY, PERSISTENT_UPGRADE_POLICY)
+SETUP_REPAIR_POLICIES = (
+    CANONICAL_POLICY,
+    DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
+    PERSISTENT_UPGRADE_POLICY,
+)
 
 
 def require_setup_repair_policy(policy: FirmwarePolicy) -> FirmwarePolicy:

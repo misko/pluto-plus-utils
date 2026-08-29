@@ -9,7 +9,7 @@ import pytest
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
     CANONICAL_UBOOT,
-    DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
+    DDR_RING_V1_RELEASE_PERSISTENT_POLICY,
 )
 from pluto_plus.setup import (
     CanonicalSetupManager,
@@ -97,7 +97,7 @@ def test_setup_plan_is_exact_identity_environment_and_policy_bound(tmp_path: Pat
 
 
 def test_setup_plan_accepts_only_exact_shipped_persistent_policy(tmp_path: Path) -> None:
-    policy = DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+    policy = DDR_RING_V1_RELEASE_PERSISTENT_POLICY
     identity = _identity().model_copy(update={"observed_firmware": policy.device_firmware})
     observation = _observation(
         identity=identity,
