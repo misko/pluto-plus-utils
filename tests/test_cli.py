@@ -695,6 +695,10 @@ def test_data_plane_status_brackets_lan_probe_with_runtime_evidence(
             rx_buffer_length=65_536,
             rx_data_available=0,
             rx_device_path="/sys/devices/fpga-axi/iio:device1",
+            tandem_state=0,
+            tandem_fifo_level=0,
+            tandem_fault_flags=0,
+            tandem_overflow_count=0,
             cma_total_bytes=64 * 1024 * 1024,
             cma_free_bytes=63 * 1024 * 1024,
             memory_total_bytes=492_560 * 1024,
@@ -1846,9 +1850,7 @@ def test_doctor_route_isolation_requires_exact_generated_confirmation(
     monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
     monkeypatch.setattr(
         "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            confirmation_phrase="ISOLATE USB SSH enx001"
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(confirmation_phrase="ISOLATE USB SSH enx001"),
     )
 
     result = runner.invoke(
@@ -1875,9 +1877,7 @@ def test_metadata_ladder_ip_isolation_requires_exact_usb_identity_and_confirmati
     monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
     monkeypatch.setattr(
         "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            confirmation_phrase="ISOLATE USB SSH enx001"
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(confirmation_phrase="ISOLATE USB SSH enx001"),
     )
 
     result = runner.invoke(
@@ -2215,9 +2215,7 @@ def test_metadata_ladder_writes_an_absent_only_private_report(
     monkeypatch.setattr(
         "pluto_plus.cli.inspect_iio_environment", lambda **_kwargs: SimpleNamespace(healthy=True)
     )
-    monkeypatch.setattr(
-        "pluto_plus.cli.run_metadata_continuity_ladder", lambda **_kwargs: report
-    )
+    monkeypatch.setattr("pluto_plus.cli.run_metadata_continuity_ladder", lambda **_kwargs: report)
     evidence = tmp_path / "evidence"
     evidence.mkdir(mode=0o700)
     destination = evidence / "rx0.json"

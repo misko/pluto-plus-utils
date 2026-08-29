@@ -89,6 +89,10 @@ class DataPlaneRuntimeStatus(ApiModel):
     rx_buffer_length: int | None = Field(default=None, ge=0)
     rx_data_available: int | None = Field(default=None, ge=0)
     rx_device_path: str = Field(min_length=1, max_length=1024)
+    tandem_state: int = Field(ge=0)
+    tandem_fifo_level: int = Field(ge=0)
+    tandem_fault_flags: int = Field(ge=0)
+    tandem_overflow_count: int = Field(ge=0)
     cma_total_bytes: int = Field(gt=0)
     cma_free_bytes: int = Field(ge=0)
     memory_total_bytes: int = Field(gt=0)
@@ -331,17 +335,17 @@ def inspect_data_plane_runtime(
             rx_buffer_length=_optional_report_int(fields, "rx_buffer_length"),
             rx_data_available=_optional_report_int(fields, "rx_data_available"),
             rx_device_path=fields["rx_device_path"],
+            tandem_state=int(fields["tandem_state"]),
+            tandem_fifo_level=int(fields["tandem_fifo_level"]),
+            tandem_fault_flags=int(fields["tandem_fault_flags"]),
+            tandem_overflow_count=int(fields["tandem_overflow_count"]),
             cma_total_bytes=int(fields["cma_total_kib"]) * 1024,
             cma_free_bytes=int(fields["cma_free_kib"]) * 1024,
             memory_total_bytes=int(fields["memory_total_kib"]) * 1024,
             memory_available_bytes=int(fields["memory_available_kib"]) * 1024,
             interrupt_total=int(fields["interrupt_total"]),
-            fpga_devices=_decode_hex_report_lines(
-                fields, "fpga_devices_hex", maximum_bytes=8192
-            ),
-            dma_devices=_decode_hex_report_lines(
-                fields, "dma_devices_hex", maximum_bytes=4096
-            ),
+            fpga_devices=_decode_hex_report_lines(fields, "fpga_devices_hex", maximum_bytes=8192),
+            dma_devices=_decode_hex_report_lines(fields, "dma_devices_hex", maximum_bytes=4096),
             interrupt_lines=_decode_hex_report_lines(
                 fields, "interrupt_lines_hex", maximum_bytes=16_384
             ),
@@ -450,6 +454,14 @@ done
 [ "$rx_count" -eq 1 ]
 rx_device_path=$(readlink -f "$rx_device")
 rx_bus_path=$(dirname "$(dirname "$rx_device_path")")
+tandem_device=''
+tandem_count=0
+for candidate in /sys/bus/iio/devices/iio:device*; do
+  [ "$(cat "$candidate/name" 2>/dev/null || true)" = tandem-agc ] || continue
+  tandem_device="$candidate"
+  tandem_count=$((tandem_count + 1))
+done
+[ "$tandem_count" -eq 1 ]
 read_optional() { [ -r "$1" ] && cat "$1" || true; }
 active_rx_buffers=$(read_optional "$rx_device/buffer/enable")
 [ -n "$active_rx_buffers" ] || active_rx_buffers=0
@@ -480,6 +492,10 @@ emit active_rx_buffers "$active_rx_buffers"
 emit rx_buffer_length "$rx_buffer_length"
 emit rx_data_available "$rx_data_available"
 emit rx_device_path "$rx_device_path"
+emit tandem_state "$(cat "$tandem_device/state")"
+emit tandem_fifo_level "$(cat "$tandem_device/fifo_level")"
+emit tandem_fault_flags "$(cat "$tandem_device/fault_flags")"
+emit tandem_overflow_count "$(cat "$tandem_device/overflow_count")"
 emit cma_total_kib "$cma_total_kib"
 emit cma_free_kib "$cma_free_kib"
 emit memory_total_kib "$memory_total_kib"

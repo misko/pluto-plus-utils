@@ -199,6 +199,10 @@ def _runtime_report(*, serial: str = "SERIAL_A") -> str:
             "PPU\trx_buffer_length\t65536",
             "PPU\trx_data_available\t0",
             "PPU\trx_device_path\t/sys/devices/fpga-axi/iio:device1",
+            "PPU\ttandem_state\t0",
+            "PPU\ttandem_fifo_level\t0",
+            "PPU\ttandem_fault_flags\t0",
+            "PPU\ttandem_overflow_count\t7",
             "PPU\tcma_total_kib\t65536",
             "PPU\tcma_free_kib\t64620",
             "PPU\tmemory_total_kib\t492560",
@@ -221,13 +225,18 @@ def test_inspect_data_plane_runtime_uses_read_only_fixed_script() -> None:
     assert transport.stdin is not None
     assert b"/proc/interrupts" in transport.stdin
     assert b"rx_bus_path" in transport.stdin
+    assert b"tandem_device" in transport.stdin
     assert b"kill " not in transport.stdin
-    assert b">\"$rx_device" not in transport.stdin
+    assert b'>"$rx_device' not in transport.stdin
     assert status.iiod_pid == 4371
     assert status.cma_free_bytes == 64_620 * 1024
     assert status.memory_total_bytes == 492_560 * 1024
     assert status.memory_available_bytes == 401_234 * 1024
     assert status.interrupt_total == 1234
+    assert status.tandem_state == 0
+    assert status.tandem_fifo_level == 0
+    assert status.tandem_fault_flags == 0
+    assert status.tandem_overflow_count == 7
     assert status.fpga_devices == ("7c400000.dma", "79020000.cf-ad9361-lpc")
     assert status.dma_devices == ("7c400000.dma",)
     assert status.interrupt_lines == ("54: 9 0 dma0chan0",)

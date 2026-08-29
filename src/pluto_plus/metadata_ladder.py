@@ -39,7 +39,7 @@ METADATA_CHANNEL_SELECTIONS: dict[MetadataChannels, tuple[int, ...]] = {
 }
 
 
-class DdrRingFinalStatus(ApiModel):
+class DdrRingStatusSnapshot(ApiModel):
     state: str
     terminal_reason: str
     error_code: int
@@ -48,12 +48,16 @@ class DdrRingFinalStatus(ApiModel):
     target_frames: int = Field(gt=0)
     produced_frames: int = Field(ge=0)
     consumed_frames: int = Field(ge=0)
-    high_water_frames: int = Field(gt=0)
+    high_water_frames: int = Field(ge=0)
     wrap_count: int = Field(ge=0)
     producer_position: int = Field(ge=0)
     consumer_position: int = Field(ge=0)
     last_contiguous_sample_sequence: int | None = Field(default=None, ge=0)
     first_unavailable_sample_sequence: int | None = Field(default=None, ge=0)
+
+
+class DdrRingFinalStatus(DdrRingStatusSnapshot):
+    """A terminal ring status that proves an exact successful capture."""
 
     @model_validator(mode="after")
     def validate_complete_capture(self) -> DdrRingFinalStatus:
@@ -63,10 +67,10 @@ class DdrRingFinalStatus(ApiModel):
             or self.error_code != 0
         ):
             raise ValueError("DDR ring did not reach a clean target-complete state")
-        if not (
-            self.produced_frames == self.consumed_frames == self.target_frames
-        ):
+        if not (self.produced_frames == self.consumed_frames == self.target_frames):
             raise ValueError("DDR ring producer/consumer frame counts do not close")
+        if self.high_water_frames < 1:
+            raise ValueError("DDR ring did not report occupied storage")
         if self.first_unavailable_sample_sequence is not None:
             raise ValueError("DDR ring reported an unavailable sample boundary")
         return self
@@ -137,6 +141,23 @@ class MetadataContinuityFailure(ApiModel):
     )
     error_type: str = Field(min_length=1)
     message: str = Field(min_length=1)
+    ddr_ring_status: DdrRingStatusSnapshot | None = None
+    ddr_ring_status_error: str | None = Field(default=None, min_length=1)
+
+
+class _MetadataCellCaptureError(RuntimeError):
+    """Preserve a cell's original error together with live ring evidence."""
+
+    def __init__(
+        self,
+        cause: Exception,
+        ddr_ring_status: DdrRingStatusSnapshot | None,
+        ddr_ring_status_error: str | None,
+    ) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.ddr_ring_status = ddr_ring_status
+        self.ddr_ring_status_error = ddr_ring_status_error
 
 
 class MetadataContinuityLadderReport(ApiModel):
@@ -186,8 +207,7 @@ class MetadataContinuityLadderReport(ApiModel):
             raise ValueError("metadata ladder DDR ring mode is inconsistent")
         if any(
             cell.ddr_ring_status is not None
-            and cell.ddr_ring_status.requested_capacity_iq_bytes
-            != self.ddr_ring_requested_iq_bytes
+            and cell.ddr_ring_status.requested_capacity_iq_bytes != self.ddr_ring_requested_iq_bytes
             for cell in self.cells
         ):
             raise ValueError("metadata ladder DDR ring request is inconsistent")
@@ -196,9 +216,7 @@ class MetadataContinuityLadderReport(ApiModel):
             if status is None:
                 continue
             frame_iq_bytes = cell.samples_per_channel * len(self.channels) * 4
-            capacity_frames, remainder = divmod(
-                status.admitted_capacity_iq_bytes, frame_iq_bytes
-            )
+            capacity_frames, remainder = divmod(status.admitted_capacity_iq_bytes, frame_iq_bytes)
             expected_admitted = (
                 self.ddr_ring_requested_iq_bytes // frame_iq_bytes
             ) * frame_iq_bytes
@@ -281,15 +299,15 @@ def run_metadata_continuity_ladder(
     if isinstance(ddr_ring_bytes, bool) or not isinstance(ddr_ring_bytes, int):
         raise TypeError("DDR ring byte budget must be an integer")
     if not 0 <= ddr_ring_bytes <= MAX_DDR_RING_IQ_BYTES:
-        raise ValueError(
-            f"DDR ring byte budget must be in [0, {MAX_DDR_RING_IQ_BYTES}]"
-        )
+        raise ValueError(f"DDR ring byte budget must be in [0, {MAX_DDR_RING_IQ_BYTES}]")
     if ddr_burst and ddr_ring_bytes:
         raise ValueError("device DDR burst and DDR ring are mutually exclusive")
     if ddr_ring_bytes and metadata_abi != 3:
         raise ValueError("device DDR ring ladder requires metadata ABI 3")
-    if metadata_abi == 3 and len(selected_channels) == 1 and any(
-        samples & 1 for samples in samples_per_channel
+    if (
+        metadata_abi == 3
+        and len(selected_channels) == 1
+        and any(samples & 1 for samples in samples_per_channel)
     ):
         raise ValueError("metadata ABI 3 single-RX sample counts must be even")
     factory = radio_factory or _default_radio_factory
@@ -300,7 +318,10 @@ def run_metadata_continuity_ladder(
     failures: list[MetadataContinuityFailure] = []
     restored = False
     try:
-        radio.open()
+        try:
+            radio.open()
+        except Exception as error:
+            raise RuntimeError(f"metadata ladder could not open radio: {error}") from error
         opened = True
         original = radio.read_settings()
         requested = original.model_copy(
@@ -331,6 +352,16 @@ def run_metadata_continuity_ladder(
                         ddr_burst=ddr_burst,
                         ddr_ring_bytes=ddr_ring_bytes,
                         clock_ns=clock_ns,
+                    )
+                )
+            except _MetadataCellCaptureError as error:
+                failures.append(
+                    MetadataContinuityFailure(
+                        samples_per_channel=samples,
+                        error_type=type(error.cause).__name__,
+                        message=str(error.cause),
+                        ddr_ring_status=error.ddr_ring_status,
+                        ddr_ring_status_error=error.ddr_ring_status_error,
                     )
                 )
             except Exception as error:
@@ -387,9 +418,7 @@ def _run_cell(
 ) -> MetadataContinuityCell:
     if ddr_burst:
         frame_duration_us = samples_per_channel * 1_000_000 / sample_rate_hz
-        if samples_per_channel * 1_000_000 < (
-            sample_rate_hz * DDR_BURST_MIN_FRAME_DURATION_US
-        ):
+        if samples_per_channel * 1_000_000 < (sample_rate_hz * DDR_BURST_MIN_FRAME_DURATION_US):
             raise ValueError(
                 "DDR burst requires at least a 12 ms frame period; "
                 f"samples={samples_per_channel} rate={sample_rate_hz} "
@@ -409,35 +438,49 @@ def _run_cell(
         ddr_ring_bytes=ddr_ring_bytes,
         ddr_ring_frames=frames if ddr_ring_bytes else 0,
     ) as capture:
-        if capture.kernel_buffers != kernel_buffers:
-            raise RuntimeError("metadata ladder kernel-buffer readback is not exact")
-        if (
-            capture.ddr_burst_enabled is not ddr_burst
-            or capture.ddr_burst_requested_bytes != ddr_burst_bytes
-            or capture.ddr_burst_admitted_bytes != ddr_burst_bytes
-            or capture.ddr_burst_frames != (frames if ddr_burst else 0)
-        ):
-            raise RuntimeError("metadata ladder DDR burst admission readback is not exact")
-        if (
-            capture.ddr_ring_enabled is not bool(ddr_ring_bytes)
-            or capture.ddr_ring_requested_bytes != ddr_ring_bytes
-            or capture.ddr_ring_admitted_bytes != expected_ring_admitted_bytes
-            or capture.ddr_ring_capacity_frames
-            != (0 if not ddr_ring_bytes else expected_ring_admitted_bytes // frame_iq_bytes)
-            or capture.ddr_ring_capture_frames != (frames if ddr_ring_bytes else 0)
-            or capture.ddr_ring_continuous
-        ):
-            raise RuntimeError("metadata ladder DDR ring admission readback is not exact")
-        for _ in range(frames):
-            block = capture.read_block()
-            if block.samples.shape != (receiver_count, samples_per_channel):
-                raise RuntimeError("metadata ladder block shape is not the selected RX layout")
-            blocks.append(block)
-        ring_status = (
-            None
-            if not ddr_ring_bytes
-            else DdrRingFinalStatus.model_validate(capture.ddr_ring_status())
-        )
+        try:
+            if capture.kernel_buffers != kernel_buffers:
+                raise RuntimeError("metadata ladder kernel-buffer readback is not exact")
+            if (
+                capture.ddr_burst_enabled is not ddr_burst
+                or capture.ddr_burst_requested_bytes != ddr_burst_bytes
+                or capture.ddr_burst_admitted_bytes != ddr_burst_bytes
+                or capture.ddr_burst_frames != (frames if ddr_burst else 0)
+            ):
+                raise RuntimeError("metadata ladder DDR burst admission readback is not exact")
+            if (
+                capture.ddr_ring_enabled is not bool(ddr_ring_bytes)
+                or capture.ddr_ring_requested_bytes != ddr_ring_bytes
+                or capture.ddr_ring_admitted_bytes != expected_ring_admitted_bytes
+                or capture.ddr_ring_capacity_frames
+                != (0 if not ddr_ring_bytes else expected_ring_admitted_bytes // frame_iq_bytes)
+                or capture.ddr_ring_capture_frames != (frames if ddr_ring_bytes else 0)
+                or capture.ddr_ring_continuous
+            ):
+                raise RuntimeError("metadata ladder DDR ring admission readback is not exact")
+            for _ in range(frames):
+                block = capture.read_block()
+                if block.samples.shape != (receiver_count, samples_per_channel):
+                    raise RuntimeError("metadata ladder block shape is not the selected RX layout")
+                blocks.append(block)
+            ring_status = (
+                None
+                if not ddr_ring_bytes
+                else DdrRingFinalStatus.model_validate(capture.ddr_ring_status())
+            )
+        except Exception as error:
+            failure_status = None
+            failure_status_error = None
+            if ddr_ring_bytes:
+                try:
+                    failure_status = DdrRingStatusSnapshot.model_validate(capture.ddr_ring_status())
+                except Exception as status_error:
+                    failure_status_error = f"{type(status_error).__name__}: {status_error}"
+            raise _MetadataCellCaptureError(
+                error,
+                failure_status,
+                failure_status_error,
+            ) from error
     elapsed_seconds = (clock_ns() - started_ns) / 1_000_000_000
     if elapsed_seconds <= 0:
         raise RuntimeError("metadata ladder clock did not advance")
@@ -450,8 +493,7 @@ def _run_cell(
     overflow_count = sum(1 for block in blocks if block.overflow_observed)
     if (
         ring_status is not None
-        and ring_status.last_contiguous_sample_sequence
-        != blocks[-1].last_sample_sequence_exclusive
+        and ring_status.last_contiguous_sample_sequence != blocks[-1].last_sample_sequence_exclusive
     ):
         raise RuntimeError("DDR ring sample boundary disagrees with captured metadata")
     return MetadataContinuityCell(
