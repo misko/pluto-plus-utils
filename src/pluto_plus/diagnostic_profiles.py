@@ -227,6 +227,15 @@ IIO_THROUGHPUT_HOLD_V1_RC1_PROFILE = DiagnosticProfile(
     release_rank=21,
 )
 
+IIO_THROUGHPUT_HOLD_V2_RC1_PROFILE = DiagnosticProfile(
+    profile_id="iio-throughput-hold-v2-rc1",
+    firmware_version="v0.45-plutoplus-spf-iio-throughput-hold-v2-rc1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="RAM-only IIO HOLD refill-fence prototype; never persistence-qualified",
+    release_rank=22,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -249,6 +258,7 @@ DIAGNOSTIC_PROFILES = (
     DDR_RING_PREFILL_V1_RC1_PROFILE,
     DDR_RING_PREFILL_V1_RELEASE_PROFILE,
     IIO_THROUGHPUT_HOLD_V1_RC1_PROFILE,
+    IIO_THROUGHPUT_HOLD_V2_RC1_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 

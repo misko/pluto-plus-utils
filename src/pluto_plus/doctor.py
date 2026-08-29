@@ -413,6 +413,24 @@ IIO_THROUGHPUT_HOLD_V1_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 29, 22, 14, 39, tzinfo=UTC),
 )
 
+# Exact RAM-only refill-fence prototype. It preserves the v1 HOLD observation
+# cadence but forces one immediate observation when iiOD admits each refill, so
+# the refill is not serialized behind the deliberately sparse interval. This
+# identity has no persistent-write authorization.
+IIO_THROUGHPUT_HOLD_V2_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="iio-throughput-hold-v2-rc1-ram",
+    release_tag="iio-throughput-hold-v2-rc1-843744ac9ac5",
+    device_firmware="v0.45-plutoplus-spf-iio-throughput-hold-v2-rc1",
+    asset_name="plutoplus-spf-iio-throughput-hold-v2-rc1-843744ac9ac5-pluto.dfu",
+    asset_sha256="f8b81c5f21cf471d1b9e6ef150a0360e84d0e42138f7c934e7e5a99aa30d353f",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33278661285",
+    source_commit="843744ac9ac5223b197173c6375c92f29f3bab8c",
+    fit_body_sha256="e87cf0ff5c5ab2eb2f9a7cfe61a85454bc93e0e1bc345103a6abcef69072b4f6",
+    fit_body_size=12_811_591,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 29, 22, 52, 49, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
