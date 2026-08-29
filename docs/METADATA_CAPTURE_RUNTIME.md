@@ -220,3 +220,7 @@ explicit `capture-completion` contract instead succeeds only when every requeste
 host frame returns with exact FPGA-counter accounting. It permits accounted gaps
 caused by a slower transport; DDR-ring captures still additionally require a clean
 `target_complete` terminal state and a counter-proven contiguous admitted prefix.
+Each successful cell also records `tandem_metadata_frames`, the exact
+`gain_observation_interval_samples`, and aggregate gain-observation and overflow
+counts. These fields make sampler-cadence changes directly auditable from the
+canonical report without a separate capture parser.

@@ -97,6 +97,10 @@ class MetadataContinuityCell(ApiModel):
     achieved_payload_mbps: float = Field(gt=0)
     achieved_payload_mibps: float = Field(gt=0)
     observed_fraction: float = Field(ge=0.0, le=1.0)
+    tandem_metadata_frames: int = Field(default=0, ge=0)
+    gain_observation_interval_samples: int | None = Field(default=None, ge=1)
+    gain_observation_count: int = Field(default=0, ge=0)
+    gain_observation_overflow_count: int = Field(default=0, ge=0)
     ddr_burst_requested_iq_bytes: int = Field(default=0, ge=0)
     ddr_burst_admitted_iq_bytes: int = Field(default=0, ge=0)
     ddr_burst_frames: int = Field(default=0, ge=0)
@@ -134,6 +138,19 @@ class MetadataContinuityCell(ApiModel):
         )
         if self.passed is not expected_pass:
             raise ValueError("metadata ladder pass result is non-canonical")
+        if self.tandem_metadata_frames:
+            if (
+                self.tandem_metadata_frames != self.observed_frames
+                or self.gain_observation_interval_samples is None
+                or self.gain_observation_count < self.tandem_metadata_frames
+            ):
+                raise ValueError("metadata ladder tandem observation accounting does not close")
+        elif (
+            self.gain_observation_interval_samples is not None
+            or self.gain_observation_count
+            or self.gain_observation_overflow_count
+        ):
+            raise ValueError("metadata ladder cannot report observations without tandem metadata")
         expected_burst_bytes = self.samples_per_channel * 4 * self.requested_frames
         if self.ddr_burst_requested_iq_bytes:
             if (
@@ -483,6 +500,10 @@ def _run_cell(
     missing = 0
     gap_count = 0
     overflow_count = 0
+    tandem_metadata_frames = 0
+    gain_observation_interval_samples: int | None = None
+    gain_observation_count = 0
+    gain_observation_overflow_count = 0
     ddr_burst_bytes = samples_per_channel * receiver_count * 4 * frames if ddr_burst else 0
     frame_iq_bytes = samples_per_channel * receiver_count * 4
     expected_ring_admitted_bytes = (
@@ -532,6 +553,18 @@ def _run_cell(
                 missing += block.missing_samples_before
                 gap_count += int(bool(block.missing_samples_before))
                 overflow_count += int(block.overflow_observed)
+                if block.tandem_metadata is not None:
+                    tandem = block.tandem_metadata.base
+                    interval = tandem.gain_observation_interval_samples
+                    if gain_observation_interval_samples is None:
+                        gain_observation_interval_samples = interval
+                    elif gain_observation_interval_samples != interval:
+                        raise RuntimeError(
+                            "metadata ladder gain-observation interval changed within a rung"
+                        )
+                    tandem_metadata_frames += 1
+                    gain_observation_count += len(tandem.gain_observations)
+                    gain_observation_overflow_count += tandem.gain_observation_overflow_count
             ring_status = (
                 None
                 if not ddr_ring_bytes
@@ -603,6 +636,10 @@ def _run_cell(
         achieved_payload_mbps=iq_bytes / elapsed_seconds / 1_000_000,
         achieved_payload_mibps=iq_bytes / elapsed_seconds / (1024 * 1024),
         observed_fraction=fraction,
+        tandem_metadata_frames=tandem_metadata_frames,
+        gain_observation_interval_samples=gain_observation_interval_samples,
+        gain_observation_count=gain_observation_count,
+        gain_observation_overflow_count=gain_observation_overflow_count,
         ddr_burst_requested_iq_bytes=ddr_burst_bytes,
         ddr_burst_admitted_iq_bytes=ddr_burst_bytes,
         ddr_burst_frames=frames if ddr_burst else 0,
