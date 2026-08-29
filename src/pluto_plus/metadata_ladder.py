@@ -92,7 +92,10 @@ class MetadataContinuityCell(ApiModel):
     missing_sample_count: int = Field(ge=0)
     gap_count: int = Field(ge=0)
     overflow_count: int = Field(ge=0)
+    iq_bytes: int = Field(gt=0)
     elapsed_seconds: float = Field(gt=0)
+    achieved_payload_mbps: float = Field(gt=0)
+    achieved_payload_mibps: float = Field(gt=0)
     observed_fraction: float = Field(ge=0.0, le=1.0)
     ddr_burst_requested_iq_bytes: int = Field(default=0, ge=0)
     ddr_burst_admitted_iq_bytes: int = Field(default=0, ge=0)
@@ -120,6 +123,12 @@ class MetadataContinuityCell(ApiModel):
         expected_fraction = self.observed_sample_count / self.device_span_sample_count
         if abs(self.observed_fraction - expected_fraction) > 1e-12:
             raise ValueError("metadata ladder observed fraction does not close")
+        expected_mbps = self.iq_bytes / self.elapsed_seconds / 1_000_000
+        expected_mibps = self.iq_bytes / self.elapsed_seconds / (1024 * 1024)
+        if abs(self.achieved_payload_mbps - expected_mbps) > 1e-9:
+            raise ValueError("metadata ladder decimal payload rate does not close")
+        if abs(self.achieved_payload_mibps - expected_mibps) > 1e-9:
+            raise ValueError("metadata ladder binary payload rate does not close")
         expected_pass = (
             self.observed_fraction >= MINIMUM_OBSERVED_FRACTION and self.overflow_count == 0
         )
@@ -237,6 +246,9 @@ class MetadataContinuityLadderReport(ApiModel):
         ):
             raise ValueError("metadata ladder DDR ring request is inconsistent")
         for cell in self.cells:
+            expected_iq_bytes = cell.observed_sample_count * len(self.channels) * 4
+            if cell.iq_bytes != expected_iq_bytes:
+                raise ValueError("metadata ladder IQ payload size does not match RX layout")
             status = cell.ddr_ring_status
             if status is None:
                 continue
@@ -548,6 +560,7 @@ def _run_cell(
     if span != observed + missing:
         raise RuntimeError("metadata ladder FPGA counter span does not close")
     fraction = observed / span
+    iq_bytes = observed * receiver_count * 4
     ring_prefix_frames = 0
     ring_prefix_iq_bytes = 0
     ring_prefix_contiguous = False
@@ -585,7 +598,10 @@ def _run_cell(
         missing_sample_count=missing,
         gap_count=gap_count,
         overflow_count=overflow_count,
+        iq_bytes=iq_bytes,
         elapsed_seconds=elapsed_seconds,
+        achieved_payload_mbps=iq_bytes / elapsed_seconds / 1_000_000,
+        achieved_payload_mibps=iq_bytes / elapsed_seconds / (1024 * 1024),
         observed_fraction=fraction,
         ddr_burst_requested_iq_bytes=ddr_burst_bytes,
         ddr_burst_admitted_iq_bytes=ddr_burst_bytes,

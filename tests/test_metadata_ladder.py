@@ -201,6 +201,9 @@ def test_metadata_ladder_selects_largest_counter_continuous_refill_and_restores(
     assert report.minimum_observed_fraction == MINIMUM_OBSERVED_FRACTION
     assert report.largest_passing_samples_per_channel == 262_144
     assert report.cells[0].observed_fraction == pytest.approx(6 / 16)
+    assert report.cells[0].iq_bytes == 6 * 1_048_576 * 2 * 4
+    assert report.cells[0].achieved_payload_mbps == pytest.approx(50.331648)
+    assert report.cells[0].achieved_payload_mibps == pytest.approx(48.0)
     assert report.cells[0].gap_count == 5
     assert not report.cells[0].passed
     assert report.cells[1].observed_fraction == 1.0
