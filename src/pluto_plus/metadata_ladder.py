@@ -19,10 +19,12 @@ from pluto_plus.models import ApiModel, RadioSettings
 
 DEFAULT_METADATA_SAMPLE_LADDER = "4194304,2097152,1048576,524288,262144,131072"
 MAX_METADATA_SAMPLE_RUNGS = 16
-# Keep the ladder bounded while allowing a 1-GB target to prove five complete
-# reuses of a 200-MB ring. Cell accounting is constant-memory; IQ frames are
-# validated and released as they arrive instead of accumulating on the host.
-MAX_METADATA_FRAMES = 256
+# Keep the ladder bounded while allowing the release throughput matrix to cover
+# 20 nominal seconds at 30 MS/s with 1,000,000-sample refills.  That 2.4-GB
+# target proves twelve complete reuses of a 200-MB ring.  Cell accounting is
+# constant-memory; IQ frames are validated and released as they arrive instead
+# of accumulating on the host.
+MAX_METADATA_FRAMES = 600
 MINIMUM_OBSERVED_FRACTION = 0.95
 # Hardware qualification found intermittent whole-frame loss at 8 ms.  The
 # first passing boundary was 10 ms; retain 50% headroom over the failure point
