@@ -182,6 +182,15 @@ DDR_RING_V1_RC1_PROFILE = DiagnosticProfile(
     release_rank=16,
 )
 
+DDR_RING_V1_RC2_PROFILE = DiagnosticProfile(
+    profile_id="ddr-ring-v1-rc2",
+    firmware_version="v0.43-plutoplus-spf-ddr-ring-v1-rc2",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="RAM-only optional DDR ring RC2 candidate; never persistence-qualified",
+    release_rank=17,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -199,6 +208,7 @@ DIAGNOSTIC_PROFILES = (
     DDR_BURST_V2_RC3_PROFILE,
     DDR_BURST_V2_RELEASE_PROFILE,
     DDR_RING_V1_RC1_PROFILE,
+    DDR_RING_V1_RC2_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
