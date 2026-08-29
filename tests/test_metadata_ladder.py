@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from weakref import ref
 
 import numpy as np
@@ -27,11 +27,17 @@ class _Capture:
         sequences: tuple[int, ...],
         kernel_buffers: int,
         receiver_count: int,
+        tandem_interval: int | None = None,
+        tandem_observations: int = 0,
+        tandem_overflow: int = 0,
     ) -> None:
         self.samples = samples
         self.sequences: Iterator[int] = iter(sequences)
         self.kernel_buffers = kernel_buffers
         self.receiver_count = receiver_count
+        self.tandem_interval = tandem_interval
+        self.tandem_observations = tandem_observations
+        self.tandem_overflow = tandem_overflow
         self.ddr_burst_requested_bytes = 0
         self.ddr_burst_admitted_bytes = 0
         self.ddr_burst_frames = 0
@@ -77,6 +83,15 @@ class _Capture:
             else (sequence - self.previous_sequence - 1) * self.samples
         )
         self.previous_sequence = sequence
+        tandem_metadata = None
+        if self.tandem_interval is not None:
+            tandem_metadata = SimpleNamespace(
+                base=SimpleNamespace(
+                    gain_observation_interval_samples=self.tandem_interval,
+                    gain_observations=tuple(object() for _ in range(self.tandem_observations)),
+                    gain_observation_overflow_count=self.tandem_overflow,
+                )
+            )
         return SampleBlockV2(
             utc_ns=1,
             samples=np.ones((self.receiver_count, self.samples), dtype=np.complex64),
@@ -86,6 +101,7 @@ class _Capture:
             metadata_flags=(1 << 2) | ((1 << 11) | (1 << 23) if missing else 0),
             metadata_abi=1,
             missing_samples_before=missing,
+            tandem_metadata=tandem_metadata,
         )
 
     def close(self) -> None:
@@ -104,7 +120,14 @@ class _Capture:
 
 
 class _Radio:
-    def __init__(self, sequences: dict[int, tuple[int, ...]]) -> None:
+    def __init__(
+        self,
+        sequences: dict[int, tuple[int, ...]],
+        *,
+        tandem_interval: int | None = None,
+        tandem_observations: int = 0,
+        tandem_overflow: int = 0,
+    ) -> None:
         self.sequences = sequences
         self.original = RadioSettings()
         self.settings = self.original
@@ -118,6 +141,9 @@ class _Radio:
         self.opened = False
         self.capture_requests: list[int] = []
         self.tandem_requests: list[object | None] = []
+        self.tandem_interval = tandem_interval
+        self.tandem_observations = tandem_observations
+        self.tandem_overflow = tandem_overflow
 
     def open(self) -> None:
         self.opened = True
@@ -150,6 +176,9 @@ class _Radio:
             self.sequences[sample_count],
             kernel_buffers,
             len(self.settings.channels),
+            self.tandem_interval,
+            self.tandem_observations,
+            self.tandem_overflow,
         )
         capture.ddr_burst_requested_bytes = ddr_burst_bytes
         capture.ddr_burst_admitted_bytes = ddr_burst_bytes
@@ -209,6 +238,36 @@ def test_metadata_ladder_selects_largest_counter_continuous_refill_and_restores(
     assert report.cells[1].observed_fraction == 1.0
     assert report.cells[1].passed
     assert report.failures == ()
+
+
+def test_metadata_ladder_reports_tandem_sampler_observability() -> None:
+    radio = _Radio(
+        {262_144: (0, 1)},
+        tandem_interval=65_536,
+        tandem_observations=3,
+        tandem_overflow=1,
+    )
+    ticks = iter((0, 1_000_000_000))
+
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=5_000_000,
+        rf_bandwidth_hz=5_000_000,
+        metadata_abi=3,
+        channels=(0,),
+        samples_per_channel=(262_144,),
+        frames=2,
+        kernel_buffers=4,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=lambda: next(ticks),
+    )
+
+    cell = report.cells[0]
+    assert cell.tandem_metadata_frames == 2
+    assert cell.gain_observation_interval_samples == 65_536
+    assert cell.gain_observation_count == 6
+    assert cell.gain_observation_overflow_count == 2
     assert report.original_settings_restored
     assert radio.settings == radio.original
     assert not radio.opened
