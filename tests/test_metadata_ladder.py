@@ -374,12 +374,14 @@ def test_metadata_ladder_accepts_gaps_only_after_exact_ddr_prefix() -> None:
         frames=frames,
         kernel_buffers=4,
         ddr_ring_bytes=2 * frame_bytes,
+        acceptance_mode="capture-completion",
         radio_factory=lambda _uri, _serial, _abi: radio,
         clock_ns=iter((0, 1_000_000_000)).__next__,
     )
 
     cell = report.cells[0]
     assert not report.failures
+    assert report.acceptance_mode == "capture-completion"
     assert cell.ddr_ring_prefix_frames == 2
     assert cell.ddr_ring_prefix_iq_bytes == 2 * frame_bytes
     assert cell.ddr_ring_prefix_contiguous

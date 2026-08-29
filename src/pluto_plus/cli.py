@@ -1502,6 +1502,16 @@ def radio_metadata_ladder(
             "auto also exercises gain transitions."
         ),
     ),
+    acceptance: str = typer.Option(
+        "continuity",
+        "--acceptance",
+        help=(
+            "Success contract: continuity requires a >=95% gap-free rung; "
+            "capture-completion accepts exact accounted gaps after all requested "
+            "frames return (a DDR ring still requires its contiguous prefix and "
+            "clean target-complete status)."
+        ),
+    ),
     report_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--report",
@@ -1650,6 +1660,13 @@ def radio_metadata_ladder(
             "--tandem-mode must be hold or auto",
             2,
         )
+    normalized_acceptance = acceptance.strip().lower()
+    if normalized_acceptance not in {"continuity", "capture-completion"}:
+        _fail(
+            "invalid_metadata_ladder_acceptance",
+            "--acceptance must be continuity or capture-completion",
+            2,
+        )
     environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
     if not environment.healthy:
         _fail(environment.status.value, environment.actionable_message, 5)
@@ -1668,6 +1685,7 @@ def radio_metadata_ladder(
             ddr_burst=ddr_burst,
             ddr_ring_bytes=ddr_ring_bytes,
             tandem_mode=cast(Any, normalized_tandem_mode),
+            acceptance_mode=cast(Any, normalized_acceptance),
         )
 
     try:
@@ -1712,7 +1730,16 @@ def radio_metadata_ladder(
         if isolation_receipt is None
         else {"host_isolation": asdict(isolation_receipt), "result": payload}
     )
-    if report.failures or report.largest_passing_samples_per_channel is None:
+    if report.acceptance_mode != normalized_acceptance:
+        _fail(
+            "metadata_ladder_acceptance_mismatch",
+            "metadata ladder report acceptance mode does not match the request",
+            5,
+        )
+    if report.failures or (
+        report.acceptance_mode == "continuity"
+        and report.largest_passing_samples_per_channel is None
+    ):
         raise typer.Exit(5)
 
 

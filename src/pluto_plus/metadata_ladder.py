@@ -35,6 +35,7 @@ MAX_DDR_RING_IQ_BYTES = 200_000_000
 MetadataAbi = Literal[1, 2, 3]
 MetadataChannels = Literal["rx0", "rx1", "dual"]
 MetadataTandemMode = Literal["hold", "auto"]
+MetadataAcceptanceMode = Literal["continuity", "capture-completion"]
 METADATA_CHANNEL_SELECTIONS: dict[MetadataChannels, tuple[int, ...]] = {
     "rx0": (0,),
     "rx1": (1,),
@@ -194,6 +195,7 @@ class MetadataContinuityLadderReport(ApiModel):
     channels: tuple[int, ...]
     kernel_buffers: int = Field(ge=4, le=64)
     tandem_mode: MetadataTandemMode = "hold"
+    acceptance_mode: MetadataAcceptanceMode = "continuity"
     ddr_burst_enabled: bool = False
     ddr_ring_requested_iq_bytes: int = Field(default=0, ge=0)
     minimum_observed_fraction: float = Field(
@@ -303,6 +305,7 @@ def run_metadata_continuity_ladder(
     ddr_burst: bool = False,
     ddr_ring_bytes: int = 0,
     tandem_mode: MetadataTandemMode = "hold",
+    acceptance_mode: MetadataAcceptanceMode = "continuity",
     radio_factory: Callable[[str, str, MetadataAbi], MetadataLadderRadio] | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> MetadataContinuityLadderReport:
@@ -320,6 +323,10 @@ def run_metadata_continuity_ladder(
         raise ValueError("metadata ABI must be 1, 2, or 3")
     if tandem_mode not in {"hold", "auto"}:
         raise ValueError("metadata tandem mode must be hold or auto")
+    if acceptance_mode not in {"continuity", "capture-completion"}:
+        raise ValueError(
+            "metadata acceptance mode must be continuity or capture-completion"
+        )
     if selected_channels not in set(METADATA_CHANNEL_SELECTIONS.values()):
         raise ValueError("metadata channels must be RX0, RX1, or dual")
     if metadata_abi in {1, 2} and selected_channels != (0, 1):
@@ -424,6 +431,7 @@ def run_metadata_continuity_ladder(
         channels=selected_channels,
         kernel_buffers=kernel_buffers,
         tandem_mode=tandem_mode,
+        acceptance_mode=acceptance_mode,
         ddr_burst_enabled=ddr_burst,
         ddr_ring_requested_iq_bytes=ddr_ring_bytes,
         cells=tuple(cells),

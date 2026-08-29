@@ -205,10 +205,18 @@ with the 200 MB ring path:
 uv run pluto radio metadata-ladder 192.168.1.17 \
   --transport ip --expect-serial EXACT_SERIAL --metadata-abi 3 --channels rx0 \
   --sample-rate-hz 20000000 --rf-bandwidth-hz 20000000 \
-  --samples 1000000 --frames 400 --kernel-buffers 4 --tandem-mode hold
+  --samples 1000000 --frames 400 --kernel-buffers 4 --tandem-mode hold \
+  --acceptance capture-completion
 uv run pluto radio metadata-ladder 192.168.1.17 \
   --transport ip --expect-serial EXACT_SERIAL --metadata-abi 3 --channels rx0 \
   --sample-rate-hz 20000000 --rf-bandwidth-hz 20000000 \
   --samples 1000000 --frames 400 --kernel-buffers 4 --tandem-mode hold \
-  --ddr-ring-bytes 200000000
+  --ddr-ring-bytes 200000000 --acceptance capture-completion
 ```
+
+The default `continuity` acceptance remains the throughput-ladder contract and
+returns nonzero when no rung covers at least 95% of the device timeline. The
+explicit `capture-completion` contract instead succeeds only when every requested
+host frame returns with exact FPGA-counter accounting. It permits accounted gaps
+caused by a slower transport; DDR-ring captures still additionally require a clean
+`target_complete` terminal state and a counter-proven contiguous admitted prefix.

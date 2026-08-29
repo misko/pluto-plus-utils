@@ -2291,6 +2291,77 @@ def test_metadata_ladder_writes_an_absent_only_private_report(
     assert "contract destination already exists" in repeated.output
 
 
+def test_metadata_ladder_capture_completion_accepts_accounted_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = MetadataContinuityLadderReport(
+        serial="SERIAL_A",
+        uri="usb:",
+        transport="iio_usb",
+        model="PlutoSDR Rev.C",
+        firmware_version="v0.44-plutoplus-spf-ddr-ring-prefill-v1-rc1",
+        metadata_abi=3,
+        sample_rate_hz=20_000_000,
+        rf_bandwidth_hz=20_000_000,
+        channels=(0,),
+        kernel_buffers=4,
+        acceptance_mode="capture-completion",
+        cells=(
+            MetadataContinuityCell(
+                samples_per_channel=262_144,
+                requested_frames=2,
+                observed_frames=2,
+                observed_sample_count=524_288,
+                device_span_sample_count=786_432,
+                first_sample_sequence=1_000,
+                last_sample_sequence_exclusive=787_432,
+                missing_sample_count=262_144,
+                gap_count=1,
+                overflow_count=1,
+                elapsed_seconds=1.0,
+                observed_fraction=2 / 3,
+                passed=False,
+            ),
+        ),
+        failures=(),
+        largest_passing_samples_per_channel=None,
+        original_settings_restored=True,
+    )
+    forwarded: dict[str, object] = {}
+
+    def run_ladder(**kwargs: object) -> MetadataContinuityLadderReport:
+        forwarded.update(kwargs)
+        return report
+
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment", lambda **_kwargs: SimpleNamespace(healthy=True)
+    )
+    monkeypatch.setattr("pluto_plus.cli.run_metadata_continuity_ladder", run_ladder)
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "SERIAL_A",
+            "--metadata-abi",
+            "3",
+            "--channels",
+            "rx0",
+            "--samples",
+            "262144",
+            "--frames",
+            "2",
+            "--acceptance",
+            "capture-completion",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert forwarded["acceptance_mode"] == "capture-completion"
+    assert json.loads(result.output)["acceptance_mode"] == "capture-completion"
+
+
 def test_remediation_offers_cover_stale_firmware_and_broken_host_libiio() -> None:
     from pluto_plus.cli import _remediation_offers
 
