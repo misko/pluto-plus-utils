@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import sys
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -2126,3 +2128,76 @@ def test_returned_radio_mute_preflights_native_iio_before_radio_access(
         match="returned-radio IIO environment failed.*explicit native libiio",
     ):
         bootstrap.mute_returned_radio("SERIAL_A")
+
+
+def test_exact_usb_iio_uri_uses_only_the_selected_runtime_topology(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    usb_root = tmp_path / "usb"
+    target = usb_root / "5-2"
+    target.mkdir(parents=True)
+    for name, value in (
+        ("idVendor", "0456\n"),
+        ("idProduct", "b673\n"),
+        ("serial", "SERIAL_A\n"),
+        ("busnum", "5\n"),
+        ("devnum", "13\n"),
+    ):
+        (target / name).write_text(value)
+    for suffix, number, usb_class, subclass, protocol in (
+        ("1.0", "00", "02", "02", "ff"),
+        ("1.5", "05", "02", "00", "00"),
+        ("1.6", "06", "ff", "00", "00"),
+    ):
+        interface = usb_root / f"5-2:{suffix}"
+        interface.mkdir()
+        (interface / "bInterfaceNumber").write_text(number + "\n")
+        (interface / "bInterfaceClass").write_text(usb_class + "\n")
+        (interface / "bInterfaceSubClass").write_text(subclass + "\n")
+        (interface / "bInterfaceProtocol").write_text(protocol + "\n")
+    monkeypatch.setattr(bootstrap, "_USB_ROOT", usb_root)
+
+    assert bootstrap.exact_usb_iio_uri(target, "SERIAL_A") == "usb:5.13.5"
+
+
+def test_exact_path_mute_never_scans_busy_peer_contexts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[str] = []
+    muted: list[object] = []
+    closed: list[str] = []
+    device = SimpleNamespace(
+        _ctx=SimpleNamespace(
+            attrs={"hw_serial": "SERIAL_A"},
+            close=lambda: closed.append("context"),
+        ),
+        rx_destroy_buffer=lambda: closed.append("buffer"),
+    )
+
+    class Environment:
+        healthy = True
+        actionable_message = ""
+
+    monkeypatch.setattr(bootstrap, "inspect_iio_environment", lambda **kwargs: Environment())
+    monkeypatch.setattr(
+        bootstrap,
+        "exact_usb_iio_uri",
+        lambda path, serial: "usb:5.13.5",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "adi",
+        SimpleNamespace(ad9361=lambda *, uri: (opened.append(uri), device)[1]),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "iio",
+        SimpleNamespace(scan_contexts=lambda: pytest.fail("global IIO scan touched a busy peer")),
+    )
+    monkeypatch.setattr("pluto_plus.hardware.iio._mute_transmit", muted.append)
+
+    bootstrap.mute_returned_radio_at_path("SERIAL_A", tmp_path / "5-2")
+
+    assert opened == ["usb:5.13.5"]
+    assert muted == [device]
+    assert closed == ["buffer", "context"]

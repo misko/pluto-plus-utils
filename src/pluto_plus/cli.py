@@ -5502,6 +5502,43 @@ def firmware_ram_resume(
         raise typer.Exit(5)
 
 
+@firmware_app.command("ram-reconcile")
+def firmware_ram_reconcile(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+    confirmation: str = typer.Option(
+        ...,
+        "--confirm",
+        help="Exact phrase RECONCILE RAM BOOT <source-receipt-id>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_RAM_BOOT_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for the reconciliation receipt.",
+    ),
+) -> None:
+    """Attest an already-returned RAM image without another DFU operation."""
+
+    from pluto_plus.volatile_firmware import (
+        VolatileFirmwareError,
+        reconcile_ram_boot_receipt,
+    )
+
+    environment = inspect_iio_environment()
+    if not environment.healthy:
+        _fail("ram_reconcile_environment_failed", environment.actionable_message, 5)
+    try:
+        result = reconcile_ram_boot_receipt(
+            receipt.expanduser().absolute(),
+            confirmation=confirmation,
+            receipt_directory=receipt_directory.expanduser().resolve(),
+        )
+    except (VolatileFirmwareError, OSError, ValueError) as error:
+        _fail("ram_reconcile_failed", str(error), 4)
+    _emit(asdict(result))
+    if result.outcome != "success":
+        raise typer.Exit(5)
+
+
 @firmware_app.command("bootstrap-usb")
 @firmware_app.command("force-flash-usb")
 @firmware_app.command("force-flash")

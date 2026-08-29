@@ -283,6 +283,30 @@ sudo udevadm control --reload-rules
 Do not enter DFU until the runtime `/dev/bus/usb/...` node is writable; the
 command repeats this check immediately before mutation.
 
+If a RAM-boot receipt is `unknown`, follow its exact last phase. A receipt that
+stopped at `exact_path_entered_dfu` may be resumed once with the generated
+`RESUME RAM BOOT <receipt-id>` confirmation:
+
+```bash
+pluto firmware ram-resume /private/receipts/RECEIPT_ID.json \
+  --confirm 'RESUME RAM BOOT RECEIPT_ID'
+```
+
+A receipt that already reached `exact_path_returned_runtime` must never be
+resumed or downloaded again. Close it with the attestation-only command:
+
+```bash
+pluto firmware ram-reconcile /private/receipts/RECEIPT_ID.json \
+  --confirm 'RECONCILE RAM BOOT RECEIPT_ID'
+```
+
+Reconciliation revalidates the private source receipt, immutable image/profile,
+exact USB topology, serial, firmware, capabilities, and TX-safe state, then
+writes a linked successor receipt. It has no DFU runner and cannot download,
+detach, reboot, or write QSPI. Its USB-IIO safety readback derives the concrete
+`usb:<bus>.<device>.<interface>` URI from the selected sysfs topology, so a busy
+unrelated Pluto cannot poison the attestation through global IIO discovery.
+
 For a serial-attested local USB radio, `firmware flash` is the standalone
 canonical-image workflow. It binds the USB and IIOD serials, physical sysfs
 path, updater partition, current firmware, and exact image hashes before asking

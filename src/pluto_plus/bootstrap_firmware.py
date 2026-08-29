@@ -1772,11 +1772,104 @@ def mute_returned_radio(serial: str) -> None:
             _mute_transmit(device)
         finally:
             device.rx_destroy_buffer()
-            device._ctx.close()
+            _close_adi_context(device)
     except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as error:
         if isinstance(error, BootstrapFirmwareError):
             raise
         raise BootstrapFirmwareError(f"cannot attest returned TX-safe state: {error}") from error
+
+
+def exact_usb_iio_uri(usb_sysfs_path: Path, serial: str) -> str:
+    """Resolve one runtime Pluto's IIO URI from its exact kernel topology.
+
+    This deliberately avoids ``iio.scan_contexts()``: discovery probes every
+    attached context and can fail when an unrelated Pluto is already streaming.
+    The direct device identity and the unique vendor-specific IIO interface are
+    instead derived from sysfs, which remains available while peer radios are
+    busy.
+    """
+
+    path = _direct_usb_path(usb_sysfs_path)
+    try:
+        resolved = path.resolve(strict=True)
+        vendor = (resolved / "idVendor").read_text(encoding="ascii").strip().lower()
+        product = (resolved / "idProduct").read_text(encoding="ascii").strip().lower()
+        observed_serial = (resolved / "serial").read_text(encoding="utf-8").strip()
+        bus = int((resolved / "busnum").read_text(encoding="ascii").strip())
+        device = int((resolved / "devnum").read_text(encoding="ascii").strip())
+    except (OSError, UnicodeError, ValueError) as error:
+        raise BootstrapFirmwareError(f"cannot resolve exact USB-IIO identity: {error}") from error
+    if vendor != "0456" or product != "b673" or bus <= 0 or device <= 0:
+        raise BootstrapFirmwareError("exact USB path is not one runtime Pluto")
+    if observed_serial != serial or not _SERIAL_PATTERN.fullmatch(serial):
+        raise BootstrapFirmwareError("exact USB path serial does not match the requested radio")
+
+    interfaces: list[int] = []
+    for candidate in path.parent.glob(f"{path.name}:*"):
+        try:
+            interface_class = (
+                (candidate / "bInterfaceClass").read_text(encoding="ascii").strip().lower()
+            )
+            interface_subclass = (
+                (candidate / "bInterfaceSubClass").read_text(encoding="ascii").strip().lower()
+            )
+            interface_protocol = (
+                (candidate / "bInterfaceProtocol").read_text(encoding="ascii").strip().lower()
+            )
+            interface_number = int(
+                (candidate / "bInterfaceNumber").read_text(encoding="ascii").strip(), 16
+            )
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if (
+            interface_class == "02"
+            and interface_subclass == "00"
+            and interface_protocol == "00"
+            and interface_number >= 0
+        ):
+            interfaces.append(interface_number)
+    if len(interfaces) != 1:
+        raise BootstrapFirmwareError(
+            f"expected one exact USB-IIO interface at {path}, found {interfaces}"
+        )
+    return f"usb:{bus}.{device}.{interfaces[0]}"
+
+
+def mute_returned_radio_at_path(serial: str, usb_sysfs_path: Path) -> None:
+    """Mute and read back only the runtime Pluto at one exact USB topology."""
+
+    try:
+        environment = inspect_iio_environment(require_usb=True)
+        if not environment.healthy:
+            raise BootstrapFirmwareError(
+                f"returned-radio IIO environment failed: {environment.actionable_message}"
+            )
+        import adi
+
+        from pluto_plus.hardware.iio import _mute_transmit
+
+        uri = exact_usb_iio_uri(usb_sysfs_path, serial)
+        device = adi.ad9361(uri=uri)
+        try:
+            if device._ctx.attrs.get("hw_serial") != serial:
+                raise BootstrapFirmwareError("TX safety context has the wrong serial")
+            _mute_transmit(device)
+        finally:
+            device.rx_destroy_buffer()
+            _close_adi_context(device)
+    except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as error:
+        if isinstance(error, BootstrapFirmwareError):
+            raise
+        raise BootstrapFirmwareError(f"cannot attest returned TX-safe state: {error}") from error
+
+
+def _close_adi_context(device: Any) -> None:
+    """Release bindings that expose explicit cleanup and let others use RAII."""
+
+    context = getattr(device, "_ctx", None)
+    closer = getattr(context, "destroy", None) or getattr(context, "close", None)
+    if callable(closer):
+        closer()
 
 
 def _attest_return_when_ready(

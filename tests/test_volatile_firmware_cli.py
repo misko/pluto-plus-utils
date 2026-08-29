@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from pluto_plus.cli import app
 from pluto_plus.host_isolation import HostIsolationPlan
-from pluto_plus.volatile_firmware import VolatileFirmwarePlan
+from pluto_plus.volatile_firmware import VolatileFirmwarePlan, VolatileFirmwareResult
 
 runner = CliRunner()
 
@@ -182,3 +182,63 @@ def test_ram_boot_route_isolation_requires_exact_generated_confirmation(
     error = json.loads(result.stderr)["error"]
     assert error["code"] == "host_isolation_confirmation_required"
     assert "ISOLATE USB SSH enx001" in error["message"]
+
+
+def test_ram_reconcile_cli_emits_successful_successor_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_id = "c" * 32
+    source = tmp_path / f"{source_id}.json"
+    receipt = tmp_path / "receipts" / f"{'e' * 32}.json"
+    observed: list[tuple[Path, str, Path]] = []
+
+    class Environment:
+        healthy = True
+        actionable_message = ""
+
+    def reconcile(
+        path: Path, *, confirmation: str, receipt_directory: Path
+    ) -> VolatileFirmwareResult:
+        observed.append((path, confirmation, receipt_directory))
+        return VolatileFirmwareResult(
+            schema_version=1,
+            receipt_id="e" * 32,
+            outcome="success",
+            phases=("source_receipt_reconciled",),
+            receipt_path=str(receipt),
+            returned_serial="SERIAL_A",
+            returned_firmware="candidate-v1",
+            returned_phy="ad9361",
+            source_receipt_id=source_id,
+        )
+
+    monkeypatch.setattr("pluto_plus.cli.inspect_iio_environment", lambda: Environment())
+    monkeypatch.setattr(
+        "pluto_plus.volatile_firmware.reconcile_ram_boot_receipt",
+        reconcile,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "ram-reconcile",
+            str(source),
+            "--confirm",
+            f"RECONCILE RAM BOOT {source_id}",
+            "--receipt-directory",
+            str(tmp_path / "receipts"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.output)
+    assert document["source_receipt_id"] == source_id
+    assert document["outcome"] == "success"
+    assert observed == [
+        (
+            source.absolute(),
+            f"RECONCILE RAM BOOT {source_id}",
+            (tmp_path / "receipts").resolve(),
+        )
+    ]

@@ -233,8 +233,12 @@ def test_execute_uses_only_exact_path_firmware_alt_and_attests_return(
     products = iter(("b674", "b673"))
     transition = RecordingTransition()
     runner = RecordingRunner()
-    muted: list[str] = []
-    monkeypatch.setattr(volatile, "mute_returned_radio", muted.append)
+    muted: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        volatile,
+        "mute_returned_radio_at_path",
+        lambda serial, path: muted.append((serial, path)),
+    )
 
     result = volatile.execute_ram_boot_plan(
         plan,
@@ -265,7 +269,7 @@ def test_execute_uses_only_exact_path_firmware_alt_and_attests_return(
     )
     assert runner.commands[1][-2:] == ("-D", plan.image_path)
     assert runner.commands[2][-1] == "-e"
-    assert muted == ["SERIAL_A"]
+    assert muted == [("SERIAL_A", Path(plan.usb_sysfs_path))]
     assert stat.S_IMODE(Path(result.receipt_path).stat().st_mode) == 0o600
     receipt = json.loads(Path(result.receipt_path).read_text())
     assert receipt["outcome"] == "success"
@@ -290,8 +294,12 @@ def test_ram_return_attestation_requires_exact_ddr_burst_capability(
             "iio,buffer-ddr-burst-reserve-bytes": "134217728",
         }
     )
-    muted: list[str] = []
-    monkeypatch.setattr(volatile, "mute_returned_radio", muted.append)
+    muted: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        volatile,
+        "mute_returned_radio_at_path",
+        lambda serial, path: muted.append((serial, path)),
+    )
 
     returned = volatile._attest_ram_return(
         burst_plan,
@@ -302,7 +310,7 @@ def test_ram_return_attestation_requires_exact_ddr_burst_capability(
     )
 
     assert returned == ("SERIAL_A", "candidate-v1", "ad9361")
-    assert muted == ["SERIAL_A"]
+    assert muted == [("SERIAL_A", Path(plan.usb_sysfs_path))]
 
     facts["iio,buffer-ddr-burst-max-iq-bytes"] = "199999999"
     with pytest.raises(volatile.VolatileFirmwareError, match="DDR burst capability"):
@@ -335,8 +343,12 @@ def test_ram_return_attestation_requires_exact_ddr_ring_capability(
             "iio,buffer-metadata-status": "1",
         }
     )
-    muted: list[str] = []
-    monkeypatch.setattr(volatile, "mute_returned_radio", muted.append)
+    muted: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        volatile,
+        "mute_returned_radio_at_path",
+        lambda serial, path: muted.append((serial, path)),
+    )
 
     returned = volatile._attest_ram_return(
         ring_plan,
@@ -347,7 +359,7 @@ def test_ram_return_attestation_requires_exact_ddr_ring_capability(
     )
 
     assert returned == ("SERIAL_A", "candidate-v1", "ad9361")
-    assert muted == ["SERIAL_A"]
+    assert muted == [("SERIAL_A", Path(plan.usb_sysfs_path))]
 
     facts["iio,buffer-ddr-ring-modes"] = "finite"
     with pytest.raises(volatile.VolatileFirmwareError, match="DDR ring capability"):
@@ -440,8 +452,12 @@ def test_resume_exact_dfu_boundary_revalidates_downloads_and_attests_return(
     source.chmod(0o600)
     runner = RecordingRunner()
     products = iter(("b674", "b673"))
-    muted: list[str] = []
-    monkeypatch.setattr(volatile, "mute_returned_radio", muted.append)
+    muted: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        volatile,
+        "mute_returned_radio_at_path",
+        lambda serial, path: muted.append((serial, path)),
+    )
 
     result = volatile.resume_ram_boot_receipt(
         source,
@@ -458,7 +474,7 @@ def test_resume_exact_dfu_boundary_revalidates_downloads_and_attests_return(
 
     assert result.outcome == "success"
     assert "0456:b673,0456:b674" in runner.commands[1]
-    assert muted == [plan.serial]
+    assert muted == [(plan.serial, Path(plan.usb_sysfs_path))]
 
 
 def test_resume_rejects_receipt_after_download_phase(
@@ -485,4 +501,99 @@ def test_resume_rejects_receipt_after_download_phase(
             source,
             confirmation=f"RESUME RAM BOOT {source_id}",
             receipt_directory=tmp_path / "resume-receipts",
+        )
+
+
+def test_reconcile_returned_runtime_is_exact_path_and_has_no_dfu_runner(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, _, _, radios = ram_plan
+    source_id = "c" * 32
+    source = tmp_path / f"{source_id}.json"
+    source.write_text(
+        json.dumps(
+            {
+                "receipt_id": source_id,
+                "outcome": "unknown",
+                "phases": [
+                    "preflight_revalidated",
+                    "dfu_util_ready",
+                    "ram_transition_dispatch_attempted",
+                    "ram_transition_dispatched",
+                    "exact_path_entered_dfu",
+                    "volatile_dfu_downloaded",
+                    "dfu_detach_dispatched",
+                    "exact_path_returned_runtime",
+                ],
+                "plan": asdict(plan),
+            }
+        )
+    )
+    source.chmod(0o600)
+    muted: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        volatile,
+        "mute_returned_radio_at_path",
+        lambda serial, path: muted.append((serial, path)),
+    )
+    monkeypatch.setattr(
+        volatile.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("reconciliation attempted an external command"),
+    )
+
+    result = volatile.reconcile_ram_boot_receipt(
+        source,
+        confirmation=f"RECONCILE RAM BOOT {source_id}",
+        receipt_directory=tmp_path / "reconcile-receipts",
+        scanner=lambda: radios,
+        iiod_inspector=lambda interface: _facts("candidate-v1"),
+        usb_product_reader=lambda path: "b673",
+        timeout_s=0.1,
+        poll_interval_s=0.001,
+    )
+
+    assert result.outcome == "success"
+    assert result.source_receipt_id == source_id
+    assert muted == [(plan.serial, Path(plan.usb_sysfs_path))]
+    assert "source_receipt_reconciled" in result.phases
+    durable = json.loads(Path(result.receipt_path).read_text())
+    assert durable["source_receipt_id"] == source_id
+    assert durable["outcome"] == "success"
+
+
+def test_reconcile_refuses_receipt_before_exact_runtime_return(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+    tmp_path: Path,
+) -> None:
+    plan, _, _, _ = ram_plan
+    source_id = "d" * 32
+    source = tmp_path / f"{source_id}.json"
+    source.write_text(
+        json.dumps(
+            {
+                "receipt_id": source_id,
+                "outcome": "unknown",
+                "phases": [
+                    "preflight_revalidated",
+                    "dfu_util_ready",
+                    "ram_transition_dispatch_attempted",
+                    "ram_transition_dispatched",
+                    "exact_path_entered_dfu",
+                    "volatile_dfu_downloaded",
+                    "dfu_detach_dispatched",
+                ],
+                "plan": asdict(plan),
+            }
+        )
+    )
+    source.chmod(0o600)
+
+    with pytest.raises(volatile.VolatileFirmwareError, match="exact-path runtime return"):
+        volatile.reconcile_ram_boot_receipt(
+            source,
+            confirmation=f"RECONCILE RAM BOOT {source_id}",
+            receipt_directory=tmp_path / "reconcile-receipts",
         )
