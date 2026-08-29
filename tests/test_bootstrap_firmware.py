@@ -1795,6 +1795,51 @@ def test_standalone_reconciliation_accepts_proven_post_eject_mass_storage_receip
     assert len(transport.calls) == 1
 
 
+def test_standalone_reconciliation_reverifies_successful_mass_storage_receipt(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
+        planned, tmp_path, monkeypatch
+    )
+    receipt_path = receipt_directory / f"{receipt_id}.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt.pop("transport")
+    receipt.update(
+        {
+            "outcome": "success",
+            "error": None,
+            "phases": [
+                "preflight_revalidated",
+                "eject_requested",
+                "media_ejected",
+                "reappeared",
+                "return_attested",
+                "tx_safe_attested",
+            ],
+        }
+    )
+    bootstrap._write_receipt(receipt_path, receipt)
+    transport = ReadOnlyReconciliationTransport(plan)
+
+    result = bootstrap.reconcile_usb_flash_receipt(
+        receipt_id,
+        receipt_directory=receipt_directory,
+        usb_sysfs_path=Path(plan.usb_sysfs_path),
+        mutation_profile_id=plan.mutation_profile_id,
+        transport=transport,
+    )
+
+    assert result.outcome == "reconciled_verified"
+    assert result.fit_sha256 == plan.fit_sha256
+    assert result.tx_safe is True
+    assert len(transport.calls) == 1
+    persisted = json.loads(receipt_path.read_text())
+    assert persisted["original_outcome"] == "success"
+    assert persisted["outcome"] == "reconciled_verified"
+
+
 def test_standalone_reconciliation_rejects_ambiguous_mass_storage_receipt(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     tmp_path: Path,

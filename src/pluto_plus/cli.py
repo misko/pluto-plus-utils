@@ -3646,7 +3646,9 @@ def firmware_reconcile(ctx: typer.Context, receipt_id: str = typer.Argument(...)
 
 @firmware_app.command("reconcile-local")
 def firmware_reconcile_local(
-    receipt_id: str = typer.Argument(..., help="Exact standalone flash receipt ID."),
+    receipt_id: str = typer.Argument(
+        ..., help="Exact uncertain or successful standalone flash receipt ID."
+    ),
     usb_sysfs_path: Path = typer.Option(  # noqa: B008
         ..., "--usb-sysfs-path", help="Exact direct USB sysfs node recorded by the receipt."
     ),
@@ -3685,7 +3687,7 @@ def firmware_reconcile_local(
         help="Private directory for host-isolation receipts.",
     ),
 ) -> None:
-    """Read-only re-attest an uncertain standalone flash; never retry it."""
+    """Read-only re-attest an uncertain or successful standalone flash."""
 
     from pluto_plus.bootstrap_firmware import (
         BootstrapFirmwareError,

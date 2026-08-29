@@ -1340,7 +1340,7 @@ def reconcile_usb_flash_receipt(
     mutation_profile_id: str,
     transport: BootstrapSshTransport,
 ) -> StandaloneReconciliationResult:
-    """Read-only re-attest one uncertain standalone flash receipt.
+    """Read-only re-attest one uncertain or successful standalone flash receipt.
 
     The source receipt, immutable profile, current USB/IIO identity, remote
     firmware, TX-safe state, and exact recorded FIT bytes must all agree.  This
@@ -1357,21 +1357,42 @@ def reconcile_usb_flash_receipt(
     receipt = _read_receipt(receipt_path)
     if receipt.get("schema_version") != 1 or receipt.get("receipt_id") != receipt_id:
         raise BootstrapFirmwareError("standalone receipt identity or schema is invalid")
-    if receipt.get("outcome") != "unknown":
-        raise BootstrapFirmwareError("only an unknown standalone flash may be reconciled")
+    original_outcome = receipt.get("outcome")
+    if original_outcome not in {"unknown", "success"}:
+        raise BootstrapFirmwareError(
+            "only an unknown or successful standalone flash may be re-attested"
+        )
     receipt_transport = receipt.get("transport")
     receipt_phases = receipt.get("phases")
     mass_storage_post_eject = (
-        (receipt_transport is None or receipt_transport == "mass_storage")
+        original_outcome == "unknown"
+        and (receipt_transport is None or receipt_transport == "mass_storage")
         and isinstance(receipt_phases, list)
         and "eject_requested" in receipt_phases
         and receipt.get("failure_classification") == "post_eject_uncertain"
         and receipt.get("retryable") is False
     )
-    if receipt_transport != "bound_ssh_frm" and not mass_storage_post_eject:
+    mass_storage_success = (
+        original_outcome == "success"
+        and (receipt_transport is None or receipt_transport == "mass_storage")
+        and isinstance(receipt_phases, list)
+        and {
+            "eject_requested",
+            "media_ejected",
+            "reappeared",
+            "return_attested",
+            "tx_safe_attested",
+        }.issubset(receipt_phases)
+        and receipt.get("error") is None
+    )
+    if (
+        receipt_transport != "bound_ssh_frm"
+        and not mass_storage_post_eject
+        and not mass_storage_success
+    ):
         raise BootstrapFirmwareError(
             "standalone reconciliation requires bound SSH evidence or a "
-            "non-retryable post-eject mass-storage receipt"
+            "successful/non-retryable post-eject mass-storage receipt"
         )
     raw_plan = receipt.get("plan")
     if not isinstance(raw_plan, dict):
@@ -1476,7 +1497,7 @@ def reconcile_usb_flash_receipt(
         fit_sha256=remote_fit,
         tx_safe=True,
     )
-    receipt["original_outcome"] = "unknown"
+    receipt["original_outcome"] = original_outcome
     receipt["outcome"] = result.outcome
     receipt["reconciliation"] = asdict(result)
     _write_receipt(receipt_path, receipt)
