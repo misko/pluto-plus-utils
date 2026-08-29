@@ -357,6 +357,26 @@ DDR_RING_V1_RC2_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 29, 3, 21, 53, tzinfo=UTC),
 )
 
+# Exact RAM-only candidate for the ring-prefill correctness fix. The consumer
+# cannot drain the optional ring until the entire admitted prefix is resident;
+# after that prefix, ABI-3 metadata accounts for source-pressure gaps without
+# turning a valid finite capture into a transport failure. Hardware promotion
+# remains forbidden until both the ordinary and 200 MB ring paths pass over
+# physical Ethernet on the protected candidate bytes.
+DDR_RING_PREFILL_V1_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-ring-prefill-v1-rc1-ram",
+    release_tag="ddr-ring-prefill-v1-rc1-ac100b76ec75",
+    device_firmware="v0.44-plutoplus-spf-ddr-ring-prefill-v1-rc1",
+    asset_name="plutoplus-spf-ddr-ring-prefill-v1-rc1-ac100b76ec75-pluto.dfu",
+    asset_sha256="0107fb1d57be2ade703bc6950ff64a20c9cf6efb06f3eb4ea71dabecbb4343fa",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33265953071",
+    source_commit="ac100b76ec7577f74df92bdca678ef6a4ccc664b",
+    fit_body_sha256="ee61df2729cfd5e8f4b8f5c8b24994a56ae5f7b280f0a2ea7044372c0721e78e",
+    fit_body_size=12_809_531,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 29, 17, 57, 1, tzinfo=UTC),
+)
+
 # Exact final-version-stamped DDR ring v1 image from protected main run
 # 33235840830. Its source graph is the hardware-qualified RC2 graph, but this
 # identity deliberately remains RAM-only: persistent mutation requires the
