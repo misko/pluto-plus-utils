@@ -6,11 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
+from pluto_plus.doctor import (
+    CANONICAL_POLICY,
+    CANONICAL_UBOOT,
+    DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
+)
 from pluto_plus.setup import (
     CanonicalSetupManager,
     SetupAuthorizationError,
     SetupExecutionResult,
+    SetupHostKeyRotation,
     SetupIdentity,
     SetupObservation,
     SetupPreconditionError,
@@ -51,6 +56,7 @@ class FakeSetupBackend:
     def __init__(self, current: SetupObservation) -> None:
         self.current = current
         self.plans = []
+        self.host_key_rotation: SetupHostKeyRotation | None = None
 
     def inspect(self, identity: SetupIdentity) -> SetupObservation:
         assert identity.serial == self.current.identity.serial
@@ -59,7 +65,7 @@ class FakeSetupBackend:
     def provision(self, plan: object) -> SetupExecutionResult:
         self.plans.append(plan)
         self.current = _observation(
-            live_phy_model="ad9361",
+            live_phy_model="ad9363a",
             uboot=CANONICAL_UBOOT,
             environment_sha256="3" * 64,
             boot_provenance="qspi_reboot_verified",
@@ -68,6 +74,7 @@ class FakeSetupBackend:
             observation=self.current,
             backup_path="backups/SERIAL_A-before.txt",
             backup_sha256="4" * 64,
+            host_key_rotation=self.host_key_rotation,
         )
 
 
@@ -84,13 +91,67 @@ def test_setup_plan_is_exact_identity_environment_and_policy_bound(tmp_path: Pat
     assert planned.plan.identity == _identity()
     assert planned.plan.profile_id == CANONICAL_POLICY.profile_id
     assert planned.plan.environment_sha256 == "1" * 64
-    assert planned.plan.changes == {
-        "attr_name": "compatible",
-        "attr_val": "ad9361",
-        "compatible": "ad9361",
-    }
+    assert planned.plan.changes == {"compatible": "ad9361"}
     assert "mode" not in planned.plan.changes
     assert planned.plan.tx_mute_required is False
+
+
+def test_setup_plan_accepts_only_exact_shipped_persistent_policy(tmp_path: Path) -> None:
+    policy = DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+    identity = _identity().model_copy(update={"observed_firmware": policy.device_firmware})
+    observation = _observation(
+        identity=identity,
+        qspi_firmware_sha256=policy.fit_body_sha256,
+    )
+    backend = FakeSetupBackend(observation)
+    manager = CanonicalSetupManager(
+        receipt_directory=tmp_path / "receipts",
+        inspector=backend.inspect,
+        executor=backend,
+        policy=policy,
+    )
+
+    planned = manager.create_plan(identity)
+
+    assert planned.plan.profile_id == policy.profile_id
+    assert planned.plan.identity.observed_firmware == policy.device_firmware
+
+    unshipped = policy.model_copy(update={"fit_body_sha256": "f" * 64})
+    with pytest.raises(ValueError, match="exact shipped hardware-qualified"):
+        CanonicalSetupManager(
+            receipt_directory=tmp_path / "unshipped",
+            inspector=backend.inspect,
+            executor=backend,
+            policy=unshipped,
+        )
+
+
+def test_setup_plan_deletes_attr_name_and_attr_val_that_revert_2r2t(
+    tmp_path: Path,
+) -> None:
+    backend = FakeSetupBackend(
+        _observation(
+            uboot={
+                "attr_name": "compatible",
+                "attr_val": "ad9361",
+                "compatible": "ad9361",
+                "mode": "1r1t",
+            }
+        )
+    )
+    manager = CanonicalSetupManager(
+        receipt_directory=tmp_path / "receipts",
+        inspector=backend.inspect,
+        executor=backend,
+    )
+
+    planned = manager.create_plan(_identity())
+
+    assert planned.plan.changes == {
+        "attr_name": None,
+        "attr_val": None,
+        "mode": "2r2t",
+    }
 
 
 def test_setup_plan_explicitly_includes_required_fail_closed_tx_mute(
@@ -160,12 +221,41 @@ def test_setup_success_is_verified_and_receipted(tmp_path: Path) -> None:
     assert receipt.success
     assert receipt.after is not None
     assert receipt.after.uboot == CANONICAL_UBOOT
-    assert receipt.after.live_phy_model == "ad9361"
+    assert receipt.after.live_phy_model == "ad9363a"
     assert receipt.backup_sha256 == "4" * 64
     assert len(manager.list_receipts()) == 1
     assert next((tmp_path / "receipts").glob("*.json")).is_file()
     with pytest.raises(SetupAuthorizationError, match="already used"):
         manager.execute(planned.plan, planned.confirmation_token)
+
+
+def test_setup_receipt_persists_post_reboot_host_key_rotation(tmp_path: Path) -> None:
+    backend = FakeSetupBackend(_observation())
+    backend.host_key_rotation = SetupHostKeyRotation(
+        previous_known_hosts_sha256="5" * 64,
+        replacement_known_hosts_sha256="6" * 64,
+        previous_fingerprint="SHA256:old",
+        replacement_fingerprint="SHA256:new",
+        previous_known_hosts_backup="/private/known_hosts.pre-reboot",
+    )
+    receipt_directory = tmp_path / "receipts"
+    manager = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    )
+    planned = manager.create_plan(_identity())
+
+    receipt = manager.execute(planned.plan, planned.confirmation_token)
+    reloaded = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    ).list_receipts()[0]
+
+    assert receipt.schema_version == 3
+    assert receipt.host_key_rotation == backend.host_key_rotation
+    assert reloaded.host_key_rotation == backend.host_key_rotation
 
 
 def test_setup_token_rejects_tampered_plan(tmp_path: Path) -> None:

@@ -17,8 +17,9 @@ from typing import Literal, Protocol
 
 from pydantic import Field, field_validator
 
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
-from pluto_plus.models import ApiModel
+from pluto_plus.diagnostic_profiles import SUPPORTED_AD936X_PHY_MODELS
+from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT, require_setup_repair_policy
+from pluto_plus.models import ApiModel, FirmwarePolicy
 
 
 class SetupError(RuntimeError):
@@ -64,6 +65,7 @@ class SetupExecutorFailure(SetupError):
         failure_phase: str = "environment_write",
         completed_phases: tuple[str, ...] = (),
         reconciliation_required: bool = True,
+        host_key_rotation: SetupHostKeyRotation | None = None,
     ) -> None:
         super().__init__(message)
         self.backup_path = backup_path
@@ -72,6 +74,7 @@ class SetupExecutorFailure(SetupError):
         self.failure_phase = failure_phase
         self.completed_phases = completed_phases
         self.reconciliation_required = reconciliation_required
+        self.host_key_rotation = host_key_rotation
 
 
 class SetupIdentity(ApiModel):
@@ -94,12 +97,20 @@ class SetupObservation(ApiModel):
 
     @field_validator("uboot")
     @classmethod
-    def validate_uboot_keys(
-        cls, value: dict[str, str | None]
-    ) -> dict[str, str | None]:
+    def validate_uboot_keys(cls, value: dict[str, str | None]) -> dict[str, str | None]:
         if set(value) != set(CANONICAL_UBOOT):
             raise ValueError("U-Boot observation must contain exactly the canonical keys")
         return value
+
+
+class SetupHostKeyRotation(ApiModel):
+    """Receipt evidence for a USB-anchored, expected post-reboot SSH key change."""
+
+    previous_known_hosts_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    replacement_known_hosts_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    previous_fingerprint: str = Field(min_length=1, max_length=512)
+    replacement_fingerprint: str = Field(min_length=1, max_length=512)
+    previous_known_hosts_backup: str = Field(min_length=1, max_length=1024)
 
 
 class SetupExecutionResult(ApiModel):
@@ -107,6 +118,7 @@ class SetupExecutionResult(ApiModel):
     backup_path: str = Field(min_length=1, max_length=1024)
     backup_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     completed_phases: tuple[str, ...] = ()
+    host_key_rotation: SetupHostKeyRotation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,11 +130,11 @@ class SetupPlan:
     profile_id: str
     environment_sha256: str
     before: SetupObservation
-    changes_items: tuple[tuple[str, str], ...]
+    changes_items: tuple[tuple[str, str | None], ...]
     tx_mute_required: bool
 
     @property
-    def changes(self) -> dict[str, str]:
+    def changes(self) -> dict[str, str | None]:
         return dict(self.changes_items)
 
 
@@ -142,7 +154,7 @@ class SetupReceipt:
     identity: SetupIdentity
     before: SetupObservation
     after: SetupObservation | None
-    changes_items: tuple[tuple[str, str], ...]
+    changes_items: tuple[tuple[str, str | None], ...]
     backup_path: str | None
     backup_sha256: str | None
     outcome: Literal[
@@ -158,9 +170,10 @@ class SetupReceipt:
     reconciliation_of: str | None
     success: bool
     error: str | None
+    host_key_rotation: SetupHostKeyRotation | None = None
 
     @property
-    def changes(self) -> dict[str, str]:
+    def changes(self) -> dict[str, str | None]:
         return dict(self.changes_items)
 
 
@@ -192,6 +205,7 @@ class CanonicalSetupManager:
         receipt_directory: Path,
         inspector: Callable[[SetupIdentity], SetupObservation],
         executor: SetupExecutor,
+        policy: FirmwarePolicy = CANONICAL_POLICY,
         clock: Callable[[], datetime] | None = None,
         confirmation_ttl: timedelta = timedelta(minutes=5),
     ) -> None:
@@ -200,6 +214,7 @@ class CanonicalSetupManager:
         self._receipts_directory = receipt_directory
         self._inspect = inspector
         self._executor = executor
+        self._policy = require_setup_repair_policy(policy)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._ttl = confirmation_ttl
         self._tokens: dict[str, _TokenRecord] = {}
@@ -212,9 +227,15 @@ class CanonicalSetupManager:
         self._validate_identity(identity, observation)
         return observation
 
+    def inspect_qualified(self, identity: SetupIdentity) -> SetupObservation:
+        """Inspect and prove the exact active/QSPI setup policy without mutation."""
+
+        observation = self.inspect(identity)
+        self._validate_preconditions(observation)
+        return observation
+
     def create_plan(self, identity: SetupIdentity) -> PlannedSetup:
-        before = self.inspect(identity)
-        self._validate_preconditions(before)
+        before = self.inspect_qualified(identity)
         changes = tuple(
             (key, expected)
             for key, expected in CANONICAL_UBOOT.items()
@@ -228,7 +249,7 @@ class CanonicalSetupManager:
             created_at=now,
             expires_at=now + self._ttl,
             identity=identity,
-            profile_id=CANONICAL_POLICY.profile_id,
+            profile_id=self._policy.profile_id,
             environment_sha256=before.environment_sha256,
             before=before,
             changes_items=changes,
@@ -311,7 +332,7 @@ class CanonicalSetupManager:
                 "post_reboot_attestation",
             )
         receipt = SetupReceipt(
-            schema_version=2,
+            schema_version=3,
             receipt_id=uuid.uuid4().hex,
             plan_id=plan.plan_id,
             started_at=started,
@@ -341,6 +362,11 @@ class CanonicalSetupManager:
             reconciliation_of=None,
             success=error is None,
             error=error,
+            host_key_rotation=(
+                result.host_key_rotation
+                if result is not None
+                else (None if partial_failure is None else partial_failure.host_key_rotation)
+            ),
         )
         self._write_receipt(receipt)
         with self._lock:
@@ -351,9 +377,7 @@ class CanonicalSetupManager:
 
     def list_receipts(self) -> list[SetupReceipt]:
         with self._lock:
-            return sorted(
-                self._receipts.values(), key=lambda item: item.started_at, reverse=True
-            )
+            return sorted(self._receipts.values(), key=lambda item: item.started_at, reverse=True)
 
     def reconcile(self, receipt_id: str) -> SetupReceipt:
         """Re-attest an uncertain outcome without invoking the mutation executor."""
@@ -367,9 +391,7 @@ class CanonicalSetupManager:
         started = self._now()
         observation = self.inspect(original.identity)
         if "reboot_observed" in original.completed_phases:
-            observation = observation.model_copy(
-                update={"boot_provenance": "qspi_reboot_verified"}
-            )
+            observation = observation.model_copy(update={"boot_provenance": "qspi_reboot_verified"})
         error: str | None = None
         try:
             self._validate_success(original.identity, observation)
@@ -377,7 +399,7 @@ class CanonicalSetupManager:
             error = f"{type(caught).__name__}: {caught}"
         success = error is None
         receipt = SetupReceipt(
-            schema_version=2,
+            schema_version=3,
             receipt_id=uuid.uuid4().hex,
             plan_id=original.plan_id,
             started_at=started,
@@ -395,6 +417,7 @@ class CanonicalSetupManager:
             reconciliation_of=original.receipt_id,
             success=success,
             error=error,
+            host_key_rotation=original.host_key_rotation,
         )
         self._write_receipt(receipt)
         with self._lock:
@@ -404,30 +427,28 @@ class CanonicalSetupManager:
     def _validate_preconditions(self, observation: SetupObservation) -> None:
         if observation.board_model != self._BOARD_MODEL:
             raise SetupPreconditionError("canonical setup requires exact PlutoSDR Rev.C")
-        if observation.identity.observed_firmware != CANONICAL_POLICY.device_firmware:
-            raise SetupPreconditionError("active firmware is not the selected canonical release")
-        if observation.qspi_firmware_sha256 != CANONICAL_POLICY.fit_body_sha256:
-            raise SetupPreconditionError("persistent QSPI firmware hash is not canonical")
+        if observation.identity.observed_firmware != self._policy.device_firmware:
+            raise SetupPreconditionError("active firmware is not the selected setup release")
+        if observation.qspi_firmware_sha256 != self._policy.fit_body_sha256:
+            raise SetupPreconditionError(
+                "persistent QSPI firmware hash does not match setup policy"
+            )
         if observation.boot_provenance not in self._SAFE_BOOT_PROVENANCE:
             raise SetupPreconditionError("persistent QSPI boot provenance is not verified")
         if observation.uboot.get("mode") not in {"1r1t", "2r2t", None}:
             raise SetupPreconditionError("existing U-Boot mode is invalid")
 
     @staticmethod
-    def _validate_identity(
-        expected: SetupIdentity, observation: SetupObservation
-    ) -> None:
+    def _validate_identity(expected: SetupIdentity, observation: SetupObservation) -> None:
         if observation.identity != expected:
             raise SetupPreconditionError("setup helper returned a different radio identity")
 
-    def _validate_success(
-        self, identity: SetupIdentity, observation: SetupObservation
-    ) -> None:
+    def _validate_success(self, identity: SetupIdentity, observation: SetupObservation) -> None:
         self._validate_identity(identity, observation)
         if observation.uboot != CANONICAL_UBOOT:
             raise SetupPreconditionError("canonical U-Boot tuple did not persist")
-        if observation.live_phy_model != "ad9361":
-            raise SetupPreconditionError("live PHY did not return as AD9361")
+        if observation.live_phy_model not in SUPPORTED_AD936X_PHY_MODELS:
+            raise SetupPreconditionError("live PHY did not return as a supported AD936x")
         required = {"voltage0", "voltage1", "voltage2", "voltage3"}
         if not required.issubset(observation.rx_scan_channels):
             raise SetupPreconditionError("dual receiver scan channels did not return")
@@ -439,9 +460,7 @@ class CanonicalSetupManager:
         if not observation.tx_safe:
             raise SetupPreconditionError("transmit state is not safe after reboot")
 
-    def _authorize(
-        self, plan: SetupPlan, token: str, now: datetime, *, consume: bool
-    ) -> None:
+    def _authorize(self, plan: SetupPlan, token: str, now: datetime, *, consume: bool) -> None:
         presented = hashlib.sha256(token.encode()).digest()
         with self._lock:
             record = self._tokens.get(plan.plan_id)
@@ -540,6 +559,11 @@ def _receipt_document(receipt: SetupReceipt) -> dict[str, object]:
         "reconciliation_of": receipt.reconciliation_of,
         "success": receipt.success,
         "error": receipt.error,
+        "host_key_rotation": (
+            None
+            if receipt.host_key_rotation is None
+            else receipt.host_key_rotation.model_dump(mode="json")
+        ),
     }
 
 
@@ -548,11 +572,11 @@ def _receipt_from_document(document: Mapping[str, object]) -> SetupReceipt:
     raw_changes = document["changes_items"]
     if not isinstance(raw_changes, list):
         raise TypeError("changes_items must be a list")
-    changes: list[tuple[str, str]] = []
+    changes: list[tuple[str, str | None]] = []
     for item in raw_changes:
         if not isinstance(item, list) or len(item) != 2:
             raise TypeError("each setup receipt change must be a pair")
-        changes.append((str(item[0]), str(item[1])))
+        changes.append((str(item[0]), None if item[1] is None else str(item[1])))
     success = bool(document["success"])
     raw_completed = document.get("completed_phases", [])
     if not isinstance(raw_completed, list):
@@ -576,24 +600,16 @@ def _receipt_from_document(document: Mapping[str, object]) -> SetupReceipt:
         before=SetupObservation.model_validate(document["before"]),
         after=None if after is None else SetupObservation.model_validate(after),
         changes_items=tuple(changes),
-        backup_path=(
-            None if document["backup_path"] is None else str(document["backup_path"])
-        ),
+        backup_path=(None if document["backup_path"] is None else str(document["backup_path"])),
         backup_sha256=(
-            None
-            if document["backup_sha256"] is None
-            else str(document["backup_sha256"])
+            None if document["backup_sha256"] is None else str(document["backup_sha256"])
         ),
         outcome=outcome,  # type: ignore[arg-type]
         failure_phase=(
-            None
-            if document.get("failure_phase") is None
-            else str(document["failure_phase"])
+            None if document.get("failure_phase") is None else str(document["failure_phase"])
         ),
         completed_phases=tuple(str(item) for item in raw_completed),
-        reconciliation_required=bool(
-            document.get("reconciliation_required", outcome == "unknown")
-        ),
+        reconciliation_required=bool(document.get("reconciliation_required", outcome == "unknown")),
         reconciliation_of=(
             None
             if document.get("reconciliation_of") is None
@@ -601,4 +617,9 @@ def _receipt_from_document(document: Mapping[str, object]) -> SetupReceipt:
         ),
         success=success,
         error=None if document["error"] is None else str(document["error"]),
+        host_key_rotation=(
+            None
+            if document.get("host_key_rotation") is None
+            else SetupHostKeyRotation.model_validate(document["host_key_rotation"])
+        ),
     )

@@ -110,6 +110,8 @@ class RadioCapabilities(ApiModel):
     supports_direct_capture: bool = False
     supports_volatile_firmware: bool = False
     supports_persistent_firmware: bool = False
+    supports_device_sample_counter: bool = False
+    supports_continuity_sequence: bool = False
     minimum_sample_rate_hz: float | None = None
     maximum_sample_rate_hz: float | None = None
 

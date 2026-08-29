@@ -192,22 +192,114 @@ when you specifically want managed/discovered daemon state correlated into the
 table. Standalone discovery never tunes, captures, or writes radio state and does
 not require native libiio.
 
+### Plan-gated RX environment survey
+
+`environment-survey` is the standalone, exact-USB chamber survey path. Planning
+uses only the passive sysfs inventory. Execution requires the plan's exact
+serial/topology/bus/device identity, the same clean utility commit, a shared
+per-serial OS lock, the printed plan SHA-256 and confirmation phrase, and a second
+explicit `--ensure-mute` gate. The imported `pluto_plus` package must be the
+tracked `src/pluto_plus` tree inside that exact clean checkout. It never uses SSH,
+changes a host route, enters DFU,
+reboots, reads or writes QSPI, or authorizes Pluto transmit.
+
+Create a private result root and plan file, then execute the printed command:
+
+```bash
+install -d -m 0700 /private/pluto-surveys /private/pluto-survey-plans
+uv run pluto environment-survey plan \
+  --serial EXACT_SERIAL \
+  --usb-path /sys/bus/usb/devices/3-7 \
+  --emitter-inventory /private/chamber/emitter-inventory.json \
+  --emitter-inventory-sha256 EXACT_SHA256 \
+  --result-root /private/pluto-surveys \
+  --output /private/pluto-survey-plans/radio-plan.json \
+  --ensure-mute
+
+uv run pluto environment-survey execute \
+  --plan /private/pluto-survey-plans/radio-plan.json \
+  --expected-plan-sha256 EXACT_PLAN_SHA256 \
+  --ensure-mute \
+  --confirm 'EXECUTE RX ENVIRONMENT SURVEY EXACT_SERIAL PLAN_ID'
+
+uv run pluto environment-survey receipt-verify \
+  /private/pluto-surveys/PLAN_ID/receipt.json
+```
+
+Before any pyadi adapter is opened, execution requires both TX gains, TX
+buffer/data/scan state, all eight DDS raw and scale attributes, all four FPGA
+DAC selectors, and tandem state/FIFO/fault/overflow through the exact raw USB-IIO
+context. The explicitly authorized mute sets gains to `-80 dB`, clears exposed
+TX buffer and scan selection, zeros every DDS source, selects FPGA ZERO on all
+four DAC lanes, and must read back completely safe. The same full predicate is
+required again after exact RX-setting restoration. Cleanup preserves an original
+RX0-only, RX1-only, or paired channel layout; it requires exact readback of every
+settable field (including each originally manual gain), while retaining but not
+equality-gating the dynamic gain reported by an original AGC mode.
+
+The acquisition is not CLI-tunable: it captures a 2.445 GHz pre-anchor, sweeps
+all 91 integer-MHz centers from 2.400 through 2.490 GHz, captures TX-muted
+authorizing baselines at 1.05/1.55/2.05/5.8 GHz, then captures a 2.445 GHz
+post-anchor. Every center uses 2.5 MS/s, 1.5 MHz RF bandwidth, manual gain 40,
+and 32 dual-RX windows of 65,536 samples. Both anchors and all four authorizing
+baselines must remain unclipped. Analysis uses a
+periodic Hann (`4096`, hop `2048`), full density-normalized PSD/STFT in
+`dBFS/Hz`, percentiles over linear integrated power before dB conversion,
+burst occupancy, and AD9361 12-bit clipping.
+Every 32-window block retains exact paired-RX settings plus the required shared
+AD9361 temperature immediately after tuning and after its last window. The
+settings evidence enumerates every raw RX channel exposing the shared PHY sample
+rate and bandwidth attributes; all values must match the pyadi scalar. No
+per-window attribute reads disturb the cadence.
+
+A required private, SHA-pinned worst-normal inventory binds every 2.4 and 5 GHz
+emitter; selection excludes the expanded union of its non-touching 2.4 GHz
+occupied spans. A control must also be unclipped. Run the exact full survey in
+canonical order on all four reserved radios, using an independent serial-scoped
+result root and 5 GiB gate each. `fleet-select` consumes each matching PASS
+manifest and receipt, re-verifies all evidence, and ranks by worst p99 across
+all four radios/eight RX paths, then worst occupancy, then frequency. Execution
+requires at least `5,368,709,120` free bytes; per-radio raw plus spectral payload
+is `4,882,169,856` bytes with an exact 64 MiB failure reserve and a retained
+400 MiB manifest allowance at every per-center free-space check. See
+[the evidence contract](docs/environment-survey.md) for inventory schema,
+formulas, layouts, fleet commands, drift thresholds, and failure behavior.
+
 ### Standalone USB/IP speed ladder
 
 `radio ladder` opens one exact radio directly and does not require `plutod`. It
-uses ordinary standard-libiio paired-RX buffers, never enables TX, and restores
-the original RX settings before returning. USB targets are serial numbers; IP
-targets are literal IPv4 addresses, with an exact expected serial strongly
-recommended:
+uses ordinary standard-libiio RX0-only, RX1-only, or dual-RX buffers, never
+enables TX, and restores the original RX settings before returning. USB targets
+are serial numbers; IP targets are literal IPv4 addresses and require an exact
+expected serial:
 
 ```bash
 uv run pluto radio ladder 104000b29905000e17000800065934759d --transport usb
 uv run pluto radio ladder 192.168.1.15 --transport ip \
   --expect-serial 104000b29905000e17000800065934759d
 uv run pluto radio ladder 192.168.1.15 --transport ip \
-  --rates 1M,2M,3M,5M --frames 12 --samples 262144 \
+  --expect-serial 104000b29905000e17000800065934759d \
+  --channels rx0 --rates 1M,2M,3M,5M --frames 12 --samples 262144 \
   --kernel-buffers 8 --format json
 ```
+
+When several USB-attached Plutos share `192.168.2.1`, bind the IP ladder to one
+serial and sysfs path with the receipt-backed isolation gate. `--report` writes
+an absent-only canonical JSON evidence file beneath an existing owned mode-0700
+directory:
+
+```bash
+uv run pluto radio ladder 192.168.2.1 --transport ip \
+  --expect-serial EXACT_SERIAL --usb-sysfs-path /sys/bus/usb/devices/EXACT_PORT \
+  --isolate-usb-route --isolation-confirm 'ISOLATE USB SSH EXACT_INTERFACE' \
+  --channels dual --rates 1M,2.5M,5M,7.5M,10M,12.5M,15M \
+  --frames 12 --samples 262144 --kernel-buffers 8 --format json \
+  --report /ABSOLUTE/PRIVATE/PATH/ip-dual.json
+```
+
+`kept_pace` compares delivered sample periods with the configured rate. The
+ordinary-buffer ladder measures host transport performance; it does not claim a
+gapless FPGA timeline. Use `radio metadata-ladder` for counter-proven continuity.
 
 The ladder runs the same passive environment preflight before opening its exact
 target. Missing Python hardware packages, missing native libiio, an incompatible
@@ -223,6 +315,101 @@ prove continuity. Stop any daemon or other process that owns the selected radio
 before running a direct ladder. The ladder explicitly configures 8 RX kernel
 buffers by default; use `--kernel-buffers` to compare another bounded count.
 
+### Local USB Fast Lock probe
+
+`radio fastlock-probe` compares ordinary AD9361 RX-LO writes with volatile Fast
+Lock recalls on one exact locally attached USB serial. It never accepts an IP
+target, arms no RX or TX buffer, verifies TX mute, requires a visibly advancing
+FPGA low-32 sample counter, and restores the exact original RX settings. The dry
+run resolves the current USB bus/device/interface and prints the serial-specific
+confirmation phrase:
+
+```bash
+uv run pluto radio fastlock-probe EXACT_SERIAL \
+  --lower-hz 959687500 --upper-hz 1190312500 --hops 32
+uv run pluto radio fastlock-probe EXACT_SERIAL \
+  --lower-hz 959687500 --upper-hz 1190312500 --hops 32 \
+  --report /private/fastlock.json --execute \
+  --confirm 'FASTLOCK USB EXACT_SERIAL'
+```
+
+The measured latency is the host-observed USB IIO attribute-write time, not the
+AD9361's internal RF-lock interval. Counter brackets do not locate the exact IQ
+sample where lock occurred. During Fast Lock, the ordinary LO-frequency attribute
+may remain cached at the last conventional tune; the probe therefore validates the
+active profile and the stored sixteen-byte profile readback instead. Metadata
+buffers are intentionally excluded because
+the tandem owner makes concurrent LO/Fast-Lock writes fail with `EBUSY`.
+The selected profile slots are volatile but remain populated after the probe;
+use the default high slots only on an otherwise idle radio.
+
+The exact confirmation phrase is the operator's assertion that the selected
+radio is otherwise idle. The probe does not acquire a cross-transport ownership
+lock or change host network state. It still attests serial and sysfs path before
+any buffer, TX, or RF mutation and requires the firmware tandem owner to be idle.
+Ordinary and Fast Lock measurements use balanced, interleaved bufferless O-F-F-O
+cycles after one unreported warmup cycle.
+
+### Metadata lifecycle soak
+
+`radio soak-metadata` reproduces the bounded context/retune/buffer lifecycle
+matrix used by the firmware release gate. It is deliberately separate from the
+ordinary-buffer speed ladder: each absolute 30.769230769-second slot opens one
+network context, alternates the order of eight LO retunes, and creates fresh
+ABI-2 tandem-HOLD metadata buffers for the 1.25/2.5/5 MS/s by 40/80/160 ms
+matrix. It refuses catch-up bursts and runs each live slot in a killable child
+with a 30-second wall-clock bound.
+
+The command is a dry run unless `--execute` and its exact confirmation phrase
+are supplied. Execution also requires a serial-specific pinned SSH host-key file
+so it can prove unchanged Linux boot ID, iiOD PID/start time/generation, zero
+buffer ownership, zero tandem fault/overflow, and TX1/TX2 `-80 dB` after every
+slot. It restores RX settings and writes an atomic mode-0600 JSON report on both
+pass and failure:
+
+```bash
+uv run pluto radio soak-metadata 192.168.1.15 \
+  --expect-serial 104000b29905000e17000800065934759d --slots 9
+uv run pluto radio soak-metadata 192.168.1.15 \
+  --expect-serial 104000b29905000e17000800065934759d --slots 9 \
+  --ssh-known-hosts-file /private/radio.known_hosts \
+  --ssh-password-file /private/radio.password --report /private/soak.json \
+  --execute --confirm 'SOAK METADATA 104000b29905000e17000800065934759d 9'
+```
+
+The nine-slot matrix is the practical release regression. The full `--slots
+936` campaign remains the long-soak gate and takes eight hours at the fixed
+period. Stop any competing owner before execution.
+
+### DDR abrupt-disconnect recovery
+
+`radio qualify-ddr-recovery` exercises the shutdown/reopen boundary that a
+normal throughput ladder cannot cover. Each cycle alternates RX0 and RX1,
+admits the exact 200 MB burst geometry at 25 MS/s, terminates that client while
+its refill is active, and immediately opens a fresh DDR capture. It then proves
+an ordinary low-rate metadata capture, exact RX-setting restoration, unchanged
+Linux boot and iiOD process identity, zero leaked buffers, and TX-safe state.
+
+The command is a dry run unless its exact confirmation phrase is supplied. A
+pinned LAN SSH key and private password file are required for execution so that
+data-plane recovery cannot be mistaken for a radio or iiOD restart:
+
+```bash
+uv run pluto radio qualify-ddr-recovery 192.168.1.15 \
+  --expect-serial 104000b29905000e17000800065934759d --cycles 20
+uv run pluto radio qualify-ddr-recovery 192.168.1.15 \
+  --expect-serial 104000b29905000e17000800065934759d --cycles 20 \
+  --profile ddr-burst-v1-release-ram \
+  --ssh-known-hosts-file /private/radio.known_hosts \
+  --ssh-password-file /private/radio.password --report /private/recovery.json \
+  --execute \
+  --confirm 'QUALIFY DDR RECOVERY 104000b29905000e17000800065934759d 20'
+```
+
+The report is created atomically with mode 0600 on pass or failure. A failed
+immediate reopen is a firmware release failure; reboot the RAM candidate rather
+than attempting to continue a wedged campaign.
+
 `pluto doctor` is also standalone by default. It reads fresh IIOD facts through
 each exact USB-gadget network interface and reports identity, Rev.C model,
 canonical v5 firmware, AD9361 PHY, paired-RX devices, metadata, and facts that
@@ -234,6 +421,101 @@ uv run pluto doctor --usb-sysfs-path /sys/bus/usb/devices/3-11 --format json
 uv run pluto doctor MANAGED_RADIO_ID  # explicitly uses plutod
 uv run pluto doctor --daemon          # all daemon-managed radios
 ```
+
+The passive sweep reports `transport.rx_data_plane` as `unknown`, because IIOD
+metadata alone cannot prove that a buffer refill completes. When the selected radio
+is quiescent, request one bounded 65,536-sample-per-channel refill on an exact USB
+target:
+
+```bash
+uv run pluto doctor --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --probe-data-plane --format json
+```
+
+If that probe reports an `ETIMEDOUT` while IIOD metadata remains responsive, use the
+standalone recovery lane. It derives the USB topology and interface from the serial,
+does not require canonical AD9361/2R2T setup, and is a dry run until explicitly
+confirmed:
+
+```bash
+uv run pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts
+uv run pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts \
+  --ssh-password-file /private/SERIAL.password \
+  --execute --confirm 'RESTART IIOD SERIAL'
+```
+
+Execution is allowed only when the pre-probe failed as a receive timeout. The fixed
+SSH script re-attests the remote gadget serial, records the old and replacement IIOD
+PID/start epoch plus CMA and active-buffer evidence, and the command retries a fresh
+bounded refill before issuing a mode-0600 receipt. A healthy, wrong-identity, or
+host-environment failure never triggers a restart. LAN recovery uses `--ssh-host` and
+the independently pinned key for that exact endpoint.
+
+To prevent the known trigger, every `IioRadioDevice` ordinary and metadata capture
+rejects a single RX allocation above 32 MiB: half of the supported firmware's 64 MiB
+CMA pool. Use repeated/streaming buffers for longer captures. This avoids relying on a
+nearly pristine contiguous CMA region even when `CmaFree` is high.
+
+### Persistent setup inspection and repair
+
+Without credentials doctor cannot reach the persistent U-Boot environment and
+reports `setup.uboot_ad9361_2r2t` as `unknown`. Give it an enrolled known_hosts
+file for one exact radio and it reads the real tuple instead — and repairs a
+non-canonical one by default:
+
+```bash
+uv run pluto doctor \
+  --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --setup-known-hosts-file ~/.local/state/pluto-plus-utils/ssh/SERIAL.known_hosts \
+  --setup-password-file ~/.config/pluto-plus/radio.pw
+
+uv run pluto doctor ... --no-fix   # read the tuple, change nothing
+```
+
+Repair is not a new mutation path: it drives the same guarded setup transaction
+as `pluto setup plan` / `pluto setup execute`, so every run still backs up the
+complete environment, applies the fail-closed TX mute, binds the environment
+digest, reboots, re-attests the exact serial and path, and writes a receipt.
+A radio that is already canonical is never written to.
+
+Two boundaries keep the default-on repair bounded. It needs
+`--setup-known-hosts-file`, so a doctor run without credentials cannot mutate
+anything; and it needs `--usb-sysfs-path`, because a pinned host key and the
+private `192.168.2.1` endpoint each address exactly one radio. The no-argument
+sweep across every attached radio therefore stays read-only.
+
+Only the `attr_name`/`attr_val`/`compatible`/`mode` tuple is repaired. Firmware
+version mismatches are reported, never auto-flashed.
+
+### Stale firmware and host libiio
+
+`firmware.release_currency` compares the radio against `UPGRADE_TARGET_PROFILE`,
+the newest **full** hardware-qualified release. Release candidates, development
+builds, and RAM-only promotion candidates are deliberately excluded, and the
+comparison uses an explicit `release_rank` rather than list position, so a radio
+already on something newer is never offered a downgrade.
+
+The report also carries `host_libiio`, the host-local libiio preflight that
+`pluto environment` runs. It gates every radio, so a broken host is reported once
+rather than per radio.
+
+When either has a known fix, doctor offers it after an explicit `y`:
+
+```bash
+uv run pluto doctor          # prompts per finding, default no
+uv run pluto doctor --yes    # show every fix without prompting
+```
+
+Prompting is suppressed for `--format json` and when stdin is not a TTY, so
+scripts and CI are unaffected; a non-interactive run prints how many findings
+have a fix and nothing else.
+
+The offer prints the exact command rather than executing it. For libiio that is
+deliberate. For firmware it is also a limitation: nothing in this project
+downloads release assets, so doctor has no image to flash and cannot complete an
+upgrade on its own.
 
 Loopback is the safe default. Setup and firmware mutations have a separately configured
 bearer-token and strict browser-Origin boundary, but ordinary tune/stream/capture routes
@@ -300,8 +582,12 @@ will not send the bearer token over non-loopback plaintext HTTP.
 
 If execution becomes uncertain after mutation or reboot, the receipt records the last
 completed phase and durable backup reference. Do not replay the consumed plan. Re-attest
-and, if necessary, explicitly re-pin the selected radio's SSH host key out of band, then
-use the receipt's read-only reconciliation action.
+and use the receipt's read-only reconciliation action. Firmware which regenerates its
+SSH key on reboot is handled automatically only for the exact USB endpoint: setup first
+proves that the selected serial/path disappeared and returned, rechecks the unambiguous
+USB route, attests the same remote gadget serial, atomically archives the prior key, and
+records both key fingerprints/digests in the receipt. LAN-routed replacement keys still
+require independent out-of-band verification and are never accepted from IP identity.
 
 ## Guarded config.txt and static IP workflow
 
@@ -338,7 +624,133 @@ Ethernet address change, update the daemon's `--iio-ip` target and the pinned-SS
 enrollment to the new endpoint. The Web Network panel implements the same workflow
 and reuses the in-memory admin-token input. See [ADR 0005](docs/adr/0005-structured-network-config.md).
 
+An attached radio does not need a LAN address or a running daemon to enter this
+workflow. `config bootstrap-ethernet` reaches only the fixed USB-gadget endpoint,
+requires an exact local serial/sysfs path/host interface and pinned host key, and
+then reuses the same structured planner and fixed remote operations:
+
+```bash
+uv run pluto config bootstrap-ethernet EXACT_HARDWARE_SERIAL \
+  --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --ssh-known-hosts-file /private/EXACT_HARDWARE_SERIAL.known_hosts \
+  --ssh-password-file /private/radio.password \
+  --address 192.168.1.186 --netmask 255.255.255.0
+```
+
+The default is an inspection-only plan: it exposes the password-redacted current
+configuration and confirmation phrase, but never the internal one-time token. Repeat
+with `--execute --confirm 'SET STATIC IP EXACT_HARDWARE_SERIAL 192.168.1.186'`
+to persist the plan. When local Pluto gadgets have overlapping `192.168.2.1` routes,
+also pass `--isolate-usb-route` and the generated
+`--isolation-confirm 'ISOLATE USB SSH <interface>'` phrase to both invocations.
+The reversible host isolation and persistent radio mutation receive separate private
+receipts. The command writes no firmware partition and never restarts the radio;
+activate the new address later with the separate guarded `radio reboot-local` flow.
+Use `--mode dhcp` without `--address` or `--netmask` to remove a static Ethernet
+address.
+
 ## Guarded firmware workflow
+
+### Local release-candidate RAM lifecycle
+
+`firmware candidate-ram` is the native owner-operated path for loading a
+release candidate into volatile RAM. It is separate from the legacy static
+profiles below: the firmware repository emits a canonical candidate plan, this
+utility owns every live device operation, and the firmware repository consumes
+the resulting semantic receipt.
+
+Capture the current USB topology and create one per-radio plan without opening
+IIO, SSH, DFU, or changing a radio:
+
+```bash
+install -d -m 0700 /private/rc14
+uv run pluto firmware candidate-ram inventory \
+  --output /private/rc14/usb-inventory.json
+uv run pluto firmware candidate-ram plan \
+  --candidate-plan /private/rc14/candidate-plan.json \
+  --usb-inventory /private/rc14/usb-inventory.json \
+  --serial EXACT_SERIAL \
+  --expected-current-firmware EXACT_CURRENT_VERSION \
+  --receipt /private/rc14/hardware/deploy/EXACT_SERIAL/ram-receipt.json \
+  --output /private/rc14/EXACT_SERIAL-operation-plan.json
+```
+
+After reviewing the plan, execute from a fully clean `pluto-plus-utils`
+checkout at the exact repository/version/commit named by the candidate plan.
+The exact confirmation phrase is printed by `plan`:
+
+```bash
+uv run pluto firmware candidate-ram execute \
+  --operation-plan /private/rc14/EXACT_SERIAL-operation-plan.json \
+  --ssh-password-file /private/credentials/EXACT_SERIAL.password \
+  --tool-repository "$PWD" \
+  --confirm 'RAM BOOT RELEASE CANDIDATE EXACT_SERIAL'
+
+uv run pluto firmware candidate-ram receipt-verify \
+  /private/rc14/hardware/deploy/EXACT_SERIAL/ram-receipt.json
+```
+
+RAM Dropbear keys are intentionally ephemeral. Candidate SSH therefore uses
+password authentication through the exact USB interface and owned `/32` route,
+with both known-host databases set to `/dev/null`; no host key is retained or
+used as an authorization gate. The utility still binds the exact serial,
+direct USB topology, candidate DFU/FIT bytes, pre/post boot IDs, unchanged
+`qspi-linux` digest, and complete muted DDS/DAC/tandem safe state. Its only DFU
+sequence uses paired `0456:b673,0456:b674`, the selected physical port, and the
+`firmware.dfu` alternate followed by detach. `-R`, `-S`, arbitrary MTD paths,
+and persistent targets are outside this command.
+
+The full ownership and migration decision is recorded in
+[`docs/adr/0006-release-candidate-device-lifecycle.md`](docs/adr/0006-release-candidate-device-lifecycle.md).
+
+### Immutable approved-v7 comparator RAM lifecycle
+
+`firmware comparator-ram` is a separate, native evidence boundary for the
+RC21 same-board approved-v7 comparator. It does not relabel a release-candidate
+plan or receipt. The plan hard-binds the retained v7 bundle, DFU and extracted
+FIT bytes, profile/tag/source commit, historical qualification harness, exact
+pilot USB inventory target and current runtime, and the clean current utility
+tree plus its comparator execution wrapper.
+
+Create the plan from retained files only. The strict USB inventory can be the
+private output of `firmware candidate-ram inventory`:
+
+```bash
+uv run pluto firmware comparator-ram plan \
+  --retained-bundle /private/v7/plutoplus-spf-tandem-agc-v2-e0049c2d0077.tar.gz \
+  --dfu /private/v7/plutoplus-spf-tandem-agc-v2-e0049c2d0077-pluto.dfu \
+  --usb-inventory /private/rc21/usb-inventory.json \
+  --serial EXACT_SERIAL \
+  --expected-current-firmware EXACT_CURRENT_VERSION \
+  --expected-current-hardware-model 'EXACT MODEL' \
+  --expected-current-metadata-abi frame-metadata-v5 \
+  --expected-current-capability tandem-agc \
+  --receipt /private/rc21/EXACT_SERIAL/comparator-ram-receipt.json \
+  --output /private/rc21/EXACT_SERIAL-comparator-ram-plan.json
+```
+
+Review the complete plan and its printed SHA-256 before executing its bounded
+approval window:
+
+```bash
+uv run pluto firmware comparator-ram execute \
+  --plan /private/rc21/EXACT_SERIAL-comparator-ram-plan.json \
+  --expected-plan-sha256 EXACT_PLAN_SHA256 \
+  --ssh-password-file /private/credentials/EXACT_SERIAL.password \
+  --confirm 'COMPARATOR RAM BOOT EXACT_SERIAL'
+
+uv run pluto firmware comparator-ram receipt-verify \
+  /private/rc21/EXACT_SERIAL/comparator-ram-receipt.json
+```
+
+The executor shares the normal per-radio lock, owns and removes one exact
+`/32` USB-gadget route, re-attests the serial/topology/interface and current
+runtime, copies the reverified DFU into a sealed descriptor, and accepts only
+the paired `0456:b673,0456:b674` selector on `firmware.dfu` followed by detach.
+A PASS receipt requires a changed boot ID, exact approved-v7 runtime, unchanged
+`qspi-linux` size/hash, released route, and complete TX/DDS/DAC/tandem safe
+state. `-R`, `-S`, serial-only selectors, arbitrary alternates, QSPI writes,
+and every persistent target are outside this command.
 
 Firmware is fail-closed unless the service is constructed with an explicit
 privileged executor. The normal workflow is inspect → upload → plan → verify the
@@ -374,9 +786,11 @@ standalone preview/execute flow and requires the exact `FLASH <serial>` phrase:
 
 ```bash
 uv run pluto firmware flash /absolute/path/to/qualified-pluto.dfu \
-  --usb-sysfs-path /sys/bus/usb/devices/3-8
+  --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --profile ddr-burst-v1-release-persistent-promotion
 uv run pluto firmware flash /absolute/path/to/qualified-pluto.dfu \
   --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --profile ddr-burst-v1-release-persistent-promotion \
   --execute --confirm 'FLASH EXACT_SERIAL'
 ```
 
@@ -413,6 +827,23 @@ unplug the radio during the update. A failure after `pluto.frm` is written is re
 `outcome: unknown`; do not retry it until the radio and durable receipt have
 been reconciled.
 
+For an uncertain serial-attested standalone SSH flash, reconcile the durable
+receipt without replaying the update:
+
+```bash
+uv run pluto firmware reconcile-local RECEIPT_ID \
+  --usb-sysfs-path /sys/bus/usb/devices/3-8 \
+  --profile EXACT_PERSISTENT_PROFILE \
+  --ssh-known-hosts-file /private/radio.known_hosts \
+  --ssh-host 192.168.1.14
+```
+
+This command is hardware-read-only. It validates the receipt and immutable
+profile, re-attests USB and IIOD identity, reads the complete TX/DDS safe state,
+and hashes exactly the receipt-recorded FIT length from `mtd3`. It never stages
+an image, invokes the updater, changes RF state, or reboots. A mismatch leaves
+the attempt unresolved and must not be treated as permission to retry.
+
 If the host UDisks service is unavailable, the same local command can use the
 radio's fixed updater over SSH while remaining bound to the selected USB network
 interface. The radio host key must already be pinned in a private `known_hosts`
@@ -430,6 +861,42 @@ This path verifies the staged FRM hash, requires an unambiguous updater `Done`,
 independently hashes the exact FIT bytes in `mtd3`, removes the stage, reboots,
 and retries post-return IIOD attestation while services start. It never exposes
 an arbitrary remote command or updater path.
+
+### Explicit LAN TOFU enrollment
+
+When the exact radio cannot be physically USB-attached, an operator may
+explicitly enroll its LAN SSH key using the factory-default password. First run
+the read-only plan:
+
+```bash
+uv run pluto firmware enroll-lan-ssh EXACT_SERIAL \
+  --host 192.168.1.20 \
+  --profile libiio-metadata-v5 \
+  --known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts
+```
+
+The plan reads only that host's bounded IIOD context and requires the exact
+serial, immutable firmware profile, AD9361/paired-RX scan layout, metadata ABI,
+and profile-specific tandem capability. Review it, then repeat with both explicit
+guards:
+
+```bash
+uv run pluto firmware enroll-lan-ssh EXACT_SERIAL \
+  --host 192.168.1.20 \
+  --profile libiio-metadata-v5 \
+  --known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts \
+  --execute --use-default-password \
+  --confirm 'TRUST LAN SSH EXACT_SERIAL 192.168.1.20'
+```
+
+This is deliberately **LAN trust on first use**, not a USB physical-path trust
+anchor. A network attacker capable of consistently impersonating both IIOD and
+SSH may defeat it, so prefer `firmware enroll-usb-ssh` whenever physical USB is
+available. Enrollment accepts the first key only into a new mode-0600 temporary
+file, disables user and global SSH trust, reconnects with strict checking to run
+only the fixed gadget-serial read, and publishes atomically without overwriting.
+It never writes `~/.ssh/known_hosts` or a global known-hosts file. Key rotation
+requires a separately reviewed new destination path.
 
 ### Experimental pinned-SSH radio administration
 

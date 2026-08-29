@@ -1,4 +1,4 @@
-"""Tandem-AGC request and metadata-v4 protocol primitives.
+"""Tandem-AGC request and metadata-v5 protocol primitives.
 
 The layouts mirror the reviewed firmware UAPI and the metadata ABI emitted by
 the qualified v6 tandem development profile.  Parsing is deliberately strict:
@@ -19,6 +19,7 @@ from pluto_plus.direct_radio.usb import (
     HEADER_PREFIX_BYTES_V3,
     VERSION_V3,
     MetadataFeatures,
+    MetadataFlags,
     ProtocolError,
     RadioMetadataV3,
 )
@@ -26,16 +27,23 @@ from pluto_plus.direct_radio.usb import (
 TANDEM_REQUEST_MAGIC: Final = 0x54465053
 TANDEM_ABI_VERSION: Final = 1
 TANDEM_REQUIRED_FEATURES: Final = 0x7
-VERSION_V4: Final = 4
+VERSION_V5: Final = 5
+VERSION_V6: Final = 6
 TANDEM_METADATA_FEATURE: Final = 1 << 8
+AD9361_TEMPERATURE_FEATURE: Final = 1 << 9
 TANDEM_METADATA_VALID_FLAG: Final = 1 << 22
-HEADER_EXTENSION_BYTES_V4: Final = 56
-HEADER_PREFIX_BYTES_V4: Final = HEADER_PREFIX_BYTES_V3 + HEADER_EXTENSION_BYTES_V4
+CANONICAL_RX_LAYOUT_FEATURE: Final = 1 << 10
+EXACT_GAP_ACCOUNTING_FEATURE: Final = 1 << 11
+SAMPLE_GAP_BEFORE_FLAG: Final = 1 << 23
+TANDEM_EVENT_RETENTION_FRAMES: Final = 2
+HEADER_EXTENSION_BYTES_V5: Final = 56
+HEADER_PREFIX_BYTES_V5: Final = HEADER_PREFIX_BYTES_V3 + HEADER_EXTENSION_BYTES_V5
+TEMPERATURE_INVALID: Final = -(1 << 31)
 
 _REQUEST = struct.Struct("<IHHIIIIiiiIIIIII4BII8I")
 _IDENTITY = struct.Struct("<IHHII")
 _V3_EXTENSION = struct.Struct("<IHHHHHHIIII")
-_V4_EXTENSION = struct.Struct("<IIIIIIiiiBBBB4I")
+_V5_EXTENSION = struct.Struct("<IIIIIIiiiBBBBi3I")
 _EVENT = struct.Struct("<QIHBB")
 _LEGACY_EVENT = struct.Struct("<QHHI")
 
@@ -84,6 +92,21 @@ class TandemSessionRequestV1:
     large_adc_overload_threshold: int = 49
     small_adc_overload_threshold: int = 48
 
+    @classmethod
+    def auto_for_sample_count(cls, samples_per_channel: int) -> TandemSessionRequestV1:
+        """Build AUTO settings that cover a refill plus its arm-safety window."""
+
+        if samples_per_channel <= 0:
+            raise ValueError("samples_per_channel must be positive")
+        request = cls(mode=TandemMode.AUTO)
+        events_denominator = request.event_capacity * request.power_measurement_samples
+        retention_samples = samples_per_channel * TANDEM_EVENT_RETENTION_FRAMES
+        minimum_periods = (retention_samples + events_denominator - 1) // events_denominator
+        return dataclasses.replace(
+            request,
+            cooldown_periods=max(request.cooldown_periods, minimum_periods - 1),
+        )
+
     def pack(self, samples_per_channel: int) -> bytes:
         if not 0 <= self.minimum_gain_db <= self.initial_gain_db <= self.maximum_gain_db <= 62:
             raise ValueError("tandem gains must be ordered within 0..62 dB")
@@ -92,13 +115,14 @@ class TandemSessionRequestV1:
         if samples_per_channel <= 0:
             raise ValueError("samples_per_channel must be positive")
         minimum_transition_samples = self.power_measurement_samples * (self.cooldown_periods + 1)
-        maximum_events = (
+        retention_samples = samples_per_channel * TANDEM_EVENT_RETENTION_FRAMES
+        maximum_retained_events = (
             0
             if self.mode is TandemMode.HOLD
-            else 1 + (samples_per_channel - 1) // minimum_transition_samples
+            else 1 + (retention_samples - 1) // minimum_transition_samples
         )
-        if maximum_events > self.event_capacity:
-            raise ValueError("event capacity cannot cover worst-case AUTO transitions")
+        if maximum_retained_events > self.event_capacity:
+            raise ValueError("event capacity cannot cover the worst-case AUTO arm window")
         byte_values = (
             self.low_power_threshold,
             self.large_lmt_overload_threshold,
@@ -160,7 +184,7 @@ class TandemGainEventV1:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class RadioMetadataV4:
+class RadioMetadataV5:
     base: RadioMetadataV3
     header_bytes: int
     ownership_epoch: int
@@ -176,27 +200,30 @@ class RadioMetadataV4:
     maximum_gain_index: int
     rx1_gain_index: int
     rx2_gain_index: int
+    ad9361_temperature_mdeg_c: int | None
     gain_events: tuple[TandemGainEventV1, ...]
 
     @classmethod
-    def unpack(cls, header: bytes | bytearray | memoryview) -> RadioMetadataV4:
+    def unpack(cls, header: bytes | bytearray | memoryview) -> RadioMetadataV5:
         raw = bytes(header)
-        if len(raw) < HEADER_PREFIX_BYTES_V4 + 4:
-            raise ProtocolError("short protocol v4 metadata header")
+        if len(raw) < HEADER_PREFIX_BYTES_V5 + 4:
+            raise ProtocolError("short protocol v5 metadata header")
         magic, version, header_bytes, features, flags = _IDENTITY.unpack_from(raw)
-        if (magic, version) != (0x314D4753, VERSION_V4) or len(raw) != header_bytes:
-            raise ProtocolError("bad protocol v4 identity or length")
+        if (magic, version) != (0x314D4753, VERSION_V5) or len(raw) != header_bytes:
+            raise ProtocolError("bad protocol v5 identity or length")
         if not features & TANDEM_METADATA_FEATURE or not features & int(
             MetadataFeatures.FPGA_GAIN_EVENTS
         ):
-            raise ProtocolError("protocol v4 lacks tandem event features")
+            raise ProtocolError("protocol v5 lacks tandem event features")
+        if not features & AD9361_TEMPERATURE_FEATURE:
+            raise ProtocolError("protocol v5 lacks AD9361 temperature support")
         if not flags & TANDEM_METADATA_VALID_FLAG:
-            raise ProtocolError("protocol v4 tandem metadata is invalid")
+            raise ProtocolError("protocol v5 tandem metadata is invalid")
         scratch = bytearray(raw)
         received_crc = struct.unpack_from("<I", scratch, header_bytes - 4)[0]
         scratch[-4:] = bytes(4)
         if received_crc != zlib.crc32(scratch) & 0xFFFFFFFF:
-            raise ProtocolError("protocol v4 metadata CRC mismatch")
+            raise ProtocolError("protocol v5 metadata CRC mismatch")
 
         v3_extension = _V3_EXTENSION.unpack_from(raw, 92)
         observation_count = v3_extension[1]
@@ -206,21 +233,21 @@ class RadioMetadataV4:
         event_capacity = v3_extension[5]
         event_bytes = v3_extension[6]
         expected = (
-            HEADER_PREFIX_BYTES_V4
+            HEADER_PREFIX_BYTES_V5
             + observation_capacity * observation_bytes
             + event_capacity * event_bytes
             + 4
         )
         if header_bytes != expected or observation_count > observation_capacity:
-            raise ProtocolError("protocol v4 capacities disagree with its header")
+            raise ProtocolError("protocol v5 capacities disagree with its header")
         if event_count > event_capacity or observation_bytes != GAIN_OBSERVATION_BYTES:
-            raise ProtocolError("protocol v4 record capacity is invalid")
+            raise ProtocolError("protocol v5 record capacity is invalid")
         if event_bytes != GAIN_EVENT_BYTES:
-            raise ProtocolError("protocol v4 event size is unsupported")
+            raise ProtocolError("protocol v5 event size is unsupported")
 
-        extension = _V4_EXTENSION.unpack_from(raw, HEADER_PREFIX_BYTES_V3)
-        if any(extension[-4:]):
-            raise ProtocolError("protocol v4 reserved fields are nonzero")
+        extension = _V5_EXTENSION.unpack_from(raw, HEADER_PREFIX_BYTES_V3)
+        if any(extension[-3:]):
+            raise ProtocolError("protocol v5 reserved fields are nonzero")
         (
             ownership_epoch,
             tandem_state,
@@ -235,6 +262,7 @@ class RadioMetadataV4:
             maximum_gain_index,
             rx1_gain_index,
             rx2_gain_index,
+            temperature_mdeg_c,
             *_reserved,
         ) = extension
         try:
@@ -255,7 +283,7 @@ class RadioMetadataV4:
         if rx1_gain_index != rx2_gain_index:
             raise ProtocolError("tandem endpoint gains are not paired")
 
-        arrays = raw[HEADER_PREFIX_BYTES_V4:header_bytes]
+        arrays = raw[HEADER_PREFIX_BYTES_V5:header_bytes]
         event_offset = observation_capacity * observation_bytes
         events: list[TandemGainEventV1] = []
         for index in range(event_count):
@@ -276,8 +304,13 @@ class RadioMetadataV4:
 
         synthetic = bytearray(raw[:HEADER_PREFIX_BYTES_V3])
         struct.pack_into("<H", synthetic, 4, VERSION_V3)
-        struct.pack_into("<H", synthetic, 6, header_bytes - HEADER_EXTENSION_BYTES_V4)
-        struct.pack_into("<I", synthetic, 8, features & ~TANDEM_METADATA_FEATURE)
+        struct.pack_into("<H", synthetic, 6, header_bytes - HEADER_EXTENSION_BYTES_V5)
+        struct.pack_into(
+            "<I",
+            synthetic,
+            8,
+            features & ~(TANDEM_METADATA_FEATURE | AD9361_TEMPERATURE_FEATURE),
+        )
         struct.pack_into("<I", synthetic, 12, flags & ~TANDEM_METADATA_VALID_FLAG)
         synthetic.extend(arrays)
         synthetic_event_offset = HEADER_PREFIX_BYTES_V3 + event_offset
@@ -314,5 +347,97 @@ class RadioMetadataV4:
             maximum_gain_index,
             rx1_gain_index,
             rx2_gain_index,
+            None if temperature_mdeg_c == TEMPERATURE_INVALID else temperature_mdeg_c,
             tuple(events),
         )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RadioMetadataV6:
+    """ABI3 tandem metadata with canonical variable RX layout and exact gaps."""
+
+    base: RadioMetadataV3
+    tandem: RadioMetadataV5
+    header_bytes: int
+    missing_samples_before: int
+
+    @classmethod
+    def unpack(cls, header: bytes | bytearray | memoryview) -> RadioMetadataV6:
+        raw = bytes(header)
+        if len(raw) < HEADER_PREFIX_BYTES_V5 + 4:
+            raise ProtocolError("short protocol v6 metadata header")
+        magic, version, header_bytes, features, flags = _IDENTITY.unpack_from(raw)
+        if (magic, version) != (0x314D4753, VERSION_V6) or len(raw) != header_bytes:
+            raise ProtocolError("bad protocol v6 identity or length")
+        required_features = (
+            0xFF
+            | TANDEM_METADATA_FEATURE
+            | AD9361_TEMPERATURE_FEATURE
+            | CANONICAL_RX_LAYOUT_FEATURE
+            | EXACT_GAP_ACCOUNTING_FEATURE
+        )
+        if features != required_features:
+            raise ProtocolError("protocol v6 feature set is not canonical")
+        if flags & ~((1 << 24) - 1) or not flags & TANDEM_METADATA_VALID_FLAG:
+            raise ProtocolError("protocol v6 flags are invalid")
+
+        scratch = bytearray(raw)
+        received_crc = struct.unpack_from("<I", scratch, header_bytes - 4)[0]
+        scratch[-4:] = bytes(4)
+        if received_crc != zlib.crc32(scratch) & 0xFFFFFFFF:
+            raise ProtocolError("protocol v6 metadata CRC mismatch")
+
+        samples_per_channel = struct.unpack_from("<I", raw, 40)[0]
+        iq_payload_bytes = struct.unpack_from("<I", raw, 44)[0]
+        enabled_scan_mask = struct.unpack_from("<I", raw, 48)[0]
+        channel_count = raw[54]
+        if enabled_scan_mask in {0x03, 0x0C}:
+            expected_channels = 1
+            bytes_per_sample = 4
+            if samples_per_channel & 1:
+                raise ProtocolError("protocol v6 single-RX sample count must be even")
+        elif enabled_scan_mask == 0x0F:
+            expected_channels = 2
+            bytes_per_sample = 8
+        else:
+            raise ProtocolError("protocol v6 scan mask is not canonical")
+        if (
+            channel_count != expected_channels
+            or not samples_per_channel
+            or iq_payload_bytes != samples_per_channel * bytes_per_sample
+        ):
+            raise ProtocolError("protocol v6 RX geometry is inconsistent")
+
+        v3_extension = _V3_EXTENSION.unpack_from(raw, 92)
+        missing_samples_before = v3_extension[-2] | (v3_extension[-1] << 32)
+        if bool(flags & SAMPLE_GAP_BEFORE_FLAG) != bool(missing_samples_before):
+            raise ProtocolError("protocol v6 gap flag and exact count disagree")
+
+        synthetic = bytearray(raw)
+        struct.pack_into("<H", synthetic, 4, VERSION_V5)
+        struct.pack_into(
+            "<I",
+            synthetic,
+            8,
+            features & ~(CANONICAL_RX_LAYOUT_FEATURE | EXACT_GAP_ACCOUNTING_FEATURE),
+        )
+        struct.pack_into("<I", synthetic, 12, flags & ~SAMPLE_GAP_BEFORE_FLAG)
+        struct.pack_into("<II", synthetic, 116, 0, 0)
+        if channel_count == 1:
+            struct.pack_into("<I", synthetic, 44, samples_per_channel * 8)
+            struct.pack_into("<I", synthetic, 48, 0x0F)
+            synthetic[54] = 2
+        synthetic[-4:] = bytes(4)
+        struct.pack_into("<I", synthetic, len(synthetic) - 4, zlib.crc32(synthetic))
+        tandem = RadioMetadataV5.unpack(synthetic)
+        base = dataclasses.replace(
+            tandem.base,
+            features=MetadataFeatures(
+                features & ~(TANDEM_METADATA_FEATURE | AD9361_TEMPERATURE_FEATURE)
+            ),
+            flags=MetadataFlags(flags & ~TANDEM_METADATA_VALID_FLAG),
+            iq_payload_bytes=iq_payload_bytes,
+            enabled_scan_mask=enabled_scan_mask,
+            channel_count=channel_count,
+        )
+        return cls(base, tandem, header_bytes, missing_samples_before)

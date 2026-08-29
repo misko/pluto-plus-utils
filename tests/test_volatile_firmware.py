@@ -4,7 +4,7 @@ import hashlib
 import json
 import stat
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -270,6 +270,49 @@ def test_execute_uses_only_exact_path_firmware_alt_and_attests_return(
     receipt = json.loads(Path(result.receipt_path).read_text())
     assert receipt["outcome"] == "success"
     assert "volatile_dfu_downloaded" in receipt["phases"]
+
+
+def test_ram_return_attestation_requires_exact_ddr_burst_capability(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, _, _, radios = ram_plan
+    burst_plan = replace(
+        plan,
+        expected_ddr_burst_max_iq_bytes=200_000_000,
+        expected_ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    )
+    facts = _facts("candidate-v1")
+    facts.update(
+        {
+            "iio,buffer-ddr-burst": "1",
+            "iio,buffer-ddr-burst-max-iq-bytes": "200000000",
+            "iio,buffer-ddr-burst-reserve-bytes": "134217728",
+        }
+    )
+    muted: list[str] = []
+    monkeypatch.setattr(volatile, "mute_returned_radio", muted.append)
+
+    returned = volatile._attest_ram_return(
+        burst_plan,
+        scanner=lambda: radios,
+        iiod_inspector=lambda interface: facts,
+        timeout_s=0.05,
+        poll_interval_s=0.001,
+    )
+
+    assert returned == ("SERIAL_A", "candidate-v1", "ad9361")
+    assert muted == ["SERIAL_A"]
+
+    facts["iio,buffer-ddr-burst-max-iq-bytes"] = "199999999"
+    with pytest.raises(volatile.VolatileFirmwareError, match="DDR burst capability"):
+        volatile._attest_ram_return(
+            burst_plan,
+            scanner=lambda: radios,
+            iiod_inspector=lambda interface: facts,
+            timeout_s=0.01,
+            poll_interval_s=0.001,
+        )
 
 
 def test_transition_uncertainty_is_receipted_and_never_retryable(

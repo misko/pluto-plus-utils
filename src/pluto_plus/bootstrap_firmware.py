@@ -9,11 +9,13 @@ radios must use the plan/token firmware manager instead.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -24,15 +26,31 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
+from pluto_plus.diagnostic_profiles import DIAGNOSTIC_PROFILES, SUPPORTED_AD936X_PHY_MODELS
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
+    DDR_BURST_V1_RC1_RAM_POLICY,
+    DDR_BURST_V1_RC2_RAM_POLICY,
+    DDR_BURST_V1_RC3_RAM_POLICY,
+    DDR_BURST_V1_RC5_RAM_POLICY,
+    DDR_BURST_V1_RELEASE_PERSISTENT_POLICY,
+    DDR_BURST_V1_RELEASE_RAM_POLICY,
+    DDR_BURST_V2_RC1_RAM_POLICY,
+    DDR_BURST_V2_RC2_RAM_POLICY,
+    DDR_BURST_V2_RC3_RAM_POLICY,
+    DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
+    DDR_BURST_V2_RELEASE_RAM_POLICY,
+    DDR_CAPACITY_TEST_RC1_RAM_POLICY,
+    SINGLE_RX_METADATA_RC1_RAM_POLICY,
+    TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
     TANDEM_V6_DEVELOPMENT_POLICY,
     TANDEM_V6_LATCH_CLEAR_PERSISTENT_POLICY,
     TANDEM_V6_LATCH_CLEAR_RAM_POLICY,
 )
 from pluto_plus.firmware import FirmwareImageError, generate_frm, validate_frm
-from pluto_plus.hardware.discovery import _facts_from_context_xml
+from pluto_plus.hardware.discovery import _facts_from_context_xml, _inspect_iio_context
+from pluto_plus.hardware.preflight import inspect_iio_environment
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 from pluto_plus.ip_firmware import (
     UsbSshRouteAmbiguous,
@@ -43,6 +61,16 @@ from pluto_plus.setup_helper import BoundSshTransport, SetupTransport
 _USB_ROOT = Path("/sys/bus/usb/devices")
 _BLOCK_ROOT = Path("/sys/class/block")
 _IIOD_PORT = 30_431
+_SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_PRIVATE_LAN_NETWORKS = tuple(
+    ipaddress.IPv4Network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+_DEFAULT_PLUTO_SSH_PASSWORD = "analog"
+_REMOTE_GADGET_SERIAL_COMMAND = (
+    "printf 'serial='; cat /sys/kernel/config/usb_gadget/composite_gadget/"
+    "strings/0x409/serialnumber"
+)
+_LAN_ENROLLMENT_PROFILES = {profile.profile_id: profile for profile in DIAGNOSTIC_PROFILES}
 BOOTSTRAP_POLICY = CANONICAL_POLICY
 
 
@@ -54,6 +82,11 @@ class StandaloneFlashProfile:
     metadata_abi: int
     tandem_agc: bool
     persistent_allowed: bool = True
+    ddr_burst_max_iq_bytes: int | None = None
+    ddr_burst_reserve_bytes: int | None = None
+    ddr_ring_max_iq_bytes: int | None = None
+    ddr_ring_modes: str | None = None
+    buffer_metadata_status: bool = False
 
 
 STANDALONE_FLASH_PROFILES = {
@@ -70,11 +103,127 @@ STANDALONE_FLASH_PROFILES = {
     TANDEM_AGC_V7_RAM_POLICY.profile_id: StandaloneFlashProfile(
         TANDEM_AGC_V7_RAM_POLICY, 2, True, persistent_allowed=False
     ),
+    TANDEM_AGC_V7_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
+        TANDEM_AGC_V7_PERSISTENT_POLICY, 2, True
+    ),
+    SINGLE_RX_METADATA_RC1_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        SINGLE_RX_METADATA_RC1_RAM_POLICY, 3, True, persistent_allowed=False
+    ),
+    DDR_CAPACITY_TEST_RC1_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_CAPACITY_TEST_RC1_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=300_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V1_RC1_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V1_RC1_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V1_RC2_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V1_RC2_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V1_RC3_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V1_RC3_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V1_RC5_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V1_RC5_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V2_RC1_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V2_RC1_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V2_RC2_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V2_RC2_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V2_RC3_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V2_RC3_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V1_RELEASE_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V1_RELEASE_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V1_RELEASE_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V1_RELEASE_PERSISTENT_POLICY,
+        3,
+        True,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V2_RELEASE_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V2_RELEASE_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
+    DDR_BURST_V2_RELEASE_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
+        DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
+        3,
+        True,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+    ),
 }
 
 
 class BootstrapFirmwareError(RuntimeError):
     """A bootstrap precondition or execution failed."""
+
+
+@dataclass(frozen=True, slots=True)
+class LanSshHostKeyEnrollmentPlan:
+    """Read-only identity evidence required before explicit LAN SSH TOFU."""
+
+    serial: str
+    host: str
+    known_hosts_file: str
+    profile_id: str
+    expected_firmware: str
+    expected_metadata_abi: int
+    expected_tandem_agc: bool
+    observed_model: str
+    confirmation_phrase: str
+    trust_model: str = "explicit_lan_tofu"
 
 
 UdisksFailureKind = Literal[
@@ -183,6 +332,8 @@ class BoundSshBootstrapTransport:
                 "StrictHostKeyChecking=yes",
                 "-o",
                 f"UserKnownHostsFile={self._known_hosts_file}",
+                "-o",
+                "GlobalKnownHostsFile=/dev/null",
                 str(local_path),
                 f"{self._username}@{self._host}:/tmp/pluto-plus-utils/pluto.frm",
             ]
@@ -263,10 +414,6 @@ def enroll_bound_usb_ssh_host_key(
     os.close(descriptor)
     temporary = Path(temporary_name)
     temporary.chmod(0o600)
-    command = (
-        "printf 'serial='; cat /sys/kernel/config/usb_gadget/composite_gadget/"
-        "strings/0x409/serialnumber"
-    )
     try:
         import pexpect
 
@@ -279,8 +426,10 @@ def enroll_bound_usb_ssh_host_key(
             "StrictHostKeyChecking=accept-new",
             "-o",
             f"UserKnownHostsFile={temporary}",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
             f"root@{host}",
-            command,
+            _REMOTE_GADGET_SERIAL_COMMAND,
         ]
         if interface is not None:
             arguments[0:0] = ["-o", f"BindInterface={interface}"]
@@ -347,6 +496,278 @@ def enroll_bound_usb_ssh_host_key(
         temporary.unlink(missing_ok=True)
 
 
+def prepare_lan_ssh_host_key_enrollment(
+    *,
+    serial: str,
+    host: str,
+    known_hosts_file: Path,
+    profile_id: str,
+) -> LanSshHostKeyEnrollmentPlan:
+    """Attest one exact LAN IIOD endpoint without creating SSH trust."""
+
+    normalized_host = _literal_private_lan_ipv4(host)
+    if _SERIAL_PATTERN.fullmatch(serial) is None:
+        raise BootstrapFirmwareError("LAN SSH enrollment requires one exact stable serial")
+    profile = _LAN_ENROLLMENT_PROFILES.get(profile_id)
+    if profile is None:
+        raise BootstrapFirmwareError(f"unknown metadata firmware profile {profile_id!r}")
+    if len(profile.metadata_abis) != 1:  # pragma: no cover - immutable profile invariant
+        raise BootstrapFirmwareError("LAN SSH enrollment profile must select one metadata ABI")
+    expected_metadata_abi = profile.metadata_abis[0]
+    destination = known_hosts_file.expanduser().resolve()
+    if destination.exists() or destination.is_symlink():
+        raise BootstrapFirmwareError("known-hosts destination already exists; refusing overwrite")
+    try:
+        facts = _inspect_iio_context(normalized_host)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise BootstrapFirmwareError(
+            f"cannot attest LAN IIOD identity at {normalized_host}: {error}"
+        ) from error
+    observed_serial = str(facts.get("hw_serial") or "").strip()
+    if observed_serial != serial:
+        raise BootstrapFirmwareError(
+            f"LAN IIOD endpoint {normalized_host} attested serial {observed_serial!r}, "
+            f"expected {serial!r}"
+        )
+    observed_model = str(facts.get("hw_model") or "").strip()
+    if "plutosdr" not in observed_model.lower():
+        raise BootstrapFirmwareError("LAN IIOD endpoint is not an attested PlutoSDR model")
+    expected_firmware = profile.firmware_version
+    observed_firmware = str(facts.get("fw_version") or "").strip()
+    if observed_firmware != expected_firmware:
+        raise BootstrapFirmwareError(
+            f"LAN IIOD firmware is {observed_firmware!r}, expected {expected_firmware!r}"
+        )
+    observed_phy = str(facts.get("ad9361-phy,model") or "").strip()
+    if observed_phy not in SUPPORTED_AD936X_PHY_MODELS:
+        raise BootstrapFirmwareError(
+            f"LAN IIOD PHY is {observed_phy!r}, expected one of "
+            f"{SUPPORTED_AD936X_PHY_MODELS!r}"
+        )
+    observed_metadata = str(facts.get("iio,buffer-metadata") or "").strip()
+    if observed_metadata != str(expected_metadata_abi):
+        raise BootstrapFirmwareError(
+            f"LAN IIOD metadata ABI is {observed_metadata!r}, expected {expected_metadata_abi}"
+        )
+    raw_device_names = facts.get("device_names", ())
+    device_names = (
+        {str(value) for value in raw_device_names}
+        if isinstance(raw_device_names, (tuple, list, set, frozenset))
+        else set()
+    )
+    if not {"ad9361-phy", "cf-ad9361-lpc"} <= device_names:
+        raise BootstrapFirmwareError("LAN IIOD endpoint lacks the paired-RX IIO devices")
+    raw_scan_channels = facts.get("cf-ad9361-lpc,scan_channels", ())
+    scan_channels = (
+        {str(value) for value in raw_scan_channels}
+        if isinstance(raw_scan_channels, (tuple, list, set, frozenset))
+        else set()
+    )
+    if not {"voltage0", "voltage1", "voltage2", "voltage3"} <= scan_channels:
+        raise BootstrapFirmwareError("LAN IIOD endpoint lacks the canonical paired-RX scan layout")
+    observed_tandem = "tandem-agc" in device_names
+    if observed_tandem is not profile.tandem_agc_required:
+        raise BootstrapFirmwareError(
+            "LAN IIOD tandem capability is "
+            f"{observed_tandem}, expected {profile.tandem_agc_required}"
+        )
+    return LanSshHostKeyEnrollmentPlan(
+        serial=serial,
+        host=normalized_host,
+        known_hosts_file=str(destination),
+        profile_id=profile_id,
+        expected_firmware=expected_firmware,
+        expected_metadata_abi=expected_metadata_abi,
+        expected_tandem_agc=profile.tandem_agc_required,
+        observed_model=observed_model,
+        confirmation_phrase=f"TRUST LAN SSH {serial} {normalized_host}",
+    )
+
+
+def execute_lan_ssh_host_key_enrollment(
+    plan: LanSshHostKeyEnrollmentPlan,
+    *,
+    confirmation: str,
+    timeout_s: float = 15,
+) -> dict[str, str | int | bool]:
+    """Create one LAN-TOFU trust file using only the Pluto default password."""
+
+    if confirmation != plan.confirmation_phrase:
+        raise BootstrapFirmwareError(
+            f"confirmation must be exactly {plan.confirmation_phrase!r}"
+    )
+    if timeout_s <= 0 or timeout_s > 60:
+        raise BootstrapFirmwareError(
+            "LAN SSH enrollment timeout must be greater than 0 and at most 60 seconds"
+        )
+    fresh = prepare_lan_ssh_host_key_enrollment(
+        serial=plan.serial,
+        host=plan.host,
+        known_hosts_file=Path(plan.known_hosts_file),
+        profile_id=plan.profile_id,
+    )
+    if fresh != plan:
+        raise BootstrapFirmwareError("LAN SSH enrollment identity plan changed before execution")
+    destination = Path(fresh.known_hosts_file)
+    _prepare_private_known_hosts_parent(destination)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    temporary.chmod(0o600)
+    try:
+        _run_lan_default_password_ssh(
+            host=fresh.host,
+            known_hosts_file=temporary,
+            strict_host_key_checking="accept-new",
+            command="/bin/true",
+            timeout_s=timeout_s,
+        )
+        if not temporary.is_file() or temporary.is_symlink() or temporary.stat().st_size == 0:
+            raise BootstrapFirmwareError("LAN SSH did not record a new host key")
+        output = _run_lan_default_password_ssh(
+            host=fresh.host,
+            known_hosts_file=temporary,
+            strict_host_key_checking="yes",
+            command=_REMOTE_GADGET_SERIAL_COMMAND,
+            timeout_s=timeout_s,
+        )
+        serial_lines = [
+            line.removeprefix("serial=").strip()
+            for line in output.splitlines()
+            if line.startswith("serial=")
+        ]
+        if serial_lines != [fresh.serial]:
+            observed = serial_lines[0] if len(serial_lines) == 1 else None
+            raise BootstrapFirmwareError(
+                f"pinned LAN SSH endpoint attested serial {observed!r}, "
+                f"expected {fresh.serial!r}"
+            )
+        fingerprint = _run_output(
+            ("ssh-keygen", "-lf", str(temporary), "-E", "sha256"), timeout_s=10
+        ).strip()
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as error:
+            raise BootstrapFirmwareError(
+                "known-hosts destination already exists; refusing overwrite"
+            ) from error
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return {
+            "trust_model": fresh.trust_model,
+            "serial": fresh.serial,
+            "ssh_host": fresh.host,
+            "known_hosts_file": str(destination),
+            "profile_id": fresh.profile_id,
+            "firmware_version": fresh.expected_firmware,
+            "metadata_abi": fresh.expected_metadata_abi,
+            "tandem_agc": fresh.expected_tandem_agc,
+            "fingerprint": fingerprint,
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _literal_private_lan_ipv4(host: str) -> str:
+    try:
+        address = ipaddress.IPv4Address(host)
+    except ipaddress.AddressValueError as error:
+        raise BootstrapFirmwareError(
+            "LAN SSH host must be one literal private IPv4 address"
+        ) from error
+    if host != str(address) or not any(address in network for network in _PRIVATE_LAN_NETWORKS):
+        raise BootstrapFirmwareError("LAN SSH host must be one literal private IPv4 address")
+    if address == ipaddress.IPv4Address("192.168.2.1"):
+        raise BootstrapFirmwareError(
+            "LAN SSH enrollment refuses the default USB-gadget endpoint; use USB enrollment"
+        )
+    return str(address)
+
+
+def _prepare_private_known_hosts_parent(destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not destination.parent.is_dir() or destination.parent.stat().st_mode & 0o077:
+        raise BootstrapFirmwareError("known-hosts parent must be a private directory")
+    if destination.exists() or destination.is_symlink():
+        raise BootstrapFirmwareError("known-hosts destination already exists; refusing overwrite")
+
+
+def _run_lan_default_password_ssh(
+    *,
+    host: str,
+    known_hosts_file: Path,
+    strict_host_key_checking: Literal["accept-new", "yes"],
+    command: str,
+    timeout_s: float,
+) -> str:
+    try:
+        import pexpect
+    except ImportError as error:  # pragma: no cover - composition guard
+        raise BootstrapFirmwareError("LAN SSH enrollment requires pexpect") from error
+    arguments = [
+        "-F",
+        "/dev/null",
+        "-o",
+        "BatchMode=no",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "NumberOfPasswordPrompts=1",
+        "-o",
+        "PreferredAuthentications=password",
+        "-o",
+        "PubkeyAuthentication=no",
+        "-o",
+        "PasswordAuthentication=yes",
+        "-o",
+        f"StrictHostKeyChecking={strict_host_key_checking}",
+        "-o",
+        f"UserKnownHostsFile={known_hosts_file}",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        "UpdateHostKeys=no",
+        f"root@{host}",
+        command,
+    ]
+    child = pexpect.spawn("ssh", arguments, encoding=None, timeout=timeout_s)
+    transcript = bytearray()
+    password_sent = False
+    try:
+        while True:
+            matched = child.expect([b"[Pp]assword:", pexpect.EOF, pexpect.TIMEOUT])
+            transcript.extend(cast(bytes, child.before or b""))
+            if matched == 0:
+                if password_sent:
+                    raise BootstrapFirmwareError("LAN SSH default-password authentication failed")
+                child.sendline(_DEFAULT_PLUTO_SSH_PASSWORD.encode())
+                password_sent = True
+                continue
+            if matched == 1:
+                break
+            raise BootstrapFirmwareError("LAN SSH enrollment timed out")
+    finally:
+        child.close(force=True)
+    output = bytes(transcript).decode(errors="replace").replace("\r", "")
+    if not password_sent:
+        raise BootstrapFirmwareError(
+            "LAN SSH endpoint did not request the authorized default password"
+        )
+    if child.exitstatus != 0 or child.signalstatus is not None:
+        raise BootstrapFirmwareError(
+            "LAN SSH fixed command failed "
+            f"({child.exitstatus=}, {child.signalstatus=}): {output[-500:]}"
+        )
+    return output
+
+
 def _require_usb_ssh_route(interface: str, host: str) -> None:
     try:
         require_unambiguous_usb_ssh_route(interface, host)
@@ -393,6 +814,20 @@ class BootstrapResult:
     failure_classification: str | None = None
     retryable: bool | None = None
     remediation: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StandaloneReconciliationResult:
+    """Read-only result for one uncertain standalone persistent flash."""
+
+    receipt_id: str
+    outcome: Literal["reconciled_verified"]
+    phases: tuple[str, ...]
+    receipt_path: str
+    returned_serial: str
+    returned_firmware: str
+    fit_sha256: str
+    tx_safe: bool
 
 
 def prepare_bootstrap_plan(
@@ -630,7 +1065,14 @@ def execute_bootstrap_plan(
         )
         phases.append("media_ejected")
         _update_receipt(receipt_path, receipt, phases)
-        _wait_for_path(Path(plan.usb_sysfs_path), present=False, timeout_s=30)
+        # Media removal can be acknowledged before the radio-side updater has
+        # finished its pre-reboot work. Use the operator-selected lifecycle
+        # bound for disappearance as well as return; a fixed 30-second window
+        # produced a false-unknown receipt on a healthy Pluto+ that disconnected
+        # immediately after the old deadline and then reconciled successfully.
+        _wait_for_path(
+            Path(plan.usb_sysfs_path), present=False, timeout_s=return_timeout_s
+        )
         phases.append("disappeared")
         _update_receipt(receipt_path, receipt, phases)
         _wait_for_path(Path(plan.usb_sysfs_path), present=True, timeout_s=return_timeout_s)
@@ -806,7 +1248,9 @@ def execute_usb_flash_plan_ssh(
         phases.append("reboot_dispatched")
         _update_receipt(receipt_path, receipt, phases)
 
-        _wait_for_path(Path(plan.usb_sysfs_path), present=False, timeout_s=30)
+        _wait_for_path(
+            Path(plan.usb_sysfs_path), present=False, timeout_s=return_timeout_s
+        )
         phases.append("disappeared")
         _update_receipt(receipt_path, receipt, phases)
         _wait_for_path(Path(plan.usb_sysfs_path), present=True, timeout_s=return_timeout_s)
@@ -841,6 +1285,157 @@ def execute_usb_flash_plan_ssh(
     return result
 
 
+def reconcile_usb_flash_receipt(
+    receipt_id: str,
+    *,
+    receipt_directory: Path,
+    usb_sysfs_path: Path,
+    mutation_profile_id: str,
+    transport: BootstrapSshTransport,
+) -> StandaloneReconciliationResult:
+    """Read-only re-attest one uncertain standalone flash receipt.
+
+    The source receipt, immutable profile, current USB/IIO identity, remote
+    firmware, TX-safe state, and exact recorded FIT bytes must all agree.  This
+    function never stages an image, writes QSPI, changes RF state, or reboots.
+    """
+
+    try:
+        canonical_receipt_id = str(uuid.UUID(receipt_id))
+    except ValueError as error:
+        raise BootstrapFirmwareError("invalid standalone receipt ID") from error
+    if receipt_id != canonical_receipt_id:
+        raise BootstrapFirmwareError("invalid standalone receipt ID")
+    receipt_path = receipt_directory / f"{receipt_id}.json"
+    receipt = _read_receipt(receipt_path)
+    if receipt.get("schema_version") != 1 or receipt.get("receipt_id") != receipt_id:
+        raise BootstrapFirmwareError("standalone receipt identity or schema is invalid")
+    if receipt.get("outcome") != "unknown":
+        raise BootstrapFirmwareError("only an unknown standalone flash may be reconciled")
+    receipt_transport = receipt.get("transport")
+    receipt_phases = receipt.get("phases")
+    mass_storage_post_eject = (
+        (receipt_transport is None or receipt_transport == "mass_storage")
+        and isinstance(receipt_phases, list)
+        and "eject_requested" in receipt_phases
+        and receipt.get("failure_classification") == "post_eject_uncertain"
+        and receipt.get("retryable") is False
+    )
+    if receipt_transport != "bound_ssh_frm" and not mass_storage_post_eject:
+        raise BootstrapFirmwareError(
+            "standalone reconciliation requires bound SSH evidence or a "
+            "non-retryable post-eject mass-storage receipt"
+        )
+    raw_plan = receipt.get("plan")
+    if not isinstance(raw_plan, dict):
+        raise BootstrapFirmwareError("standalone receipt has no valid plan")
+    try:
+        plan = BootstrapPlan(**raw_plan)
+    except (TypeError, ValueError) as error:
+        raise BootstrapFirmwareError("standalone receipt plan is invalid") from error
+    if plan.operation != "flash" or not plan.target_serial:
+        raise BootstrapFirmwareError("receipt is not serial-bound standalone flash evidence")
+    if not _SERIAL_PATTERN.fullmatch(plan.target_serial):
+        raise BootstrapFirmwareError("receipt contains an invalid radio serial")
+    if plan.usb_sysfs_path != str(usb_sysfs_path):
+        raise BootstrapFirmwareError("requested USB path does not match the receipt")
+    if plan.mutation_profile_id != mutation_profile_id:
+        raise BootstrapFirmwareError("requested profile does not match the receipt")
+    profile = STANDALONE_FLASH_PROFILES.get(mutation_profile_id)
+    if profile is None or not profile.persistent_allowed:
+        raise BootstrapFirmwareError("receipt does not select a persistent qualified profile")
+    policy = profile.policy
+    expected = (
+        (plan.image_sha256, policy.asset_sha256, "DFU SHA-256"),
+        (plan.fit_sha256, policy.fit_body_sha256, "FIT SHA-256"),
+        (plan.fit_size, policy.fit_body_size, "FIT size"),
+        (plan.expected_firmware, policy.device_firmware, "firmware identity"),
+    )
+    for recorded, qualified, label in expected:
+        if recorded != qualified:
+            raise BootstrapFirmwareError(f"receipt {label} is outside the selected profile")
+
+    returned = _one_local_target(_direct_usb_path(usb_sysfs_path))
+    if returned.serial != plan.target_serial or len(returned.host_network_interfaces) != 1:
+        raise BootstrapFirmwareError("current USB identity does not match the receipt")
+    facts = inspect_bound_iiod(returned.host_network_interfaces[0].name)
+    if str(facts.get("hw_serial") or "").strip() != plan.target_serial:
+        raise BootstrapFirmwareError("current IIOD serial does not match the receipt")
+    if str(facts.get("fw_version") or "").strip() != plan.expected_firmware:
+        raise BootstrapFirmwareError("current IIOD firmware does not match the receipt")
+    if str(facts.get("iio,buffer-metadata") or "").strip() != str(
+        plan.expected_metadata_abi
+    ):
+        raise BootstrapFirmwareError("current metadata ABI does not match the receipt")
+    raw_names = facts.get("device_names", ())
+    device_names = (
+        {str(value) for value in raw_names}
+        if isinstance(raw_names, (tuple, list, set, frozenset))
+        else set()
+    )
+    if ("tandem-agc" in device_names) is not plan.expected_tandem_agc:
+        raise BootstrapFirmwareError("current tandem capability does not match the receipt")
+
+    output = transport.run(
+        f"sh -s -- {plan.target_serial} {plan.fit_size}",
+        stdin=_REMOTE_RECONCILE_SCRIPT,
+        timeout_s=120,
+    )
+    fields = _parse_reconciliation_report(output)
+    if fields.get("serial") != plan.target_serial:
+        raise BootstrapFirmwareError("remote serial does not match the receipt")
+    if fields.get("firmware") != plan.expected_firmware:
+        raise BootstrapFirmwareError("remote firmware does not match the receipt")
+    remote_fit = fields.get("fit_sha256", "")
+    if not hmac.compare_digest(remote_fit, plan.fit_sha256):
+        raise BootstrapFirmwareError("remote mtd3 FIT does not match the receipt")
+    try:
+        gains = tuple(float(value) for value in fields["tx_hardwaregain_db"].split(","))
+        buffers = tuple(float(value) for value in fields["tx_buffer_enable"].split(","))
+        scans = tuple(float(value) for value in fields["tx_scan_enable"].split(","))
+        raws = tuple(float(value) for value in fields["tx_dds_raw"].split(","))
+        scales = tuple(float(value) for value in fields["tx_dds_scale"].split(","))
+    except (KeyError, ValueError) as error:
+        raise BootstrapFirmwareError("remote TX-safe report is invalid") from error
+    tx_safe = (
+        len(gains) == 2
+        and all(value <= -80 for value in gains)
+        and buffers == (0,)
+        and len(scans) == 4
+        and all(value == 0 for value in scans)
+        and len(raws) == 8
+        and all(value == 0 for value in raws)
+        and len(scales) == 8
+        and all(value == 0 for value in scales)
+    )
+    if not tx_safe:
+        raise BootstrapFirmwareError("remote TX-safe readback was not affirmative")
+
+    phases = (
+        "receipt_validated",
+        "qualified_profile_validated",
+        "usb_iiod_identity_attested",
+        "remote_identity_attested",
+        "tx_safe_read_only_attested",
+        "mtd3_fit_verified",
+    )
+    result = StandaloneReconciliationResult(
+        receipt_id=receipt_id,
+        outcome="reconciled_verified",
+        phases=phases,
+        receipt_path=str(receipt_path),
+        returned_serial=plan.target_serial,
+        returned_firmware=plan.expected_firmware,
+        fit_sha256=remote_fit,
+        tx_safe=True,
+    )
+    receipt["original_outcome"] = "unknown"
+    receipt["outcome"] = result.outcome
+    receipt["reconciliation"] = asdict(result)
+    _write_receipt(receipt_path, receipt)
+    return result
+
+
 _REMOTE_ATTEST_COMMAND = (
     "printf 'serial='; cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/"
     "serialnumber 2>/dev/null || true; printf '\\nmodel='; tr -d '\\000' </proc/device-tree/"
@@ -854,6 +1449,49 @@ _REMOTE_STAGE_HASH_COMMAND = "sha256sum /tmp/pluto-plus-utils/pluto.frm"
 _REMOTE_UPDATE_COMMAND = "/sbin/update_frm.sh /tmp/pluto-plus-utils/pluto.frm"
 _REMOTE_CLEANUP_COMMAND = "rm -f /tmp/pluto-plus-utils/pluto.frm && sync"
 _REMOTE_REBOOT_COMMAND = "/usr/sbin/device_reboot reset"
+
+_REMOTE_RECONCILE_SCRIPT = rb"""set -eu
+serial_expected="$1"
+fit_size="$2"
+emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
+serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
+firmware=$(awk '$1 == "device-fw" {print $2; exit}' /opt/VERSIONS)
+fit_sha256=$(head -c "$fit_size" /dev/mtdblock3 | sha256sum | awk '{print $1}')
+test "$serial" = "$serial_expected"
+phy=''; dds=''
+for d in /sys/bus/iio/devices/iio:device*; do
+  case "$(cat "$d/name" 2>/dev/null || true)" in
+    ad9361-phy) phy="$d" ;;
+    cf-ad9361-dds-core-lpc) dds="$d" ;;
+  esac
+done
+test -n "$phy" && test -n "$dds"
+gains=''; scans=''; raws=''; scales=''
+for f in "$phy"/out_voltage0_hardwaregain "$phy"/out_voltage1_hardwaregain; do
+  value=$(awk '{print $1}' "$f")
+  gains="${gains}${gains:+,}${value}"
+done
+for f in "$dds"/scan_elements/out_voltage[0-3]_en; do
+  value=$(cat "$f")
+  scans="${scans}${scans:+,}${value}"
+done
+for f in "$dds"/out_altvoltage*_raw; do
+  value=$(cat "$f")
+  raws="${raws}${raws:+,}${value}"
+done
+for f in "$dds"/out_altvoltage*_scale; do
+  value=$(cat "$f")
+  scales="${scales}${scales:+,}${value}"
+done
+emit serial "$serial"
+emit firmware "$firmware"
+emit fit_sha256 "$fit_sha256"
+emit tx_hardwaregain_db "$gains"
+emit tx_buffer_enable "$(cat "$dds/buffer/enable")"
+emit tx_scan_enable "$scans"
+emit tx_dds_raw "$raws"
+emit tx_dds_scale "$scales"
+"""
 
 
 def _remote_attestation(output: str) -> dict[str, str]:
@@ -871,6 +1509,27 @@ def _one_sha256(output: str) -> str:
     if len(matches) != 1:
         raise BootstrapFirmwareError("remote hash command did not return exactly one SHA-256")
     return str(matches[0])
+
+
+def _parse_reconciliation_report(output: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3 and parts[0] == "PPU" and parts[1] not in fields:
+            fields[parts[1]] = parts[2]
+    required = {
+        "serial",
+        "firmware",
+        "fit_sha256",
+        "tx_hardwaregain_db",
+        "tx_buffer_enable",
+        "tx_scan_enable",
+        "tx_dds_raw",
+        "tx_dds_scale",
+    }
+    if set(fields) != required or not re.fullmatch(r"[0-9a-f]{64}", fields["fit_sha256"]):
+        raise BootstrapFirmwareError("remote reconciliation report is incomplete")
+    return fields
 
 
 def _validate_plan_payload(plan: BootstrapPlan, frm: bytes, confirmation: str) -> None:
@@ -960,6 +1619,11 @@ def mute_returned_radio(serial: str) -> None:
     """Mute and read back one exact returned USB-IIO radio."""
 
     try:
+        environment = inspect_iio_environment(require_usb=True)
+        if not environment.healthy:
+            raise BootstrapFirmwareError(
+                f"returned-radio IIO environment failed: {environment.actionable_message}"
+            )
         import adi
         import iio
 
@@ -982,7 +1646,7 @@ def mute_returned_radio(serial: str) -> None:
         finally:
             device.rx_destroy_buffer()
             device._ctx.close()
-    except (ImportError, OSError, RuntimeError, ValueError) as error:
+    except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as error:
         if isinstance(error, BootstrapFirmwareError):
             raise
         raise BootstrapFirmwareError(f"cannot attest returned TX-safe state: {error}") from error
@@ -1495,6 +2159,25 @@ def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _read_receipt(path: Path) -> dict[str, Any]:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+            os.close(descriptor)
+            raise BootstrapFirmwareError("standalone receipt is not a bounded regular file")
+        if metadata.st_mode & 0o077:
+            os.close(descriptor)
+            raise BootstrapFirmwareError("standalone receipt permissions are not private")
+        with os.fdopen(descriptor, encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, json.JSONDecodeError) as error:
+        raise BootstrapFirmwareError(f"cannot read standalone receipt: {error}") from error
+    if not isinstance(payload, dict):
+        raise BootstrapFirmwareError("standalone receipt must contain one JSON object")
+    return payload
 
 
 def _update_receipt(

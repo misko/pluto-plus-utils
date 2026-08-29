@@ -189,7 +189,7 @@ def test_ssh_only_canonical_plan_confirmation_unknown_and_reconcile(
     tmp_path: Path, monkeypatch
 ) -> None:
     image, fit = _dfu()
-    policy = service_module.CANONICAL_POLICY.model_copy(
+    policy = service_module.PERSISTENT_UPGRADE_POLICY.model_copy(
         update={
             "asset_sha256": hashlib.sha256(image).hexdigest(),
             "fit_body_sha256": hashlib.sha256(fit).hexdigest(),
@@ -197,7 +197,7 @@ def test_ssh_only_canonical_plan_confirmation_unknown_and_reconcile(
             "device_firmware": "canonical-v1",
         }
     )
-    monkeypatch.setattr(service_module, "CANONICAL_POLICY", policy)
+    monkeypatch.setattr(service_module, "PERSISTENT_UPGRADE_POLICY", policy)
     serial = "ip-radio-1"
     radio = NetworkFakeRadio(serial, "192.168.2.15", "old-v1")
     identity = RadioFirmwareIdentity(

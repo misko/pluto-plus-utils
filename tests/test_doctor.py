@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT, diagnose_radio
+from pluto_plus.doctor import (
+    CANONICAL_POLICY,
+    CANONICAL_UBOOT,
+    DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
+    PERSISTENT_UPGRADE_POLICY,
+    diagnose_radio,
+)
 from pluto_plus.models import (
     DoctorStatus,
     RadioCapabilities,
@@ -33,6 +39,13 @@ def _snapshot(
         requested_settings=RadioSettings(),
         actual_settings=RadioSettings(),
     )
+
+
+def test_persistent_upgrade_policy_selects_hardware_qualified_ddr_burst_release() -> None:
+    assert PERSISTENT_UPGRADE_POLICY is DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+    assert PERSISTENT_UPGRADE_POLICY.hardware_qualified is True
+    assert PERSISTENT_UPGRADE_POLICY.profile_id == "ddr-burst-v2-release-persistent-promotion"
+    assert PERSISTENT_UPGRADE_POLICY.device_firmware == "v0.42-plutoplus-spf-ddr-burst-v2"
 
 
 def test_doctor_passes_only_with_complete_persistent_evidence() -> None:
@@ -69,13 +82,12 @@ def test_doctor_does_not_infer_persistence_from_active_firmware_or_channels() ->
 
     assert not report.healthy
     assert findings["firmware.device_version"].status is DoctorStatus.PASS
-    assert findings["rf.phy_model"].status is DoctorStatus.FAIL
+    assert findings["rf.phy_model"].status is DoctorStatus.PASS
     assert findings["setup.uboot_2r2t"].status is DoctorStatus.UNKNOWN
     assert findings["firmware.boot_provenance"].status is DoctorStatus.UNKNOWN
     assert findings["identity.usb_path"].status is DoctorStatus.WARN
     assert findings["firmware.helper"].status is DoctorStatus.WARN
-    assert findings["rf.phy_model"].remediation is not None
-    assert findings["rf.phy_model"].remediation.automatable
+    assert findings["rf.phy_model"].remediation is None
 
 
 def test_old_firmware_recommends_only_guarded_profile_aware_flash() -> None:

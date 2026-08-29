@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -25,6 +26,7 @@ from pluto_plus.ip_firmware import (
     PinnedSshFirmwareTransport,
     SshCommandResult,
     UsbSshRouteAmbiguous,
+    pinned_ssh_host_key_fingerprint,
     require_unambiguous_usb_ssh_route,
 )
 from pluto_plus.network_config import (
@@ -648,6 +650,7 @@ def test_pinned_ssh_transport_uses_key_only_strict_host_checking_and_fixed_updat
     assert stdin is None
     assert "BatchMode=yes" in argv
     assert "StrictHostKeyChecking=yes" in argv
+    assert "GlobalKnownHostsFile=/dev/null" in argv
     assert "PasswordAuthentication=no" in argv
     assert argv[-1] == "/sbin/update_frm.sh /root/.pluto-plus-ip-firmware/pluto.frm"
     assert all("mtd" not in argument for argument in argv)
@@ -783,6 +786,37 @@ def test_pinned_transport_reads_redacted_config_and_applies_only_bound_network_p
     assert b"device_reboot" not in apply_stdin
 
 
+def test_pinned_transport_accepts_an_empty_generated_config_txt(tmp_path: Path) -> None:
+    values = {
+        "ipaddr": "192.168.2.1",
+        "ipaddr_host": "192.168.2.10",
+        "netmask": "255.255.255.0",
+        "ipaddr_eth": "192.168.1.183",
+        "netmask_eth": "255.255.255.0",
+    }
+    lines = [
+        "PPU\tserial\tSERIAL_A",
+        "PPU\thostname\tpluto",
+        *(f"PPU\t{key}\t{value}" for key, value in values.items()),
+        "PPU\tethernet_runtime_address\t192.168.1.152",
+        f"PPU\tenvironment_sha256\t{persistent_environment_sha256(values)}",
+        f"PPU\tconfig_txt_sha256\t{hashlib.sha256(b'').hexdigest()}",
+        "PPU\tconfig_txt_redacted_b64\t",
+    ]
+    transport = _ssh_transport(
+        tmp_path,
+        RecordingSshRunner(
+            [SshCommandResult(0, ("\n".join(lines) + "\n").encode(), b"")]
+        ),
+    )
+
+    observed = transport.inspect_network_config("SERIAL_A")
+
+    assert observed.config_txt_redacted == ""
+    assert observed.ethernet_address == "192.168.1.183"
+    assert observed.ethernet_runtime_address == "192.168.1.152"
+
+
 def test_pinned_transport_rejects_hostnames_loose_files_and_changed_key(
     tmp_path: Path,
 ) -> None:
@@ -800,7 +834,8 @@ def test_pinned_transport_rejects_hostnames_loose_files_and_changed_key(
             SshCommandResult(
                 255,
                 b"",
-                b"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!",
+                b"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
+                + b"long diagnostic tail\n" * 100,
             )
         ]
     )
@@ -817,6 +852,26 @@ def test_pinned_transport_rejects_hostnames_loose_files_and_changed_key(
             private_key_file=private_key,
             command_runner=runner,
         )
+
+
+def test_pinned_fingerprint_accepts_an_exact_openssh_hashed_host(tmp_path: Path) -> None:
+    endpoint = "192.168.2.1"
+    salt = b"deterministic-test-salt"
+    host_digest = hmac.new(salt, endpoint.encode(), hashlib.sha1).digest()  # noqa: S324
+    key = b"synthetic-ed25519-public-key"
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(
+        "|1|"
+        f"{base64.b64encode(salt).decode()}|{base64.b64encode(host_digest).decode()} "
+        f"ssh-ed25519 {base64.b64encode(key).decode()}\n"
+    )
+    known_hosts.chmod(0o600)
+
+    assert pinned_ssh_host_key_fingerprint(known_hosts, endpoint) == (
+        "SHA256:" + base64.b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
+    )
+    with pytest.raises(ValueError, match="exactly one pinned key"):
+        pinned_ssh_host_key_fingerprint(known_hosts, "192.168.2.2")
 
 
 def test_pinned_transport_rejects_credential_file_changes_after_enrollment(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -19,6 +20,33 @@ from urllib.parse import urlsplit
 import httpx
 import typer
 
+from pluto_plus.ddr_recovery import (
+    DEFAULT_DISCONNECT_DELAY_MS,
+    MAX_DISCONNECT_DELAY_MS,
+    MIN_DISCONNECT_DELAY_MS,
+    DdrRecoveryError,
+    execute_ddr_recovery,
+    prepare_ddr_recovery,
+    run_live_ddr_recovery_cycle,
+)
+from pluto_plus.ddr_recovery import MAX_CYCLES as MAX_DDR_RECOVERY_CYCLES
+from pluto_plus.fastlock import (
+    DEFAULT_DWELL_US,
+    DEFAULT_HOPS_PER_MODE,
+    DEFAULT_LOWER_FREQUENCY_HZ,
+    DEFAULT_LOWER_PROFILE,
+    DEFAULT_MAX_SECONDS,
+    DEFAULT_PROFILE_SETTLE_MS,
+    DEFAULT_UPPER_FREQUENCY_HZ,
+    DEFAULT_UPPER_PROFILE,
+    MAX_HOPS_PER_MODE,
+    MAX_SECONDS,
+    FastLockProbeError,
+    FastLockProbeReport,
+    prepare_usb_fastlock_probe,
+    run_usb_fastlock_probe,
+    write_fastlock_report,
+)
 from pluto_plus.hardware.preflight import IioEnvironmentReport, inspect_iio_environment
 from pluto_plus.inventory import (
     LocalUsbPluto,
@@ -27,7 +55,30 @@ from pluto_plus.inventory import (
     local_ipv4_discovery_networks,
     scan_local_usb_plutos,
 )
-from pluto_plus.ladder import DEFAULT_RATE_LADDER, LadderReport, parse_rate_ladder, run_iio_ladder
+from pluto_plus.ladder import (
+    DEFAULT_RATE_LADDER,
+    LADDER_CHANNEL_SELECTIONS,
+    UNSAFE_KERNEL_QUEUE_CONFIRMATION,
+    LadderReport,
+    parse_rate_ladder,
+    run_iio_ladder,
+)
+from pluto_plus.metadata_ladder import (
+    DEFAULT_METADATA_SAMPLE_LADDER,
+    MAX_DDR_RING_IQ_BYTES,
+    MAX_METADATA_FRAMES,
+    METADATA_CHANNEL_SELECTIONS,
+    parse_metadata_sample_ladder,
+    run_metadata_continuity_ladder,
+)
+from pluto_plus.metadata_soak import (
+    MAX_SLOTS,
+    MetadataSoakError,
+    SshMetadataHealthProbe,
+    execute_metadata_soak,
+    prepare_metadata_soak,
+    run_live_metadata_slot,
+)
 from pluto_plus.seeded_hop import (
     DEFAULT_FRAME_SIZE,
     DEFAULT_HOP_SECONDS,
@@ -40,15 +91,33 @@ from pluto_plus.seeded_hop import (
     DEFAULT_STOP_HZ,
     DEFAULT_THRESHOLD_DB,
 )
+from pluto_plus.setup_helper import BoundSshTransport
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
 DEFAULT_STATE_ROOT = Path(os.environ.get("PLUTO_STATE_ROOT", "./pluto-state"))
+_SOURCE_REPOSITORY = Path(__file__).resolve().parents[2]
+DEFAULT_TOOL_REPOSITORY = (
+    _SOURCE_REPOSITORY if (_SOURCE_REPOSITORY / ".git").is_dir() else Path.cwd()
+)
 DEFAULT_BOOTSTRAP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/bootstrap-receipts"
 DEFAULT_QUALIFICATION_REPORTS = Path.home() / ".local/state/pluto-plus-utils/qualification-reports"
 DEFAULT_LOCAL_REBOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/reboot-receipts"
 DEFAULT_RAM_BOOT_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/ram-boot-receipts"
+DEFAULT_METADATA_SOAK_REPORTS = Path.home() / ".local/state/pluto-plus-utils/metadata-soak-reports"
+DEFAULT_DDR_RECOVERY_REPORTS = Path.home() / ".local/state/pluto-plus-utils/ddr-recovery-reports"
+DEFAULT_FASTLOCK_REPORTS = Path.home() / ".local/state/pluto-plus-utils/fastlock-reports"
 DEFAULT_HOST_ISOLATION_RECEIPTS = (
     Path.home() / ".local/state/pluto-plus-utils/host-isolation-receipts"
+)
+DEFAULT_SETUP_RECEIPTS = Path.home() / ".local/state/pluto-plus-utils/setup-receipts"
+DEFAULT_NETWORK_CONFIG_RECEIPTS = (
+    Path.home() / ".local/state/pluto-plus-utils/network-config-receipts"
+)
+DEFAULT_DATA_PLANE_RECOVERY_RECEIPTS = (
+    Path.home() / ".local/state/pluto-plus-utils/data-plane-recovery-receipts"
+)
+DEFAULT_ENVIRONMENT_SURVEY_REPORTS = (
+    Path.home() / ".local/state/pluto-plus-utils/environment-surveys"
 )
 API_PREFIX = "api/v1"
 
@@ -64,6 +133,18 @@ job_app = typer.Typer(no_args_is_help=True, help="Inspect stream and capture job
 artifact_app = typer.Typer(no_args_is_help=True, help="Inspect captured artifacts.")
 scan_app = typer.Typer(no_args_is_help=True, help="Run exclusive frequency scans.")
 firmware_app = typer.Typer(no_args_is_help=True, help="Plan and execute guarded firmware updates.")
+candidate_ram_app = typer.Typer(
+    no_args_is_help=True,
+    help="Plan, execute, and verify local release-candidate RAM deployments.",
+)
+comparator_ram_app = typer.Typer(
+    no_args_is_help=True,
+    help="Plan, execute, and verify the immutable approved-v7 comparator RAM boot.",
+)
+environment_survey_app = typer.Typer(
+    no_args_is_help=True,
+    help="Plan, execute, and verify exact-USB RX-only RF environment surveys.",
+)
 setup_app = typer.Typer(
     no_args_is_help=True, help="Plan and execute guarded canonical AD9361/2R2T setup."
 )
@@ -84,6 +165,9 @@ app.add_typer(job_app, name="job")
 app.add_typer(artifact_app, name="artifact")
 app.add_typer(scan_app, name="scan")
 app.add_typer(firmware_app, name="firmware")
+firmware_app.add_typer(candidate_ram_app, name="candidate-ram")
+firmware_app.add_typer(comparator_ram_app, name="comparator-ram")
+app.add_typer(environment_survey_app, name="environment-survey")
 app.add_typer(setup_app, name="setup")
 app.add_typer(config_app, name="config")
 app.add_typer(calibrate_app, name="calibrate")
@@ -395,10 +479,40 @@ def _ladder_table(report: LadderReport) -> str:
     identity = (
         f"Radio {report.serial} · {report.uri} · {report.model} · "
         f"firmware {report.firmware_version or 'unknown'} · "
-        f"kernel buffers {report.kernel_buffers}"
+        f"kernel buffers {report.kernel_buffers} "
+        f"({report.kernel_buffer_configuration_basis.replace('_', ' ')}) · "
+        f"RX queue {report.kernel_queue_bytes / (1024 * 1024):g} MiB"
     )
+    if report.unsafe_kernel_queue_override:
+        identity += " (UNVALIDATED OVERRIDE)"
     restore = "Original RX settings restored: yes"
     return "\n".join((identity, header, separator, *body, restore, report.continuity_claim))
+
+
+def _fastlock_table(report: FastLockProbeReport, report_path: Path) -> str:
+    ordinary = report.ordinary_timing
+    fastlock = report.fastlock_timing
+    lines = (
+        f"Radio {report.identity.serial} · {report.identity.uri} · "
+        f"firmware {report.identity.firmware_version or 'unknown'}",
+        (
+            "Ordinary LO write: "
+            f"median {ordinary.median_us:.1f} us · p95 {ordinary.p95_us:.1f} us · "
+            f"max {ordinary.maximum_us:.1f} us"
+        ),
+        (
+            "Fast Lock recall:  "
+            f"median {fastlock.median_us:.1f} us · p95 {fastlock.p95_us:.1f} us · "
+            f"max {fastlock.maximum_us:.1f} us"
+        ),
+        f"Median speedup: {report.median_speedup:.2f}x",
+        "Original RX settings restored: yes",
+        "TX muted and verified: yes",
+        f"Report: {report_path}",
+        report.latency_claim,
+        report.continuity_claim,
+    )
+    return "\n".join(lines)
 
 
 def _environment_table(report: IioEnvironmentReport) -> str:
@@ -675,6 +789,14 @@ def radio_reboot_local(
             "other addresses use the normal LAN route."
         ),
     ),
+    expect_return_profile: str | None = typer.Option(
+        None,
+        "--expect-return-profile",
+        help=(
+            "Exact hardware-qualified persistent profile expected after reboot; "
+            "use this when returning a volatile RAM image to QSPI."
+        ),
+    ),
     execute: bool = typer.Option(
         False,
         "--execute",
@@ -725,6 +847,23 @@ def radio_reboot_local(
     from pluto_plus.setup_helper import BoundSshTransport
 
     selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    expected_return_firmware = None
+    if expect_return_profile is not None:
+        from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
+
+        return_profile = STANDALONE_FLASH_PROFILES.get(expect_return_profile)
+        if (
+            return_profile is None
+            or not return_profile.persistent_allowed
+            or not return_profile.policy.hardware_qualified
+        ):
+            _fail(
+                "local_reboot_return_profile_invalid",
+                "--expect-return-profile must select an exact hardware-qualified "
+                "persistent profile",
+                2,
+            )
+        expected_return_firmware = str(return_profile.policy.device_firmware)
     isolation_plan = None
     route_checker_override: Callable[[str, str], UsbSshRouteObservation] | None = None
     pluto_interfaces: tuple[str, ...] = ()
@@ -740,9 +879,7 @@ def radio_reboot_local(
         if len(selected_matches) != 1 or len(selected_matches[0].host_network_interfaces) != 1:
             _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
         pluto_interfaces = tuple(
-            interface.name
-            for item in local_devices
-            for interface in item.host_network_interfaces
+            interface.name for item in local_devices for interface in item.host_network_interfaces
         )
         try:
             isolation_plan = prepare_usb_ssh_isolation(
@@ -772,6 +909,7 @@ def radio_reboot_local(
             usb_sysfs_path,
             ssh_host=ssh_host,
             known_hosts_file=selected_known_hosts,
+            expected_return_firmware=expected_return_firmware,
             **prepare_options,
         )
     except (LocalRebootError, OSError, ValueError) as error:
@@ -783,9 +921,7 @@ def radio_reboot_local(
                 "mode": "dry_run",
                 "will_reboot": False,
                 "plan": asdict(plan),
-                "host_isolation": (
-                    None if isolation_plan is None else asdict(isolation_plan)
-                ),
+                "host_isolation": (None if isolation_plan is None else asdict(isolation_plan)),
                 "host_environment": environment.model_dump(mode="json"),
                 "next_command": (
                     f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
@@ -830,6 +966,7 @@ def radio_reboot_local(
             )
         except UnicodeDecodeError:
             _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
+
     def reboot_action() -> Any:
         ssh = BoundSshTransport(
             host=plan.ssh_host,
@@ -873,6 +1010,117 @@ def radio_reboot_local(
         _emit({"host_isolation": asdict(isolation_receipt), "result": asdict(receipt)})
 
 
+@radio_app.command("reboot-lan")
+def radio_reboot_lan(
+    serial: str = typer.Argument(..., help="Exact serial of the LAN radio with detached USB."),
+    ssh_host: str = typer.Option(
+        ...,
+        "--ssh-host",
+        help="Exact canonical private LAN IPv4; the shared USB address is rejected.",
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts pinned to this exact LAN endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Private one-line root password file; otherwise prompt without echo.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Mute TX, dispatch the reboot, and verify the exact serial returns over USB.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase REBOOT LAN <serial>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_LOCAL_REBOOT_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for the durable LAN reboot receipt.",
+    ),
+    timeout_s: float = typer.Option(
+        60,
+        "--timeout",
+        min=5,
+        max=300,
+        help="Seconds to wait for the exact serial to return over local USB.",
+    ),
+) -> None:
+    """Guardedly reboot one LAN-attested radio whose USB gadget is absent."""
+
+    from pluto_plus.lan_reboot import (
+        LanRebootError,
+        LanRebootExecutionError,
+        execute_lan_reboot,
+        prepare_lan_reboot,
+    )
+    from pluto_plus.local_reboot import FixedSshLocalRebootTransport
+
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    password = (
+        typer.prompt("Radio SSH password", hide_input=True)
+        if ssh_password_file is None
+        else _read_private_text_file(
+            ssh_password_file.expanduser().absolute(), label="radio SSH password"
+        )
+    )
+    transport = FixedSshLocalRebootTransport(
+        BoundSshTransport(
+            host=ssh_host,
+            interface=None,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+    )
+    try:
+        plan = prepare_lan_reboot(
+            serial,
+            ssh_host=ssh_host,
+            known_hosts_file=selected_known_hosts,
+            transport=transport,
+        )
+    except (LanRebootError, OSError, ValueError) as error:
+        _fail("lan_reboot_preflight_failed", str(error), 4)
+    if not execute:
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_reboot": False,
+                "plan": asdict(plan),
+                "next_command": (
+                    f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
+                ),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "lan_reboot_confirmation_required",
+            f"--execute requires --confirm {plan.confirmation_phrase!r}",
+            2,
+        )
+    try:
+        receipt = execute_lan_reboot(
+            plan,
+            confirmation=confirmation or "",
+            transport=transport,
+            known_hosts_file=selected_known_hosts,
+            receipt_directory=receipt_directory.expanduser().absolute(),
+            timeout_s=timeout_s,
+        )
+    except LanRebootExecutionError as error:
+        _emit(asdict(error.receipt))
+        raise typer.Exit(5) from error
+    except (LanRebootError, OSError, ValueError) as error:
+        _fail("lan_reboot_failed", str(error), 4)
+    _emit(asdict(receipt))
+
+
 @app.command("environment")
 def environment_preflight(
     output_format: str = typer.Option(
@@ -905,19 +1153,24 @@ def radio_ladder(
     expect_serial: str | None = typer.Option(
         None,
         "--expect-serial",
-        help="Require this exact radio serial (recommended for IP).",
+        help="Require this exact radio serial (required for IP).",
     ),
     rates: str = typer.Option(
         DEFAULT_RATE_LADDER,
         "--rates",
         help="Strictly increasing comma-separated Hz/K/M/G sample-rate rungs.",
     ),
+    channels: str = typer.Option(
+        "dual",
+        "--channels",
+        help="Canonical receive layout: rx0, rx1, or dual.",
+    ),
     samples: int = typer.Option(
         262_144,
         "--samples",
         min=16_384,
         max=4_194_304,
-        help="Samples per channel in each paired-RX frame.",
+        help="Samples per channel in each receive frame.",
     ),
     frames: int = typer.Option(
         12, "--frames", min=1, max=100, help="Timed frames captured at each rung."
@@ -936,11 +1189,44 @@ def radio_ladder(
         max=64,
         help="Explicit libiio RX kernel-buffer count.",
     ),
+    unsafe_kernel_queue_confirmation: str | None = typer.Option(
+        None,
+        "--unsafe-kernel-queue-confirm",
+        help=(
+            "Exact phrase ALLOW UNVALIDATED RX QUEUE to exceed the hardware-validated "
+            "16 MiB aggregate RX queue ceiling."
+        ),
+    ),
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Output format: table or json."
     ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--report",
+        help="Absent-only private canonical JSON report path beneath an owned mode-0700 parent.",
+    ),
+    usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--usb-sysfs-path",
+        help="Exact local USB sysfs node anchoring an isolated IP transport.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing Pluto NICs/routes around an IP ladder.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="Exact phrase ISOLATE USB SSH <interface> for temporary route isolation.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for durable host-isolation receipts.",
+    ),
 ) -> None:
-    """Directly ladder-test paired-RX USB or IP throughput without plutod."""
+    """Directly ladder-test RX0, RX1, or dual USB/IP throughput without plutod."""
 
     normalized_transport = transport.strip().lower()
     uri: str
@@ -962,39 +1248,777 @@ def radio_ladder(
             _fail("invalid_radio_target", "IP ladder target must be a literal IP address", 2)
         if address.version != 4:
             _fail("invalid_radio_target", "IP ladder currently supports IPv4 targets", 2)
+        if expect_serial is None:
+            _fail("missing_radio_identity", "IP ladder requires --expect-serial", 2)
         uri = f"ip:{address}"
         serial = expect_serial
     else:
         _fail("invalid_ladder_transport", "ladder transport must be usb or ip", 2)
 
+    isolation_plan = None
+    pluto_interfaces: tuple[str, ...] = ()
+    if isolate_usb_route:
+        if normalized_transport != "ip" or usb_sysfs_path is None:
+            _fail(
+                "host_isolation_target_required",
+                "throughput ladder route isolation requires IP transport and --usb-sysfs-path",
+                2,
+            )
+        from pluto_plus.host_isolation import HostIsolationError, prepare_usb_ssh_isolation
+
+        local_devices = scan_local_usb_plutos()
+        selected = [
+            item
+            for item in local_devices
+            if item.serial == serial and item.usb_path == str(usb_sysfs_path)
+        ]
+        if len(selected) != 1 or len(selected[0].host_network_interfaces) != 1:
+            _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
+        pluto_interfaces = tuple(
+            interface.name for item in local_devices for interface in item.host_network_interfaces
+        )
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                selected[0].host_network_interfaces[0].name,
+                uri.removeprefix("ip:"),
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        if isolation_confirmation != isolation_plan.confirmation_phrase:
+            _fail(
+                "host_isolation_confirmation_required",
+                f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
+                2,
+            )
+
     normalized_format = output_format.strip().lower()
     if normalized_format not in {"table", "json"}:
         _fail("invalid_ladder_format", "ladder format must be table or json", 2)
+    normalized_channels = channels.strip().lower()
+    if normalized_channels not in LADDER_CHANNEL_SELECTIONS:
+        _fail("ladder_failed", "channels must be rx0, rx1, or dual", 5)
     try:
         parsed_rates = parse_rate_ladder(rates)
     except ValueError as error:
         _fail("ladder_failed", str(error), 5)
+    allow_unsafe_kernel_queue = unsafe_kernel_queue_confirmation is not None
+    if (
+        allow_unsafe_kernel_queue
+        and unsafe_kernel_queue_confirmation != UNSAFE_KERNEL_QUEUE_CONFIRMATION
+    ):
+        _fail(
+            "unsafe_kernel_queue_confirmation_invalid",
+            f"--unsafe-kernel-queue-confirm must be exactly {UNSAFE_KERNEL_QUEUE_CONFIRMATION!r}",
+            2,
+        )
     environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
     if not environment.healthy:
         _fail(environment.status.value, environment.actionable_message, 5)
-    try:
-        report = run_iio_ladder(
+
+    def ladder_action() -> Any:
+        return run_iio_ladder(
             uri=uri,
             serial=serial,
             rates_hz=parsed_rates,
+            channels=LADDER_CHANNEL_SELECTIONS[normalized_channels],
             samples_per_channel=samples,
             frames=frames,
             warmup_frames=warmup_frames,
             kernel_buffers=kernel_buffers,
+            allow_unsafe_kernel_queue=allow_unsafe_kernel_queue,
         )
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            report = ladder_action()
+        else:
+            from pluto_plus.host_isolation import (
+                HostIsolationError,
+                HostIsolationExecutionError,
+                execute_usb_ssh_isolated,
+            )
+
+            try:
+                report, isolation_receipt = execute_usb_ssh_isolated(
+                    isolation_plan,
+                    confirmation=isolation_confirmation or "",
+                    receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                    action=ladder_action,
+                    pluto_interfaces=pluto_interfaces,
+                )
+            except HostIsolationExecutionError as error:
+                _emit({"host_isolation": asdict(error.receipt)})
+                raise typer.Exit(5) from error
+            except HostIsolationError as error:
+                _fail("host_isolation_failed", str(error), 4)
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         _fail("ladder_failed", str(error), 5)
+    if report_path is not None:
+        from pluto_plus.release_candidate import (
+            ReleaseCandidateContractError,
+            write_private_contract,
+        )
+
+        try:
+            write_private_contract(report_path.expanduser().absolute(), report)
+        except (OSError, ReleaseCandidateContractError) as error:
+            _fail("ladder_report_failed", str(error), 5)
     if normalized_format == "json":
-        _emit(report.model_dump(mode="json"))
+        payload = report.model_dump(mode="json")
+        _emit(
+            payload
+            if isolation_receipt is None
+            else {"host_isolation": asdict(isolation_receipt), "result": payload}
+        )
     else:
         typer.echo(_ladder_table(report))
+        if isolation_receipt is not None:
+            typer.echo(f"Host isolation receipt: {isolation_receipt.receipt_path}")
+        if report_path is not None:
+            typer.echo(f"Report: {report_path.expanduser().absolute()}")
     if report.failures:
         raise typer.Exit(5)
+
+
+@radio_app.command("metadata-ladder")
+def radio_metadata_ladder(
+    target: str = typer.Argument(
+        ...,
+        help="USB serial when --transport=usb, or a literal IPv4 address when using IP.",
+    ),
+    transport: str = typer.Option(
+        "usb", "--transport", "-t", help="Metadata libiio transport: usb or ip."
+    ),
+    expect_serial: str | None = typer.Option(
+        None,
+        "--expect-serial",
+        help="Require this exact radio serial (required for IP).",
+    ),
+    ip_port: int = typer.Option(
+        30_431,
+        "--ip-port",
+        min=1,
+        max=65_535,
+        help="IIO network port; accepted only with --transport=ip.",
+    ),
+    sample_rate_hz: int = typer.Option(
+        5_000_000,
+        "--sample-rate-hz",
+        min=1,
+        help="Exact native sample rate used for every refill-size rung.",
+    ),
+    rf_bandwidth_hz: int = typer.Option(
+        5_000_000,
+        "--rf-bandwidth-hz",
+        min=1,
+        help="Exact analog RF bandwidth; must not exceed the sample rate.",
+    ),
+    metadata_abi: int = typer.Option(
+        1,
+        "--metadata-abi",
+        min=1,
+        max=3,
+        help="Exact release-local and radio metadata ABI to attest.",
+    ),
+    channels: str = typer.Option(
+        "dual",
+        "--channels",
+        help="Canonical receive layout: rx0, rx1, or dual (single RX requires ABI 3).",
+    ),
+    samples: str = typer.Option(
+        DEFAULT_METADATA_SAMPLE_LADDER,
+        "--samples",
+        help="Strictly descending comma-separated samples/channel rungs.",
+    ),
+    frames: int = typer.Option(
+        6,
+        "--frames",
+        min=2,
+        max=MAX_METADATA_FRAMES,
+        help="Counter-observed metadata frames requested at each rung.",
+    ),
+    kernel_buffers: int = typer.Option(
+        4,
+        "--kernel-buffers",
+        min=4,
+        max=64,
+        help="Explicit RX kernel-buffer count; at least four are required.",
+    ),
+    ddr_burst: bool = typer.Option(
+        False,
+        "--ddr-burst",
+        help=(
+            "Opt in to device-RAM burst capture; each rung requests exactly --frames "
+            "whole IQ frames (metadata ABI 3, one receiver)."
+        ),
+    ),
+    ddr_ring_bytes: int = typer.Option(
+        0,
+        "--ddr-ring-bytes",
+        min=0,
+        max=MAX_DDR_RING_IQ_BYTES,
+        help=(
+            "Opt in to the streaming device-DDR ring with this IQ-byte capacity; "
+            "each rung remains a finite --frames capture (metadata ABI 3)."
+        ),
+    ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--report",
+        help="Absent-only private canonical JSON report path beneath an owned mode-0700 parent.",
+    ),
+    usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--usb-sysfs-path",
+        help="Exact local USB sysfs node anchoring an isolated IP transport.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing Pluto NICs/routes around an IP ladder.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="Exact phrase ISOLATE USB SSH <interface> for temporary route isolation.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for durable host-isolation receipts.",
+    ),
+) -> None:
+    """Find the largest refill preserving FPGA-counter continuity."""
+
+    normalized_transport = transport.strip().lower()
+    uri: str
+    serial: str
+    isolation_endpoint: str | None = None
+    if normalized_transport == "usb":
+        if ip_port != 30_431:
+            _fail(
+                "invalid_metadata_ladder_port",
+                "--ip-port is accepted only with --transport=ip",
+                2,
+            )
+        if expect_serial is not None and expect_serial != target:
+            _fail(
+                "radio_identity_mismatch",
+                "for USB, TARGET is the serial and must equal --expect-serial",
+                2,
+            )
+        uri = "usb:"
+        serial = target
+    elif normalized_transport == "ip":
+        candidate = target.removeprefix("ip:")
+        try:
+            address = ip_address(candidate)
+        except ValueError:
+            _fail(
+                "invalid_radio_target",
+                "IP metadata ladder target must be a literal IP address",
+                2,
+            )
+        if address.version != 4:
+            _fail(
+                "invalid_radio_target",
+                "IP metadata ladder currently supports IPv4 targets",
+                2,
+            )
+        if expect_serial is None:
+            _fail(
+                "missing_radio_identity",
+                "IP metadata ladder requires --expect-serial",
+                2,
+            )
+        isolation_endpoint = str(address)
+        uri = f"ip:{address}" if ip_port == 30_431 else f"ip:{address}:{ip_port}"
+        serial = expect_serial
+    else:
+        _fail(
+            "invalid_metadata_ladder_transport",
+            "metadata ladder transport must be usb or ip",
+            2,
+        )
+    isolation_plan = None
+    pluto_interfaces: tuple[str, ...] = ()
+    if isolate_usb_route:
+        if normalized_transport != "ip" or usb_sysfs_path is None:
+            _fail(
+                "host_isolation_target_required",
+                "metadata ladder route isolation requires IP transport and --usb-sysfs-path",
+                2,
+            )
+        from pluto_plus.host_isolation import HostIsolationError, prepare_usb_ssh_isolation
+
+        local_devices = scan_local_usb_plutos()
+        selected = [
+            item
+            for item in local_devices
+            if item.serial == serial and item.usb_path == str(usb_sysfs_path)
+        ]
+        if len(selected) != 1 or len(selected[0].host_network_interfaces) != 1:
+            _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
+        pluto_interfaces = tuple(
+            interface.name for item in local_devices for interface in item.host_network_interfaces
+        )
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                selected[0].host_network_interfaces[0].name,
+                isolation_endpoint or "",
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        if isolation_confirmation != isolation_plan.confirmation_phrase:
+            _fail(
+                "host_isolation_confirmation_required",
+                f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
+                2,
+            )
+    try:
+        parsed_samples = parse_metadata_sample_ladder(samples)
+    except ValueError as error:
+        _fail("metadata_ladder_failed", str(error), 5)
+    environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    normalized_channels = channels.strip().lower()
+    if metadata_abi not in {1, 2, 3}:
+        _fail("metadata_ladder_failed", "metadata ABI must be 1, 2, or 3", 5)
+    if normalized_channels not in METADATA_CHANNEL_SELECTIONS:
+        _fail("metadata_ladder_failed", "channels must be rx0, rx1, or dual", 5)
+
+    def ladder_action() -> Any:
+        return run_metadata_continuity_ladder(
+            uri=uri,
+            serial=serial,
+            sample_rate_hz=sample_rate_hz,
+            rf_bandwidth_hz=rf_bandwidth_hz,
+            metadata_abi=cast(Any, metadata_abi),
+            channels=METADATA_CHANNEL_SELECTIONS[cast(Any, normalized_channels)],
+            samples_per_channel=parsed_samples,
+            frames=frames,
+            kernel_buffers=kernel_buffers,
+            ddr_burst=ddr_burst,
+            ddr_ring_bytes=ddr_ring_bytes,
+        )
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            report = ladder_action()
+        else:
+            from pluto_plus.host_isolation import (
+                HostIsolationError,
+                HostIsolationExecutionError,
+                execute_usb_ssh_isolated,
+            )
+
+            try:
+                report, isolation_receipt = execute_usb_ssh_isolated(
+                    isolation_plan,
+                    confirmation=isolation_confirmation or "",
+                    receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                    action=ladder_action,
+                    pluto_interfaces=pluto_interfaces,
+                )
+            except HostIsolationExecutionError as error:
+                _emit({"host_isolation": asdict(error.receipt)})
+                raise typer.Exit(5) from error
+            except HostIsolationError as error:
+                _fail("host_isolation_failed", str(error), 4)
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("metadata_ladder_failed", str(error), 5)
+    if report_path is not None:
+        from pluto_plus.release_candidate import (
+            ReleaseCandidateContractError,
+            write_private_contract,
+        )
+
+        try:
+            write_private_contract(report_path.expanduser().absolute(), report)
+        except (OSError, ReleaseCandidateContractError) as error:
+            _fail("metadata_ladder_report_failed", str(error), 5)
+    payload = report.model_dump(mode="json")
+    _emit(
+        payload
+        if isolation_receipt is None
+        else {"host_isolation": asdict(isolation_receipt), "result": payload}
+    )
+    if report.failures or report.largest_passing_samples_per_channel is None:
+        raise typer.Exit(5)
+
+
+@radio_app.command("fastlock-probe")
+def radio_fastlock_probe(
+    serial: str = typer.Argument(..., help="Exact serial of one locally attached USB Pluto+."),
+    lower_hz: int = typer.Option(
+        DEFAULT_LOWER_FREQUENCY_HZ,
+        "--lower-hz",
+        min=70_000_000,
+        max=6_000_000_000,
+        help="Lower RX-LO frequency in Hz.",
+    ),
+    upper_hz: int = typer.Option(
+        DEFAULT_UPPER_FREQUENCY_HZ,
+        "--upper-hz",
+        min=70_000_000,
+        max=6_000_000_000,
+        help="Upper RX-LO frequency in Hz.",
+    ),
+    hops: int = typer.Option(
+        DEFAULT_HOPS_PER_MODE,
+        "--hops",
+        min=2,
+        max=MAX_HOPS_PER_MODE,
+        help="Even hop count for each of ordinary tuning and Fast Lock.",
+    ),
+    dwell_us: int = typer.Option(
+        DEFAULT_DWELL_US,
+        "--dwell-us",
+        min=0,
+        max=1_000_000,
+        help="Host dwell after each control-plane hop.",
+    ),
+    profile_settle_ms: int = typer.Option(
+        DEFAULT_PROFILE_SETTLE_MS,
+        "--profile-settle-ms",
+        min=0,
+        max=1_000,
+        help="Settle time before storing each volatile synthesizer profile.",
+    ),
+    lower_profile: int = typer.Option(DEFAULT_LOWER_PROFILE, "--lower-profile", min=0, max=7),
+    upper_profile: int = typer.Option(DEFAULT_UPPER_PROFILE, "--upper-profile", min=0, max=7),
+    max_seconds: int = typer.Option(
+        DEFAULT_MAX_SECONDS,
+        "--max-seconds",
+        min=1,
+        max=MAX_SECONDS,
+        help=(
+            "Cooperative operation budget checked around every dwell; the finite IIO timeout "
+            "also bounds a stalled USB call, and the maximum is five minutes."
+        ),
+    ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None, "--report", help="Durable atomic JSON timing/restoration receipt."
+    ),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table or json."
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Run the bounded live USB workload, asserting the selected radio is idle.",
+    ),
+    confirmation: str | None = typer.Option(
+        None, "--confirm", help="With --execute, the exact phrase printed by the dry run."
+    ),
+) -> None:
+    """Compare ordinary RX tuning with AD9361 Fast Lock on one exact local USB radio."""
+
+    normalized_format = output_format.strip().lower()
+    if normalized_format not in {"table", "json"}:
+        _fail("invalid_fastlock_format", "Fast Lock format must be table or json", 2)
+    try:
+        plan = prepare_usb_fastlock_probe(
+            serial,
+            lower_frequency_hz=lower_hz,
+            upper_frequency_hz=upper_hz,
+            lower_profile=lower_profile,
+            upper_profile=upper_profile,
+            hops_per_mode=hops,
+            dwell_us=dwell_us,
+            profile_settle_ms=profile_settle_ms,
+            max_seconds=max_seconds,
+        )
+    except (FastLockProbeError, ValueError) as error:
+        _fail("fastlock_plan_failed", str(error), 2)
+    selected_report = (
+        DEFAULT_FASTLOCK_REPORTS / f"fastlock-{plan.serial}-{time.time_ns()}.json"
+        if report_path is None
+        else report_path.expanduser().resolve()
+    )
+    if not execute:
+        _emit(
+            {
+                "execute": False,
+                "plan": plan.model_dump(mode="json"),
+                "confirmation_phrase": plan.expected_confirmation,
+                "report_path": str(selected_report),
+            }
+        )
+        return
+    if confirmation != plan.expected_confirmation:
+        _fail(
+            "fastlock_confirmation_required",
+            f"--confirm must be exactly {plan.expected_confirmation!r}",
+            2,
+        )
+    environment = inspect_iio_environment(require_usb=True)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        report = run_usb_fastlock_probe(plan)
+        write_fastlock_report(selected_report, report)
+    except (FastLockProbeError, ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("fastlock_probe_failed", str(error), 5)
+    if normalized_format == "json":
+        _emit(
+            {
+                "report": report.model_dump(mode="json"),
+                "report_path": str(selected_report),
+            }
+        )
+    else:
+        typer.echo(_fastlock_table(report, selected_report))
+
+
+@radio_app.command("soak-metadata")
+def radio_soak_metadata(
+    target: str = typer.Argument(..., help="Literal private IPv4 address of one radio."),
+    expect_serial: str = typer.Option(
+        ..., "--expect-serial", help="Require this exact radio serial over IIO and SSH."
+    ),
+    slots: int = typer.Option(
+        9,
+        "--slots",
+        min=1,
+        max=MAX_SLOTS,
+        help="Bounded context slots; the full long-soak maximum is 936.",
+    ),
+    profile_id: str = typer.Option(
+        "tandem-agc-v7-release-ram",
+        "--profile",
+        help="Exact immutable ABI-2/3 tandem firmware profile.",
+    ),
+    ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts file pinned to this exact radio and endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Optional private one-line radio password file; otherwise prompt.",
+    ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None, "--report", help="Durable atomic JSON report path."
+    ),
+    execute: bool = typer.Option(False, "--execute", help="Run the bounded live workload."),
+    confirmation: str | None = typer.Option(
+        None, "--confirm", help="With --execute, the exact phrase printed by the dry run."
+    ),
+) -> None:
+    """Soak repeated ABI-2/3 metadata context/retune/buffer lifecycles."""
+
+    try:
+        plan = prepare_metadata_soak(
+            target,
+            expect_serial,
+            slots=slots,
+            profile_id=profile_id,
+        )
+    except MetadataSoakError as error:
+        _fail("metadata_soak_plan_failed", str(error), 2)
+    selected_report = (
+        DEFAULT_METADATA_SOAK_REPORTS / f"metadata-{plan.serial}-{time.time_ns()}.json"
+        if report_path is None
+        else report_path.expanduser().resolve()
+    )
+    if not execute:
+        _emit(
+            {
+                "execute": False,
+                "plan": plan.model_dump(mode="json"),
+                "confirmation_phrase": plan.confirmation_phrase,
+                "report_path": str(selected_report),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "metadata_soak_confirmation_required",
+            f"--confirm must be exactly {plan.confirmation_phrase!r}",
+            2,
+        )
+    if ssh_known_hosts_file is None:
+        _fail(
+            "metadata_soak_known_hosts_required",
+            "--execute requires --ssh-known-hosts-file",
+            2,
+        )
+    if selected_report.exists():
+        _fail(
+            "metadata_soak_report_exists",
+            "refusing to replace an existing metadata soak report",
+            2,
+        )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().resolve()
+    _read_private_file_bytes(
+        selected_known_hosts,
+        label="metadata soak SSH known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    password = (
+        typer.prompt("Radio root password", hide_input=True)
+        if ssh_password_file is None
+        else _read_private_text_file(
+            ssh_password_file.expanduser().resolve(), label="metadata soak SSH password"
+        )
+    )
+    environment = inspect_iio_environment()
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        transport = BoundSshTransport(
+            host=plan.target,
+            interface=None,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+        probe = SshMetadataHealthProbe(transport, serial=plan.serial)
+        report = execute_metadata_soak(
+            plan,
+            report_path=selected_report,
+            health_probe=probe,
+            slot_runner=run_live_metadata_slot,
+        )
+    except (ImportError, MetadataSoakError, OSError, RuntimeError, ValueError) as error:
+        _fail("metadata_soak_failed", str(error), 5)
+    _emit(report.model_dump(mode="json"))
+
+
+@radio_app.command("qualify-ddr-recovery")
+def radio_qualify_ddr_recovery(
+    target: str = typer.Argument(..., help="Literal private IPv4 address of one radio."),
+    expect_serial: str = typer.Option(
+        ..., "--expect-serial", help="Require this exact radio serial over IIO and SSH."
+    ),
+    cycles: int = typer.Option(
+        20,
+        "--cycles",
+        min=1,
+        max=MAX_DDR_RECOVERY_CYCLES,
+        help="Abrupt 200 MB DDR disconnect/reopen cycles; RX0 and RX1 alternate.",
+    ),
+    mode: str = typer.Option(
+        "burst",
+        "--mode",
+        help="DDR client semantics to interrupt: burst or ring.",
+    ),
+    disconnect_delay_ms: int = typer.Option(
+        DEFAULT_DISCONNECT_DELAY_MS,
+        "--disconnect-delay-ms",
+        min=MIN_DISCONNECT_DELAY_MS,
+        max=MAX_DISCONNECT_DELAY_MS,
+        help="Delay after victim admission before the process is terminated.",
+    ),
+    profile_id: str = typer.Option(
+        "ddr-burst-v1-release-ram",
+        "--profile",
+        help="Exact immutable ABI-3 firmware profile supporting the selected DDR mode.",
+    ),
+    ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts file pinned to this exact radio and endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Optional private one-line radio password file; otherwise prompt.",
+    ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None, "--report", help="Absent-only private atomic JSON report path."
+    ),
+    execute: bool = typer.Option(False, "--execute", help="Run the destructive-client workload."),
+    confirmation: str | None = typer.Option(
+        None, "--confirm", help="With --execute, the exact phrase printed by the dry run."
+    ),
+) -> None:
+    """Prove immediate IIO recovery after abrupt high-rate DDR client loss."""
+
+    try:
+        plan = prepare_ddr_recovery(
+            target,
+            expect_serial,
+            cycles=cycles,
+            profile_id=profile_id,
+            mode=cast(Any, mode.strip().lower()),
+            disconnect_delay_ms=disconnect_delay_ms,
+        )
+    except DdrRecoveryError as error:
+        _fail("ddr_recovery_plan_failed", str(error), 2)
+    selected_report = (
+        DEFAULT_DDR_RECOVERY_REPORTS
+        / f"ddr-{plan.mode}-recovery-{plan.serial}-{time.time_ns()}.json"
+        if report_path is None
+        else report_path.expanduser().resolve()
+    )
+    if not execute:
+        _emit(
+            {
+                "execute": False,
+                "plan": plan.model_dump(mode="json"),
+                "confirmation_phrase": plan.confirmation_phrase,
+                "report_path": str(selected_report),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "ddr_recovery_confirmation_required",
+            f"--confirm must be exactly {plan.confirmation_phrase!r}",
+            2,
+        )
+    if ssh_known_hosts_file is None:
+        _fail(
+            "ddr_recovery_known_hosts_required",
+            "--execute requires --ssh-known-hosts-file",
+            2,
+        )
+    if selected_report.exists():
+        _fail(
+            "ddr_recovery_report_exists",
+            "refusing to replace an existing DDR recovery report",
+            2,
+        )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().resolve()
+    _read_private_file_bytes(
+        selected_known_hosts,
+        label="DDR recovery SSH known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    password = (
+        typer.prompt("Radio root password", hide_input=True)
+        if ssh_password_file is None
+        else _read_private_text_file(
+            ssh_password_file.expanduser().resolve(), label="DDR recovery SSH password"
+        )
+    )
+    environment = inspect_iio_environment(require_usb=False)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        transport = BoundSshTransport(
+            host=plan.target,
+            interface=None,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+        probe = SshMetadataHealthProbe(transport, serial=plan.serial)
+        report = execute_ddr_recovery(
+            plan,
+            report_path=selected_report,
+            health_probe=probe,
+            cycle_runner=run_live_ddr_recovery_cycle,
+        )
+    except (DdrRecoveryError, ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("ddr_recovery_failed", str(error), 5)
+    _emit(report.model_dump(mode="json"))
 
 
 @radio_app.command("qualify-tandem")
@@ -1023,7 +2047,7 @@ def radio_qualify_tandem(
     profile_id: str = typer.Option(
         "tandem-agc-v7-release-ram",
         "--profile",
-        help="Exact immutable ABI-2 tandem firmware profile to qualify.",
+        help="Exact immutable ABI-2/3 tandem firmware profile to qualify.",
     ),
     execute: bool = typer.Option(
         False,
@@ -1075,8 +2099,7 @@ def radio_qualify_tandem(
                 "plan": asdict(plan),
                 "report_path": str(selected_report.expanduser().resolve()),
                 "next_command": (
-                    "repeat with --execute and "
-                    f"--confirm {json.dumps(plan.confirmation_phrase)}"
+                    f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
                 ),
             }
         )
@@ -1109,9 +2132,346 @@ def radio_status(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> Non
 
 
 @radio_app.command("recover")
-def radio_recover(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> None:
-    """Reopen an errored/offline radio and re-attest its stable serial."""
-    _emit(_api(ctx).request("POST", f"radios/{radio_id}/recover"))
+def radio_recover(
+    ctx: typer.Context,
+    radio_id: str = typer.Argument(...),
+    data_plane: bool = typer.Option(
+        False,
+        "--data-plane",
+        help="Probe a wedged data plane and restart its attested iiOD over SSH.",
+    ),
+    usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--usb-sysfs-path",
+        help="Optional exact local USB node; otherwise derive it from SERIAL.",
+    ),
+    ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts pinned to the exact recovery endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Optional private one-line root password file; otherwise prompt on execution.",
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1",
+        "--ssh-host",
+        help="Literal private SSH IPv4; 192.168.2.1 uses the exact USB interface.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Restart iiOD only after the bounded pre-probe confirms a timeout.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase RESTART IIOD <serial>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_DATA_PLANE_RECOVERY_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for the durable recovery receipt.",
+    ),
+) -> None:
+    """Recover controller resources, or explicitly repair a wedged iiOD data plane."""
+
+    if not data_plane:
+        local_options = (
+            usb_sysfs_path,
+            ssh_known_hosts_file,
+            ssh_password_file,
+            confirmation,
+        )
+        if execute or any(value is not None for value in local_options):
+            _fail(
+                "data_plane_recovery_flag_required",
+                "local SSH recovery options require --data-plane",
+                2,
+            )
+        _emit(_api(ctx).request("POST", f"radios/{radio_id}/recover"))
+        return
+    _recover_data_plane(
+        radio_id,
+        usb_sysfs_path=usb_sysfs_path,
+        ssh_known_hosts_file=ssh_known_hosts_file,
+        ssh_password_file=ssh_password_file,
+        ssh_host=ssh_host,
+        execute=execute,
+        confirmation=confirmation,
+        receipt_directory=receipt_directory,
+    )
+
+
+@radio_app.command("data-plane-status")
+def radio_data_plane_status(
+    serial: str = typer.Argument(..., help="Exact serial of the network radio."),
+    ssh_host: str = typer.Option(
+        ...,
+        "--ssh-host",
+        help="Exact private LAN IPv4 used for both pinned SSH and the IIO probe.",
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--ssh-known-hosts-file",
+        help="Private known_hosts pinned to this exact LAN endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Private one-line root password file; otherwise prompt without echo.",
+    ),
+    probe: bool = typer.Option(
+        False,
+        "--probe",
+        help="Bracket one bounded two-receiver LAN refill with runtime snapshots.",
+    ),
+) -> None:
+    """Read exact-radio IIOD, IIO-buffer, DMA, IRQ, and kernel runtime evidence."""
+
+    from pluto_plus.data_plane import (
+        DataPlaneRecoveryError,
+        inspect_data_plane_runtime,
+        probe_iio_data_plane,
+    )
+    from pluto_plus.setup_helper import SetupHelperError
+
+    try:
+        address = ip_address(ssh_host)
+    except ValueError:
+        _fail("invalid_data_plane_status_host", "--ssh-host must be a literal IPv4", 2)
+    if address.version != 4 or not address.is_private or str(address) != ssh_host:
+        _fail(
+            "invalid_data_plane_status_host",
+            "--ssh-host must be a canonical private IPv4",
+            2,
+        )
+    if ssh_host == "192.168.2.1":
+        _fail(
+            "invalid_data_plane_status_host",
+            "data-plane status currently requires a unique LAN endpoint, not shared USB SSH",
+            2,
+        )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    _read_private_file_bytes(
+        selected_known_hosts,
+        label="data-plane status known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    password = (
+        typer.prompt("Radio SSH password", hide_input=True)
+        if ssh_password_file is None
+        else _read_private_text_file(
+            ssh_password_file.expanduser().absolute(), label="radio SSH password"
+        )
+    )
+    try:
+        transport = BoundSshTransport(
+            host=ssh_host,
+            interface=None,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+        before = inspect_data_plane_runtime(transport, serial)
+        bounded_probe = (
+            probe_iio_data_plane(f"ip:{ssh_host}", serial) if probe else None
+        )
+        after = inspect_data_plane_runtime(transport, serial) if probe else None
+    except (DataPlaneRecoveryError, SetupHelperError, OSError, ValueError) as error:
+        _fail("data_plane_status_failed", str(error), 4)
+    _emit(
+        {
+            "before": before.model_dump(mode="json"),
+            "probe": None if bounded_probe is None else bounded_probe.model_dump(mode="json"),
+            "after": None if after is None else after.model_dump(mode="json"),
+        }
+    )
+
+
+def _recover_data_plane(
+    serial: str,
+    *,
+    usb_sysfs_path: Path | None,
+    ssh_known_hosts_file: Path | None,
+    ssh_password_file: Path | None,
+    ssh_host: str,
+    execute: bool,
+    confirmation: str | None,
+    receipt_directory: Path,
+) -> None:
+    from pluto_plus.data_plane import (
+        IIOD_RECOVERY_SCHEMA,
+        IiodRecoveryReceipt,
+        new_recovery_receipt_id,
+        probe_iio_data_plane,
+        restart_attested_iiod,
+        utc_now,
+        wait_for_iio_data_plane,
+    )
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
+        write_private_contract,
+    )
+
+    try:
+        ssh_address = ip_address(ssh_host)
+    except ValueError:
+        _fail("invalid_data_plane_recovery_host", "--ssh-host must be a literal IPv4", 2)
+    if ssh_address.version != 4 or not ssh_address.is_private:
+        _fail("invalid_data_plane_recovery_host", "--ssh-host must be a private IPv4", 2)
+    ssh_host = str(ssh_address)
+    if ssh_known_hosts_file is None:
+        _fail(
+            "data_plane_recovery_trust_required",
+            "--data-plane requires --ssh-known-hosts-file",
+            2,
+        )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    known_hosts_bytes = _read_private_file_bytes(
+        selected_known_hosts,
+        label="data-plane recovery known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    local_matches = [
+        device
+        for device in scan_local_usb_plutos()
+        if device.serial == serial
+        and (usb_sysfs_path is None or device.usb_path == str(usb_sysfs_path))
+    ]
+    selected_usb: LocalUsbPluto | None = None
+    interface: str | None = None
+    probe_uri: str
+    if ssh_host == "192.168.2.1":
+        if len(local_matches) != 1:
+            _fail(
+                "data_plane_recovery_target_ambiguous",
+                f"expected one local USB radio with serial {serial!r}, found {len(local_matches)}",
+                4,
+            )
+        selected_usb = local_matches[0]
+        if len(selected_usb.host_network_interfaces) != 1:
+            _fail(
+                "data_plane_recovery_target_ambiguous",
+                "selected USB radio does not expose one exact host network interface",
+                4,
+            )
+        interface = selected_usb.host_network_interfaces[0].name
+        probe_uri = "usb:"
+    else:
+        if usb_sysfs_path is not None and len(local_matches) != 1:
+            _fail(
+                "data_plane_recovery_target_ambiguous",
+                "the requested USB path does not match one local radio with the expected serial",
+                4,
+            )
+        selected_usb = local_matches[0] if len(local_matches) == 1 else None
+        probe_uri = f"ip:{ssh_host}"
+    environment = inspect_iio_environment(require_usb=probe_uri == "usb:")
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    before = probe_iio_data_plane(probe_uri, serial)
+    confirmation_phrase = f"RESTART IIOD {serial}"
+    dry_run = {
+        "mode": "dry_run",
+        "serial": serial,
+        "ssh_host": ssh_host,
+        "ssh_interface": interface,
+        "usb_sysfs_path": None if selected_usb is None else selected_usb.usb_path,
+        "before_probe": before.model_dump(mode="json"),
+        "will_restart_iiod": False,
+        "eligible_for_restart": before.failure_kind == "timeout",
+        "next_command": (
+            None
+            if before.status == "pass" or before.failure_kind != "timeout"
+            else f"repeat with --execute and --confirm {json.dumps(confirmation_phrase)}"
+        ),
+    }
+    if not execute:
+        _emit(dry_run)
+        return
+    if before.status == "pass":
+        _emit({**dry_run, "mode": "already_healthy"})
+        return
+    if before.failure_kind != "timeout":
+        _fail(
+            "data_plane_recovery_not_eligible",
+            "iiOD restart is allowed only for a bounded RX timeout; "
+            f"probe failed as {before.failure_kind}: {before.error}",
+            4,
+        )
+    if confirmation != confirmation_phrase:
+        _fail(
+            "data_plane_recovery_confirmation_required",
+            f"--execute requires --confirm {confirmation_phrase!r}",
+            2,
+        )
+    if ssh_password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        password = _read_private_text_file(
+            ssh_password_file.expanduser().absolute(), label="radio SSH password"
+        )
+
+    receipt_id = new_recovery_receipt_id()
+    started_at = utc_now()
+    restart = None
+    after = None
+    error_text: str | None = None
+    try:
+        transport = BoundSshTransport(
+            host=ssh_host,
+            interface=interface,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+        )
+        restart = restart_attested_iiod(transport, serial)
+        after = wait_for_iio_data_plane(probe_uri, serial)
+        if after.status != "pass":
+            raise RuntimeError(f"post-restart data-plane probe failed: {after.error}")
+    except Exception as error:
+        error_text = f"{type(error).__name__}: {error}"
+    receipt = IiodRecoveryReceipt(
+        schema=IIOD_RECOVERY_SCHEMA,
+        receipt_id=receipt_id,
+        started_at=started_at,
+        finished_at=utc_now(),
+        serial=serial,
+        uri=probe_uri,
+        ssh_host=ssh_host,
+        ssh_interface=interface,
+        usb_sysfs_path=None if selected_usb is None else selected_usb.usb_path,
+        known_hosts_sha256=hashlib.sha256(known_hosts_bytes).hexdigest(),
+        before_probe=before,
+        restart=restart,
+        after_probe=after,
+        outcome="recovered" if error_text is None else "failed",
+        error=error_text,
+    )
+    selected_directory = receipt_directory.expanduser().absolute()
+    try:
+        selected_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory_state = selected_directory.lstat()
+        if (
+            not stat.S_ISDIR(directory_state.st_mode)
+            or selected_directory.is_symlink()
+            or directory_state.st_uid != os.getuid()
+            or stat.S_IMODE(directory_state.st_mode) != 0o700
+        ):
+            raise OSError("receipt directory must be an owned mode-0700 real directory")
+        identity = write_private_contract(selected_directory / f"{receipt_id}.json", receipt)
+    except (OSError, ReleaseCandidateContractError) as error:
+        _fail("data_plane_recovery_receipt_failed", str(error), 5)
+    payload = {
+        "receipt": receipt.model_dump(mode="json", by_alias=True),
+        "receipt_path": str(identity.path),
+        "receipt_sha256": identity.sha256,
+    }
+    if error_text is not None:
+        _emit(payload)
+        raise typer.Exit(5)
+    _emit(payload)
 
 
 @config_app.command("status")
@@ -1126,6 +2486,289 @@ def config_show(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> None
     """Read structured network settings and password-redacted config.txt."""
 
     _emit(_api(ctx).request("GET", f"radios/{radio_id}/config"))
+
+
+def _standalone_network_plan_payload(plan: Any) -> dict[str, Any]:
+    return {
+        "plan_id": plan.plan_id,
+        "created_at": plan.created_at.isoformat(),
+        "expires_at": plan.expires_at.isoformat(),
+        "identity": plan.identity.model_dump(mode="json"),
+        "before": plan.before.model_dump(mode="json"),
+        "interface": plan.interface.value,
+        "mode": plan.mode.value,
+        "address": plan.address,
+        "netmask": plan.netmask,
+        "host_address": plan.host_address,
+        "changes": plan.changes,
+        "confirmation": plan.confirmation,
+        "endpoint_after_restart": plan.endpoint_after_restart,
+        "restart_required": plan.restart_required,
+    }
+
+
+def _standalone_network_receipt_payload(receipt: Any) -> dict[str, Any]:
+    payload = asdict(receipt)
+    payload["started_at"] = receipt.started_at.isoformat()
+    payload["finished_at"] = receipt.finished_at.isoformat()
+    payload["identity"] = receipt.identity.model_dump(mode="json")
+    payload["interface"] = receipt.interface.value
+    payload["mode"] = receipt.mode.value
+    payload["changes"] = receipt.changes
+    return payload
+
+
+@config_app.command("bootstrap-ethernet")
+def config_bootstrap_ethernet(
+    serial: str = typer.Argument(..., help="Exact stable serial of the local USB radio."),
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ...,
+        "--usb-sysfs-path",
+        help="Exact direct /sys/bus/usb/devices path for the selected radio.",
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--ssh-known-hosts-file",
+        help="Previously enrolled private known_hosts file for this exact USB endpoint.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Private radio password file; otherwise execution prompts without echo.",
+    ),
+    inspect_only: bool = typer.Option(
+        False,
+        "--inspect-only",
+        help="Read persistent settings and the live Ethernet IPv4 without planning a change.",
+    ),
+    mode: str = typer.Option("static", "--mode", help="Ethernet mode: static or dhcp."),
+    address: str | None = typer.Option(None, "--address", help="Static Ethernet IPv4."),
+    netmask: str | None = typer.Option(
+        None, "--netmask", help="Static dotted-decimal Ethernet netmask."
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Persist the validated Ethernet variables; omission only inspects and plans.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, the exact SET STATIC IP ... or SET DHCP ... phrase.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_NETWORK_CONFIG_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for network-config receipts and environment backups.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing Pluto USB routes with a durable receipt.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="Exact phrase ISOLATE USB SSH <interface> for temporary route isolation.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for host-isolation receipts.",
+    ),
+) -> None:
+    """Inspect or persist Ethernet settings through one exact USB-attached radio."""
+
+    from pluto_plus.host_isolation import (
+        HostIsolationError,
+        HostIsolationExecutionError,
+        execute_usb_ssh_isolated,
+        prepare_usb_ssh_isolation,
+    )
+    from pluto_plus.ip_firmware import (
+        IpFirmwareError,
+        SshNetworkConfigBackend,
+        pinned_ssh_host_key_fingerprint,
+    )
+    from pluto_plus.network_config import (
+        NetworkAddressMode,
+        NetworkConfigError,
+        NetworkConfigExecutionError,
+        NetworkConfigIdentity,
+        NetworkConfigManager,
+        NetworkInterface,
+    )
+    from pluto_plus.setup_helper import SetupHelperError
+
+    endpoint = "192.168.2.1"
+    local_devices = scan_local_usb_plutos()
+    selected = [
+        item
+        for item in local_devices
+        if item.serial == serial and item.usb_path == str(usb_sysfs_path)
+    ]
+    if len(selected) != 1 or len(selected[0].host_network_interfaces) != 1:
+        _fail(
+            "network_bootstrap_identity_unavailable",
+            "serial and USB path must identify one radio with one network interface",
+            4,
+        )
+    interface = selected[0].host_network_interfaces[0].name
+    pluto_interfaces = tuple(
+        network.name for item in local_devices for network in item.host_network_interfaces
+    )
+    selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    _read_private_file_bytes(
+        selected_known_hosts,
+        label="radio SSH known-hosts",
+        maximum_bytes=1024 * 1024,
+    )
+    try:
+        fingerprint = pinned_ssh_host_key_fingerprint(selected_known_hosts, endpoint)
+        selected_mode = NetworkAddressMode(mode)
+    except ValueError as error:
+        _fail("network_bootstrap_preflight_failed", str(error), 2)
+    if inspect_only and (
+        execute or address is not None or netmask is not None or confirmation is not None
+    ):
+        _fail(
+            "network_bootstrap_inspect_only_conflict",
+            "--inspect-only does not accept mutation planning or execution options",
+            2,
+        )
+
+    isolation_plan = None
+    if isolate_usb_route:
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                interface,
+                endpoint,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        if isolation_confirmation != isolation_plan.confirmation_phrase:
+            _fail(
+                "host_isolation_confirmation_required",
+                f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
+                2,
+            )
+
+    if ssh_password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        password = _read_private_text_file(
+            ssh_password_file.expanduser().absolute(), label="radio SSH password"
+        )
+
+    failed_receipt: dict[str, Any] | None = None
+
+    def configure_action() -> tuple[Any, Any | None]:
+        nonlocal failed_receipt
+        ssh = BoundSshTransport(
+            host=endpoint,
+            interface=interface,
+            password=password,
+            known_hosts_file=selected_known_hosts,
+            route_preflight=(None if isolation_plan is None else lambda: None),
+        )
+        backend = SshNetworkConfigBackend(
+            endpoint=endpoint,
+            host_key_fingerprint=fingerprint,
+            command_runner=ssh.run,
+        )
+        manager = NetworkConfigManager(
+            identity=NetworkConfigIdentity(
+                serial=serial,
+                endpoint=endpoint,
+                host_key_fingerprint=fingerprint,
+            ),
+            backend=backend,
+            receipt_directory=receipt_directory.expanduser().absolute(),
+        )
+        if inspect_only:
+            return manager.inspect(), None
+        planned = manager.create_plan(
+            interface=NetworkInterface.ETHERNET,
+            mode=selected_mode,
+            address=address,
+            netmask=netmask,
+            host_address=None,
+        )
+        if not execute:
+            return planned.plan, None
+        if confirmation != planned.plan.confirmation:
+            raise NetworkConfigError(f"--execute requires --confirm {planned.plan.confirmation!r}")
+        try:
+            receipt = manager.execute(
+                planned.plan,
+                planned.confirmation_token,
+                confirmation or "",
+            )
+        except NetworkConfigExecutionError as error:
+            failed_receipt = _standalone_network_receipt_payload(error.receipt)
+            raise
+        return planned.plan, receipt
+
+    isolation_receipt = None
+    try:
+        if isolation_plan is None:
+            plan, receipt = configure_action()
+        else:
+            (plan, receipt), isolation_receipt = execute_usb_ssh_isolated(
+                isolation_plan,
+                confirmation=isolation_confirmation or "",
+                receipt_directory=isolation_receipt_directory.expanduser().absolute(),
+                action=configure_action,
+                pluto_interfaces=pluto_interfaces,
+            )
+    except HostIsolationExecutionError as error:
+        payload: dict[str, Any] = {"host_isolation": asdict(error.receipt)}
+        if failed_receipt is not None:
+            payload["network_config"] = failed_receipt
+        _emit(payload)
+        raise typer.Exit(5) from error
+    except HostIsolationError as error:
+        _fail("host_isolation_failed", str(error), 4)
+    except NetworkConfigExecutionError as error:
+        _emit(_standalone_network_receipt_payload(error.receipt))
+        raise typer.Exit(5) from error
+    except (IpFirmwareError, NetworkConfigError, SetupHelperError, OSError, ValueError) as error:
+        _fail("network_bootstrap_failed", str(error), 4)
+
+    isolation_payload = None if isolation_receipt is None else asdict(isolation_receipt)
+    if inspect_only:
+        _emit(
+            {
+                "mode": "inspect_only",
+                "will_persist": False,
+                "will_restart": False,
+                "observation": plan.model_dump(mode="json"),
+                "host_isolation": isolation_payload,
+            }
+        )
+        return
+    if receipt is None:
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_persist": False,
+                "will_restart": False,
+                "plan": _standalone_network_plan_payload(plan),
+                "host_isolation": isolation_payload,
+                "next_step": (
+                    f"repeat with --execute and --confirm {json.dumps(plan.confirmation)}; "
+                    "restart remains a separate guarded action"
+                ),
+            }
+        )
+        return
+    result = _standalone_network_receipt_payload(receipt)
+    _emit(
+        result
+        if isolation_payload is None
+        else {"host_isolation": isolation_payload, "result": result}
+    )
 
 
 @config_app.command("plan")
@@ -1184,6 +2827,138 @@ def config_receipt_list(ctx: typer.Context) -> None:
     _emit(_api(ctx).request("GET", "network-config/receipts"))
 
 
+def _remediation_offers(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    """Collect (headline, command) for findings doctor can hand the operator a fix for.
+
+    Doctor cannot obtain a firmware image -- nothing in this project downloads
+    release assets -- so a firmware offer prints the exact guarded sequence rather
+    than pretending it can flash on its own.
+    """
+
+    offers: list[tuple[str, str]] = []
+    host = payload.get("host_libiio")
+    if isinstance(host, dict) and host.get("healthy") is False:
+        offers.append(
+            (
+                f"Host libiio is not usable ({host.get('status')}): {host.get('summary')}",
+                str(host.get("remediation") or "scripts/install_native_libiio.sh"),
+            )
+        )
+    for radio in payload.get("radios", []):
+        stale = next(
+            (
+                check
+                for check in radio.get("checks", [])
+                if check.get("code") == "firmware.release_currency"
+                and check.get("status") == "fail"
+            ),
+            None,
+        )
+        if stale is None:
+            continue
+        offers.append(
+            (
+                f"{radio.get('serial')} runs {stale.get('actual')}; "
+                f"{stale.get('expected')} is the newest qualified release",
+                (
+                    f"pluto firmware upload <{stale.get('expected')}.dfu>; "
+                    f"pluto firmware flash <IMAGE> "
+                    f"--usb-sysfs-path {radio.get('usb_sysfs_path')} --execute --confirm ..."
+                ),
+            )
+        )
+    return offers
+
+
+def _offer_remediations(offers: list[tuple[str, str]], *, assume_yes: bool) -> None:
+    """Show each fix after an explicit yes; stay silent when not interactive."""
+
+    if not offers:
+        return
+    if not assume_yes and not sys.stdin.isatty():
+        typer.echo(
+            f"\n{len(offers)} finding(s) have a known remediation. "
+            "Rerun interactively, or pass --yes, to see the exact commands."
+        )
+        return
+    for headline, command in offers:
+        typer.echo(f"\n{headline}")
+        if not assume_yes and not typer.confirm("Show the exact fix?", default=False):
+            continue
+        typer.echo(f"  {command}")
+
+
+def _build_setup_probe(
+    *,
+    known_hosts_file: Path | None,
+    password_file: Path | None,
+    host: str,
+    receipt_directory: Path,
+    usb_sysfs_path: Path | None,
+    repair: bool,
+) -> Callable[[Any, str | None], Any] | None:
+    """Build the credentialed persistent-tuple probe, or None to stay read-only.
+
+    Without an enrolled known_hosts file there is no attested way to reach the
+    radio, so doctor keeps its existing read-only behaviour and cannot mutate.
+    """
+
+    if known_hosts_file is None:
+        return None
+    if usb_sysfs_path is None:
+        _fail(
+            "setup_probe_target_required",
+            "--setup-known-hosts-file requires --usb-sysfs-path: the pinned host key and the "
+            "private endpoint each address exactly one radio",
+            2,
+        )
+    from pluto_plus.setup_repair import SetupCredentials, probe_and_repair, ssh_manager_factory
+
+    selected_known_hosts = known_hosts_file.expanduser().absolute()
+    _read_private_file_bytes(
+        selected_known_hosts, label="setup SSH known-hosts", maximum_bytes=1024 * 1024
+    )
+    if password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        password = _read_private_text_file(
+            password_file.expanduser().absolute(), label="radio SSH password"
+        )
+
+    def probe(device: Any, firmware: str | None) -> Any:
+        if not device.serial:
+            from pluto_plus.setup_repair import SetupProbeOutcome
+
+            return SetupProbeOutcome(
+                status="unknown",
+                actual=None,
+                summary="Persistent tuple needs one stable USB serial to bind an identity",
+            )
+        interfaces = device.host_network_interfaces
+        return probe_and_repair(
+            serial=device.serial,
+            usb_sysfs_path=device.usb_path,
+            firmware_version=firmware,
+            manager_factory=ssh_manager_factory(
+                SetupCredentials(
+                    host=host,
+                    password=password,
+                    known_hosts_file=selected_known_hosts,
+                    receipt_directory=receipt_directory.expanduser().absolute(),
+                    state_root=receipt_directory.expanduser().absolute().parent,
+                    interface=(
+                        interfaces[0].name
+                        if host == "192.168.2.1" and len(interfaces) == 1
+                        else None
+                    ),
+                )
+            ),
+            repair=repair,
+        )
+
+    return probe
+
+
 @app.command("doctor")
 def doctor(
     ctx: typer.Context,
@@ -1198,17 +2973,75 @@ def doctor(
         "--daemon",
         help="Use plutod for all-radio doctor instead of standalone local USB inspection.",
     ),
+    probe_data_plane: bool = typer.Option(
+        False,
+        "--probe-data-plane",
+        help=(
+            "Open one 64 Ki-sample RX buffer on the exact --usb-sysfs-path and report "
+            "iiOD data-plane health."
+        ),
+    ),
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Standalone output format: table or json."
+    ),
+    setup_known_hosts_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--setup-known-hosts-file",
+        help=(
+            "Enrolled private known_hosts pinned to this exact radio. Supplying it lets "
+            "doctor read the persistent U-Boot tuple instead of reporting it unknown."
+        ),
+    ),
+    setup_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--setup-password-file",
+        help="Private radio root password file; prompts when omitted.",
+    ),
+    setup_host: str = typer.Option(
+        "192.168.2.1", "--setup-host", help="Literal private IPv4 endpoint for the radio."
+    ),
+    setup_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_SETUP_RECEIPTS,
+        "--setup-receipt-directory",
+        help="Private directory for setup repair receipts.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing Pluto NICs/routes around the setup probe.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="Exact phrase ISOLATE USB SSH <interface> for temporary route isolation.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for durable host-isolation receipts.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Assume yes for remediation prompts; required when stdin is not a TTY.",
+    ),
+    fix: bool = typer.Option(
+        True,
+        "--fix/--no-fix",
+        help=(
+            "Repair a non-canonical persistent U-Boot tuple through the guarded setup "
+            "transaction. Requires --setup-known-hosts-file; --no-fix reports only."
+        ),
     ),
 ) -> None:
     """Check local USB radios directly, or one managed radio through plutod."""
 
     if radio_id is not None or daemon:
-        if usb_sysfs_path is not None:
+        if usb_sysfs_path is not None or probe_data_plane or isolate_usb_route:
             _fail(
                 "incompatible_doctor_options",
-                "--usb-sysfs-path cannot be combined with a daemon radio ID or --daemon",
+                "local USB probe options cannot be combined with a daemon radio ID or --daemon",
                 2,
             )
         path = "doctor" if radio_id is None else f"radios/{radio_id}/doctor"
@@ -1219,15 +3052,106 @@ def doctor(
         _fail("invalid_doctor_format", "doctor format must be table or json", 2)
     from pluto_plus.local_doctor import diagnose_local_usb_radios
 
+    if probe_data_plane and usb_sysfs_path is None:
+        _fail(
+            "data_plane_probe_target_required",
+            "--probe-data-plane requires one exact --usb-sysfs-path",
+            2,
+        )
+
+    isolation_plan = None
+    pluto_interfaces: tuple[str, ...] = ()
+    if isolate_usb_route:
+        if usb_sysfs_path is None or setup_known_hosts_file is None:
+            _fail(
+                "host_isolation_target_required",
+                "doctor route isolation requires --usb-sysfs-path and "
+                "--setup-known-hosts-file",
+                2,
+            )
+        if setup_host != "192.168.2.1":
+            _fail("host_isolation_invalid", "USB route isolation requires 192.168.2.1", 2)
+        from pluto_plus.host_isolation import HostIsolationError, prepare_usb_ssh_isolation
+
+        local_devices = scan_local_usb_plutos()
+        selected = [item for item in local_devices if item.usb_path == str(usb_sysfs_path)]
+        if len(selected) != 1 or len(selected[0].host_network_interfaces) != 1:
+            _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
+        pluto_interfaces = tuple(
+            interface.name for item in local_devices for interface in item.host_network_interfaces
+        )
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                selected[0].host_network_interfaces[0].name,
+                setup_host,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        if isolation_confirmation != isolation_plan.confirmation_phrase:
+            _fail(
+                "host_isolation_confirmation_required",
+                f"--isolation-confirm must be exactly "
+                f"{isolation_plan.confirmation_phrase!r}",
+                2,
+            )
+
+    setup_probe = _build_setup_probe(
+        known_hosts_file=setup_known_hosts_file,
+        password_file=setup_password_file,
+        host=setup_host,
+        receipt_directory=setup_receipt_directory,
+        usb_sysfs_path=usb_sysfs_path,
+        repair=fix,
+    )
+
+    def doctor_action() -> Any:
+        doctor_options: dict[str, Any] = {"setup_probe": setup_probe}
+        if probe_data_plane:
+            from pluto_plus.data_plane import probe_iio_data_plane
+
+            def active_probe(device: LocalUsbPluto) -> Any:
+                if device.serial is None:
+                    raise ValueError("selected USB radio has no stable serial")
+                return probe_iio_data_plane("usb:", device.serial)
+
+            doctor_options["data_plane_probe"] = active_probe
+        return diagnose_local_usb_radios(usb_sysfs_path, **doctor_options)
+
+    isolation_receipt = None
     try:
-        report = diagnose_local_usb_radios(usb_sysfs_path)
+        if isolation_plan is None:
+            report = doctor_action()
+        else:
+            from pluto_plus.host_isolation import (
+                HostIsolationError,
+                HostIsolationExecutionError,
+                execute_usb_ssh_isolated,
+            )
+
+            try:
+                report, isolation_receipt = execute_usb_ssh_isolated(
+                    isolation_plan,
+                    confirmation=isolation_confirmation or "",
+                    receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                    action=doctor_action,
+                    pluto_interfaces=pluto_interfaces,
+                )
+            except HostIsolationExecutionError as error:
+                _emit({"host_isolation": asdict(error.receipt)})
+                raise typer.Exit(5) from error
+            except HostIsolationError as error:
+                _fail("host_isolation_failed", str(error), 4)
     except ValueError as error:
         _fail("local_doctor_target_not_found", str(error), 4)
     payload = asdict(report)
+    if isolation_receipt is not None:
+        payload["host_isolation"] = asdict(isolation_receipt)
     if normalized == "json":
         _emit(payload)
-    else:
-        typer.echo(_local_doctor_table(payload))
+        return
+    typer.echo(_local_doctor_table(payload))
+    _offer_remediations(_remediation_offers(payload), assume_yes=yes)
 
 
 def _local_doctor_table(report: dict[str, Any]) -> str:
@@ -1243,6 +3167,16 @@ def _local_doctor_table(report: dict[str, Any]) -> str:
             notes.append("UNKNOWN: " + ",".join(unknown))
         if radio.get("error"):
             notes.append(str(radio["error"]))
+        repair = radio.get("setup_repair")
+        if isinstance(repair, dict) and repair.get("attempted"):
+            applied = ", ".join(
+                f"{key} delete" if value is None else f"{key}={value}"
+                for key, value in repair.get("changes") or ()
+            )
+            if repair.get("succeeded"):
+                notes.append(f"REPAIRED setup ({applied}); receipt {repair.get('receipt_id')}")
+            else:
+                notes.append(f"REPAIR FAILED ({applied}): {repair.get('error')}")
         rows.append(
             {
                 "USB": " ".join(
@@ -1596,6 +3530,231 @@ def firmware_reconcile(ctx: typer.Context, receipt_id: str = typer.Argument(...)
     _emit(_api(ctx).request("POST", f"firmware/receipts/{receipt_id}/reconcile", json_body={}))
 
 
+@firmware_app.command("reconcile-local")
+def firmware_reconcile_local(
+    receipt_id: str = typer.Argument(..., help="Exact standalone flash receipt ID."),
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ..., "--usb-sysfs-path", help="Exact direct USB sysfs node recorded by the receipt."
+    ),
+    profile: str = typer.Option(
+        ..., "--profile", help="Exact immutable persistent profile recorded by the receipt."
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ..., "--ssh-known-hosts-file", help="Pinned known_hosts for the exact returned radio."
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None, "--ssh-password-file", help="Optional private password file; otherwise prompt."
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1",
+        "--ssh-host",
+        help="Literal private endpoint; non-default addresses use the LAN route.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_BOOTSTRAP_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory containing the standalone receipt.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing local Pluto NICs/routes with a durable receipt.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="Exact phrase ISOLATE USB SSH <interface> for temporary route isolation.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for host-isolation receipts.",
+    ),
+) -> None:
+    """Read-only re-attest an uncertain standalone flash; never retry it."""
+
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapFirmwareError,
+        BoundSshBootstrapTransport,
+        reconcile_usb_flash_receipt,
+    )
+    from pluto_plus.host_isolation import (
+        HostIsolationError,
+        HostIsolationExecutionError,
+        execute_usb_ssh_isolated,
+        prepare_usb_ssh_isolation,
+    )
+
+    interface = None
+    local_devices: tuple[LocalUsbPluto, ...] = ()
+    if ssh_host == "192.168.2.1":
+        local_devices = scan_local_usb_plutos()
+        selected_matches = [
+            item
+            for item in local_devices
+            if item.usb_path == str(usb_sysfs_path) and len(item.host_network_interfaces) == 1
+        ]
+        if len(selected_matches) != 1:
+            _fail(
+                "standalone_reconciliation_identity_unavailable",
+                "USB path must identify one radio with one network interface",
+                4,
+            )
+        interface = selected_matches[0].host_network_interfaces[0].name
+    isolation_plan = None
+    pluto_interfaces: tuple[str, ...] = ()
+    if isolate_usb_route:
+        if ssh_host != "192.168.2.1" or interface is None:
+            _fail("host_isolation_invalid", "USB route isolation requires 192.168.2.1", 2)
+        pluto_interfaces = tuple(
+            network.name for item in local_devices for network in item.host_network_interfaces
+        )
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                interface,
+                ssh_host,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        if isolation_confirmation != isolation_plan.confirmation_phrase:
+            _fail(
+                "host_isolation_confirmation_required",
+                f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
+                2,
+            )
+    if ssh_password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        try:
+            password = (
+                _read_private_file_bytes(
+                    ssh_password_file,
+                    label="radio SSH password",
+                    maximum_bytes=4096,
+                )
+                .decode("utf-8")
+                .strip()
+            )
+        except UnicodeDecodeError:
+            _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
+
+    def reconcile_action() -> Any:
+        try:
+            transport = BoundSshBootstrapTransport(
+                interface=interface,
+                password=password,
+                known_hosts_file=ssh_known_hosts_file.expanduser().resolve(),
+                host=ssh_host,
+            )
+            return reconcile_usb_flash_receipt(
+                receipt_id,
+                receipt_directory=receipt_directory.expanduser().resolve(),
+                usb_sysfs_path=usb_sysfs_path,
+                mutation_profile_id=profile,
+                transport=transport,
+            )
+        except (BootstrapFirmwareError, OSError, ValueError) as error:
+            raise BootstrapFirmwareError(str(error)) from error
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            result = reconcile_action()
+        else:
+            result, isolation_receipt = execute_usb_ssh_isolated(
+                isolation_plan,
+                confirmation=isolation_confirmation or "",
+                receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                action=reconcile_action,
+                pluto_interfaces=pluto_interfaces,
+            )
+    except HostIsolationExecutionError as error:
+        _emit({"host_isolation": asdict(error.receipt)})
+        raise typer.Exit(5) from error
+    except HostIsolationError as error:
+        _fail("host_isolation_failed", str(error), 4)
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("standalone_reconciliation_failed", str(error), 4)
+    if isolation_receipt is None:
+        _emit(asdict(result))
+    else:
+        _emit({"host_isolation": asdict(isolation_receipt), "result": asdict(result)})
+
+
+@firmware_app.command("enroll-lan-ssh")
+def firmware_enroll_lan_ssh(
+    serial: str = typer.Argument(..., help="Exact serial expected at the LAN endpoint."),
+    host: str = typer.Option(..., "--host", help="Exact private LAN IPv4 endpoint."),
+    known_hosts_file: Path = typer.Option(  # noqa: B008
+        ..., "--known-hosts-file", help="New private serial-specific known_hosts file."
+    ),
+    profile: str = typer.Option(
+        ...,
+        "--profile",
+        help="Immutable metadata firmware/capability profile required from IIOD.",
+    ),
+    execute: bool = typer.Option(False, "--execute", help="Perform explicit LAN TOFU."),
+    use_default_password: bool = typer.Option(
+        False,
+        "--use-default-password",
+        help="Acknowledge use of the Pluto factory-default root password for enrollment.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase TRUST LAN SSH <serial> <host>.",
+    ),
+) -> None:
+    """Pin one LAN SSH key after read-only IIOD identity attestation."""
+
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapFirmwareError,
+        execute_lan_ssh_host_key_enrollment,
+        prepare_lan_ssh_host_key_enrollment,
+    )
+
+    try:
+        plan = prepare_lan_ssh_host_key_enrollment(
+            serial=serial,
+            host=host,
+            known_hosts_file=known_hosts_file,
+            profile_id=profile,
+        )
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("lan_ssh_identity_attestation_failed", str(error), 4)
+    if not execute:
+        _emit(
+            {
+                "mode": "dry_run",
+                "will_trust_host_key": False,
+                "warning": "explicit LAN TOFU is weaker than USB-anchored enrollment",
+                "plan": asdict(plan),
+            }
+        )
+        return
+    if confirmation != plan.confirmation_phrase:
+        _fail(
+            "lan_ssh_confirmation_required",
+            f"--confirm must be exactly {plan.confirmation_phrase!r}",
+            2,
+        )
+    if not use_default_password:
+        _fail(
+            "lan_ssh_default_password_authorization_required",
+            "--execute requires explicit --use-default-password authorization",
+            2,
+        )
+    try:
+        result = execute_lan_ssh_host_key_enrollment(
+            plan,
+            confirmation=confirmation,
+        )
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("lan_ssh_enrollment_failed", str(error), 4)
+    _emit(result)
+
+
 @firmware_app.command("enroll-usb-ssh")
 def firmware_enroll_usb_ssh(
     serial: str = typer.Argument(..., help="Exact serial of one USB-attached local radio."),
@@ -1658,9 +3817,7 @@ def firmware_enroll_usb_ssh(
     }
     isolation_plan = None
     pluto_interfaces = tuple(
-        interface.name
-        for item in local_devices
-        for interface in item.host_network_interfaces
+        interface.name for item in local_devices for interface in item.host_network_interfaces
     )
     if isolate_usb_route:
         if ssh_host != "192.168.2.1":
@@ -1681,9 +3838,7 @@ def firmware_enroll_usb_ssh(
                 "mode": "dry_run",
                 "will_trust_host_key": False,
                 "plan": plan,
-                "host_isolation": (
-                    None if isolation_plan is None else asdict(isolation_plan)
-                ),
+                "host_isolation": (None if isolation_plan is None else asdict(isolation_plan)),
             }
         )
         return
@@ -1803,7 +3958,7 @@ def firmware_flash_usb(
         "--return-timeout",
         min=30,
         max=1800,
-        help="Seconds to wait for the exact radio to return after flashing.",
+        help="Seconds to wait for the exact radio to disappear and return after flashing.",
     ),
 ) -> None:
     """Flash one exact qualified profile onto a serial-attested local USB Pluto."""
@@ -1821,6 +3976,1093 @@ def firmware_flash_usb(
         ssh_host=ssh_host,
         return_timeout_s=return_timeout_s,
         mutation_profile_id=profile,
+    )
+
+
+@environment_survey_app.command("plan")
+def environment_survey_plan(
+    serial: str = typer.Option(..., "--serial", help="Exact local runtime USB serial."),
+    usb_path: Path = typer.Option(  # noqa: B008
+        ...,
+        "--usb-path",
+        help="Exact direct /sys/bus/usb/devices topology path for that serial.",
+    ),
+    emitter_inventory: Path = typer.Option(  # noqa: B008
+        ...,
+        "--emitter-inventory",
+        help="Private canonical worst-normal Wi-Fi emitter inventory JSON.",
+    ),
+    emitter_inventory_sha256: str = typer.Option(
+        ...,
+        "--emitter-inventory-sha256",
+        help="Expected lowercase SHA-256 of the exact canonical emitter inventory bytes.",
+    ),
+    result_root: Path = typer.Option(  # noqa: B008
+        DEFAULT_ENVIRONMENT_SURVEY_REPORTS,
+        "--result-root",
+        help="Existing owned mode-0700 parent for raw, PSD, STFT, manifest, and receipt.",
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent private survey-plan JSON output."
+    ),
+    ensure_mute: bool = typer.Option(
+        False,
+        "--ensure-mute",
+        help="Authorize only the complete fail-closed TX mute before RX surveying.",
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout whose exact commit is bound into the plan.",
+    ),
+) -> None:
+    """Create a passive exact-USB survey plan; never open IIO or touch the radio."""
+
+    import pluto_plus.environment_survey as survey_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyEmitterInventory,
+        EnvironmentSurveyError,
+        EnvironmentSurveyParameters,
+        prepare_environment_survey,
+        project_occupied_2_4_spans,
+    )
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
+        load_private_contract,
+        model_file_identity,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    if not ensure_mute:
+        _fail(
+            "environment_survey_mute_not_authorized",
+            "plan creation requires explicit --ensure-mute authority",
+            2,
+        )
+    if (
+        len(emitter_inventory_sha256) != 64
+        or emitter_inventory_sha256 != emitter_inventory_sha256.lower()
+        or any(value not in "0123456789abcdef" for value in emitter_inventory_sha256)
+    ):
+        _fail(
+            "environment_survey_inventory_digest_invalid",
+            "--emitter-inventory-sha256 must be exactly 64 lowercase hexadecimal characters",
+            2,
+        )
+    try:
+        inventory_path = emitter_inventory.expanduser().absolute()
+        inventory = load_private_contract(inventory_path, EnvironmentSurveyEmitterInventory)
+        inventory_identity = model_file_identity(inventory_path, inventory)
+        if inventory_identity.sha256 != emitter_inventory_sha256:
+            raise EnvironmentSurveyError("emitter inventory SHA-256 differs from the CLI pin")
+        parameters = EnvironmentSurveyParameters(
+            occupied_2_4_spans_hz=project_occupied_2_4_spans(inventory),
+        )
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(Path(__file__), Path(survey_source.__file__)),
+        )
+        plan = prepare_environment_survey(
+            scan_local_usb_plutos(),
+            serial=serial,
+            usb_path=usb_path.expanduser().absolute(),
+            output_root=result_root.expanduser().absolute(),
+            emitter_inventory_file=inventory_identity,
+            emitter_inventory=inventory,
+            parameters=parameters,
+            tool_source=source,
+            tool_version=__version__,
+        )
+        identity = write_private_contract(output.expanduser().absolute(), plan)
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_plan_failed", str(error), 4)
+    _emit(
+        {
+            "mode": "passive_plan",
+            "hardware_accessed": False,
+            "pluto_tx_authorized": False,
+            "ssh_authorized": False,
+            "route_mutation_authorized": False,
+            "firmware_mutation_authorized": False,
+            "plan": plan.model_dump(mode="json", by_alias=True),
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+            "next_command": (
+                "pluto environment-survey execute --plan "
+                f"{identity.path} --expected-plan-sha256 {identity.sha256} "
+                "--ensure-mute --confirm "
+                f"{json.dumps(plan.confirmation_phrase)}"
+            ),
+        }
+    )
+
+
+@environment_survey_app.command("execute")
+def environment_survey_execute(
+    plan: Path = typer.Option(  # noqa: B008
+        ..., "--plan", help="Private plan produced by environment-survey plan."
+    ),
+    expected_plan_sha256: str = typer.Option(
+        ...,
+        "--expected-plan-sha256",
+        help="Exact lowercase SHA-256 printed when the approved plan was created.",
+    ),
+    confirmation: str = typer.Option(
+        ..., "--confirm", help="Exact serial- and survey-specific phrase printed by plan."
+    ),
+    ensure_mute: bool = typer.Option(
+        False,
+        "--ensure-mute",
+        help="Explicitly apply and verify the complete TX mute before and after RX capture.",
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Same clean checkout and commit bound into the retained plan.",
+    ),
+) -> None:
+    """Run one local USB-IIO RX survey with no SSH, route, firmware, QSPI, or TX."""
+
+    import pluto_plus.environment_survey as survey_source
+    import pluto_plus.environment_survey_linux as survey_linux_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyError,
+        EnvironmentSurveyExecutionError,
+        execute_environment_survey,
+    )
+    from pluto_plus.environment_survey_linux import LinuxEnvironmentSurveyBackend
+    from pluto_plus.release_candidate import ReleaseCandidateContractError
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    environment = inspect_iio_environment(require_usb=True)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        if (
+            len(expected_plan_sha256) != 64
+            or expected_plan_sha256 != expected_plan_sha256.lower()
+            or any(value not in "0123456789abcdef" for value in expected_plan_sha256)
+        ):
+            raise EnvironmentSurveyError(
+                "--expected-plan-sha256 must be exactly 64 lowercase hexadecimal characters"
+            )
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(
+                Path(__file__),
+                Path(survey_source.__file__),
+                Path(survey_linux_source.__file__),
+            ),
+        )
+        receipt, digest = execute_environment_survey(
+            plan.expanduser().absolute(),
+            expected_plan_sha256=expected_plan_sha256,
+            confirmation=confirmation,
+            ensure_mute=ensure_mute,
+            backend=LinuxEnvironmentSurveyBackend(),
+            tool_source=source,
+            tool_version=__version__,
+        )
+    except EnvironmentSurveyExecutionError as error:
+        _fail(
+            "environment_survey_execute_failed",
+            f"{error}; durable receipt={error.receipt_path} sha256={error.receipt_sha256}",
+            5,
+        )
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_execute_failed", str(error), 5)
+    _emit(
+        {
+            "outcome": receipt.outcome,
+            "selected_control_frequency_hz": receipt.selected_control_frequency_hz,
+            "receipt": str(receipt.manifest.path.parent / "receipt.json"),
+            "receipt_sha256": digest,
+            "manifest": str(receipt.manifest.path),
+            "pluto_tx_enabled": False,
+        }
+    )
+
+
+@environment_survey_app.command("receipt-verify")
+def environment_survey_receipt_verify(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout bound into the receipt.",
+    ),
+) -> None:
+    """Verify the plan, manifest, and every retained raw/PSD/STFT SHA-256."""
+
+    import pluto_plus.environment_survey as survey_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyError,
+        verify_environment_survey_receipt,
+    )
+    from pluto_plus.release_candidate import ReleaseCandidateContractError
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    try:
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(Path(__file__), Path(survey_source.__file__)),
+        )
+        verified = verify_environment_survey_receipt(receipt.expanduser().absolute())
+        if (
+            verified.tool_repository != source.repository
+            or verified.tool_source_commit != source.commit
+            or verified.tool_version != __version__
+        ):
+            raise EnvironmentSurveyError(
+                "receipt tool source differs from the executing attested package"
+            )
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_receipt_invalid", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "outcome": verified.outcome,
+            "serial": verified.target.serial,
+            "selected_control_frequency_hz": verified.selected_control_frequency_hz,
+            "receipt": str(receipt.expanduser().absolute()),
+        }
+    )
+
+
+@environment_survey_app.command("fleet-select")
+def environment_survey_fleet_select(
+    manifests: list[Path] = typer.Option(  # noqa: B008
+        ..., "--manifest", help="Manifest path, repeated exactly four times in reserved order."
+    ),
+    receipts: list[Path] = typer.Option(  # noqa: B008
+        ..., "--receipt", help="Matching PASS receipt, repeated exactly four times."
+    ),
+    emitter_inventory: Path = typer.Option(  # noqa: B008
+        ..., "--emitter-inventory", help="Exact private worst-normal emitter inventory."
+    ),
+    emitter_inventory_sha256: str = typer.Option(
+        ..., "--emitter-inventory-sha256", help="Pinned lowercase inventory SHA-256."
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent private fleet-selection JSON output."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout matching all four surveys.",
+    ),
+) -> None:
+    """Deep-verify four surveys and select one global quiet 2.4 GHz center."""
+
+    import pluto_plus.environment_survey as survey_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyEmitterInventory,
+        EnvironmentSurveyError,
+        build_environment_survey_fleet_selection,
+    )
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
+        load_private_contract,
+        model_file_identity,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    if (
+        len(emitter_inventory_sha256) != 64
+        or emitter_inventory_sha256 != emitter_inventory_sha256.lower()
+        or any(value not in "0123456789abcdef" for value in emitter_inventory_sha256)
+    ):
+        _fail(
+            "environment_survey_inventory_digest_invalid",
+            "--emitter-inventory-sha256 must be exactly 64 lowercase hexadecimal characters",
+            2,
+        )
+    try:
+        inventory_path = emitter_inventory.expanduser().absolute()
+        inventory = load_private_contract(inventory_path, EnvironmentSurveyEmitterInventory)
+        inventory_identity = model_file_identity(inventory_path, inventory)
+        if inventory_identity.sha256 != emitter_inventory_sha256:
+            raise EnvironmentSurveyError("emitter inventory SHA-256 differs from the CLI pin")
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(Path(__file__), Path(survey_source.__file__)),
+        )
+        selection = build_environment_survey_fleet_selection(
+            tuple(path.expanduser().absolute() for path in manifests),
+            tuple(path.expanduser().absolute() for path in receipts),
+            emitter_inventory_file=inventory_identity,
+            emitter_inventory=inventory,
+            tool_source=source,
+            tool_version=__version__,
+        )
+        identity = write_private_contract(output.expanduser().absolute(), selection)
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_fleet_selection_failed", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "selected_control_frequency_hz": selection.selected_control_frequency_hz,
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+            "receipts_and_artifacts_verified": True,
+        }
+    )
+
+
+@environment_survey_app.command("fleet-verify")
+def environment_survey_fleet_verify(
+    selection: Path = typer.Argument(...),  # noqa: B008
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout bound into the fleet selection.",
+    ),
+) -> None:
+    """Reverify a fleet selection from all four receipts and retained artifacts."""
+
+    import pluto_plus.environment_survey as survey_source
+    from pluto_plus import __version__
+    from pluto_plus.environment_survey import (
+        EnvironmentSurveyError,
+        verify_environment_survey_fleet_selection,
+    )
+    from pluto_plus.release_candidate import ReleaseCandidateContractError
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    try:
+        source = attest_clean_tool_repository(
+            tool_repository.expanduser().absolute(),
+            imported_source_files=(Path(__file__), Path(survey_source.__file__)),
+        )
+        verified = verify_environment_survey_fleet_selection(
+            selection.expanduser().absolute(),
+            tool_source=source,
+            tool_version=__version__,
+        )
+    except (
+        OSError,
+        ValueError,
+        EnvironmentSurveyError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("environment_survey_fleet_selection_invalid", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "selected_control_frequency_hz": verified.selected_control_frequency_hz,
+            "selection": str(selection.expanduser().absolute()),
+            "receipts_and_artifacts_verified": True,
+        }
+    )
+
+
+@comparator_ram_app.command("plan")
+def firmware_comparator_ram_plan(
+    retained_bundle: Path = typer.Option(  # noqa: B008
+        ..., "--retained-bundle", help="Exact retained approved-v7 build bundle."
+    ),
+    dfu: Path = typer.Option(  # noqa: B008
+        ..., "--dfu", help="Exact retained approved-v7 DFU beside the build bundle."
+    ),
+    usb_inventory: Path = typer.Option(  # noqa: B008
+        ..., "--usb-inventory", help="Private strict inventory from candidate-ram inventory."
+    ),
+    serial: str = typer.Option(..., "--serial", help="Exact pilot USB serial."),
+    expected_current_firmware: str = typer.Option(
+        ..., "--expected-current-firmware", help="Exact preboot firmware version."
+    ),
+    expected_current_hardware_model: str = typer.Option(
+        ..., "--expected-current-hardware-model", help="Exact preboot Pluto+ hardware model."
+    ),
+    expected_current_metadata_abi: str = typer.Option(
+        ..., "--expected-current-metadata-abi", help="Exact preboot frame-metadata ABI."
+    ),
+    expected_current_capability: list[str] = typer.Option(  # noqa: B008
+        ...,
+        "--expected-current-capability",
+        help="Exact sorted preboot capability; repeat for each capability.",
+    ),
+    receipt: Path = typer.Option(  # noqa: B008
+        ..., "--receipt", help="Absent serial-scoped comparator receipt output."
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent mode-private comparator plan output."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout to bind into the comparator plan.",
+    ),
+    validity_seconds: int = typer.Option(
+        900,
+        "--validity-seconds",
+        min=60,
+        max=1800,
+        help="Bounded file-only plan approval window.",
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1", "--ssh-host", help="Private USB-gadget SSH endpoint."
+    ),
+) -> None:
+    """Create a native approved-v7 comparator plan without opening hardware."""
+
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    import pluto_plus.comparator_ram as comparator_source
+    from pluto_plus import __version__
+    from pluto_plus.comparator_ram import (
+        ComparatorRamError,
+        attest_comparator_tool_repository,
+        prepare_comparator_ram_plan,
+    )
+    from pluto_plus.release_candidate import (
+        ExpectedRuntime,
+        ReleaseCandidateContractError,
+        ReleaseUsbInventory,
+        load_private_contract,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        inventory_path = usb_inventory.expanduser().absolute()
+        inventory = load_private_contract(inventory_path, ReleaseUsbInventory)
+        repository = tool_repository.expanduser().absolute()
+        tool = attest_comparator_tool_repository(
+            repository,
+            version=__version__,
+            wrapper_path=Path(comparator_source.__file__).absolute(),
+        )
+        created = datetime.now(UTC)
+        plan = prepare_comparator_ram_plan(
+            inventory,
+            inventory_path=inventory_path,
+            retained_bundle_path=retained_bundle.expanduser().absolute(),
+            dfu_path=dfu.expanduser().absolute(),
+            serial=serial,
+            expected_current_runtime=ExpectedRuntime(
+                firmware_version=expected_current_firmware,
+                hardware_model=expected_current_hardware_model,
+                metadata_abi=expected_current_metadata_abi,
+                capabilities=tuple(expected_current_capability),
+            ),
+            receipt_path=receipt.expanduser().absolute(),
+            tool=tool,
+            created_at=created,
+            expires_at=created + timedelta(seconds=validity_seconds),
+            plan_id=uuid.uuid4().hex,
+            ssh_host=ssh_host,
+        )
+        identity = write_private_contract(output.expanduser().absolute(), plan)
+    except (
+        OSError,
+        ValueError,
+        ComparatorRamError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("comparator_ram_plan_failed", str(error), 4)
+    _emit(
+        {
+            "mode": "offline_plan",
+            "hardware_accessed": False,
+            "will_write_qspi": False,
+            "will_load_volatile_ram": False,
+            "plan": plan.model_dump(mode="json", by_alias=True),
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+            "next_command": (
+                "pluto firmware comparator-ram execute --plan "
+                f"{identity.path} --expected-plan-sha256 {identity.sha256} "
+                "--ssh-password-file <private-file> "
+                f"--confirm {json.dumps(plan.confirmation_phrase)}"
+            ),
+        }
+    )
+
+
+@comparator_ram_app.command("execute")
+def firmware_comparator_ram_execute(
+    plan: Path = typer.Option(  # noqa: B008
+        ..., "--plan", help="Private plan produced by comparator-ram plan."
+    ),
+    expected_plan_sha256: str = typer.Option(
+        ..., "--expected-plan-sha256", help="Exact reviewed comparator plan SHA-256."
+    ),
+    ssh_password_file: Path = typer.Option(  # noqa: B008
+        ..., "--ssh-password-file", help="Owned mode-0600 one-line radio password file."
+    ),
+    confirmation: str = typer.Option(
+        ..., "--confirm", help="Exact COMPARATOR RAM BOOT <serial> phrase."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Same clean checkout bound into the comparator plan.",
+    ),
+    state_root: Path = typer.Option(  # noqa: B008
+        DEFAULT_STATE_ROOT,
+        "--state-root",
+        help="Private state root used for shared and maintenance locks.",
+    ),
+    timeout_s: float = typer.Option(
+        45.0, "--timeout", min=5.0, max=600.0, help="Per-transition wait timeout."
+    ),
+) -> None:
+    """RAM-boot the exact approved-v7 comparator without persistent authority."""
+
+    import pluto_plus.comparator_ram as comparator_source
+    from pluto_plus import __version__
+    from pluto_plus.comparator_ram import (
+        ComparatorRamError,
+        ComparatorRamPlan,
+        attest_comparator_tool_repository,
+        execute_comparator_ram,
+    )
+    from pluto_plus.release_candidate import ReleaseCandidateContractError, load_private_contract
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import LinuxReleaseCandidateBackend
+
+    environment = inspect_iio_environment(require_usb=True)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    planned: ComparatorRamPlan | None = None
+    try:
+        selected_plan = plan.expanduser().absolute()
+        planned = load_private_contract(selected_plan, ComparatorRamPlan)
+        tool = attest_comparator_tool_repository(
+            tool_repository.expanduser().absolute(),
+            version=__version__,
+            wrapper_path=Path(comparator_source.__file__).absolute(),
+        )
+        backend = LinuxReleaseCandidateBackend(
+            state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
+        )
+        receipt, digest = execute_comparator_ram(
+            selected_plan,
+            expected_plan_sha256=expected_plan_sha256,
+            password_path=ssh_password_file.expanduser().absolute(),
+            confirmation=confirmation,
+            backend=backend,
+            tool=tool,
+            timeout_s=timeout_s,
+        )
+    except (
+        OSError,
+        ValueError,
+        ComparatorRamError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        detail = ""
+        if isinstance(error, ComparatorRamError) and error.receipt is not None:
+            path = planned.receipt_path if planned is not None else "unknown"
+            detail = (
+                f"; durable {error.receipt.outcome} receipt={path} sha256={error.receipt_sha256}"
+            )
+        _fail("comparator_ram_execute_failed", f"{error}{detail}", 5)
+    _emit(
+        {
+            "outcome": receipt.outcome,
+            "receipt": receipt.model_dump(mode="json", by_alias=True),
+            "receipt_path": str(planned.receipt_path),
+            "receipt_sha256": digest,
+            "persistent_write": False,
+        }
+    )
+
+
+@comparator_ram_app.command("receipt-verify")
+def firmware_comparator_ram_receipt_verify(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout bound into the comparator plan.",
+    ),
+) -> None:
+    """Deep-replay a native comparator receipt and every retained input."""
+
+    import pluto_plus.comparator_ram as comparator_source
+    from pluto_plus import __version__
+    from pluto_plus.comparator_ram import (
+        ComparatorRamError,
+        attest_comparator_tool_repository,
+        verify_comparator_ram_receipt,
+    )
+    from pluto_plus.release_candidate import ReleaseCandidateContractError
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        tool = attest_comparator_tool_repository(
+            tool_repository.expanduser().absolute(),
+            version=__version__,
+            wrapper_path=Path(comparator_source.__file__).absolute(),
+        )
+        selected = receipt.expanduser().absolute()
+        verified = verify_comparator_ram_receipt(selected, tool=tool)
+    except (
+        OSError,
+        ValueError,
+        ComparatorRamError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("comparator_ram_receipt_invalid", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "outcome": verified.outcome,
+            "receipt": str(selected),
+            "serial": verified.target.serial,
+            "profile": verified.artifact.profile_id,
+            "persistent_write": False,
+        }
+    )
+
+
+@candidate_ram_app.command("inventory")
+def firmware_candidate_ram_inventory(
+    output: Path = typer.Option(  # noqa: B008
+        ...,
+        "--output",
+        help="Absent mode-private output for the strict USB inventory.",
+    ),
+    serial: str | None = typer.Option(
+        None,
+        "--serial",
+        help=(
+            "Restrict the retained inventory to exactly one matching USB runtime; "
+            "the selected device must still pass every Pluto+ release check."
+        ),
+    ),
+) -> None:
+    """Capture strict runtime USB topology without opening IIO, SSH, or DFU."""
+
+    from datetime import UTC, datetime
+
+    from pluto_plus.release_candidate import (
+        build_release_usb_inventory,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        scanned = scan_local_usb_plutos()
+        selected = scanned
+        if serial is not None:
+            if not serial or serial.strip() != serial:
+                raise ValueError("release USB inventory serial filter is not exact")
+            selected = tuple(device for device in scanned if device.serial == serial)
+            if len(selected) != 1:
+                raise ValueError(
+                    "release USB inventory requires exactly one runtime matching --serial"
+                )
+        inventory = build_release_usb_inventory(
+            selected, created_at=datetime.now(UTC)
+        )
+        identity = write_private_contract(output.expanduser().absolute(), inventory)
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        _fail("candidate_ram_inventory_failed", str(error), 4)
+    _emit(
+        {
+            "mode": "read_only_usb_inventory",
+            "hardware_accessed": False,
+            "scanned_device_count": len(scanned),
+            "device_count": len(inventory.devices),
+            "serial_filter": serial,
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+        }
+    )
+
+
+@candidate_ram_app.command("plan")
+def firmware_candidate_ram_plan(
+    candidate_plan: Path = typer.Option(  # noqa: B008
+        ..., "--candidate-plan", help="Private release-candidate plan from the firmware repo."
+    ),
+    usb_inventory: Path = typer.Option(  # noqa: B008
+        ..., "--usb-inventory", help="Private inventory produced by candidate-ram inventory."
+    ),
+    serial: str = typer.Option(..., "--serial", help="Exact target USB serial."),
+    expected_current_firmware: str = typer.Option(
+        ...,
+        "--expected-current-firmware",
+        help="Exact firmware expected before this RAM transition.",
+    ),
+    receipt: Path = typer.Option(  # noqa: B008
+        ..., "--receipt", help="Absent serial-scoped output for the eventual execution receipt."
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent mode-private per-radio operation-plan output."
+    ),
+    ssh_host: str = typer.Option(
+        "192.168.2.1", "--ssh-host", help="Private USB-gadget SSH endpoint."
+    ),
+) -> None:
+    """Create a per-radio operation plan using retained files only."""
+
+    import uuid
+    from datetime import UTC, datetime
+
+    from pluto_plus.release_candidate import (
+        ReleaseCandidatePlan,
+        ReleaseUsbInventory,
+        build_operation_plan,
+        load_private_contract,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        candidate_path = candidate_plan.expanduser().absolute()
+        inventory_path = usb_inventory.expanduser().absolute()
+        candidate = load_private_contract(candidate_path, ReleaseCandidatePlan)
+        inventory = load_private_contract(inventory_path, ReleaseUsbInventory)
+        operation = build_operation_plan(
+            candidate,
+            inventory,
+            candidate_path=candidate_path,
+            inventory_path=inventory_path,
+            serial=serial,
+            expected_current_firmware=expected_current_firmware,
+            receipt_path=receipt.expanduser().absolute(),
+            plan_id=uuid.uuid4().hex,
+            created_at=datetime.now(UTC),
+            ssh_host=ssh_host,
+        )
+        identity = write_private_contract(output.expanduser().absolute(), operation)
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        _fail("candidate_ram_plan_failed", str(error), 4)
+    _emit(
+        {
+            "mode": "offline_plan",
+            "hardware_accessed": False,
+            "will_write_qspi": False,
+            "will_load_volatile_ram": False,
+            "operation_plan": operation.model_dump(mode="json", by_alias=True),
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+            "next_command": (
+                "pluto firmware candidate-ram execute --operation-plan "
+                f"{identity.path} --ssh-password-file <private-file> "
+                f"--confirm {json.dumps(operation.confirmation_phrase)}"
+            ),
+        }
+    )
+
+
+@candidate_ram_app.command("execute")
+def firmware_candidate_ram_execute(
+    operation_plan: Path = typer.Option(  # noqa: B008
+        ..., "--operation-plan", help="Private operation plan produced by candidate-ram plan."
+    ),
+    ssh_password_file: Path = typer.Option(  # noqa: B008
+        ..., "--ssh-password-file", help="Owned mode-0600 one-line radio password file."
+    ),
+    confirmation: str = typer.Option(
+        ..., "--confirm", help="Exact serial-specific phrase printed by candidate-ram plan."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout whose commit is retained in the receipt.",
+    ),
+    state_root: Path = typer.Option(  # noqa: B008
+        DEFAULT_STATE_ROOT,
+        "--state-root",
+        help="Private daemon state root used for exclusive maintenance locking.",
+    ),
+    timeout_s: float = typer.Option(
+        45.0, "--timeout", min=5.0, max=600.0, help="Per-transition wait timeout."
+    ),
+) -> None:
+    """RAM-boot one exact candidate with no host-key or persistent-write authority."""
+
+    from pluto_plus import __version__
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateOperationPlan,
+        load_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import (
+        ReleaseCandidateLifecycleError,
+        execute_candidate_ram,
+    )
+    from pluto_plus.release_candidate_linux import (
+        LinuxReleaseCandidateBackend,
+        attest_clean_tool_repository,
+    )
+
+    try:
+        selected_operation = operation_plan.expanduser().absolute()
+        planned = load_private_contract(selected_operation, ReleaseCandidateOperationPlan)
+        repository = tool_repository.expanduser().absolute()
+        source = attest_clean_tool_repository(repository)
+        backend = LinuxReleaseCandidateBackend(
+            state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
+        )
+        receipt, digest = execute_candidate_ram(
+            selected_operation,
+            password_path=ssh_password_file.expanduser().absolute(),
+            confirmation=confirmation,
+            backend=backend,
+            tool_repository=source.repository,
+            tool_version=__version__,
+            tool_source_commit=source.commit,
+            timeout_s=timeout_s,
+        )
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        detail = ""
+        if isinstance(error, ReleaseCandidateLifecycleError) and error.receipt is not None:
+            detail = (
+                f"; durable {error.receipt.outcome} receipt={planned.receipt_path} "
+                f"sha256={error.receipt_sha256}"
+            )
+        _fail("candidate_ram_execute_failed", f"{error}{detail}", 5)
+    _emit(
+        {
+            "outcome": receipt.outcome,
+            "receipt": receipt.model_dump(mode="json", by_alias=True),
+            "receipt_path": str(planned.receipt_path),
+            "receipt_sha256": digest,
+        }
+    )
+
+
+@candidate_ram_app.command("receipt-verify")
+def firmware_candidate_ram_receipt_verify(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+) -> None:
+    """Replay a durable receipt against its exact candidate and operation plans."""
+
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateOperationPlan,
+        ReleaseCandidatePlan,
+        ReleaseCandidateRamReceipt,
+        load_private_contract,
+        validate_contract_bundle,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        selected = receipt.expanduser().absolute()
+        value = load_private_contract(selected, ReleaseCandidateRamReceipt)
+        operation = load_private_contract(value.operation_plan.path, ReleaseCandidateOperationPlan)
+        candidate = load_private_contract(value.candidate_plan.path, ReleaseCandidatePlan)
+        validate_contract_bundle(
+            candidate,
+            operation,
+            value,
+            candidate_path=value.candidate_plan.path,
+            operation_path=value.operation_plan.path,
+        )
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        _fail("candidate_ram_receipt_invalid", str(error), 4)
+    _emit(
+        {
+            "verdict": "pass",
+            "outcome": value.outcome,
+            "receipt": str(selected),
+            "serial": value.target.serial,
+            "candidate_firmware": value.expected_firmware,
+        }
+    )
+
+
+@candidate_ram_app.command("recover")
+def firmware_candidate_ram_recover(
+    receipt: Path = typer.Argument(...),  # noqa: B008
+    ssh_password_file: Path = typer.Option(  # noqa: B008
+        ..., "--ssh-password-file", help="Owned mode-0600 one-line radio password file."
+    ),
+    confirmation: str = typer.Option(
+        ..., "--confirm", help="Exact phrase RECOVER RELEASE CANDIDATE <serial>."
+    ),
+    expected_return_firmware: str = typer.Option(
+        ...,
+        "--expected-return-firmware",
+        help="Exact firmware expected after returning to or finding the safe runtime.",
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent private recovery-receipt output."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout whose commit performs recovery.",
+    ),
+    state_root: Path = typer.Option(  # noqa: B008
+        DEFAULT_STATE_ROOT,
+        "--state-root",
+        help="Private daemon state root used for exclusive maintenance locking.",
+    ),
+    timeout_s: float = typer.Option(
+        45.0, "--timeout", min=5.0, max=600.0, help="Per-recovery wait timeout."
+    ),
+) -> None:
+    """Return one exact unknown candidate DFU transition to a safe runtime."""
+
+    import uuid
+    from datetime import UTC, datetime
+
+    from pluto_plus import __version__
+    from pluto_plus.release_candidate import (
+        RECOVERY_RECEIPT_SCHEMA,
+        CleanupReceipt,
+        ReleaseCandidateOperationPlan,
+        ReleaseCandidatePlan,
+        ReleaseCandidateRamReceipt,
+        ReleaseCandidateRecoveryReceipt,
+        load_private_contract,
+        model_file_identity,
+        validate_contract_bundle,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import (
+        ReleaseCandidateLifecycleError,
+        validate_password_file,
+    )
+    from pluto_plus.release_candidate_linux import (
+        LinuxReleaseCandidateBackend,
+        attest_clean_tool_repository,
+    )
+
+    try:
+        selected_receipt = receipt.expanduser().absolute()
+        unknown = load_private_contract(selected_receipt, ReleaseCandidateRamReceipt)
+        operation = load_private_contract(
+            unknown.operation_plan.path, ReleaseCandidateOperationPlan
+        )
+        candidate = load_private_contract(unknown.candidate_plan.path, ReleaseCandidatePlan)
+        validate_contract_bundle(
+            candidate,
+            operation,
+            unknown,
+            candidate_path=unknown.candidate_plan.path,
+            operation_path=unknown.operation_plan.path,
+        )
+        if selected_receipt != operation.receipt_path:
+            raise ReleaseCandidateLifecycleError(
+                "unknown receipt path differs from its operation plan"
+            )
+        if (
+            unknown.outcome != "unknown"
+            or unknown.pre_runtime is None
+            or unknown.cleanup.verified
+            or not unknown.host_route.release_verified
+            or unknown.transition.persistent_write
+        ):
+            raise ReleaseCandidateLifecycleError(
+                "recovery requires one route-released unknown RAM receipt"
+            )
+        expected_confirmation = f"RECOVER RELEASE CANDIDATE {unknown.target.serial}"
+        if confirmation != expected_confirmation:
+            raise ReleaseCandidateLifecycleError(
+                f"recovery requires exact confirmation {expected_confirmation!r}"
+            )
+        password = validate_password_file(ssh_password_file.expanduser().absolute())
+        try:
+            password.path.relative_to(candidate.artifact_index.path.parent)
+        except ValueError:
+            pass
+        else:
+            raise ReleaseCandidateLifecycleError(
+                "SSH password file must be outside the candidate archive"
+            )
+        source = attest_clean_tool_repository(tool_repository.expanduser().absolute())
+        backend = LinuxReleaseCandidateBackend(
+            state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
+        )
+        if (
+            unknown.transition.download_completed
+            and expected_return_firmware != candidate.expected_runtime.firmware_version
+        ):
+            raise ReleaseCandidateLifecycleError(
+                "a completed candidate download must recover to the candidate firmware"
+            )
+        started_at = datetime.now(UTC)
+        with backend.transaction_locks(unknown.target, operation.ssh_host):
+            recovered, route, detached = backend.recover_unknown_runtime(
+                unknown.target,
+                pre_runtime=unknown.pre_runtime,
+                expected_firmware=expected_return_firmware,
+                password=password,
+                ssh_host=operation.ssh_host,
+                timeout_s=timeout_s,
+            )
+        recovery = ReleaseCandidateRecoveryReceipt(
+            schema=RECOVERY_RECEIPT_SCHEMA,
+            recovery_id=uuid.uuid4().hex,
+            started_at=started_at,
+            completed_at=datetime.now(UTC),
+            tool_repository=source.repository,
+            tool_version=__version__,
+            tool_source_commit=source.commit,
+            source_receipt=model_file_identity(selected_receipt, unknown),
+            operation_plan=unknown.operation_plan,
+            candidate_plan=unknown.candidate_plan,
+            target=unknown.target,
+            pre_runtime=unknown.pre_runtime,
+            recovered_runtime=recovered,
+            expected_return_firmware=expected_return_firmware,
+            host_route=route,
+            recovery_action="dfu-detach-e" if detached else "runtime-attestation",
+            dfu_detach_completed=detached,
+            persistent_write=False,
+            qspi_unchanged=True,
+            cleanup=CleanupReceipt(verified=True),
+        )
+        identity = write_private_contract(output.expanduser().absolute(), recovery)
+    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        _fail("candidate_ram_recovery_failed", str(error), 5)
+    _emit(
+        {
+            "outcome": "pass",
+            "recovery_receipt": str(identity.path),
+            "recovery_receipt_sha256": identity.sha256,
+            "serial": recovery.target.serial,
+            "firmware_version": recovery.recovered_runtime.firmware_version,
+            "qspi_unchanged": recovery.qspi_unchanged,
+            "route_release_verified": recovery.host_route.release_verified,
+        }
     )
 
 
@@ -1870,12 +5112,33 @@ def firmware_ram_boot(
         "--receipt-directory",
         help="Private directory for durable RAM-boot receipts.",
     ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing local Pluto NICs/routes with a durable receipt.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="With isolation execution, exact phrase ISOLATE USB SSH <interface>.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for host-isolation receipts.",
+    ),
 ) -> None:
     """Load one exact qualified DFU into RAM without writing QSPI."""
 
     from pluto_plus.bootstrap_firmware import (
         BootstrapFirmwareError,
         BoundSshBootstrapTransport,
+    )
+    from pluto_plus.host_isolation import (
+        HostIsolationError,
+        HostIsolationExecutionError,
+        execute_usb_ssh_isolated,
+        prepare_usb_ssh_isolation,
     )
     from pluto_plus.volatile_firmware import (
         SshRamBootTransition,
@@ -1895,6 +5158,32 @@ def firmware_ram_boot(
         )
     except (VolatileFirmwareError, OSError, ValueError) as error:
         _fail("ram_boot_preflight_failed", str(error), 4)
+    isolation_plan = None
+    pluto_interfaces: tuple[str, ...] = ()
+    if isolate_usb_route:
+        if ssh_host != "192.168.2.1":
+            _fail("host_isolation_invalid", "USB route isolation requires 192.168.2.1", 2)
+        local_devices = scan_local_usb_plutos()
+        selected_matches = [
+            item
+            for item in local_devices
+            if item.serial == plan.serial and item.usb_path == plan.usb_sysfs_path
+        ]
+        if len(selected_matches) != 1 or len(selected_matches[0].host_network_interfaces) != 1:
+            _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
+        if selected_matches[0].host_network_interfaces[0].name != plan.usb_interface:
+            _fail("host_isolation_identity_changed", "selected USB interface changed", 4)
+        pluto_interfaces = tuple(
+            interface.name for item in local_devices for interface in item.host_network_interfaces
+        )
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                plan.usb_interface,
+                ssh_host,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
     if not execute:
         environment = inspect_iio_environment()
         _emit(
@@ -1903,6 +5192,7 @@ def firmware_ram_boot(
                 "will_write_qspi": False,
                 "will_load_volatile_ram": False,
                 "plan": asdict(plan),
+                "host_isolation": (None if isolation_plan is None else asdict(isolation_plan)),
                 "host_environment": environment.model_dump(mode="json"),
                 "next_command": (
                     f"repeat with --execute and --confirm {json.dumps(plan.confirmation_phrase)}"
@@ -1914,6 +5204,12 @@ def firmware_ram_boot(
         _fail(
             "ram_boot_confirmation_required",
             f"--execute requires --confirm {plan.confirmation_phrase!r}",
+            2,
+        )
+    if isolation_plan is not None and isolation_confirmation != isolation_plan.confirmation_phrase:
+        _fail(
+            "host_isolation_confirmation_required",
+            f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
             2,
         )
     if not plan.raw_usb_write_access:
@@ -1941,23 +5237,44 @@ def firmware_ram_boot(
             )
         except UnicodeDecodeError:
             _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
-    try:
+    def ram_boot_action() -> Any:
         ssh = BoundSshBootstrapTransport(
             interface=(plan.usb_interface if plan.transition_route_mode == "usb_gadget" else None),
             password=password,
             known_hosts_file=selected_known_hosts,
             host=plan.transition_host,
         )
-        result = execute_ram_boot_plan(
+        return execute_ram_boot_plan(
             plan,
             confirmation=confirmation,
             known_hosts_file=selected_known_hosts,
             transition=SshRamBootTransition(ssh),
             receipt_directory=receipt_directory.expanduser().resolve(),
         )
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            result = ram_boot_action()
+        else:
+            result, isolation_receipt = execute_usb_ssh_isolated(
+                isolation_plan,
+                confirmation=isolation_confirmation or "",
+                receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                action=ram_boot_action,
+                pluto_interfaces=pluto_interfaces,
+            )
+    except HostIsolationExecutionError as error:
+        _emit({"host_isolation": asdict(error.receipt)})
+        raise typer.Exit(5) from error
+    except HostIsolationError as error:
+        _fail("host_isolation_failed", str(error), 4)
     except (VolatileFirmwareError, BootstrapFirmwareError, OSError, ValueError) as error:
         _fail("ram_boot_failed", str(error), 4)
-    _emit(asdict(result))
+    if isolation_receipt is None:
+        _emit(asdict(result))
+    else:
+        _emit({"host_isolation": asdict(isolation_receipt), "result": asdict(result)})
     if result.outcome != "success":
         raise typer.Exit(5)
 
@@ -2231,6 +5548,150 @@ def setup_receipt_list(ctx: typer.Context) -> None:
     _emit(_api(ctx).request("GET", "setup/receipts"))
 
 
+@setup_app.command("reconcile-local")
+def setup_reconcile_local(
+    receipt_id: str = typer.Argument(..., help="Exact uncertain setup receipt ID."),
+    serial: str = typer.Option(..., "--serial", help="Exact USB serial recorded by the receipt."),
+    usb_sysfs_path: Path = typer.Option(  # noqa: B008
+        ..., "--usb-sysfs-path", help="Exact direct USB path recorded by the receipt."
+    ),
+    firmware: str = typer.Option(
+        ..., "--firmware", help="Exact active firmware identity recorded by the receipt."
+    ),
+    known_hosts_file: Path = typer.Option(  # noqa: B008
+        ..., "--known-hosts-file", help="Current pinned known_hosts for the exact radio."
+    ),
+    password_file: Path | None = typer.Option(  # noqa: B008
+        None, "--password-file", help="Private radio password file; otherwise prompt."
+    ),
+    host: str = typer.Option(
+        "192.168.2.1", "--host", help="Literal private SSH endpoint for the radio."
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_SETUP_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory containing the uncertain setup receipt.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing local Pluto NICs/routes with a durable receipt.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="Exact phrase ISOLATE USB SSH <interface> for temporary route isolation.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for host-isolation receipts.",
+    ),
+) -> None:
+    """Read-only re-attest an uncertain local setup receipt; never retry it."""
+
+    from pluto_plus.host_isolation import (
+        HostIsolationError,
+        HostIsolationExecutionError,
+        execute_usb_ssh_isolated,
+        prepare_usb_ssh_isolation,
+    )
+    from pluto_plus.setup import SetupError, SetupIdentity
+    from pluto_plus.setup_helper import SetupHelperError
+    from pluto_plus.setup_repair import SetupCredentials, ssh_manager_factory
+
+    try:
+        identity = SetupIdentity(
+            serial=serial,
+            usb_sysfs_path=str(usb_sysfs_path),
+            observed_firmware=firmware,
+        )
+    except ValueError as error:
+        _fail("setup_reconciliation_identity_invalid", str(error), 2)
+    local_devices = scan_local_usb_plutos()
+    matches = [
+        item
+        for item in local_devices
+        if item.serial == serial and item.usb_path == str(usb_sysfs_path)
+    ]
+    if len(matches) != 1 or len(matches[0].host_network_interfaces) != 1:
+        _fail(
+            "setup_reconciliation_identity_unavailable",
+            "serial/path must identify one local radio with one USB network interface",
+            4,
+        )
+    interface = matches[0].host_network_interfaces[0].name if host == "192.168.2.1" else None
+    isolation_plan = None
+    pluto_interfaces = tuple(
+        network.name for item in local_devices for network in item.host_network_interfaces
+    )
+    if isolate_usb_route:
+        if host != "192.168.2.1" or interface is None:
+            _fail("host_isolation_invalid", "USB route isolation requires 192.168.2.1", 2)
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                interface,
+                host,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        if isolation_confirmation != isolation_plan.confirmation_phrase:
+            _fail(
+                "host_isolation_confirmation_required",
+                f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
+                2,
+            )
+    selected_known_hosts = known_hosts_file.expanduser().absolute()
+    _read_private_file_bytes(
+        selected_known_hosts, label="setup SSH known-hosts", maximum_bytes=1024 * 1024
+    )
+    if password_file is None:
+        password = typer.prompt("Radio SSH password", hide_input=True)
+    else:
+        password = _read_private_text_file(
+            password_file.expanduser().absolute(), label="radio SSH password"
+        )
+    selected_receipts = receipt_directory.expanduser().absolute()
+
+    def reconcile_action() -> Any:
+        manager = ssh_manager_factory(
+            SetupCredentials(
+                host=host,
+                password=password,
+                known_hosts_file=selected_known_hosts,
+                receipt_directory=selected_receipts,
+                state_root=selected_receipts.parent,
+                interface=interface,
+            )
+        )(identity)
+        return manager.reconcile(receipt_id)
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            receipt = reconcile_action()
+        else:
+            receipt, isolation_receipt = execute_usb_ssh_isolated(
+                isolation_plan,
+                confirmation=isolation_confirmation or "",
+                receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                action=reconcile_action,
+                pluto_interfaces=pluto_interfaces,
+            )
+    except HostIsolationExecutionError as error:
+        _emit({"host_isolation": asdict(error.receipt)})
+        raise typer.Exit(5) from error
+    except HostIsolationError as error:
+        _fail("host_isolation_failed", str(error), 4)
+    except (SetupError, SetupHelperError, OSError, ValueError) as error:
+        _fail("setup_reconciliation_failed", str(error), 4)
+    payload = asdict(receipt)
+    if isolation_receipt is not None:
+        payload = {"host_isolation": asdict(isolation_receipt), "result": payload}
+    _emit(payload)
+
+
 @app.command("analyze")
 def analyze(
     ctx: typer.Context,
@@ -2379,6 +5840,17 @@ def _discover_production_devices() -> tuple[Any, ...]:
             2,
         )
     return tuple(discovery.discover_devices())
+
+
+def _append_hardware_without_explicit_duplicates(
+    explicit: list[Any], discovered: tuple[Any, ...]
+) -> None:
+    """Let an explicit transport selection override broad hardware discovery."""
+
+    explicit_ids = {str(device.identity.radio_id) for device in explicit}
+    explicit.extend(
+        device for device in discovered if str(device.identity.radio_id) not in explicit_ids
+    )
 
 
 def _direct_ip_devices(specifications: list[str]) -> tuple[Any, ...]:
@@ -2673,7 +6145,7 @@ def serve(
         )
         devices.extend(managed_network_devices)
     if hardware:
-        devices.extend(_discover_production_devices())
+        _append_hardware_without_explicit_duplicates(devices, _discover_production_devices())
     if not devices and not discovered_radios:
         _fail("no_radios", "no fake radios requested and no hardware radios discovered", 2)
 
@@ -2856,7 +6328,7 @@ def serve(
         setup_manager=setup_manager,
     )
     if ssh_enrollments:
-        from pluto_plus.doctor import CANONICAL_POLICY
+        from pluto_plus.doctor import PERSISTENT_UPGRADE_POLICY
         from pluto_plus.firmware import (
             FirmwareManager,
             FirmwareTransport,
@@ -2967,7 +6439,8 @@ def serve(
                             observed.serial == enrolled_serial
                             and observed.transport is Transport.IIO_IP
                             and observed.uri == f"ip:{enrolled_host}"
-                            and observed.firmware_version == CANONICAL_POLICY.device_firmware
+                            and observed.firmware_version
+                            == PERSISTENT_UPGRADE_POLICY.device_firmware
                         )
                     except Exception:
                         return False
@@ -2984,7 +6457,7 @@ def serve(
                         host_key_fingerprint=transport.host_key_fingerprint,
                     ),
                     transport=transport,
-                    expected_firmware=CANONICAL_POLICY.device_firmware,
+                    expected_firmware=PERSISTENT_UPGRADE_POLICY.device_firmware,
                     post_reset_probe=post_reset_probe,
                     post_reset_tx_guard=post_reset_tx_guard,
                     evidence_directory=(

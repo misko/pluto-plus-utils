@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
 from pluto_plus.cli import app
+from pluto_plus.host_isolation import HostIsolationPlan
 from pluto_plus.volatile_firmware import VolatileFirmwarePlan
 
 runner = CliRunner()
@@ -116,3 +119,66 @@ def test_ram_boot_cli_refuses_raw_usb_permission_before_prompt_or_mutation(
     error = json.loads(result.stderr)["error"]
     assert error["code"] == "ram_boot_usb_permission_denied"
     assert "udev" in error["message"]
+
+
+def test_ram_boot_route_isolation_requires_exact_generated_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = replace(
+        _plan(),
+        transition_host="192.168.2.1",
+        transition_route_mode="usb_gadget",
+    )
+    isolation_plan = HostIsolationPlan(
+        schema_version=1,
+        plan_id="isolate-a",
+        created_at="2026-08-27T00:00:00+00:00",
+        selected_interface="enx001",
+        endpoint="192.168.2.1",
+        selected_addresses=("192.168.2.10",),
+        peer_interfaces=("enx002",),
+        peer_addresses=(("enx002", ("192.168.2.10",)),),
+        competing_routes=(),
+        sudo_ready=True,
+        confirmation_phrase="ISOLATE USB SSH enx001",
+    )
+    monkeypatch.setattr(
+        "pluto_plus.volatile_firmware.prepare_ram_boot_plan",
+        lambda *args, **kwargs: plan,
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.scan_local_usb_plutos",
+        lambda: (
+            SimpleNamespace(
+                serial="SERIAL_A",
+                usb_path="/sys/bus/usb/devices/3-7",
+                host_network_interfaces=(SimpleNamespace(name="enx001"),),
+            ),
+            SimpleNamespace(
+                serial="SERIAL_B",
+                usb_path="/sys/bus/usb/devices/3-8",
+                host_network_interfaces=(SimpleNamespace(name="enx002"),),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
+        lambda *args, **kwargs: isolation_plan,
+    )
+    arguments = _arguments(tmp_path)[:-2]
+
+    result = runner.invoke(
+        app,
+        [
+            *arguments,
+            "--isolate-usb-route",
+            "--execute",
+            "--confirm",
+            "RAM BOOT SERIAL_A",
+        ],
+    )
+
+    assert result.exit_code == 2
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "host_isolation_confirmation_required"
+    assert "ISOLATE USB SSH enx001" in error["message"]

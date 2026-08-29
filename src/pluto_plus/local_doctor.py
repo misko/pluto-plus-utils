@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,16 +13,32 @@ from pluto_plus.bootstrap_firmware import (
     BootstrapFirmwareError,
     inspect_bound_iiod,
 )
+from pluto_plus.data_plane import DataPlaneProbe
 from pluto_plus.diagnostic_profiles import (
     DIAGNOSTIC_PROFILES,
+    SUPPORTED_AD936X_PHY_MODELS,
+    UPGRADE_TARGET_PROFILE,
     MetadataAbiState,
     parse_metadata_abi,
     select_diagnostic_profile,
+    upgrade_target_for,
 )
+from pluto_plus.doctor import CANONICAL_UBOOT
+from pluto_plus.hardware.preflight import IioEnvironmentReport, inspect_iio_environment
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
+from pluto_plus.setup_repair import SetupProbeOutcome, SetupRepairRecord
 
 CheckStatus = Literal["pass", "fail", "unknown"]
+# Reads (and, when enabled, repairs) one radio's persistent U-Boot tuple.  Injected so
+# the read-only lane stays free of any SSH or credential dependency.
+SetupProbe = Callable[[LocalUsbPluto, "str | None"], SetupProbeOutcome]
+DataPlaneProbeRunner = Callable[[LocalUsbPluto], DataPlaneProbe]
 LOCAL_POLICY = BOOTSTRAP_POLICY
+# Rendered from the single canonical definition so the advertised tuple cannot drift
+# away from the one the provisioner actually writes.
+CANONICAL_UBOOT_SUMMARY = ", ".join(
+    f"{key} unset" if value is None else f"{key}={value}" for key, value in CANONICAL_UBOOT.items()
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +67,19 @@ class LocalDoctorRadio:
     overall: CheckStatus
     checks: tuple[LocalDoctorCheck, ...]
     error: str | None = None
+    setup_repair: SetupRepairRecord | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HostLibiioCheck:
+    """Host-local libiio health. Not a per-radio fact: it gates every radio."""
+
+    status: str
+    healthy: bool
+    summary: str
+    remediation: str | None
+    libiio_version: str | None
+    backends: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,14 +89,18 @@ class LocalDoctorReport:
     canonical_image_sha256: str
     radios: tuple[LocalDoctorRadio, ...]
     diagnostic_profiles: tuple[str, ...] = ()
+    host_libiio: HostLibiioCheck | None = None
 
 
 def diagnose_local_usb_radios(
     usb_sysfs_path: Path | None = None,
     *,
     devices: tuple[LocalUsbPluto, ...] | None = None,
+    setup_probe: SetupProbe | None = None,
+    data_plane_probe: DataPlaneProbeRunner | None = None,
+    environment_probe: Callable[[], IioEnvironmentReport] = inspect_iio_environment,
 ) -> LocalDoctorReport:
-    """Freshly inspect each selected USB Pluto without opening an IIO buffer."""
+    """Freshly inspect local Plutos, with an explicitly supplied active probe."""
 
     selected = scan_local_usb_plutos() if devices is None else devices
     if usb_sysfs_path is not None:
@@ -76,17 +110,22 @@ def diagnose_local_usb_radios(
             raise ValueError(
                 f"expected exactly one local Pluto at {usb_sysfs_path}, found {len(selected)}"
             )
-    radios = tuple(_diagnose_radio(device) for device in selected)
+    radios = tuple(_diagnose_radio(device, setup_probe, data_plane_probe) for device in selected)
     return LocalDoctorReport(
         generated_at=datetime.now(UTC).isoformat(),
         canonical_firmware=LOCAL_POLICY.device_firmware,
         canonical_image_sha256=LOCAL_POLICY.asset_sha256,
         diagnostic_profiles=tuple(profile.profile_id for profile in DIAGNOSTIC_PROFILES),
         radios=radios,
+        host_libiio=_host_libiio(environment_probe),
     )
 
 
-def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
+def _diagnose_radio(
+    device: LocalUsbPluto,
+    setup_probe: SetupProbe | None = None,
+    data_plane_probe: DataPlaneProbeRunner | None = None,
+) -> LocalDoctorRadio:
     checks: list[LocalDoctorCheck] = []
     usb_bus_device = (
         f"{device.bus_number:03d}:{device.device_number:03d}"
@@ -159,6 +198,40 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         if identity_ok
         else "IIOD identity is blank or does not match USB",
     )
+    if data_plane_probe is None or device.serial is None:
+        _check(
+            checks,
+            "transport.rx_data_plane",
+            "unknown",
+            None,
+            "one exact-serial bounded RX refill",
+            "Data-plane probe was not requested"
+            if data_plane_probe is None
+            else "Data-plane probe requires a stable USB serial",
+        )
+    else:
+        try:
+            data_plane = data_plane_probe(device)
+        except Exception as error:
+            _check(
+                checks,
+                "transport.rx_data_plane",
+                "fail",
+                f"{type(error).__name__}: {error}",
+                "one exact-serial bounded RX refill",
+                "Bounded RX data-plane probe failed",
+            )
+        else:
+            _check(
+                checks,
+                "transport.rx_data_plane",
+                data_plane.status,
+                data_plane.model_dump(mode="json"),
+                "one exact-serial bounded RX refill",
+                "Bounded RX data-plane refill passed"
+                if data_plane.status == "pass"
+                else f"Bounded RX data-plane refill failed: {data_plane.error}",
+            )
     model = str(facts.get("hw_model") or "").strip() or None
     model_ok = model is not None and "plutosdr rev.c" in model.lower()
     _check(
@@ -181,14 +254,30 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         if profile is not None
         else "Active firmware has no supported diagnostic profile",
     )
+    upgrade = upgrade_target_for(profile)
+    _check(
+        checks,
+        "firmware.release_currency",
+        "unknown" if profile is None else "fail" if upgrade is not None else "pass",
+        firmware,
+        UPGRADE_TARGET_PROFILE.firmware_version,
+        "Active firmware has no known profile, so it cannot be ranked"
+        if profile is None
+        else f"A newer qualified release is available: {upgrade.firmware_version}"
+        if upgrade is not None
+        else "Active firmware is at or newer than the newest qualified release",
+    )
     phy = str(facts.get("ad9361-phy,model") or "").strip() or None
+    phy_supported = phy in SUPPORTED_AD936X_PHY_MODELS
     _check(
         checks,
         "rf.phy_model",
-        "pass" if phy == "ad9361" else "fail",
+        "pass" if phy_supported else "fail",
         phy,
-        "ad9361",
-        "Live PHY is AD9361" if phy == "ad9361" else "Live PHY is not AD9361",
+        SUPPORTED_AD936X_PHY_MODELS,
+        "Live PHY is a supported AD936x"
+        if phy_supported
+        else "Live PHY is not a supported AD936x",
     )
     metadata = parse_metadata_abi(facts.get("iio,buffer-metadata"))
     metadata_ok = profile is not None and metadata.abi in profile.metadata_abis
@@ -246,13 +335,16 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         "fresh trusted persistent-boot evidence",
         "Standalone USB IIOD inspection cannot prove QSPI boot provenance",
     )
+    probed = None if setup_probe is None else setup_probe(device, firmware)
     _check(
         checks,
         "setup.uboot_ad9361_2r2t",
-        "unknown",
-        None,
-        "attr_name=compatible, attr_val=ad9361, compatible=ad9361, mode=2r2t",
-        "Persistent U-Boot values require the authenticated setup inspector",
+        "unknown" if probed is None else probed.status,
+        None if probed is None else probed.actual,
+        CANONICAL_UBOOT_SUMMARY,
+        "Persistent U-Boot values require the authenticated setup inspector"
+        if probed is None
+        else probed.summary,
     )
     return _radio_result(
         device,
@@ -260,6 +352,7 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
         interface,
         storage,
         checks,
+        setup_repair=None if probed is None else probed.repair,
         firmware=firmware,
         model=model,
         phy=phy,
@@ -273,12 +366,14 @@ def _diagnose_radio(device: LocalUsbPluto) -> LocalDoctorRadio:
 def _unknown_facts(checks: list[LocalDoctorCheck]) -> None:
     for code, expected in (
         ("identity.iio_serial", "same non-empty USB serial"),
+        ("transport.rx_data_plane", "one exact-serial bounded RX refill"),
         ("hardware.rev_c", "PlutoSDR Rev.C"),
         (
             "firmware.diagnostic_profile",
             tuple(item.firmware_version for item in DIAGNOSTIC_PROFILES),
         ),
-        ("rf.phy_model", "ad9361"),
+        ("firmware.release_currency", UPGRADE_TARGET_PROFILE.firmware_version),
+        ("rf.phy_model", SUPPORTED_AD936X_PHY_MODELS),
         ("transport.buffer_metadata", "metadata ABI selected by a known profile"),
         ("rf.paired_rx_device", ("ad9361-phy", "cf-ad9361-lpc")),
         ("transport.tandem_agc", "capability selected by a known profile"),
@@ -381,6 +476,7 @@ def _radio_result(
     storage: str | None,
     checks: list[LocalDoctorCheck],
     *,
+    setup_repair: SetupRepairRecord | None = None,
     firmware: str | None = None,
     model: str | None = None,
     phy: str | None = None,
@@ -410,4 +506,22 @@ def _radio_result(
         overall=overall,
         checks=tuple(checks),
         error=error,
+        setup_repair=setup_repair,
+    )
+
+
+def _host_libiio(probe: Callable[[], IioEnvironmentReport]) -> HostLibiioCheck | None:
+    """Summarise host libiio health, degrading to None if the probe itself fails."""
+
+    try:
+        report = probe()
+    except Exception:  # noqa: BLE001 - a probe failure must not fail the whole sweep
+        return None
+    return HostLibiioCheck(
+        status=str(report.status),
+        healthy=report.healthy,
+        summary=report.message,
+        remediation=report.remediation,
+        libiio_version=report.libiio_version,
+        backends=tuple(report.backends),
     )

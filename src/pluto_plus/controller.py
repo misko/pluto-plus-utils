@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -23,7 +24,7 @@ from pluto_plus.errors import (
     RadioSetupRequiredError,
     RevisionConflictError,
 )
-from pluto_plus.hardware.base import RadioDevice, SampleBlock
+from pluto_plus.hardware.base import RadioDevice, SampleBlock, restore_settings_exact
 from pluto_plus.models import (
     JobState,
     RadioSettings,
@@ -37,8 +38,10 @@ from pluto_plus.models import (
     SpectrumFrame,
     StreamJob,
     StreamRequest,
+    Transport,
     utc_now,
 )
+from pluto_plus.radio_lock import acquire_radio_lock
 
 
 class SpectrumSubscription:
@@ -125,6 +128,7 @@ class RadioController:
         max_in_memory_jobs: int = 256,
         shutdown_timeout_s: float = 15,
         max_spectrum_subscribers: int = 64,
+        radio_lock_root: Path | None = None,
     ) -> None:
         if capture_reserve_bytes < 0:
             raise ValueError("capture_reserve_bytes cannot be negative")
@@ -152,6 +156,7 @@ class RadioController:
         self._setup_diagnostic_facts: dict[str, object] = {}
         self._active: _ActiveStream | None = None
         self._active_scan: _ActiveScan | None = None
+        self._radio_lock_manager: Any | None = None
         self._jobs = {
             job.job_id: job
             for job in self._catalog.list_stream_jobs(self._device.identity.radio_id)[
@@ -164,7 +169,20 @@ class RadioController:
                 :max_in_memory_jobs
             ]
         }
-        self._open()
+        if radio_lock_root is not None and self._device.identity.transport in {
+            Transport.IIO_USB,
+            Transport.DIRECT_USB,
+        }:
+            self._radio_lock_manager = acquire_radio_lock(
+                self._device.identity.serial,
+                root=radio_lock_root,
+            )
+            self._radio_lock_manager.__enter__()
+        try:
+            self._open()
+        except BaseException:
+            self._release_radio_lock()
+            raise
 
     @property
     def radio_id(self) -> str:
@@ -541,6 +559,12 @@ class RadioController:
             self._device.close()
         with self._lock:
             self._state = RadioState.OFFLINE
+        self._release_radio_lock()
+
+    def _release_radio_lock(self) -> None:
+        manager, self._radio_lock_manager = self._radio_lock_manager, None
+        if manager is not None:
+            manager.__exit__(None, None, None)
 
     def _open(self) -> None:
         try:
@@ -688,8 +712,7 @@ class RadioController:
                     self._revision += 1
                 points.append(_scan_point(block, actual, request.fft_size))
             with self._device_lock:
-                restored_actual = self._device.apply_settings(original)
-                _validate_readback(original, restored_actual)
+                restored_actual = restore_settings_exact(self._device, original).restored
             restored = True
             with self._lock:
                 self._requested = original
@@ -731,8 +754,7 @@ class RadioController:
             if not restored:
                 try:
                     with self._device_lock:
-                        restored_actual = self._device.apply_settings(original)
-                        _validate_readback(original, restored_actual)
+                        restored_actual = restore_settings_exact(self._device, original).restored
                     with self._lock:
                         self._requested = original
                         self._actual = restored_actual

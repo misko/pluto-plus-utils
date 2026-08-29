@@ -6,16 +6,17 @@ import math
 import re
 import time
 from collections.abc import Callable, Sequence
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 from pydantic import Field
 
-from pluto_plus.hardware.base import SampleBlock
+from pluto_plus.hardware.base import SampleBlock, restore_settings_exact
 from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.models import ApiModel, RadioCapabilities, RadioIdentity, RadioSettings
 
 DEFAULT_RATE_LADDER = "1M,1.5M,2M,2.5M,3M,5M,10M,20M,30M"
+LADDER_CHANNEL_SELECTIONS = {"rx0": (0,), "rx1": (1,), "dual": (0, 1)}
 MIN_SAMPLES_PER_CHANNEL = 16_384
 MAX_SAMPLES_PER_CHANNEL = 4_194_304
 MAX_RATE_RUNGS = 32
@@ -23,6 +24,11 @@ MAX_TIMED_FRAMES = 100
 MAX_WARMUP_FRAMES = 20
 WIRE_BYTES_PER_COMPLEX_SAMPLE = 4
 KEEP_PACE_FRACTION = 0.90
+# Live Pluto+ qualification found that a 32 MiB four-buffer RX queue can
+# permanently wedge RX-DMAC completion after the first timeout, while the
+# 16 MiB envelope remains healthy across single and dual 1--15 MS/s ladders.
+MAX_SAFE_KERNEL_QUEUE_BYTES = 16 * 1024 * 1024
+UNSAFE_KERNEL_QUEUE_CONFIRMATION = "ALLOW UNVALIDATED RX QUEUE"
 _RATE_PATTERN = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([kKmMgG]?)$")
 _RATE_MULTIPLIERS = {"": 1, "k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
 
@@ -59,6 +65,9 @@ class LadderReport(ApiModel):
     firmware_version: str | None
     channels: tuple[int, ...]
     kernel_buffers: int = Field(ge=1, le=64)
+    kernel_buffer_configuration_basis: Literal["setter_accepted", "readback"]
+    kernel_queue_bytes: int = Field(gt=0)
+    unsafe_kernel_queue_override: bool
     wire_bytes_per_sample_period: int
     warmup_frames: int
     cells: tuple[LadderCell, ...]
@@ -77,6 +86,11 @@ class LadderRadio(Protocol):
     @property
     def capabilities(self) -> RadioCapabilities: ...
 
+    @property
+    def kernel_buffer_configuration_basis(
+        self,
+    ) -> Literal["not_configured", "setter_accepted", "readback"]: ...
+
     def open(self) -> None: ...
 
     def close(self) -> None: ...
@@ -85,7 +99,7 @@ class LadderRadio(Protocol):
 
     def apply_settings(self, settings: RadioSettings) -> RadioSettings: ...
 
-    def configure_kernel_buffers(self, count: int) -> None: ...
+    def configure_kernel_buffers(self, count: int) -> int | None: ...
 
     def read_block(self, sample_count: int) -> SampleBlock: ...
 
@@ -118,16 +132,27 @@ def run_iio_ladder(
     uri: str,
     serial: str | None,
     rates_hz: Sequence[int],
+    channels: Sequence[int] = (0, 1),
     samples_per_channel: int = 262_144,
     frames: int = 12,
     warmup_frames: int = 2,
     kernel_buffers: int = 8,
+    allow_unsafe_kernel_queue: bool = False,
     radio_factory: Callable[[str, str | None], LadderRadio] | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> LadderReport:
-    """Run a bounded paired-RX ladder and restore the exact original RX settings."""
+    """Run a bounded RX-layout ladder and restore the exact original RX settings."""
 
-    _validate_shape(rates_hz, samples_per_channel, frames, warmup_frames, kernel_buffers)
+    selected_channels = tuple(channels)
+    kernel_queue_bytes = _validate_shape(
+        rates_hz,
+        selected_channels,
+        samples_per_channel,
+        frames,
+        warmup_frames,
+        kernel_buffers,
+        allow_unsafe_kernel_queue,
+    )
     factory = radio_factory or _default_radio_factory
     radio = factory(uri, serial)
     opened = False
@@ -140,10 +165,15 @@ def run_iio_ladder(
         opened = True
         original = radio.read_settings()
         radio.configure_kernel_buffers(kernel_buffers)
-        channels = tuple(radio.capabilities.receiver_channels)
-        if len(channels) < 2:
-            raise RuntimeError("speed ladder requires a paired-RX Pluto context")
-        channels = channels[:2]
+        kernel_buffer_configuration_basis = radio.kernel_buffer_configuration_basis
+        if kernel_buffer_configuration_basis == "not_configured":
+            raise RuntimeError("RX kernel-buffer configuration has no verification basis")
+        available_channels = tuple(radio.capabilities.receiver_channels)
+        if any(channel not in available_channels for channel in selected_channels):
+            raise RuntimeError(
+                "speed ladder receiver selection is unavailable: "
+                f"requested {selected_channels}, available {available_channels}"
+            )
         for rate in rates_hz:
             try:
                 _validate_rate(rate, radio.capabilities)
@@ -151,13 +181,20 @@ def run_iio_ladder(
                     update={
                         "sample_rate_hz": rate,
                         "bandwidth_hz": min(max(rate, 200_000), 20_000_000),
-                        "channels": channels,
+                        "channels": selected_channels,
                     }
                 )
                 actual = radio.apply_settings(requested)
+                if actual.channels != selected_channels:
+                    raise RuntimeError(
+                        "speed ladder receiver selection did not read back exactly: "
+                        f"requested {selected_channels}, actual {actual.channels}"
+                    )
                 for _ in range(warmup_frames):
                     _validate_block(
-                        radio.read_block(samples_per_channel), channels, samples_per_channel
+                        radio.read_block(samples_per_channel),
+                        selected_channels,
+                        samples_per_channel,
                     )
                 latencies_ns: list[int] = []
                 started_ns = clock_ns()
@@ -165,13 +202,16 @@ def run_iio_ladder(
                     frame_started_ns = clock_ns()
                     block = radio.read_block(samples_per_channel)
                     frame_ended_ns = clock_ns()
-                    _validate_block(block, channels, samples_per_channel)
+                    _validate_block(block, selected_channels, samples_per_channel)
                     latencies_ns.append(frame_ended_ns - frame_started_ns)
                 elapsed_seconds = (clock_ns() - started_ns) / 1_000_000_000
                 if elapsed_seconds <= 0:
                     raise RuntimeError("benchmark clock did not advance")
                 wire_bytes = (
-                    frames * samples_per_channel * len(channels) * WIRE_BYTES_PER_COMPLEX_SAMPLE
+                    frames
+                    * samples_per_channel
+                    * len(selected_channels)
+                    * WIRE_BYTES_PER_COMPLEX_SAMPLE
                 )
                 achieved_mbps = wire_bytes / elapsed_seconds / 1_000_000
                 delivered_rate = frames * samples_per_channel / elapsed_seconds
@@ -185,7 +225,7 @@ def run_iio_ladder(
                         wire_bytes=wire_bytes,
                         elapsed_seconds=elapsed_seconds,
                         offered_payload_mbps=actual.sample_rate_hz
-                        * len(channels)
+                        * len(selected_channels)
                         * WIRE_BYTES_PER_COMPLEX_SAMPLE
                         / 1_000_000,
                         achieved_payload_mbps=achieved_mbps,
@@ -210,7 +250,7 @@ def run_iio_ladder(
     finally:
         try:
             if opened and original is not None:
-                restored = radio.apply_settings(original) == original
+                restored = restore_settings_exact(radio, original).restored == original
         finally:
             if opened:
                 radio.close()
@@ -222,9 +262,12 @@ def run_iio_ladder(
         transport=identity.transport.value,
         model=identity.model,
         firmware_version=identity.firmware_version,
-        channels=channels,
+        channels=selected_channels,
         kernel_buffers=kernel_buffers,
-        wire_bytes_per_sample_period=len(channels) * WIRE_BYTES_PER_COMPLEX_SAMPLE,
+        kernel_buffer_configuration_basis=kernel_buffer_configuration_basis,
+        kernel_queue_bytes=kernel_queue_bytes,
+        unsafe_kernel_queue_override=(kernel_queue_bytes > MAX_SAFE_KERNEL_QUEUE_BYTES),
+        wire_bytes_per_sample_period=len(selected_channels) * WIRE_BYTES_PER_COMPLEX_SAMPLE,
         warmup_frames=warmup_frames,
         cells=tuple(cells),
         failures=tuple(failures),
@@ -238,15 +281,19 @@ def _default_radio_factory(uri: str, serial: str | None) -> LadderRadio:
 
 def _validate_shape(
     rates_hz: Sequence[int],
+    channels: tuple[int, ...],
     samples_per_channel: int,
     frames: int,
     warmup_frames: int,
     kernel_buffers: int,
-) -> None:
+    allow_unsafe_kernel_queue: bool,
+) -> int:
     if not rates_hz or len(rates_hz) > MAX_RATE_RUNGS:
         raise ValueError(f"speed ladder requires between 1 and {MAX_RATE_RUNGS} rungs")
     if any(right <= left for left, right in zip(rates_hz, rates_hz[1:], strict=False)):
         raise ValueError("sample-rate ladder must be strictly increasing")
+    if channels not in set(LADDER_CHANNEL_SELECTIONS.values()):
+        raise ValueError("speed ladder channels must be rx0, rx1, or dual")
     if not MIN_SAMPLES_PER_CHANNEL <= samples_per_channel <= MAX_SAMPLES_PER_CHANNEL:
         raise ValueError(
             f"samples per channel must be between {MIN_SAMPLES_PER_CHANNEL} "
@@ -258,6 +305,18 @@ def _validate_shape(
         raise ValueError(f"warmup frames must be between 0 and {MAX_WARMUP_FRAMES}")
     if not 1 <= kernel_buffers <= 64:
         raise ValueError("kernel buffer count must be between 1 and 64")
+    queue_bytes = (
+        samples_per_channel * len(channels) * WIRE_BYTES_PER_COMPLEX_SAMPLE * kernel_buffers
+    )
+    if queue_bytes > MAX_SAFE_KERNEL_QUEUE_BYTES and not allow_unsafe_kernel_queue:
+        raise ValueError(
+            "RX kernel queue requires "
+            f"{queue_bytes / (1024 * 1024):.1f} MiB, above the hardware-validated "
+            f"{MAX_SAFE_KERNEL_QUEUE_BYTES / (1024 * 1024):.1f} MiB safety ceiling; "
+            "reduce --samples or --kernel-buffers, or provide the explicit unsafe "
+            "qualification override"
+        )
+    return queue_bytes
 
 
 def _validate_rate(rate: int, capabilities: RadioCapabilities) -> None:
@@ -274,11 +333,9 @@ def _validate_rate(rate: int, capabilities: RadioCapabilities) -> None:
 def _validate_block(block: SampleBlock, channels: tuple[int, ...], samples: int) -> None:
     expected = (len(channels), samples)
     if block.samples.shape != expected:
-        raise RuntimeError(
-            f"paired capture returned shape {block.samples.shape}, expected {expected}"
-        )
+        raise RuntimeError(f"RX capture returned shape {block.samples.shape}, expected {expected}")
     if not np.isfinite(block.samples).all():
-        raise RuntimeError("paired capture contains non-finite samples")
+        raise RuntimeError("RX capture contains non-finite samples")
 
 
 def _percentile_ms(values_ns: Sequence[int], percentile: int) -> float:

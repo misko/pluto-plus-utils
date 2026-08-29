@@ -42,6 +42,8 @@ The web UI runs the same API at `GET /api/v1/radios/{radio_id}/doctor`. It check
 each fact independently:
 
 - exact IIO hardware serial and a separately correlated `0456:b673` USB sysfs path;
+- an optional exact-serial 65,536-sample RX refill (`--probe-data-plane` on one exact
+  `--usb-sysfs-path`), which detects a responsive control plane with a wedged data plane;
 - active `fw_version` against the selected firmware profile;
 - live `ad9361-phy,model == ad9361`;
 - RX scan elements `voltage0..voltage3`, proving both complex receive paths exist;
@@ -53,6 +55,40 @@ each fact independently:
 `unknown` is deliberate. Channel presence cannot prove the persistent U-Boot values,
 and an active RAM-loaded image cannot prove QSPI contents. The daemon does not use
 default SSH credentials and does not guess these facts.
+
+## Data-plane timeout prevention and recovery
+
+Supported firmware reserves a 64 MiB contiguous-memory (CMA) pool. A large single
+IIOD allocation can intermittently fragment that pool and leave later small refills
+timing out even though attribute reads still work. Pluto+ Utils therefore refuses a
+single ordinary or metadata RX buffer above 32 MiB (50% of the pool). Split longer
+captures into repeated buffers rather than increasing one `rx_buffer_size`.
+
+First stop other owners and prove the failure on one exact local USB radio:
+
+```console
+pluto doctor --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --probe-data-plane --format json
+```
+
+If `transport.rx_data_plane` fails with a timeout, plan and execute the narrow recovery:
+
+```console
+pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts
+pluto radio recover SERIAL --data-plane \
+  --ssh-known-hosts-file /private/SERIAL.known_hosts \
+  --ssh-password-file /private/SERIAL.password \
+  --execute --confirm 'RESTART IIOD SERIAL'
+```
+
+This path is intentionally independent of the canonical 2R2T gate. It derives the USB
+path/interface from the stable serial, requires pinned SSH trust, remotely re-attests
+the same gadget serial, restarts only the supervisor-owned IIOD child, and records both
+process generations, active RX-buffer state, and `CmaTotal`/`CmaFree`. It then waits for
+a fresh bounded RX refill and writes an absent-only mode-0600 receipt. It refuses to
+restart for a healthy probe, a wrong serial, an invalid refill shape, or a broken host
+libiio environment.
 
 ## Radio `.15` on Gauss
 
@@ -83,11 +119,25 @@ two-receiver Web preview now pass. A physical cold boot remains a separate check
 Only use this profile for an exact serial-attested Pluto+ Rev.C. The persistent tuple is:
 
 ```text
-attr_name=compatible
-attr_val=ad9361
+attr_name    (unset)
+attr_val     (unset)
 compatible=ad9361
 mode=2r2t
 ```
+
+`attr_name` and `attr_val` must be **absent**, not set to `compatible`/`ad9361`. The
+AD936x boot script on these boards guards its AD9364 branch with a malformed condition:
+
+```text
+test ${compatible} = ad9364 || test -n ${attr_val} = ad9364
+```
+
+U-Boot's `test` consumes `-n <value>` as a complete operator, then matches no operator at
+the trailing `= ad9364` and returns true unconditionally (`u-boot cmd/test.c`). Any
+non-empty `attr_val` therefore fires that branch on every boot, which strips
+`adi,2rx-2tx-mode-enable` and runs `setenv mode 1r1t; saveenv` — silently reverting the
+radio to 1R1T and persisting the revert. `compatible=ad9361` drives the AD9361 override on
+its own through a separate, correctly formed branch, so the unlock is unaffected.
 
 A safe provisioner must perform this entire transaction:
 
@@ -97,9 +147,21 @@ A safe provisioner must perform this entire transaction:
 4. Back up `/opt/VERSIONS` and the complete output of `fw_printenv`.
 5. Change only mismatching fields, preferably with one `fw_setenv -s` batch.
 6. Sync and reboot; reacquire the same serial and physical path.
-7. Reread all four values and require the live PHY to report `ad9361`.
-8. Require scan elements 0–3 and take a paired two-receiver sample.
+7. Reread all four values and require a supported AD936x PHY identity. A Rev.C may
+   truthfully retain its native `ad9363a` compatible string after the tuple is fixed.
+8. Require scan elements 0–3 and take a paired two-receiver sample; this layout,
+   rather than the PHY marketing string, is the 2R2T invariant.
 9. Keep DDS/TX buffers disabled and set/read back TX1 and TX2 attenuation to the safe minimum.
+
+SSH trust should normally be enrolled through an exact USB physical path. If
+that radio cannot be USB-attached, `pluto firmware enroll-lan-ssh` provides a
+separate, explicitly weaker LAN-TOFU path. Its dry run first attests the exact
+private IPv4 endpoint and serial through bounded read-only IIOD metadata. An
+execution additionally requires `--use-default-password` and the exact phrase
+`TRUST LAN SSH <serial> <host>`. It records no user or global SSH trust, verifies
+the gadget serial again over the newly pinned key, and creates the requested
+private known-hosts file only if no destination exists. Prefer USB enrollment;
+LAN TOFU cannot exclude an attacker able to impersonate both IIOD and SSH.
 
 Pluto+ Utils implements this as a separate setup plan, not as a generic remote shell or
 firmware upload. The daemon must be explicitly composed with one exact serial, sysfs path,
@@ -123,11 +185,26 @@ pluto --admin-token-file /private/admin.token setup receipt-list
 
 The Web Doctor panel enables **Prepare setup repair** only for an eligible, noncanonical
 selected radio. Inspect the immutable diff, enter the admin token, type
-`PROVISION <serial>`, and execute once. A changed SSH host key is a hard verification
-failure: physically re-attest the USB serial/path before reviewing and re-pinning it.
-If an execution receipt reports an unknown outcome, do not retry provisioning. Preserve
-the receipt and backup reference, restore pinned SSH trust only after that out-of-band
-attestation, and run the dedicated read-only reconciliation action.
+`PROVISION <serial>`, and execute once. For the exact interface-bound USB endpoint,
+firmware which regenerates its SSH key on reboot is handled only after the selected
+serial/path has disappeared and returned. Setup then repeats the unambiguous route and
+local USB identity checks, accepts one replacement key while running a fixed remote
+serial attestation, atomically archives the previous key, and records both fingerprints
+and file digests in the receipt. This recovery is deliberately unavailable for a LAN
+endpoint, whose changed key still requires independent out-of-band verification. If an
+execution receipt reports an unknown outcome, do not retry provisioning; preserve its
+receipt and backup and use the dedicated read-only reconciliation action. A standalone
+doctor transaction can be reconciled without a daemon:
+
+```bash
+pluto setup reconcile-local RECEIPT_ID \
+  --serial SERIAL --usb-sysfs-path /sys/bus/usb/devices/3-11 \
+  --firmware EXACT_VERSION --known-hosts-file /private/SERIAL.known_hosts
+```
+
+With duplicate `192.168.2.1` Pluto gadget networks, add `--isolate-usb-route` and
+the exact generated `--isolation-confirm 'ISOLATE USB SSH <interface>'` phrase.
+The action is read-only and restores every isolated host route before returning.
 
 ## Firmware update contract
 
@@ -184,9 +261,15 @@ uv run pluto firmware ram-boot ./CANDIDATE.dfu \
 
 Execution additionally requires `--execute --confirm 'RAM BOOT <serial>'`.
 After loading, the command requires the exact serial/path to return with the
-profile firmware, ABI, tandem capability, AD9361 PHY, and TX-safe readback.
+profile firmware, ABI, tandem capability, unchanged supported AD936x PHY, and
+TX-safe readback.
 Power cycling returns to the unchanged QSPI image. Persistent promotion always
 requires a separate profile whose manifest is hardware-qualified.
+
+For a host with several Pluto USB gadget NICs, `ram-boot` also accepts
+`--isolate-usb-route` plus the exact generated isolation confirmation. The
+isolation receipt is returned alongside the RAM-boot receipt and all host
+network state is restored on success or failure.
 
 The dry-run plan reports `raw_usb_write_access`. If it is false, install the
 repository rule and reconnect the radios before execution:
@@ -224,6 +307,19 @@ volume and records a durable local receipt. Once a stable serial exists, all
 subsequent firmware operations must use the normal serial-attested plan/token
 workflow. Never retry an `unknown` bootstrap receipt without read-only
 reconciliation.
+
+An uncertain serial-attested standalone receipt is reconciled independently of
+the daemon with `pluto firmware reconcile-local RECEIPT_ID`. This includes a
+bound-SSH receipt or a utility-produced mass-storage receipt that proves a
+non-retryable post-eject uncertainty. Supply the exact
+recorded `--usb-sysfs-path`, persistent `--profile`, pinned
+`--ssh-known-hosts-file`, and endpoint. The command performs only readback: it
+validates the durable receipt and qualified profile, correlates USB and IIOD
+identity, verifies the active firmware and TX/DDS safe state, and hashes exactly
+the recorded FIT length from `mtd3`. It has no updater, QSPI-write, RF-write, or
+reboot operation; any mismatch remains unresolved and must not trigger a retry.
+Duplicate USB-gadget routes use the same explicit `--isolate-usb-route` and
+`--isolation-confirm` guard as RAM boot and setup reconciliation.
 
 `--return-timeout` is bounded to 30–1800 seconds and defaults to 180. A failure
 before the SCSI eject request is a known `qspi_write_not_started` result: the FIT
@@ -268,6 +364,13 @@ and SSH but no USB connection to the daemon host. It does not turn an IP address
 identity: the daemon requires one private enrollment binding the literal endpoint to
 the exact managed IIO serial and an out-of-band verified SSH host key. Only key-based
 root SSH is accepted. Discovery does not enroll a radio.
+
+The selected persistent-upgrade policy is
+`ddr-burst-v1-release-persistent-promotion`, which binds the published
+`v0.42-plutoplus-spf-ddr-burst-v1` DFU/FIT bytes. This is deliberately separate
+from the older canonical setup-repair policy: repairing the U-Boot tuple must not
+silently choose a firmware upgrade, and selecting the current release must not
+weaken the setup transaction.
 
 This transport is deliberately narrower than the USB firmware surface:
 

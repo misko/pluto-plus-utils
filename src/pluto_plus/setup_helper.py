@@ -12,20 +12,24 @@ import ipaddress
 import json
 import os
 import re
+import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol, cast
 
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
+from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT, require_setup_repair_policy
 from pluto_plus.ip_firmware import (
     UsbSshRouteAmbiguous,
     require_unambiguous_usb_ssh_route,
 )
+from pluto_plus.models import FirmwarePolicy
 from pluto_plus.setup import (
     SetupExecutionResult,
     SetupExecutorFailure,
+    SetupHostKeyRotation,
     SetupIdentity,
     SetupObservation,
     SetupPlan,
@@ -68,6 +72,7 @@ class BoundSshTransport:
         username: str = "root",
         ssh_binary: str = "ssh",
         route_preflight: Callable[[], None] | None = None,
+        usb_identity_checker: Callable[[str, Path], None] | None = None,
     ) -> None:
         if interface is not None and not _INTERFACE_PATTERN.fullmatch(interface):
             raise ValueError("invalid USB network interface")
@@ -105,6 +110,8 @@ class BoundSshTransport:
         self._ssh_binary = ssh_binary
         self._known_hosts_file = known_hosts_file
         self._route_preflight = selected_route_preflight
+        self._usb_identity_checker = usb_identity_checker or _attest_usb_identity
+        self._known_hosts_sha256 = _private_known_hosts_sha256(known_hosts_file)
 
     def run(
         self,
@@ -124,11 +131,17 @@ class BoundSshTransport:
             "-o",
             "BatchMode=no",
             "-o",
+            "PasswordAuthentication=yes",
+            "-o",
+            "PubkeyAuthentication=no",
+            "-o",
             "ConnectTimeout=5",
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
             f"UserKnownHostsFile={self._known_hosts_file}",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
             f"{self._username}@{self.host}",
             command,
         ]
@@ -172,6 +185,147 @@ class BoundSshTransport:
             )
         return output
 
+    def reenroll_after_attested_usb_reboot(
+        self,
+        *,
+        serial: str,
+        usb_sysfs_path: Path,
+        timeout_s: float = 15,
+    ) -> SetupHostKeyRotation:
+        """Replace a rotated key only through the exact USB-bound endpoint.
+
+        This is deliberately unavailable for LAN-routed setup. The caller must
+        first have observed the selected USB topology disappear and return; this
+        method then repeats local serial/path and route attestation before using
+        accept-new against only that physically bound USB interface.
+        """
+
+        if self.host != "192.168.2.1" or self.interface is None:
+            raise SetupHelperError(
+                "automatic post-reboot SSH key enrollment requires the exact USB endpoint"
+            )
+        self._route_preflight()
+        self._usb_identity_checker(serial, usb_sysfs_path)
+        previous = _private_known_hosts_bytes(self._known_hosts_file)
+        previous_sha256 = hashlib.sha256(previous).hexdigest()
+        if previous_sha256 != self._known_hosts_sha256:
+            raise SetupHelperError("setup known-hosts changed after transport creation")
+        previous_fingerprint = _known_hosts_fingerprint(self._known_hosts_file)
+
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{self._known_hosts_file.name}.replacement.",
+            dir=self._known_hosts_file.parent,
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        temporary.chmod(0o600)
+        try:
+            output = self._enroll_replacement_key(
+                temporary,
+                serial=serial,
+                timeout_s=timeout_s,
+            )
+            serials = [
+                line.removeprefix("serial=").strip()
+                for line in output.splitlines()
+                if line.startswith("serial=")
+            ]
+            if serials != [serial]:
+                observed = serials[0] if len(serials) == 1 else None
+                raise SetupHelperError(
+                    "USB-bound replacement SSH key attested serial "
+                    f"{observed!r}, expected {serial!r}"
+                )
+            replacement = _private_known_hosts_bytes(temporary)
+            replacement_sha256 = hashlib.sha256(replacement).hexdigest()
+            if replacement_sha256 == previous_sha256:
+                raise SetupHelperError("post-reboot SSH host key did not change")
+            replacement_fingerprint = _known_hosts_fingerprint(temporary)
+            backup = self._known_hosts_file.with_name(
+                f"{self._known_hosts_file.name}.pre-reboot-{previous_sha256[:12]}"
+            )
+            _write_private_exclusive(backup, previous)
+            temporary.replace(self._known_hosts_file)
+            _fsync_directory(self._known_hosts_file.parent)
+            self._known_hosts_sha256 = replacement_sha256
+            return SetupHostKeyRotation(
+                previous_known_hosts_sha256=previous_sha256,
+                replacement_known_hosts_sha256=replacement_sha256,
+                previous_fingerprint=previous_fingerprint,
+                replacement_fingerprint=replacement_fingerprint,
+                previous_known_hosts_backup=str(backup),
+            )
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _enroll_replacement_key(
+        self,
+        known_hosts_file: Path,
+        *,
+        serial: str,
+        timeout_s: float,
+    ) -> str:
+        try:
+            import pexpect
+        except ImportError as error:  # pragma: no cover - composition guard
+            raise SetupHelperError("Bound SSH setup requires pexpect") from error
+        command = (
+            "printf 'serial=%s\\n' \"$(cat /sys/kernel/config/usb_gadget/"
+            'composite_gadget/strings/0x409/serialnumber)"'
+        )
+        arguments = [
+            "-B",
+            cast(str, self.interface),
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "PasswordAuthentication=yes",
+            "-o",
+            "PubkeyAuthentication=no",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_file}",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
+            f"{self._username}@{self.host}",
+            command,
+        ]
+        child = pexpect.spawn(
+            self._ssh_binary,
+            arguments,
+            encoding=None,
+            timeout=timeout_s,
+        )
+        transcript = bytearray()
+        password_sent = False
+        try:
+            while True:
+                matched = child.expect(
+                    [b"[Pp]assword:", pexpect.EOF, pexpect.TIMEOUT], timeout=timeout_s
+                )
+                transcript.extend(cast(bytes, child.before or b""))
+                if matched == 0:
+                    if password_sent:
+                        raise SetupHelperError("replacement SSH key authentication failed")
+                    child.sendline(self._password.encode())
+                    password_sent = True
+                    continue
+                if matched == 1:
+                    break
+                raise SetupHelperError("replacement SSH key enrollment timed out")
+        finally:
+            child.close(force=True)
+        output = bytes(transcript).decode(errors="replace").replace("\r", "")
+        if child.exitstatus != 0 or child.signalstatus is not None:
+            raise SetupHelperError(
+                "replacement SSH key enrollment failed "
+                f"({child.exitstatus=}, {child.signalstatus=}): {output[-500:]}"
+            )
+        return output
+
 
 def _require_usb_ssh_route(interface: str, host: str) -> None:
     try:
@@ -189,6 +343,7 @@ class FixedSshSetupExecutor:
         identity: SetupIdentity,
         transport: SetupTransport,
         state_root: Path,
+        policy: FirmwarePolicy = CANONICAL_POLICY,
         reenumeration_timeout_s: float = 45,
         poll_interval_s: float = 0.25,
     ) -> None:
@@ -199,10 +354,11 @@ class FixedSshSetupExecutor:
         self.identity = identity
         self.transport = transport
         self.state_root = state_root
+        self._policy = require_setup_repair_policy(policy)
         self._reenumeration_timeout_s = reenumeration_timeout_s
         self._poll_interval_s = poll_interval_s
 
-    def canonical_batch(self, changes: Mapping[str, str]) -> bytes:
+    def canonical_batch(self, changes: Mapping[str, str | None]) -> bytes:
         if not changes:
             raise SetupHelperError("canonical setup has no changes")
         if not set(changes).issubset(CANONICAL_UBOOT):
@@ -213,7 +369,8 @@ class FixedSshSetupExecutor:
                 continue
             if changes[key] != expected:
                 raise SetupHelperError("setup requested a non-canonical U-Boot value")
-            ordered.append(f"{key} {expected}\n")
+            # fw_setenv --script deletes a variable when the line carries no value.
+            ordered.append(f"{key}\n" if expected is None else f"{key} {expected}\n")
         return "".join(ordered).encode()
 
     def inspect(self, identity: SetupIdentity | None = None) -> SetupObservation:
@@ -221,7 +378,7 @@ class FixedSshSetupExecutor:
         if expected != self.identity:
             raise SetupHelperError("helper is bound to a different radio identity")
         self._attest_local_usb()
-        command = f"sh -s -- {self.identity.serial} {CANONICAL_POLICY.fit_body_size}"
+        command = f"sh -s -- {self.identity.serial} {self._policy.fit_body_size}"
         output = self.transport.run(command, stdin=_INSPECT_SCRIPT, timeout_s=45)
         fields = _parse_report(output)
         if fields.get("serial") != self.identity.serial:
@@ -239,7 +396,7 @@ class FixedSshSetupExecutor:
         tx_safe = _tx_safe(fields)
         qspi_digest = _required_digest(fields, "qspi_sha256")
         provenance = (
-            "qspi_image_verified" if qspi_digest == CANONICAL_POLICY.fit_body_sha256 else "unknown"
+            "qspi_image_verified" if qspi_digest == self._policy.fit_body_sha256 else "unknown"
         )
         return SetupObservation(
             identity=observed_identity,
@@ -257,7 +414,7 @@ class FixedSshSetupExecutor:
     def provision(self, plan: SetupPlan) -> SetupExecutionResult:
         if plan.identity != self.identity:
             raise SetupHelperError("setup plan is bound to a different radio")
-        if plan.profile_id != CANONICAL_POLICY.profile_id:
+        if plan.profile_id != self._policy.profile_id:
             raise SetupHelperError("setup plan selected an unsupported profile")
         before = self.inspect(plan.identity)
         if before != plan.before or before.environment_sha256 != plan.environment_sha256:
@@ -266,6 +423,7 @@ class FixedSshSetupExecutor:
         completed_phases = ["preflight", "backup"]
         failure_phase = "tx_safety"
         mutation_attempted = False
+        host_key_rotation: SetupHostKeyRotation | None = None
         try:
             if not before.tx_safe:
                 self._mute_transmit()
@@ -310,7 +468,25 @@ class FixedSshSetupExecutor:
                         backup_path=str(backup_path),
                         backup_sha256=backup_digest,
                         completed_phases=(*completed_phases, "post_reboot_attestation"),
+                        host_key_rotation=host_key_rotation,
                     )
+                except SetupSshHostKeyChangedError as error:
+                    last_error = error
+                    if host_key_rotation is not None:
+                        break
+                    reenroll = getattr(
+                        self.transport,
+                        "reenroll_after_attested_usb_reboot",
+                        None,
+                    )
+                    if not callable(reenroll):
+                        break
+                    host_key_rotation = reenroll(
+                        serial=self.identity.serial,
+                        usb_sysfs_path=Path(self.identity.usb_sysfs_path),
+                        timeout_s=self._reenumeration_timeout_s,
+                    )
+                    completed_phases.append("ssh_host_key_reenrolled")
                 except BaseException as error:
                     last_error = error
                     time.sleep(self._poll_interval_s)
@@ -323,6 +499,7 @@ class FixedSshSetupExecutor:
                 failure_phase=failure_phase,
                 completed_phases=tuple(completed_phases),
                 reconciliation_required=mutation_attempted,
+                host_key_rotation=host_key_rotation,
             ) from error
 
     def _mute_transmit(self) -> None:
@@ -452,7 +629,7 @@ def _tx_safe(fields: Mapping[str, str]) -> bool:
     # transmitters actually present, and keep every present value strictly
     # muted. The post-conversion call lands on the 2R2T row because the radio
     # really does have two transmitters by then.
-    tx_shapes = {1: (4, 4, 2), 2: (8, 8, 4)}    # transmitters -> raw, scale, scan
+    tx_shapes = {1: (4, 4, 2), 2: (8, 8, 4)}  # transmitters -> raw, scale, scan
     expected = tx_shapes.get(len(gains))
     return (
         expected is not None
@@ -464,6 +641,80 @@ def _tx_safe(fields: Mapping[str, str]) -> bool:
         and available == (0,)
         and all(value == 0 for value in scans)
     )
+
+
+def _private_known_hosts_bytes(path: Path) -> bytes:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise SetupHelperError("setup known-hosts file is not readable") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SetupHelperError("setup known-hosts must be a regular non-symlink file")
+    if metadata.st_mode & 0o077:
+        raise SetupHelperError("setup known-hosts file must be private")
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise SetupHelperError("setup known-hosts file is not readable") from error
+    if not payload or len(payload) > 1024 * 1024:
+        raise SetupHelperError("setup known-hosts file is empty or too large")
+    return payload
+
+
+def _private_known_hosts_sha256(path: Path) -> str:
+    return hashlib.sha256(_private_known_hosts_bytes(path)).hexdigest()
+
+
+def _known_hosts_fingerprint(path: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ("ssh-keygen", "-lf", str(path), "-E", "sha256"),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SetupHelperError(f"cannot fingerprint setup SSH host key: {error}") from error
+    fingerprint = completed.stdout.strip()
+    if completed.returncode != 0 or not fingerprint:
+        raise SetupHelperError("setup known-hosts does not contain a valid SSH host key")
+    return fingerprint
+
+
+def _attest_usb_identity(serial: str, usb_sysfs_path: Path) -> None:
+    if not _SERIAL_PATTERN.fullmatch(serial):
+        raise SetupHelperError("invalid expected USB serial")
+    if not re.fullmatch(r"/sys/bus/usb/devices/[^/]+", str(usb_sysfs_path)):
+        raise SetupHelperError("invalid expected USB sysfs path")
+    try:
+        vendor = (usb_sysfs_path / "idVendor").read_text().strip().lower()
+        product = (usb_sysfs_path / "idProduct").read_text().strip().lower()
+        observed_serial = (usb_sysfs_path / "serial").read_text().strip()
+    except OSError as error:
+        raise SetupHelperError("selected USB device is not attached") from error
+    if (vendor, product, observed_serial) != ("0456", "b673", serial):
+        raise SetupHelperError("selected USB path identity changed")
+
+
+def _write_private_exclusive(path: Path, payload: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 _INSPECT_SCRIPT = rb"""set -eu

@@ -15,7 +15,7 @@ from pluto_plus.analysis import AnalysisService
 from pluto_plus.artifacts import verify_artifact
 from pluto_plus.catalog import Catalog
 from pluto_plus.controller import RadioController, SpectrumSubscription
-from pluto_plus.doctor import CANONICAL_POLICY, diagnose_radio
+from pluto_plus.doctor import CANONICAL_POLICY, PERSISTENT_UPGRADE_POLICY, diagnose_radio
 from pluto_plus.errors import (
     ArtifactNotFoundError,
     FirmwareObjectNotFoundError,
@@ -69,6 +69,7 @@ from pluto_plus.network_config import (
     NetworkInterface,
     PlannedNetworkConfig,
 )
+from pluto_plus.radio_lock import shared_radio_lock_root
 from pluto_plus.setup import (
     CanonicalSetupManager,
     PlannedSetup,
@@ -137,6 +138,7 @@ class PlutoService:
                     self.catalog,
                     capture_free_bytes=capture_free_bytes,
                     capture_reserve_bytes=capture_reserve_bytes,
+                    radio_lock_root=shared_radio_lock_root(),
                 )
                 if controller.radio_id in self._controllers:
                     controller.close()
@@ -610,7 +612,7 @@ class PlutoService:
             raise FirmwareObjectNotFoundError(f"unknown firmware image: {image_id}") from error
         if (
             transport is FirmwareTransport.SSH_FRM
-            and expected_firmware_version != CANONICAL_POLICY.device_firmware
+            and expected_firmware_version != PERSISTENT_UPGRADE_POLICY.device_firmware
         ):
             raise FirmwareImageError(
                 "ssh_frm is restricted to the hardware-qualified canonical firmware"
@@ -623,10 +625,10 @@ class PlutoService:
             transport=transport,
         )
         if transport is FirmwareTransport.SSH_FRM and not (
-            _summary.sha256 == CANONICAL_POLICY.asset_sha256
+            _summary.sha256 == PERSISTENT_UPGRADE_POLICY.asset_sha256
             or (
-                planned.plan.fit_sha256 == CANONICAL_POLICY.fit_body_sha256
-                and planned.plan.fit_size == CANONICAL_POLICY.fit_body_size
+                planned.plan.fit_sha256 == PERSISTENT_UPGRADE_POLICY.fit_body_sha256
+                and planned.plan.fit_size == PERSISTENT_UPGRADE_POLICY.fit_body_size
             )
         ):
             raise FirmwareImageError(
@@ -650,19 +652,24 @@ class PlutoService:
             summary, _source = self._firmware_images[image_id]
         except KeyError as error:
             raise FirmwareObjectNotFoundError(f"unknown firmware image: {image_id}") from error
+        selected_policy = (
+            PERSISTENT_UPGRADE_POLICY
+            if transport is FirmwareTransport.SSH_FRM
+            else CANONICAL_POLICY
+        )
         if (
             transport is FirmwareTransport.USB
-            and summary.sha256 != CANONICAL_POLICY.asset_sha256
+            and summary.sha256 != selected_policy.asset_sha256
         ):
             raise FirmwareImageError(
                 "uploaded image SHA-256 does not match the selected canonical release: "
-                f"expected {CANONICAL_POLICY.asset_sha256}, got {summary.sha256}"
+                f"expected {selected_policy.asset_sha256}, got {summary.sha256}"
             )
         return self.create_firmware_plan(
             radio_id,
             image_id,
             mode,
-            expected_firmware_version=CANONICAL_POLICY.device_firmware,
+            expected_firmware_version=selected_policy.device_firmware,
             transport=transport,
         )
 

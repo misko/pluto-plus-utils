@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -37,6 +38,25 @@ def test_tandem_request_is_exact_and_capacity_bounded() -> None:
             event_capacity=1,
             cooldown_periods=1,
         ).pack(65_536)
+
+
+def test_default_auto_request_covers_the_largest_metadata_ladder_refill() -> None:
+    request = TandemSessionRequestV1.auto_for_sample_count(4_194_304)
+
+    assert request.cooldown_periods == 127
+    assert len(request.pack(4_194_304)) == 104
+
+
+def test_default_auto_request_covers_first_refill_arm_window() -> None:
+    request = TandemSessionRequestV1.auto_for_sample_count(1_000_000)
+
+    assert request.cooldown_periods == 30
+    assert len(request.pack(1_000_000)) == 104
+    with pytest.raises(ValueError, match="AUTO arm window"):
+        TandemSessionRequestV1(
+            mode=TandemMode.AUTO,
+            cooldown_periods=16,
+        ).pack(1_000_000)
 
 
 def test_auto_stimulus_stays_within_normalized_dds_bounds() -> None:
@@ -152,6 +172,20 @@ def test_gain_table_mapping_rejects_unqualified_frequency() -> None:
         qualification.TandemQualificationError, match="outside the qualified gain tables"
     ):
         qualification._expected_gain_table(100_000_000)
+
+
+def test_temperature_summary_accepts_cached_values_and_rejects_missing() -> None:
+    frames = [
+        SimpleNamespace(ad9361_temperature_mdeg_c=None),
+        SimpleNamespace(ad9361_temperature_mdeg_c=43_860),
+        SimpleNamespace(ad9361_temperature_mdeg_c=44_125),
+    ]
+    assert qualification._temperature_summary(frames) == {
+        "temperature_mdeg_c_min": 43_860,
+        "temperature_mdeg_c_max": 44_125,
+    }
+    with pytest.raises(qualification.TandemQualificationError, match="no valid"):
+        qualification._temperature_summary(frames[:1])
 
 
 def test_tone_analysis_requires_coherent_signal_on_both_receivers() -> None:

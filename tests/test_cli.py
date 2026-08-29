@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -11,6 +14,7 @@ from typer.testing import CliRunner
 
 from pluto_plus.cli import (
     ApiClient,
+    _append_hardware_without_explicit_duplicates,
     _direct_ip_devices,
     _direct_usb_devices,
     _iio_ip_devices,
@@ -18,10 +22,108 @@ from pluto_plus.cli import (
     _read_ssh_firmware_enrollment,
     app,
 )
-from pluto_plus.inventory import LocalUsbPluto
+from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
+from pluto_plus.metadata_ladder import MetadataContinuityCell, MetadataContinuityLadderReport
 from pluto_plus.models import Transport
+from pluto_plus.network_config import (
+    NetworkConfigExecutionResult,
+    NetworkConfigIdentity,
+    NetworkConfigObservation,
+    persistent_environment_sha256,
+)
 
 runner = CliRunner()
+
+
+def _recovery_usb() -> LocalUsbPluto:
+    return LocalUsbPluto(
+        usb_path="/sys/bus/usb/devices/3-8",
+        bus_number=3,
+        device_number=11,
+        product="PlutoSDR+",
+        serial="SERIAL_A",
+        speed_mbps=480,
+        interface_count=7,
+        host_network_interfaces=(
+            HostNetworkInterface(name="enx001", ipv4_addresses=("192.168.2.10",)),
+        ),
+    )
+
+
+def _network_observation(*, ethernet_address: str | None) -> NetworkConfigObservation:
+    values = {
+        "ipaddr": "192.168.2.1",
+        "ipaddr_host": "192.168.2.10",
+        "netmask": "255.255.255.0",
+        "ipaddr_eth": ethernet_address or "",
+        "netmask_eth": "255.255.255.0",
+    }
+    return NetworkConfigObservation(
+        identity=NetworkConfigIdentity(
+            serial="SERIAL_A",
+            endpoint="192.168.2.1",
+            host_key_fingerprint="SHA256:" + "A" * 43,
+        ),
+        config_txt_sha256="b" * 64,
+        environment_sha256=persistent_environment_sha256(values),
+        config_txt_redacted="[WLAN]\npwd_wlan = <redacted>\n",
+        hostname="pluto",
+        usb_radio_address=values["ipaddr"],
+        usb_host_address=values["ipaddr_host"],
+        usb_netmask=values["netmask"],
+        ethernet_address=ethernet_address,
+        ethernet_runtime_address="192.168.1.153",
+        ethernet_netmask=values["netmask_eth"],
+    )
+
+
+class _NetworkBootstrapBackend:
+    instances: list[_NetworkBootstrapBackend] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.apply_calls: list[Any] = []
+        self.instances.append(self)
+
+    def inspect_network_config(self, serial: str) -> NetworkConfigObservation:
+        assert serial == "SERIAL_A"
+        return _network_observation(ethernet_address="192.168.1.186" if self.apply_calls else None)
+
+    def apply_network_config(self, plan: Any) -> NetworkConfigExecutionResult:
+        self.apply_calls.append(plan)
+        backup = b"ipaddr_eth=\n"
+        return NetworkConfigExecutionResult(
+            observation=self.inspect_network_config("SERIAL_A"),
+            backup_path="/root/.pluto-plus-network-config/plan.env",
+            backup_sha256=hashlib.sha256(backup).hexdigest(),
+            backup_content=backup,
+            completed_phases=("persistent_readback_verified",),
+        )
+
+
+def _network_bootstrap_credentials(tmp_path: Path) -> tuple[Path, Path]:
+    known_hosts = (tmp_path / "known_hosts").absolute()
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = (tmp_path / "password").absolute()
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    return known_hosts, password
+
+
+def test_explicit_direct_transport_overrides_duplicate_broad_hardware_discovery() -> None:
+    explicit = [SimpleNamespace(identity=SimpleNamespace(radio_id="SERIAL_A"), kind="direct")]
+    discovered = (
+        SimpleNamespace(identity=SimpleNamespace(radio_id="SERIAL_A"), kind="iio"),
+        SimpleNamespace(identity=SimpleNamespace(radio_id="SERIAL_B"), kind="iio"),
+    )
+
+    _append_hardware_without_explicit_duplicates(explicit, discovered)
+
+    assert [(item.identity.radio_id, item.kind) for item in explicit] == [
+        ("SERIAL_A", "direct"),
+        ("SERIAL_B", "iio"),
+    ]
 
 
 @pytest.fixture
@@ -376,6 +478,306 @@ def test_settings_set_fetches_revision_and_sends_only_requested_fields(api_trans
         "gain_mode": "slow_attack",
         "channels": [0, 1],
     }
+
+
+def test_data_plane_recovery_dry_run_derives_usb_target_and_reports_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneProbe
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda **kwargs: SimpleNamespace(healthy=True),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.probe_iio_data_plane",
+        lambda uri, serial: DataPlaneProbe(
+            status="fail",
+            serial=serial,
+            uri="usb:1",
+            samples_per_channel=65_536,
+            receiver_count=2,
+            wire_bytes=524_288,
+            elapsed_ms=5000,
+            failure_kind="timeout",
+            error="TimeoutError: [Errno 110]",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "recover",
+            "SERIAL_A",
+            "--data-plane",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["eligible_for_restart"] is True
+    assert payload["will_restart_iiod"] is False
+    assert payload["ssh_interface"] == "enx001"
+    assert payload["usb_sysfs_path"] == "/sys/bus/usb/devices/3-8"
+
+
+def test_data_plane_recovery_restarts_only_timeout_and_writes_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneProbe, IiodRestartEvidence
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    probes = iter(
+        (
+            DataPlaneProbe(
+                status="fail",
+                serial="SERIAL_A",
+                uri="usb:1",
+                samples_per_channel=65_536,
+                receiver_count=2,
+                wire_bytes=524_288,
+                elapsed_ms=5000,
+                failure_kind="timeout",
+                error="TimeoutError: [Errno 110]",
+            ),
+            DataPlaneProbe(
+                status="pass",
+                serial="SERIAL_A",
+                uri="usb:1",
+                samples_per_channel=65_536,
+                receiver_count=2,
+                wire_bytes=524_288,
+                elapsed_ms=40,
+            ),
+        )
+    )
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda **kwargs: SimpleNamespace(healthy=True),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.probe_iio_data_plane", lambda uri, serial: next(probes)
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.BoundSshTransport",
+        lambda **kwargs: SimpleNamespace(bound=kwargs),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.restart_attested_iiod",
+        lambda transport, serial: IiodRestartEvidence(
+            serial=serial,
+            previous_pid=101,
+            replacement_pid=202,
+            previous_start_ticks=1000,
+            replacement_start_ticks=2000,
+            active_rx_buffers_before=1,
+            cma_total_bytes=64 * 1024 * 1024,
+            cma_free_before_bytes=12 * 1024 * 1024,
+            cma_free_after_bytes=63 * 1024 * 1024,
+        ),
+    )
+    receipt_directory = tmp_path / "receipts"
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "recover",
+            "SERIAL_A",
+            "--data-plane",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--receipt-directory",
+            str(receipt_directory),
+            "--execute",
+            "--confirm",
+            "RESTART IIOD SERIAL_A",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["receipt"]["outcome"] == "recovered"
+    receipt_path = Path(payload["receipt_path"])
+    assert receipt_path.is_file()
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(receipt_path.read_text())["restart"]["replacement_pid"] == 202
+
+
+def test_data_plane_recovery_never_restarts_a_wrong_identity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneProbe
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda **kwargs: SimpleNamespace(healthy=True),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.probe_iio_data_plane",
+        lambda uri, serial: DataPlaneProbe(
+            status="fail",
+            serial=serial,
+            uri="usb:wrong",
+            samples_per_channel=65_536,
+            elapsed_ms=5,
+            failure_kind="identity",
+            error="DataPlaneRecoveryError: attested serial 'OTHER'",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "recover",
+            "SERIAL_A",
+            "--data-plane",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--execute",
+            "--confirm",
+            "RESTART IIOD SERIAL_A",
+        ],
+    )
+
+    assert result.exit_code == 4, result.output
+    assert "data_plane_recovery_not_eligible" in result.output
+    assert "identity" in result.output
+
+
+def test_data_plane_status_brackets_lan_probe_with_runtime_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneProbe, DataPlaneRuntimeStatus
+
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+    transports: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "pluto_plus.cli.BoundSshTransport",
+        lambda **kwargs: transports.append(kwargs) or SimpleNamespace(bound=kwargs),
+    )
+    snapshots = iter(
+        DataPlaneRuntimeStatus(
+            serial="SERIAL_A",
+            iiod_pid=4371,
+            iiod_start_ticks=352201,
+            iiod_generation=2,
+            active_rx_buffers=0,
+            rx_buffer_length=65_536,
+            rx_data_available=0,
+            rx_device_path="/sys/devices/fpga-axi/iio:device1",
+            cma_total_bytes=64 * 1024 * 1024,
+            cma_free_bytes=63 * 1024 * 1024,
+            memory_total_bytes=492_560 * 1024,
+            memory_available_bytes=401_234 * 1024,
+            interrupt_total=1_234,
+            fpga_devices=("7c400000.dma", "79020000.cf-ad9361-lpc"),
+            dma_devices=("7c400000.dma",),
+            interrupt_lines=(f"54: {count} dma0chan0",),
+            kernel_events=(),
+        )
+        for count in (9, 9)
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.inspect_data_plane_runtime",
+        lambda transport, serial: next(snapshots),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.probe_iio_data_plane",
+        lambda uri, serial: DataPlaneProbe(
+            status="fail",
+            serial=serial,
+            uri=uri,
+            samples_per_channel=65_536,
+            receiver_count=2,
+            wire_bytes=524_288,
+            elapsed_ms=5_000,
+            failure_kind="timeout",
+            error="TimeoutError: [Errno 110]",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "data-plane-status",
+            "SERIAL_A",
+            "--ssh-host",
+            "192.168.1.183",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--probe",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert transports == [
+        {
+            "host": "192.168.1.183",
+            "interface": None,
+            "password": "analog",
+            "known_hosts_file": known_hosts,
+        }
+    ]
+    assert payload["before"]["interrupt_lines"] == ["54: 9 dma0chan0"]
+    assert payload["probe"]["uri"] == "ip:192.168.1.183"
+    assert payload["probe"]["failure_kind"] == "timeout"
+    assert payload["after"]["interrupt_lines"] == ["54: 9 dma0chan0"]
+
+
+def test_data_plane_status_rejects_shared_usb_address(tmp_path: Path) -> None:
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "data-plane-status",
+            "SERIAL_A",
+            "--ssh-host",
+            "192.168.2.1",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "unique LAN endpoint" in result.output
 
 
 @pytest.mark.parametrize(
@@ -1239,6 +1641,136 @@ def test_usb_flash_cli_routes_explicit_lan_host_without_usb_bind(
     ]
 
 
+def test_standalone_reconcile_cli_forwards_exact_receipt_path_and_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pluto_plus.bootstrap_firmware import StandaloneReconciliationResult
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    observed: dict[str, object] = {}
+
+    class RecordingSshTransport:
+        def __init__(self, **kwargs: object) -> None:
+            observed["transport_kwargs"] = kwargs
+
+    def reconcile(receipt_id: str, **kwargs: object) -> StandaloneReconciliationResult:
+        observed["receipt_id"] = receipt_id
+        observed.update(kwargs)
+        return StandaloneReconciliationResult(
+            receipt_id=receipt_id,
+            outcome="reconciled_verified",
+            phases=("mtd3_fit_verified",),
+            receipt_path=str(tmp_path / "receipts" / f"{receipt_id}.json"),
+            returned_serial="SERIAL_A",
+            returned_firmware="v7",
+            fit_sha256="a" * 64,
+            tx_safe=True,
+        )
+
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.BoundSshBootstrapTransport",
+        RecordingSshTransport,
+    )
+    monkeypatch.setattr("pluto_plus.bootstrap_firmware.reconcile_usb_flash_receipt", reconcile)
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "reconcile-local",
+            "11111111-2222-3333-4444-555555555555",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--profile",
+            "exact-profile",
+            "--ssh-host",
+            "192.168.1.14",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--receipt-directory",
+            str(tmp_path / "receipts"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["outcome"] == "reconciled_verified"
+    assert observed["receipt_id"] == "11111111-2222-3333-4444-555555555555"
+    assert observed["usb_sysfs_path"] == Path("/sys/bus/usb/devices/3-8")
+    assert observed["mutation_profile_id"] == "exact-profile"
+    assert observed["receipt_directory"] == (tmp_path / "receipts").resolve()
+    assert observed["transport_kwargs"] == {
+        "interface": None,
+        "password": "analog",
+        "known_hosts_file": known_hosts.resolve(),
+        "host": "192.168.1.14",
+    }
+
+
+def test_setup_reconcile_local_emits_the_verified_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @dataclass(frozen=True)
+    class ReconciledReceipt:
+        receipt_id: str
+        outcome: str
+        success: bool
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+    monkeypatch.setattr(
+        "pluto_plus.cli.scan_local_usb_plutos",
+        lambda: (_recovery_usb(),),
+    )
+
+    class Manager:
+        def reconcile(self, receipt_id: str) -> ReconciledReceipt:
+            return ReconciledReceipt(receipt_id, "reconciled_verified", True)
+
+    monkeypatch.setattr(
+        "pluto_plus.setup_repair.ssh_manager_factory",
+        lambda credentials: lambda identity: Manager(),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "setup",
+            "reconcile-local",
+            "receipt-a",
+            "--serial",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--firmware",
+            "v-test",
+            "--known-hosts-file",
+            str(known_hosts),
+            "--password-file",
+            str(password),
+            "--host",
+            "192.168.1.14",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "outcome": "reconciled_verified",
+        "receipt_id": "receipt-a",
+        "success": True,
+    }
+
+
 def test_doctor_defaults_to_standalone_local_usb_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1246,7 +1778,7 @@ def test_doctor_defaults_to_standalone_local_usb_json(
 
     monkeypatch.setattr(
         "pluto_plus.local_doctor.diagnose_local_usb_radios",
-        lambda path: LocalDoctorReport(
+        lambda path, setup_probe=None: LocalDoctorReport(
             generated_at="2026-08-16T12:00:00+00:00",
             canonical_firmware="v5",
             canonical_image_sha256="a" * 64,
@@ -1258,3 +1790,534 @@ def test_doctor_defaults_to_standalone_local_usb_json(
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["canonical_firmware"] == "v5"
+
+
+def test_doctor_stays_read_only_without_setup_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.local_doctor import LocalDoctorReport
+
+    seen: list[object] = []
+
+    def fake(path, setup_probe=None):
+        seen.append(setup_probe)
+        return LocalDoctorReport(
+            generated_at="2026-08-16T12:00:00+00:00",
+            canonical_firmware="v5",
+            canonical_image_sha256="a" * 64,
+            radios=(),
+        )
+
+    monkeypatch.setattr("pluto_plus.local_doctor.diagnose_local_usb_radios", fake)
+
+    result = runner.invoke(app, ["doctor", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == [None]
+
+
+def test_doctor_data_plane_probe_requires_one_exact_usb_target() -> None:
+    result = runner.invoke(app, ["doctor", "--format", "json", "--probe-data-plane"])
+
+    assert result.exit_code == 2, result.output
+    assert "data_plane_probe_target_required" in result.output
+
+
+def test_doctor_setup_inspection_requires_one_exact_radio(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+
+    result = runner.invoke(
+        app,
+        ["doctor", "--format", "json", "--setup-known-hosts-file", str(known_hosts)],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "setup_probe_target_required" in result.output
+
+
+def test_doctor_route_isolation_requires_exact_generated_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            confirmation_phrase="ISOLATE USB SSH enx001"
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "doctor",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--setup-known-hosts-file",
+            str(known_hosts),
+            "--isolate-usb-route",
+            "--no-fix",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "host_isolation_confirmation_required" in result.output
+    assert "ISOLATE USB SSH enx001" in result.output
+
+
+def test_metadata_ladder_ip_isolation_requires_exact_usb_identity_and_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            confirmation_phrase="ISOLATE USB SSH enx001"
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "192.168.2.1",
+            "--transport",
+            "ip",
+            "--expect-serial",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--isolate-usb-route",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "host_isolation_confirmation_required" in result.output
+    assert "ISOLATE USB SSH enx001" in result.output
+
+
+def test_metadata_ladder_forwards_nondefault_ip_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment", lambda **_kwargs: SimpleNamespace(healthy=True)
+    )
+
+    def fail_with_uri(**kwargs: object) -> None:
+        raise RuntimeError(f"{kwargs['uri']} ring={kwargs['ddr_ring_bytes']}")
+
+    monkeypatch.setattr("pluto_plus.cli.run_metadata_continuity_ladder", fail_with_uri)
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "192.168.2.1",
+            "--transport",
+            "ip",
+            "--expect-serial",
+            "SERIAL_A",
+            "--ip-port",
+            "40431",
+            "--metadata-abi",
+            "3",
+            "--ddr-ring-bytes",
+            "100000000",
+        ],
+    )
+
+    assert result.exit_code == 5, result.output
+    assert "ip:192.168.2.1:40431" in result.output
+    assert "ring=100000000" in result.output
+
+
+def test_metadata_ladder_rejects_ip_port_for_usb() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "SERIAL_A",
+            "--ip-port",
+            "40431",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "invalid_metadata_ladder_port" in result.output
+
+
+def _patch_network_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _NetworkBootstrapBackend.instances.clear()
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr(
+        "pluto_plus.ip_firmware.pinned_ssh_host_key_fingerprint",
+        lambda *_args, **_kwargs: "SHA256:" + "A" * 43,
+    )
+    monkeypatch.setattr(
+        "pluto_plus.ip_firmware.SshNetworkConfigBackend",
+        _NetworkBootstrapBackend,
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.BoundSshTransport",
+        lambda **kwargs: SimpleNamespace(run=lambda *_args, **_kwargs: ""),
+    )
+
+
+def test_config_bootstrap_ethernet_dry_run_is_exact_and_nonmutating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_network_bootstrap(monkeypatch)
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "bootstrap-ethernet",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--address",
+            "192.168.1.186",
+            "--netmask",
+            "255.255.255.0",
+            "--receipt-directory",
+            str((tmp_path / "receipts").absolute()),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "dry_run"
+    assert payload["will_persist"] is False
+    assert payload["will_restart"] is False
+    assert payload["plan"]["identity"]["serial"] == "SERIAL_A"
+    assert payload["plan"]["identity"]["endpoint"] == "192.168.2.1"
+    assert payload["plan"]["changes"] == {"ipaddr_eth": "192.168.1.186"}
+    assert payload["plan"]["confirmation"] == "SET STATIC IP SERIAL_A 192.168.1.186"
+    assert "confirmation_token" not in result.stdout
+    assert _NetworkBootstrapBackend.instances[0].apply_calls == []
+
+
+def test_config_bootstrap_ethernet_inspects_live_address_without_a_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_network_bootstrap(monkeypatch)
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "bootstrap-ethernet",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--inspect-only",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "inspect_only"
+    assert payload["will_persist"] is False
+    assert payload["will_restart"] is False
+    assert payload["observation"]["ethernet_address"] is None
+    assert payload["observation"]["ethernet_runtime_address"] == "192.168.1.153"
+    assert "plan" not in payload
+    assert _NetworkBootstrapBackend.instances[0].apply_calls == []
+
+
+def test_config_bootstrap_ethernet_inspect_only_rejects_mutation_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_network_bootstrap(monkeypatch)
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "bootstrap-ethernet",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--inspect-only",
+            "--address",
+            "192.168.1.186",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "network_bootstrap_inspect_only_conflict" in result.output
+
+
+def test_config_bootstrap_ethernet_executes_one_validated_plan_without_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_network_bootstrap(monkeypatch)
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+    receipt_directory = (tmp_path / "receipts").absolute()
+
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "bootstrap-ethernet",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--address",
+            "192.168.1.186",
+            "--netmask",
+            "255.255.255.0",
+            "--execute",
+            "--confirm",
+            "SET STATIC IP SERIAL_A 192.168.1.186",
+            "--receipt-directory",
+            str(receipt_directory),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["outcome"] == "persisted_restart_required"
+    assert payload["restart_required"] is True
+    assert payload["endpoint_after_restart"] == "192.168.1.186"
+    assert len(_NetworkBootstrapBackend.instances[0].apply_calls) == 1
+    assert len(list(receipt_directory.glob("*.json"))) == 1
+    assert len(list((receipt_directory / "backups").glob("*.env"))) == 1
+
+
+def test_config_bootstrap_ethernet_isolation_requires_exact_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_network_bootstrap(monkeypatch)
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+    monkeypatch.setattr(
+        "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
+        lambda *_args, **_kwargs: SimpleNamespace(confirmation_phrase="ISOLATE USB SSH enx001"),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "bootstrap-ethernet",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--address",
+            "192.168.1.186",
+            "--netmask",
+            "255.255.255.0",
+            "--isolate-usb-route",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "host_isolation_confirmation_required" in result.output
+    assert "ISOLATE USB SSH enx001" in result.output
+
+
+def test_metadata_ladder_writes_an_absent_only_private_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = MetadataContinuityLadderReport(
+        serial="SERIAL_A",
+        uri="usb:",
+        transport="iio_usb",
+        model="PlutoSDR Rev.C",
+        firmware_version="v0.42-plutoplus-spf-single-rx-metadata-rc1",
+        metadata_abi=3,
+        sample_rate_hz=2_500_000,
+        rf_bandwidth_hz=2_500_000,
+        channels=(0,),
+        kernel_buffers=4,
+        cells=(
+            MetadataContinuityCell(
+                samples_per_channel=262_144,
+                requested_frames=2,
+                observed_frames=2,
+                observed_sample_count=524_288,
+                device_span_sample_count=524_288,
+                missing_sample_count=0,
+                gap_count=0,
+                overflow_count=0,
+                elapsed_seconds=1.0,
+                observed_fraction=1.0,
+                passed=True,
+            ),
+        ),
+        failures=(),
+        largest_passing_samples_per_channel=262_144,
+        original_settings_restored=True,
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment", lambda **_kwargs: SimpleNamespace(healthy=True)
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.run_metadata_continuity_ladder", lambda **_kwargs: report
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(mode=0o700)
+    destination = evidence / "rx0.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "SERIAL_A",
+            "--transport",
+            "usb",
+            "--metadata-abi",
+            "3",
+            "--channels",
+            "rx0",
+            "--samples",
+            "262144",
+            "--frames",
+            "50",
+            "--report",
+            str(destination),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert destination.stat().st_mode & 0o777 == 0o600
+    assert json.loads(destination.read_text())["serial"] == "SERIAL_A"
+
+    repeated = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "SERIAL_A",
+            "--metadata-abi",
+            "3",
+            "--channels",
+            "rx0",
+            "--samples",
+            "262144",
+            "--frames",
+            "2",
+            "--report",
+            str(destination),
+        ],
+    )
+    assert repeated.exit_code == 5, repeated.output
+    assert "contract destination already exists" in repeated.output
+
+
+def test_remediation_offers_cover_stale_firmware_and_broken_host_libiio() -> None:
+    from pluto_plus.cli import _remediation_offers
+
+    payload = {
+        "host_libiio": {
+            "healthy": False,
+            "status": "usb_backend_missing",
+            "summary": "native libiio has no USB backend",
+            "remediation": "scripts/install_native_libiio.sh",
+        },
+        "radios": [
+            {
+                "serial": "SERIAL_A",
+                "usb_sysfs_path": "/sys/bus/usb/devices/3-11",
+                "checks": [
+                    {
+                        "code": "firmware.release_currency",
+                        "status": "fail",
+                        "actual": "v0.38-plutoplus-spf-libiio-metadata-v5",
+                        "expected": "v0.39-plutoplus-spf-libiio-metadata-v6",
+                    }
+                ],
+            }
+        ],
+    }
+
+    offers = _remediation_offers(payload)
+
+    assert len(offers) == 2
+    assert "scripts/install_native_libiio.sh" in offers[0][1]
+    assert "SERIAL_A" in offers[1][0]
+
+
+def test_remediation_offers_stay_empty_for_a_current_radio() -> None:
+    from pluto_plus.cli import _remediation_offers
+
+    payload = {
+        "host_libiio": {"healthy": True, "status": "ready"},
+        "radios": [
+            {
+                "serial": "SERIAL_A",
+                "checks": [{"code": "firmware.release_currency", "status": "pass"}],
+            }
+        ],
+    }
+
+    assert _remediation_offers(payload) == []
+
+
+def test_non_interactive_doctor_never_prompts(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import pluto_plus.cli as cli
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+
+    def explode(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("doctor must not prompt without a TTY")
+
+    monkeypatch.setattr(cli.typer, "confirm", explode)
+
+    cli._offer_remediations([("stale firmware", "pluto firmware flash ...")], assume_yes=False)
+
+    output = capsys.readouterr().out
+    assert "--yes" in output
+    assert "pluto firmware flash" not in output
+
+
+def test_assume_yes_shows_every_fix_without_prompting(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import pluto_plus.cli as cli
+
+    def explode(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("--yes must not prompt")
+
+    monkeypatch.setattr(cli.typer, "confirm", explode)
+
+    cli._offer_remediations([("stale firmware", "pluto firmware flash ...")], assume_yes=True)
+
+    assert "pluto firmware flash" in capsys.readouterr().out

@@ -8,6 +8,7 @@ import pytest
 from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
 from pluto_plus.setup import (
     SetupExecutorFailure,
+    SetupHostKeyRotation,
     SetupIdentity,
     SetupObservation,
     SetupPlan,
@@ -16,6 +17,7 @@ from pluto_plus.setup_helper import (
     BoundSshTransport,
     FixedSshSetupExecutor,
     SetupHelperError,
+    SetupSshHostKeyChangedError,
     SetupTransport,
 )
 
@@ -36,6 +38,47 @@ def test_bound_ssh_transport_supports_private_lan_without_usb_bind(
 
     assert transport.host == "192.168.1.14"
     assert transport.interface is None
+
+
+def test_bound_ssh_transport_uses_only_the_selected_known_hosts_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    spawned_arguments: list[str] = []
+
+    class SuccessfulChild:
+        before = b""
+        exitstatus = 0
+        signalstatus = None
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            return 1
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    def spawn(binary: str, arguments: list[str], **kwargs: object) -> SuccessfulChild:
+        del binary, kwargs
+        spawned_arguments.extend(arguments)
+        return SuccessfulChild()
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", spawn)
+    transport = BoundSshTransport(
+        host="192.168.1.14",
+        interface=None,
+        password="analog",
+        known_hosts_file=known_hosts,
+    )
+
+    assert transport.run("fw_printenv mode") == ""
+    assert f"UserKnownHostsFile={known_hosts}" in spawned_arguments
+    assert "GlobalKnownHostsFile=/dev/null" in spawned_arguments
 
 
 def test_bound_ssh_transport_rejects_public_or_named_hosts(tmp_path: Path) -> None:
@@ -99,6 +142,203 @@ def test_bound_ssh_transport_rechecks_route_before_each_operation(tmp_path: Path
     assert checks == 2
 
 
+def test_bound_ssh_transport_reenrolls_rotated_key_after_usb_attestation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+
+    old_key = b"192.168.2.1 ssh-ed25519 AAAAOLD\n"
+    new_key = b"192.168.2.1 ssh-ed25519 AAAANEW\n"
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_bytes(old_key)
+    known_hosts.chmod(0o600)
+    usb_checks: list[tuple[str, Path]] = []
+    spawned_arguments: list[str] = []
+
+    class EnrollmentChild:
+        before = b""
+        exitstatus = 0
+        signalstatus = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            self.calls += 1
+            if self.calls == 1:
+                self.before = b""
+                return 0
+            self.before = b"serial=SERIAL_A\n"
+            return 1
+
+        def sendline(self, value: bytes) -> None:
+            assert value == b"analog"
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    def spawn(binary: str, arguments: list[str], **kwargs: object) -> EnrollmentChild:
+        del binary, kwargs
+        spawned_arguments.extend(arguments)
+        destination = next(
+            Path(argument.split("=", 1)[1])
+            for argument in arguments
+            if argument.startswith("UserKnownHostsFile=")
+        )
+        destination.write_bytes(new_key)
+        destination.chmod(0o600)
+        return EnrollmentChild()
+
+    import pexpect
+
+    import pluto_plus.setup_helper as setup_helper
+
+    monkeypatch.setattr(pexpect, "spawn", spawn)
+    monkeypatch.setattr(
+        setup_helper,
+        "_known_hosts_fingerprint",
+        lambda path: f"SHA256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+    )
+    transport = BoundSshTransport(
+        host="192.168.2.1",
+        interface="enx_path_a",
+        password="analog",
+        known_hosts_file=known_hosts,
+        route_preflight=lambda: None,
+        usb_identity_checker=lambda serial, path: usb_checks.append((serial, path)),
+    )
+
+    evidence = transport.reenroll_after_attested_usb_reboot(
+        serial="SERIAL_A",
+        usb_sysfs_path=Path("/sys/bus/usb/devices/3-8"),
+    )
+
+    assert usb_checks == [("SERIAL_A", Path("/sys/bus/usb/devices/3-8"))]
+    assert known_hosts.read_bytes() == new_key
+    assert Path(evidence.previous_known_hosts_backup).read_bytes() == old_key
+    assert evidence.previous_known_hosts_sha256 == hashlib.sha256(old_key).hexdigest()
+    assert evidence.replacement_known_hosts_sha256 == hashlib.sha256(new_key).hexdigest()
+    assert "StrictHostKeyChecking=accept-new" in spawned_arguments
+    assert "GlobalKnownHostsFile=/dev/null" in spawned_arguments
+    assert spawned_arguments[:2] == ["-B", "enx_path_a"]
+
+
+def test_bound_ssh_transport_never_auto_reenrolls_a_lan_endpoint(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    transport = BoundSshTransport(
+        host="192.168.1.14",
+        interface=None,
+        password="analog",
+        known_hosts_file=known_hosts,
+    )
+
+    with pytest.raises(SetupHelperError, match="exact USB endpoint"):
+        transport.reenroll_after_attested_usb_reboot(
+            serial="SERIAL_A",
+            usb_sysfs_path=Path("/sys/bus/usb/devices/3-8"),
+        )
+
+    assert known_hosts.read_text() == "placeholder\n"
+
+
+def test_bound_ssh_transport_keeps_pinned_key_when_replacement_serial_is_wrong(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_key = b"192.168.2.1 ssh-ed25519 AAAAOLD\n"
+    new_key = b"192.168.2.1 ssh-ed25519 AAAANEW\n"
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_bytes(old_key)
+    known_hosts.chmod(0o600)
+
+    class WrongRadioChild:
+        before = b""
+        exitstatus = 0
+        signalstatus = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            self.calls += 1
+            if self.calls == 1:
+                return 0
+            self.before = b"serial=DIFFERENT_RADIO\n"
+            return 1
+
+        def sendline(self, value: bytes) -> None:
+            assert value == b"analog"
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    def spawn(binary: str, arguments: list[str], **kwargs: object) -> WrongRadioChild:
+        del binary, kwargs
+        destination = next(
+            Path(argument.split("=", 1)[1])
+            for argument in arguments
+            if argument.startswith("UserKnownHostsFile=")
+        )
+        destination.write_bytes(new_key)
+        destination.chmod(0o600)
+        return WrongRadioChild()
+
+    import pexpect
+
+    import pluto_plus.setup_helper as setup_helper
+
+    monkeypatch.setattr(pexpect, "spawn", spawn)
+    monkeypatch.setattr(setup_helper, "_known_hosts_fingerprint", lambda path: "SHA256:test")
+    transport = BoundSshTransport(
+        host="192.168.2.1",
+        interface="enx_path_a",
+        password="analog",
+        known_hosts_file=known_hosts,
+        route_preflight=lambda: None,
+        usb_identity_checker=lambda serial, path: None,
+    )
+
+    with pytest.raises(SetupHelperError, match="DIFFERENT_RADIO"):
+        transport.reenroll_after_attested_usb_reboot(
+            serial="SERIAL_A",
+            usb_sysfs_path=Path("/sys/bus/usb/devices/3-8"),
+        )
+
+    assert known_hosts.read_bytes() == old_key
+    assert list(tmp_path.glob("known_hosts.pre-reboot-*")) == []
+
+
+def test_bound_ssh_transport_refuses_reenrollment_if_pinned_key_was_tampered(
+    tmp_path: Path,
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("original\n")
+    known_hosts.chmod(0o600)
+    transport = BoundSshTransport(
+        host="192.168.2.1",
+        interface="enx_path_a",
+        password="analog",
+        known_hosts_file=known_hosts,
+        route_preflight=lambda: None,
+        usb_identity_checker=lambda serial, path: None,
+    )
+    known_hosts.write_text("tampered\n")
+
+    with pytest.raises(SetupHelperError, match="changed after transport creation"):
+        transport.reenroll_after_attested_usb_reboot(
+            serial="SERIAL_A",
+            usb_sysfs_path=Path("/sys/bus/usb/devices/3-8"),
+        )
+
+    assert known_hosts.read_text() == "tampered\n"
+    assert list(tmp_path.glob("known_hosts.pre-reboot-*")) == []
+
+
 class RecordingTransport(SetupTransport):
     def __init__(self) -> None:
         self.commands: list[tuple[str, bytes | None]] = []
@@ -107,6 +347,16 @@ class RecordingTransport(SetupTransport):
     def run(self, command: str, *, stdin: bytes | None = None, timeout_s: float = 15) -> str:
         self.commands.append((command, stdin))
         return self.responses.pop(0)
+
+
+def _rotation_evidence(tmp_path: Path) -> SetupHostKeyRotation:
+    return SetupHostKeyRotation(
+        previous_known_hosts_sha256="5" * 64,
+        replacement_known_hosts_sha256="6" * 64,
+        previous_fingerprint="SHA256:old",
+        replacement_fingerprint="SHA256:new",
+        previous_known_hosts_backup=str(tmp_path / "known_hosts.pre-reboot"),
+    )
 
 
 def _identity() -> SetupIdentity:
@@ -126,10 +376,12 @@ def _observation(*, canonical: bool, tx_safe: bool) -> SetupObservation:
             dict(CANONICAL_UBOOT)
             if canonical
             else {
-                "attr_name": None,
-                "attr_val": None,
-                "compatible": None,
-                "mode": "2r2t",
+                # The real-world reverted state: attr_name/attr_val present, which fires
+                # the malformed AD9364 branch and persists mode=1r1t on every boot.
+                "attr_name": "compatible",
+                "attr_val": "ad9361",
+                "compatible": "ad9361",
+                "mode": "1r1t",
             }
         ),
         environment_sha256=("2" if canonical else "1") * 64,
@@ -152,9 +404,9 @@ def _plan(before: SetupObservation) -> SetupPlan:
         environment_sha256=before.environment_sha256,
         before=before,
         changes_items=(
-            ("attr_name", "compatible"),
-            ("attr_val", "ad9361"),
-            ("compatible", "ad9361"),
+            ("attr_name", None),
+            ("attr_val", None),
+            ("mode", "2r2t"),
         ),
         tx_mute_required=not before.tx_safe,
     )
@@ -184,9 +436,7 @@ class ScriptedExecutor(FixedSshSetupExecutor):
         self.events.append("inspect")
         return next(self._observations)
 
-    def _write_backup(
-        self, plan: SetupPlan, observation: SetupObservation
-    ) -> tuple[Path, str]:
+    def _write_backup(self, plan: SetupPlan, observation: SetupObservation) -> tuple[Path, str]:
         self.events.append("backup")
         return Path("/private/backup.json"), "4" * 64
 
@@ -215,12 +465,9 @@ def test_executor_backs_up_before_exact_batch_write_and_reboot(tmp_path: Path) -
         state_root=tmp_path,
     )
 
-    batch = executor.canonical_batch(
-        {"attr_name": "compatible", "attr_val": "ad9361", "compatible": "ad9361"}
-    )
-    assert batch == (
-        b"attr_name compatible\nattr_val ad9361\ncompatible ad9361\n"
-    )
+    batch = executor.canonical_batch({"attr_name": None, "attr_val": None, "compatible": "ad9361"})
+    # A line carrying no value deletes the variable in fw_setenv --script mode.
+    assert batch == b"attr_name\nattr_val\ncompatible ad9361\n"
     assert b"mode" not in batch
     with pytest.raises(SetupHelperError):
         executor.canonical_batch({"arbitrary": "value"})
@@ -262,9 +509,79 @@ def test_provision_orders_backup_mute_exact_batch_reboot_and_verification(
     command, stdin = executor.recording_transport.commands[0]
     assert before.environment_sha256 in command
     assert command.endswith("/usr/sbin/device_reboot reset")
-    assert stdin == b"attr_name compatible\nattr_val ad9361\ncompatible ad9361\n"
+    assert stdin == b"attr_name\nattr_val\nmode 2r2t\n"
     assert result.observation.live_phy_model == "ad9361"
     assert result.backup_path == "/private/backup.json"
+
+
+def test_provision_reenrolls_expected_rotated_key_only_after_reenumeration(
+    tmp_path: Path,
+) -> None:
+    before = _observation(canonical=False, tx_safe=True)
+    after = _observation(canonical=True, tx_safe=True)
+    evidence = _rotation_evidence(tmp_path)
+
+    class RotatingTransport(RecordingTransport):
+        def reenroll_after_attested_usb_reboot(
+            self, *, serial: str, usb_sysfs_path: Path, timeout_s: float
+        ) -> SetupHostKeyRotation:
+            del timeout_s
+            executor.events.append(f"reenroll:{serial}:{usb_sysfs_path}")
+            return evidence
+
+    class RotatingExecutor(FixedSshSetupExecutor):
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            self.inspect_calls = 0
+            self.recording_transport = RotatingTransport()
+            self.recording_transport.responses.append("")
+            super().__init__(
+                identity=_identity(),
+                transport=self.recording_transport,
+                state_root=tmp_path,
+                poll_interval_s=0.001,
+            )
+
+        def inspect(self, identity: SetupIdentity | None = None) -> SetupObservation:
+            del identity
+            self.inspect_calls += 1
+            self.events.append("inspect")
+            if self.inspect_calls == 1:
+                return before
+            if self.inspect_calls == 2:
+                raise SetupSshHostKeyChangedError("pinned key changed after reboot")
+            return after
+
+        def _write_backup(self, plan: SetupPlan, observation: SetupObservation) -> tuple[Path, str]:
+            del plan, observation
+            self.events.append("backup")
+            return Path("/private/backup.json"), "4" * 64
+
+        def _wait_for_reenumeration(self) -> None:
+            self.events.append("reenumerate")
+
+    executor = RotatingExecutor()
+
+    result = executor.provision(_plan(before))
+
+    assert executor.events == [
+        "inspect",
+        "backup",
+        "reenumerate",
+        "inspect",
+        "reenroll:SERIAL_A:/sys/bus/usb/devices/3-8",
+        "inspect",
+    ]
+    assert result.host_key_rotation == evidence
+    assert result.completed_phases == (
+        "preflight",
+        "backup",
+        "tx_safe",
+        "mutation_dispatched",
+        "reboot_observed",
+        "ssh_host_key_reenrolled",
+        "post_reboot_attestation",
+    )
 
 
 def test_failure_after_backup_preserves_backup_reference_and_never_retries(
@@ -297,7 +614,7 @@ def _tx_mute_fragment() -> str:
 
     text = _MUTE_SCRIPT.decode()
     start = text.index("\n", text.index('[ -n "$phy" ]')) + 1
-    end = text.index('printf \'%s\\n\' 0 >"$dds/buffer/enable"')
+    end = text.index("printf '%s\\n' 0 >\"$dds/buffer/enable\"")
     return 'set -eu\nphy="$1"\n' + text[start:end]
 
 
@@ -322,11 +639,11 @@ def _run_mute(tmp_path, channels):
     try:
         proc = subprocess.run(
             ["sh", "-c", _tx_mute_fragment(), "sh", str(phy)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         written = {
-            ch: (phy / f"out_voltage{ch}_hardwaregain").read_text().strip()
-            for ch in channels
+            ch: (phy / f"out_voltage{ch}_hardwaregain").read_text().strip() for ch in channels
         }
     finally:
         os.chmod(phy, 0o755)

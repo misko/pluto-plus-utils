@@ -67,10 +67,10 @@ class RepairableFakeRadio(FakeRadioDevice):
             "uboot": CANONICAL_UBOOT
             if self._canonical
             else {
-                "attr_name": None,
-                "attr_val": None,
-                "compatible": None,
-                "mode": "2r2t",
+                "attr_name": "compatible",
+                "attr_val": "ad9361",
+                "compatible": "ad9361",
+                "mode": "1r1t",
             },
             # The fixture starts from an independently cold-attested canonical QSPI
             # image. Setup execution proves the environment survived a reboot; it
@@ -130,10 +130,10 @@ class SetupBackend:
                 dict(CANONICAL_UBOOT)
                 if canonical
                 else {
-                    "attr_name": None,
-                    "attr_val": None,
-                    "compatible": None,
-                    "mode": "2r2t",
+                    "attr_name": "compatible",
+                    "attr_val": "ad9361",
+                    "compatible": "ad9361",
+                    "mode": "1r1t",
                 }
             ),
             environment_sha256=("3" if canonical else "1") * 64,
@@ -300,7 +300,7 @@ def test_setup_api_plan_execute_receipt_and_fresh_doctor(tmp_path: Path) -> None
     with _client(service, _policy()) as client:
         before = client.get(f"{API_PREFIX}/radios/SERIAL_A/doctor").json()
         before_findings = {item["code"]: item for item in before["findings"]}
-        assert before_findings["rf.phy_model"]["status"] == "fail"
+        assert before_findings["rf.phy_model"]["status"] == "pass"
         assert before_findings["setup.uboot_2r2t"]["status"] == "fail"
 
         planned = _post_plan(client, AUTH_HEADERS)
@@ -313,11 +313,11 @@ def test_setup_api_plan_execute_receipt_and_fresh_doctor(tmp_path: Path) -> None
         }
         assert document["plan"]["environment_sha256"] == "1" * 64
         assert dict(document["plan"]["changes_items"]) == {
-            "attr_name": "compatible",
-            "attr_val": "ad9361",
-            "compatible": "ad9361",
+            "attr_name": None,
+            "attr_val": None,
+            "mode": "2r2t",
         }
-        assert "mode" not in dict(document["plan"]["changes_items"])
+        assert "compatible" not in dict(document["plan"]["changes_items"])
 
         wrong_token = client.post(
             f"{API_PREFIX}/setup/executions",
@@ -385,7 +385,7 @@ def test_setup_required_radio_does_not_hide_healthy_radios_and_can_be_repaired(
 
         report = service.doctor("SERIAL_A")
         findings = {item.code: item for item in report.findings}
-        assert findings["rf.phy_model"].status.value == "fail"
+        assert findings["rf.phy_model"].status.value == "pass"
         assert findings["rf.dual_rx_scan"].status.value == "fail"
 
         planned = service.create_canonical_setup_plan("SERIAL_A")

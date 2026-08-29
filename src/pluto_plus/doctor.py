@@ -13,6 +13,7 @@ from typing import Any
 
 from pluto_plus.diagnostic_profiles import (
     DIAGNOSTIC_PROFILES,
+    SUPPORTED_AD936X_PHY_MODELS,
     MetadataAbiState,
     parse_metadata_abi,
     select_diagnostic_profile,
@@ -27,9 +28,20 @@ from pluto_plus.models import (
     RadioSnapshot,
 )
 
-CANONICAL_UBOOT = {
-    "attr_name": "compatible",
-    "attr_val": "ad9361",
+# attr_name/attr_val must stay unset.  The AD936x boot script on these boards guards
+# its AD9364 branch with a malformed condition:
+#
+#     test ${compatible} = ad9364 || test -n ${attr_val} = ad9364
+#
+# U-Boot's test consumes "-n <value>" as a complete operator, then matches no operator
+# at the trailing "= ad9364" and returns true unconditionally (u-boot cmd/test.c).  Any
+# non-empty attr_val therefore fires that branch on every boot, stripping
+# adi,2rx-2tx-mode-enable and running "setenv mode 1r1t; saveenv" -- reverting a 2R2T
+# radio to 1R1T and persisting the revert.  compatible=ad9361 drives the AD9361
+# override on its own through a separate, correctly formed branch.
+CANONICAL_UBOOT: dict[str, str | None] = {
+    "attr_name": None,
+    "attr_val": None,
     "compatible": "ad9361",
     "mode": "2r2t",
 }
@@ -95,21 +107,298 @@ TANDEM_V6_LATCH_CLEAR_PERSISTENT_POLICY = TANDEM_V6_LATCH_CLEAR_RAM_POLICY.model
 )
 
 # Exact final-version-stamped tandem v7 candidate from the trusted Kalman build.
+# This successor includes the synchronous iiOD exclusive-buffer close barrier.
 # This policy is deliberately RAM-only until all four physical radios pass the
 # release matrix. A future persistent policy must be a separate reviewed object.
 TANDEM_AGC_V7_RAM_POLICY = FirmwarePolicy(
     profile_id="tandem-agc-v7-release-ram",
     release_tag="v0.40-plutoplus-spf-tandem-agc-v7",
     device_firmware="v0.40-plutoplus-spf-tandem-agc-v7",
-    asset_name="plutoplus-spf-tandem-agc-v2-8e214cd7826c-pluto.dfu",
-    asset_sha256="532b45f2ab6cc3e7dfdbdf2a552c54c7e6b2217eb392c6d42a1c648852c8feeb",
-    release_url="https://github.com/misko/plutosdr-fw/actions/runs/32206442088",
-    source_commit="8e214cd7826c310ea9b5d2d45186359141d14421",
-    fit_body_sha256="006c3783f1d832dbab6b3f7b990f8bf06a0779e99de5d939bff2899a519352e0",
-    fit_body_size=12_776_775,
+    asset_name="plutoplus-spf-tandem-agc-v2-e0049c2d0077-pluto.dfu",
+    asset_sha256="4fe286f9756e3c721d5322ba9c18831f43ab4678c34bb9ef7f238cbb1236debe",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/32214045747",
+    source_commit="e0049c2d0077770eeb1f6850b957878a373623d9",
+    fit_body_sha256="4c19876d09082adfdbd255726e84be397eb4e18a4c0d96b9722d7d543c2ebae7",
+    fit_body_size=12_776_823,
     hardware_qualified=False,
-    published_at=datetime(2026, 8, 19, 2, 9, 5, tzinfo=UTC),
+    published_at=datetime(2026, 8, 19, 4, 32, 25, tzinfo=UTC),
 )
+
+# The same attested bytes receive a separate QSPI authorization only after the
+# four-radio RAM matrix passed. Keeping this identity distinct preserves the
+# rule that selecting the RAM diagnostic profile can never authorize a write.
+TANDEM_AGC_V7_PERSISTENT_POLICY = TANDEM_AGC_V7_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "tandem-agc-v7-release-persistent-promotion",
+        "hardware_qualified": True,
+    }
+)
+
+# Exact ABI-3 single-RX candidate produced by the trusted Kalman build. The
+# sealed bundle passed the complete offline release gate, but these bytes have
+# not yet passed the physical-radio matrix. Keeping only a RAM policy makes a
+# power cycle the recovery path and prevents any command from selecting it for
+# QSPI persistence before an explicit hardware promotion.
+SINGLE_RX_METADATA_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="single-rx-metadata-rc1-ram",
+    release_tag="plutoplus-spf-single-rx-metadata-rc1-c83345490234",
+    device_firmware="v0.42-plutoplus-spf-single-rx-metadata-rc1",
+    asset_name="plutoplus-spf-single-rx-metadata-rc1-c83345490234-pluto.dfu",
+    asset_sha256="3d38a74234823937995e20c32099f61923284df50b530f1e39df1b72f5e80aaf",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33121754593",
+    source_commit="c833454902343843e4af7f3f6c97c40d4a809c90",
+    fit_body_sha256="dff0c0f4d607beb5c5adc050e9cf6d2bbb09d1cd5c13a7c57a4771c2cbf17dab",
+    fit_body_size=12_793_263,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 27, 22, 38, 52, tzinfo=UTC),
+)
+
+# Exact opt-in DDR burst candidate built from the RC32-based ABI-3 graph. The
+# profile is intentionally RAM-only: its hash authorizes volatile DFU testing,
+# never persistence. A separate promotion identity is required after the USB,
+# IP, cancellation, and memory-reserve hardware matrix passes.
+DDR_BURST_V1_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-rc1-ram",
+    release_tag="ddr-burst-v1-rc1-fdbe3ffaed60",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1-rc1",
+    asset_name="plutoplus-spf-ddr-burst-v1-rc1-fdbe3ffaed60-pluto.dfu",
+    asset_sha256="9024ed3c0ce38efeaf2e30dd71f903e2d65a234b90e7af175d3c196042dc6591",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33145187461",
+    source_commit="fdbe3ffaed604cc83f89252a10d2ec8b51b5be58",
+    fit_body_sha256="b9ceebdbadf144e91be78c2b87aad30691f3ade068f91ad8ab61c72b1b4035d4",
+    fit_body_size=12_796_131,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 5, 34, 46, tzinfo=UTC),
+)
+
+# RC2 rebuilds the combined post-PR56 source graph with the reviewed Pluto HDL
+# area strategy that keeps the widened RX DMAC inside the Z7010. The exact
+# trusted-CI bytes remain RAM-only: selecting this profile can never authorize
+# a persistent write, and a future promotion must use a distinct policy.
+DDR_BURST_V1_RC2_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-rc2-ram",
+    release_tag="ddr-burst-v1-rc2-b046b80fd280",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1-rc2",
+    asset_name="plutoplus-spf-ddr-burst-v1-rc2-b046b80fd280-pluto.dfu",
+    asset_sha256="2164eed7450cfe8e29ea1e57ee1b556c06e912a4bbca6f186721f0ecc744d0b8",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33157004273",
+    source_commit="b046b80fd280dc827b8e0eef75374cda8bdf15a6",
+    fit_body_sha256="8c06c17aecebb724e021470f43f31440ed850327ac7fd4d4b0238c5a3563eda7",
+    fit_body_size=12_796_723,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 9, 14, 1, tzinfo=UTC),
+)
+
+# RC3 retains the exact RC2 userspace/FPGA graph and adds the merged AXI-DMAC
+# hardware-shutdown fence. The trusted bundle is release-eligible offline, but
+# this identity remains RAM-only until abrupt-disconnect and multi-radio gates
+# pass; no policy with the same source commit may authorize persistence.
+DDR_BURST_V1_RC3_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-rc3-ram",
+    release_tag="ddr-burst-v1-rc3-19abd4a4184b",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1-rc3",
+    asset_name="plutoplus-spf-ddr-burst-v1-rc3-19abd4a4184b-pluto.dfu",
+    asset_sha256="18f0ce26e4c242f24fcacbd04e71b633e24ccf5b740332a263dc15e778a231fa",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33163618434",
+    source_commit="19abd4a4184b155153eaf1d1b7fd3b393bcb6ace",
+    fit_body_sha256="0f46a47d41c994c71c4d58d409cfe73ec90b198a07553586a5188ae4321230f9",
+    fit_body_size=12_796_875,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 10, 51, 38, tzinfo=UTC),
+)
+
+# RC5 closes the high-to-low sample-rate recovery defect by resetting the RX
+# timestamp FIFO, with the reset hold implemented as one SRL so the slice-full
+# Z7010 still routes. The protected bundle and both checksum inventories pass,
+# but these bytes remain RAM-only until the repeated disconnect and fleet gates
+# complete; no profile with this identity may authorize persistence.
+DDR_BURST_V1_RC5_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-rc5-ram",
+    release_tag="ddr-burst-v1-rc5-58f382f69776",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1-rc5",
+    asset_name="plutoplus-spf-ddr-burst-v1-rc5-58f382f69776-pluto.dfu",
+    asset_sha256="ba364191cdfd0eb17af81d952f92d69481c7e31fbcdd8baac79590eab8afe98c",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33171059728",
+    source_commit="58f382f69776f39b04eac9e289064d6e22edd433",
+    fit_body_sha256="bd888473054b269643e94e599f835a71fad2ed8cb08f21258c5f418bfd380aab",
+    fit_body_size=12_793_407,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 12, 48, 35, tzinfo=UTC),
+)
+
+# RC1 fixes two released DDR-burst failures without changing the FPGA, Linux,
+# metadata ABI, gadget, or memory geometry: iiOD compares the native 8-bit
+# tandem transition status modulo 256, and both client and server validate the
+# complete two-frame AUTO arm window. The protected bundle is release-eligible
+# offline, but these exact bytes remain RAM-only until hardware qualification.
+DDR_BURST_V2_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v2-rc1-ram",
+    release_tag="ddr-burst-v2-rc1-e2a6458ae9fa",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v2-rc1",
+    asset_name="plutoplus-spf-ddr-burst-v2-rc1-e2a6458ae9fa-pluto.dfu",
+    asset_sha256="c1e80d1f5748e33e7668a2641961e4de07e725d5b8c6588830f61e45c7a14b60",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33196445808",
+    source_commit="e2a6458ae9fabafdf4a7dfa56bc9294d5355bc3d",
+    fit_body_sha256="4088680502052e828e81380dad0a9b0aa9ae0cf4a0c891933897f62e2fdcabd4",
+    fit_body_size=12_797_471,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 18, 10, 54, tzinfo=UTC),
+)
+
+# RC2 adds a deterministic, pre-hardware 8 ms DDR frame-period floor after
+# full-image RC1 qualification exposed whole-frame loss for short high-rate
+# refills. It also retains sparse iiOD failures in the bounded kernel log.
+# These exact protected-build bytes remain RAM-only until hardware gates pass.
+DDR_BURST_V2_RC2_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v2-rc2-ram",
+    release_tag="ddr-burst-v2-rc2-1b811c744012",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v2-rc2",
+    asset_name="plutoplus-spf-ddr-burst-v2-rc2-1b811c744012-pluto.dfu",
+    asset_sha256="284e5f87e853055ee182c2caa9db8bdacae34a9b20d0f3187dd001f87c0cf011",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33202981068",
+    source_commit="1b811c744012227f01f19a79af17e2d9ba8ca90b",
+    fit_body_sha256="c4f517cb3f442617d6154c1e44779c30181ad4af44325b32300fc5413b7e4891",
+    fit_body_size=12_797_859,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 19, 35, 41, tzinfo=UTC),
+)
+
+# RC3 raises the deterministic DDR frame-period floor to 12 ms after repeated
+# two-PHY RC2 testing found an intermittent whole-frame loss at 8 ms, while
+# 10 ms and 12 ms each passed 1,280 frames. These exact protected-build bytes
+# remain RAM-only until the final multi-radio hardware gate passes.
+DDR_BURST_V2_RC3_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v2-rc3-ram",
+    release_tag="ddr-burst-v2-rc3-29d61452badb",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v2-rc3",
+    asset_name="plutoplus-spf-ddr-burst-v2-rc3-29d61452badb-pluto.dfu",
+    asset_sha256="f13576d89548416a85b11486d22203acfab5166d97e85e49980a973bd763a599",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33208101532",
+    source_commit="29d61452badb364ca4ab95278de720514ee87a2c",
+    fit_body_sha256="8f788bb1af9f392b2decfcda0477749971083a4edd3d28638bbab550e60aec80",
+    fit_body_size=12_797_807,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 20, 45, 12, tzinfo=UTC),
+)
+
+# Exact final-version-stamped v2 image from protected main run 33212817936.
+# The sealed bundle passed every offline release gate, but the byte-distinct
+# DFU/FIT must repeat the physical-radio matrix before any QSPI authorization
+# exists. This policy therefore permits volatile DFU boot only.
+DDR_BURST_V2_RELEASE_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v2-release-ram",
+    release_tag="v0.42-plutoplus-spf-ddr-burst-v2",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v2",
+    asset_name="plutoplus-spf-ddr-burst-v2-3cc434da22a6-pluto.dfu",
+    asset_sha256="274506a9ce3f283eb9d5cf4cc254ad294c669d70647fa656ebc051358ccb5ad0",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33212817936",
+    source_commit="3cc434da22a655937dc0c2d2e6fb9d97b4b8d1e5",
+    fit_body_sha256="ff93c3335f61f224ae85b414e83d2acab1a2bfd47daa2183ad920586ba94187b",
+    fit_body_size=12_798_367,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 21, 53, 18, tzinfo=UTC),
+)
+
+# Exact RAM-only capacity experiment built from the final v2 source graph. Its
+# sole runtime change raises iiOD's static and advertised single-RX burst ceiling
+# to 300,000,000 IQ bytes; the 128 MiB ordinary-memory reserve, 16 MiB CMA
+# reserve, full prefault, and post-prefault checks remain unchanged. This policy
+# exists only to qualify 250 MB and 300 MB admission on physical radios and can
+# never authorize a persistent write.
+DDR_CAPACITY_TEST_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-capacity-test-rc1-ram",
+    release_tag="ddr-capacity-test-rc1-84f05685a590",
+    device_firmware="v0.42-plutoplus-spf-ddr-capacity-test-rc1",
+    asset_name="plutoplus-spf-ddr-capacity-test-rc1-84f05685a590-pluto.dfu",
+    asset_sha256="eab63fd6003751ee007230cdaafab341a93bbe830e71747166cac5be777f11ce",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33220868991",
+    source_commit="84f05685a59007a01448628bf0f2be258594ee87",
+    fit_body_sha256="510f5848442376bb2f03ded4390ad916de074791fff2f4bd85c37aa96f263338",
+    fit_body_size=12_798_519,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 23, 59, 24, tzinfo=UTC),
+)
+
+# The exact same final DFU/FIT receives a distinct QSPI authorization only
+# after both physical PHY types passed the final-byte RAM matrix: 12 ms and
+# 200 MB on RX0/RX1, USB and physical Ethernet, deterministic lower-bound
+# rejection, abrupt-client recovery, and ordinary dual-RX postflight.
+DDR_BURST_V2_RELEASE_PERSISTENT_POLICY = DDR_BURST_V2_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "ddr-burst-v2-release-persistent-promotion",
+        "hardware_qualified": True,
+    }
+)
+
+# Exact final-version-stamped DDR burst image from protected main run
+# 33174605592. The release label does not transfer RC5's hardware evidence:
+# these byte-distinct DFU/FIT objects remain RAM-only until they pass the final
+# recovery and fleet matrix. A separate reviewed policy must authorize QSPI.
+DDR_BURST_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-burst-v1-release-ram",
+    release_tag="v0.42-plutoplus-spf-ddr-burst-v1",
+    device_firmware="v0.42-plutoplus-spf-ddr-burst-v1",
+    asset_name="plutoplus-spf-ddr-burst-v1-a6b78df100f6-pluto.dfu",
+    asset_sha256="47bb23ff1d498a5899c4503de33bc818aa908c567eab4e0fc535602ffa296877",
+    release_url=(
+        "https://github.com/misko/plutosdr-fw/releases/tag/"
+        "v0.42-plutoplus-spf-ddr-burst-v1"
+    ),
+    source_commit="a6b78df100f67c1bcd2528e2fbc0c86b2a8ee2ba",
+    fit_body_sha256="f40542a7b1a53f4f1b06a5733f068e7b69f1eddff7ab0eb46c0f37f9f37d295a",
+    fit_body_size=12_793_395,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 13, 55, 32, tzinfo=UTC),
+)
+
+# The same exact final DFU/FIT receives a distinct QSPI authorization only
+# after all five USB-attached radios passed RAM boot, RX0/RX1 abrupt-client
+# recovery, final-safe checks, and the designated USB/IP maximum-burst matrix.
+# Keeping the RAM identity separate prevents diagnostic selection from writing.
+DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "ddr-burst-v1-release-persistent-promotion",
+        "hardware_qualified": True,
+    }
+)
+
+# Persistent firmware mutation is a separate authority from canonical setup
+# repair. USB and enrolled-network upgrades select the newest release that has
+# completed the persistent hardware gate; setup keeps the immutable U-Boot
+# tuple but accepts only an exact QSPI image in the allowlist below.
+PERSISTENT_UPGRADE_POLICY = DDR_BURST_V2_RELEASE_PERSISTENT_POLICY
+
+# Canonical U-Boot repair may run only while one of these exact, reviewed,
+# hardware-qualified QSPI images is active. The tuple itself remains fixed;
+# this allowlist only advances the firmware/hash provenance accepted around it.
+SETUP_REPAIR_POLICIES = (CANONICAL_POLICY, PERSISTENT_UPGRADE_POLICY)
+
+
+def require_setup_repair_policy(policy: FirmwarePolicy) -> FirmwarePolicy:
+    """Return the shipped exact policy or reject caller-constructed authority."""
+
+    selected = next(
+        (
+            candidate
+            for candidate in SETUP_REPAIR_POLICIES
+            if candidate.profile_id == policy.profile_id
+        ),
+        None,
+    )
+    if selected is None or selected != policy:
+        raise ValueError("setup repair policy is not an exact shipped hardware-qualified policy")
+    return selected
+
+
+def setup_repair_policy_for_firmware(firmware_version: str) -> FirmwarePolicy:
+    """Select setup authority by exact active firmware; never by lexical rank."""
+
+    matches = tuple(
+        policy for policy in SETUP_REPAIR_POLICIES if policy.device_firmware == firmware_version
+    )
+    if len(matches) != 1:
+        raise ValueError("active firmware has no exact shipped setup repair policy")
+    return matches[0]
 
 
 def diagnose_radio(
@@ -185,15 +474,16 @@ def diagnose_radio(
     )
 
     phy_model = _string(observed.get("phy_model"))
+    phy_supported = phy_model in SUPPORTED_AD936X_PHY_MODELS
     findings.append(
         _comparison(
             "rf.phy_model",
-            phy_model == "ad9361",
-            "RF PHY identifies as AD9361"
-            if phy_model == "ad9361"
-            else "RF PHY is not canonical AD9361",
+            phy_supported,
+            "RF PHY identifies as a supported AD936x"
+            if phy_supported
+            else "RF PHY is not a supported AD936x",
             phy_model,
-            "ad9361",
+            SUPPORTED_AD936X_PHY_MODELS,
             "ad9361-phy model attribute",
             remediation=_setup_remediation(),
             unknown=phy_model is None,
