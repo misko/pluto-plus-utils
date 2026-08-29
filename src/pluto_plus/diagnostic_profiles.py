@@ -214,7 +214,7 @@ DDR_RING_PREFILL_V1_RELEASE_PROFILE = DiagnosticProfile(
     firmware_version="v0.44-plutoplus-spf-ddr-ring-prefill-v1",
     metadata_abis=(3,),
     tandem_agc_required=True,
-    release_status="RAM-only final bytes; persistence qualification pending",
+    release_status="hardware-qualified release",
     release_rank=20,
 )
 

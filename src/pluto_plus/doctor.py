@@ -395,6 +395,20 @@ DDR_RING_PREFILL_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 29, 18, 51, 2, tzinfo=UTC),
 )
 
+# The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
+# after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
+# ring runs each proved an exact 200 MB contiguous prefix, clean finite target
+# completion, immediate ordinary-IIO recovery, and idle memory/DMA health on
+# the local AD9363A radio. The RAM-only identity above remains non-persistent.
+DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY = (
+    DDR_RING_PREFILL_V1_RELEASE_RAM_POLICY.model_copy(
+        update={
+            "profile_id": "ddr-ring-prefill-v1-release-persistent-promotion",
+            "hardware_qualified": True,
+        }
+    )
+)
+
 # Exact final-version-stamped DDR ring v1 image from protected main run
 # 33235840830. Its source graph is the hardware-qualified RC2 graph, but this
 # identity deliberately remains RAM-only: persistent mutation requires the
