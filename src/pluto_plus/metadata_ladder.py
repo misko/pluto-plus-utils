@@ -48,7 +48,7 @@ class DdrRingFinalStatus(ApiModel):
     target_frames: int = Field(gt=0)
     produced_frames: int = Field(ge=0)
     consumed_frames: int = Field(ge=0)
-    high_water_frames: int = Field(ge=0)
+    high_water_frames: int = Field(gt=0)
     wrap_count: int = Field(ge=0)
     producer_position: int = Field(ge=0)
     consumer_position: int = Field(ge=0)
