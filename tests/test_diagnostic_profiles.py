@@ -17,6 +17,7 @@ from pluto_plus.diagnostic_profiles import (
     DDR_RING_V1_RC1_PROFILE,
     DDR_RING_V1_RC2_PROFILE,
     DDR_RING_V1_RELEASE_PROFILE,
+    IIO_THROUGHPUT_HOLD_V1_RC1_PROFILE,
     SINGLE_RX_METADATA_RC1_PROFILE,
     TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE,
     V5_PROFILE,
@@ -85,6 +86,7 @@ def test_metadata_abi_preserves_exact_observation(
         (DDR_RING_V1_RELEASE_PROFILE, 3, True),
         (DDR_RING_PREFILL_V1_RC1_PROFILE, 3, True),
         (DDR_RING_PREFILL_V1_RELEASE_PROFILE, 3, True),
+        (IIO_THROUGHPUT_HOLD_V1_RC1_PROFILE, 3, True),
     ],
 )
 def test_known_profiles_are_accepted_without_changing_mutation_policy(
