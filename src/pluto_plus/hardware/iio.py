@@ -17,6 +17,11 @@ import numpy as np
 from pluto_plus.diagnostic_profiles import SUPPORTED_AD936X_PHY_MODELS, parse_metadata_abi
 from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
 from pluto_plus.hardware.base import DEFAULT_RESTORE_LO_SEARCH_HZ, SampleBlock
+from pluto_plus.hardware.iio_iq_decode import (
+    IioIqDecoder,
+    read_interleaved_complex64,
+    validate_iq_decoder,
+)
 from pluto_plus.hardware.iio_metadata import (
     ABI3_METADATA_LAYOUTS,
     IioMetadataCaptureSession,
@@ -89,9 +94,11 @@ class IioRadioDevice:
         iio_module: ModuleType | Any | None = None,
         iio_contexts: Mapping[str, str] | None = None,
         expected_metadata_abi: int | None = None,
+        iq_decoder: IioIqDecoder = "pyadi",
     ) -> None:
         if expected_metadata_abi not in {None, 1, 2, 3}:
             raise ValueError("expected_metadata_abi must be 1, 2, 3, or None")
+        validate_iq_decoder(iq_decoder)
         normalized = uri.removeprefix("pluto://")
         self._configured_uri = normalized
         self._requested_serial = serial
@@ -103,6 +110,7 @@ class IioRadioDevice:
         self._iio_module = iio_module
         self._iio_contexts = iio_contexts
         self._expected_metadata_abi = expected_metadata_abi
+        self._iq_decoder = iq_decoder
         self._metadata_runtime: MetadataRuntimeVerification | None = None
         self._device: Any | None = None
         self._buffer_size: int | None = None
@@ -463,7 +471,18 @@ class IioRadioDevice:
             device.rx_buffer_size = sample_count
             self._buffer_size = sample_count
         before = time.time_ns()
-        raw = device.rx()
+        if self._iq_decoder == "raw-complex64":
+            try:
+                raw = read_interleaved_complex64(
+                    device,
+                    samples_per_channel=sample_count,
+                    channels=tuple(int(item) for item in device.rx_enabled_channels),
+                )
+            except BaseException:
+                self.reset_receive_buffer()
+                raise
+        else:
+            raw = device.rx()
         after = time.time_ns()
         values = np.asarray(raw)
         expected_receivers = len(tuple(device.rx_enabled_channels))
@@ -474,7 +493,10 @@ class IioRadioDevice:
                 f"paired Pluto read returned {values.shape}, expected "
                 f"({expected_receivers}, {sample_count})"
             )
-        return SampleBlock(utc_ns=(before + after) // 2, samples=values.astype(np.complex64))
+        return SampleBlock(
+            utc_ns=(before + after) // 2,
+            samples=values.astype(np.complex64, copy=self._iq_decoder == "pyadi"),
+        )
 
     def configure_kernel_buffers(self, count: int) -> int:
         """Set the libiio RX kernel-buffer count before creating a userspace buffer."""
@@ -804,6 +826,7 @@ class IioRadioDevice:
             ddr_ring_bytes=ddr_ring_bytes,
             ddr_ring_frames=ddr_ring_frames,
             ddr_ring_continuous=ddr_ring_continuous,
+            iq_decoder=self._iq_decoder,
         )
         try:
             session.open()

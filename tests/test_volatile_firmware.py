@@ -372,6 +372,70 @@ def test_ram_return_attestation_requires_exact_ddr_ring_capability(
         )
 
 
+@pytest.mark.parametrize(
+    ("expected", "observed", "accepted"),
+    [
+        (False, "", True),
+        (False, "1", False),
+        (True, "1", True),
+        (True, "", False),
+        (True, "0", False),
+        (True, "2", False),
+        (True, "true", False),
+    ],
+)
+def test_ram_return_attestation_requires_exact_timing_log_capability(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    expected: bool,
+    observed: str,
+    accepted: bool,
+) -> None:
+    plan, _, _, radios = ram_plan
+    timing_plan = replace(plan, expected_buffer_metadata_timing_log=expected)
+    facts = _facts("candidate-v1")
+    if observed:
+        facts["iio,buffer-metadata-timing-log"] = observed
+    muted: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        volatile,
+        "mute_returned_radio_at_path",
+        lambda serial, path: muted.append((serial, path)),
+    )
+
+    if accepted:
+        returned = volatile._attest_ram_return(
+            timing_plan,
+            scanner=lambda: radios,
+            iiod_inspector=lambda interface: facts,
+            timeout_s=0.05,
+            poll_interval_s=0.001,
+        )
+        assert returned == ("SERIAL_A", "candidate-v1", "ad9361")
+        assert muted == [("SERIAL_A", Path(plan.usb_sysfs_path))]
+    else:
+        with pytest.raises(volatile.VolatileFirmwareError, match="timing-log capability"):
+            volatile._attest_ram_return(
+                timing_plan,
+                scanner=lambda: radios,
+                iiod_inspector=lambda interface: facts,
+                timeout_s=0.01,
+                poll_interval_s=0.001,
+            )
+        assert muted == []
+
+
+def test_receipt_cannot_change_the_profile_timing_log_requirement(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+) -> None:
+    plan, _, _, _ = ram_plan
+    volatile._revalidate_plan_image(plan)
+    with pytest.raises(volatile.VolatileFirmwareError, match="immutable profile"):
+        volatile._revalidate_plan_image(
+            replace(plan, expected_buffer_metadata_timing_log=True)
+        )
+
+
 def test_transition_uncertainty_is_receipted_and_never_retryable(
     ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
     tmp_path: Path,

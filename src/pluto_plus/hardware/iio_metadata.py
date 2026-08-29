@@ -20,6 +20,11 @@ from pluto_plus.direct_radio.usb import (
 )
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.base import SampleBlockV2
+from pluto_plus.hardware.iio_iq_decode import (
+    IioIqDecoder,
+    read_interleaved_complex64,
+    validate_iq_decoder,
+)
 from pluto_plus.hardware.sample_clock import (
     DEFAULT_SAMPLE_CLOCK_RATE_TOLERANCE_PPM,
     HostTimeAnchorMeasurement,
@@ -191,7 +196,9 @@ class IioMetadataCaptureSession:
         ddr_ring_bytes: int = 0,
         ddr_ring_frames: int = 0,
         ddr_ring_continuous: bool = False,
+        iq_decoder: IioIqDecoder = "pyadi",
     ) -> None:
+        validate_iq_decoder(iq_decoder)
         if sample_rate_hz <= 0:
             raise ValueError("sample_rate_hz must be positive")
         if samples_per_channel <= 0:
@@ -224,6 +231,7 @@ class IioMetadataCaptureSession:
         elif ddr_ring_frames or ddr_ring_continuous:
             raise ValueError("DDR ring mode requires a positive byte budget")
         self._sdr = sdr
+        self._iq_decoder = iq_decoder
         self._metadata_buffer_type = metadata_buffer_type
         self._sample_rate_hz = int(sample_rate_hz)
         self._samples_per_channel = int(samples_per_channel)
@@ -460,7 +468,15 @@ class IioMetadataCaptureSession:
         host_before_ns = time.time_ns()
         for startup_discard in range(MAX_STARTUP_FRAME_DISCARDS + 1):
             try:
-                raw_signal = self._sdr.rx()
+                raw_signal = (
+                    read_interleaved_complex64(
+                        self._sdr,
+                        samples_per_channel=self._samples_per_channel,
+                        channels=self._channels,
+                    )
+                    if self._iq_decoder == "raw-complex64"
+                    else self._sdr.rx()
+                )
                 break
             except OSError as error:
                 if error.errno != errno.EAGAIN or startup_discard == MAX_STARTUP_FRAME_DISCARDS:

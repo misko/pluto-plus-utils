@@ -50,6 +50,7 @@ from pluto_plus.doctor import (
     DDR_RING_V1_RELEASE_RAM_POLICY,
     IIO_THROUGHPUT_HOLD_V1_RC1_RAM_POLICY,
     IIO_THROUGHPUT_HOLD_V2_RC1_RAM_POLICY,
+    IIO_THROUGHPUT_TIMING_V1_RC1_RAM_POLICY,
     SINGLE_RX_METADATA_RC1_RAM_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
@@ -96,6 +97,7 @@ class StandaloneFlashProfile:
     ddr_ring_max_iq_bytes: int | None = None
     ddr_ring_modes: str | None = None
     buffer_metadata_status: bool = False
+    buffer_metadata_timing_log: bool = False
 
 
 STANDALONE_FLASH_PROFILES = {
@@ -191,6 +193,18 @@ STANDALONE_FLASH_PROFILES = {
         ddr_ring_max_iq_bytes=200_000_000,
         ddr_ring_modes="finite,continuous",
         buffer_metadata_status=True,
+    ),
+    IIO_THROUGHPUT_TIMING_V1_RC1_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        IIO_THROUGHPUT_TIMING_V1_RC1_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+        ddr_ring_max_iq_bytes=200_000_000,
+        ddr_ring_modes="finite,continuous",
+        buffer_metadata_status=True,
+        buffer_metadata_timing_log=True,
     ),
     DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
         DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,

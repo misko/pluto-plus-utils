@@ -14,6 +14,7 @@ from pluto_plus.hardware.base import (
     restore_settings_exact,
 )
 from pluto_plus.hardware.iio import IioRadioDevice
+from pluto_plus.hardware.iio_iq_decode import IioIqDecoder, validate_iq_decoder
 from pluto_plus.ladder import MAX_SAMPLES_PER_CHANNEL, MIN_SAMPLES_PER_CHANNEL
 from pluto_plus.models import ApiModel, RadioSettings
 from pluto_plus.tandem import TandemMode, TandemSessionRequestV1
@@ -222,6 +223,7 @@ class MetadataContinuityLadderReport(ApiModel):
     kernel_buffers: int = Field(ge=4, le=64)
     tandem_mode: MetadataTandemMode = "hold"
     acceptance_mode: MetadataAcceptanceMode = "continuity"
+    iq_decoder: IioIqDecoder = "pyadi"
     ddr_burst_enabled: bool = False
     ddr_ring_requested_iq_bytes: int = Field(default=0, ge=0)
     minimum_observed_fraction: float = Field(
@@ -335,6 +337,7 @@ def run_metadata_continuity_ladder(
     ddr_ring_bytes: int = 0,
     tandem_mode: MetadataTandemMode = "hold",
     acceptance_mode: MetadataAcceptanceMode = "continuity",
+    iq_decoder: IioIqDecoder = "pyadi",
     radio_factory: Callable[[str, str, MetadataAbi], MetadataLadderRadio] | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> MetadataContinuityLadderReport:
@@ -348,6 +351,7 @@ def run_metadata_continuity_ladder(
         kernel_buffers=kernel_buffers,
     )
     selected_channels = tuple(channels)
+    validate_iq_decoder(iq_decoder)
     if metadata_abi not in {1, 2, 3}:
         raise ValueError("metadata ABI must be 1, 2, or 3")
     if tandem_mode not in {"hold", "auto"}:
@@ -376,8 +380,11 @@ def run_metadata_continuity_ladder(
         and any(samples & 1 for samples in samples_per_channel)
     ):
         raise ValueError("metadata ABI 3 single-RX sample counts must be even")
-    factory = radio_factory or _default_radio_factory
-    radio = factory(uri, serial, metadata_abi)
+    radio = (
+        radio_factory(uri, serial, metadata_abi)
+        if radio_factory is not None
+        else _default_radio_factory(uri, serial, metadata_abi, iq_decoder=iq_decoder)
+    )
     opened = False
     original: RadioSettings | None = None
     cells: list[MetadataContinuityCell] = []
@@ -461,6 +468,7 @@ def run_metadata_continuity_ladder(
         kernel_buffers=kernel_buffers,
         tandem_mode=tandem_mode,
         acceptance_mode=acceptance_mode,
+        iq_decoder=iq_decoder,
         ddr_burst_enabled=ddr_burst,
         ddr_ring_requested_iq_bytes=ddr_ring_bytes,
         cells=tuple(cells),
@@ -676,6 +684,8 @@ def _default_radio_factory(
     uri: str,
     serial: str,
     metadata_abi: MetadataAbi,
+    *,
+    iq_decoder: IioIqDecoder = "pyadi",
 ) -> MetadataLadderRadio:
     return cast(
         MetadataLadderRadio,
@@ -684,5 +694,6 @@ def _default_radio_factory(
             serial=serial,
             radio_id=serial,
             expected_metadata_abi=metadata_abi,
+            iq_decoder=iq_decoder,
         ),
     )

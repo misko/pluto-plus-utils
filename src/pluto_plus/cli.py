@@ -479,6 +479,7 @@ def _ladder_table(report: LadderReport) -> str:
     identity = (
         f"Radio {report.serial} · {report.uri} · {report.model} · "
         f"firmware {report.firmware_version or 'unknown'} · "
+        f"IQ decoder {report.iq_decoder} · "
         f"kernel buffers {report.kernel_buffers} "
         f"({report.kernel_buffer_configuration_basis.replace('_', ' ')}) · "
         f"RX queue {report.kernel_queue_bytes / (1024 * 1024):g} MiB"
@@ -1174,6 +1175,11 @@ def radio_ladder(
         "--channels",
         help="Canonical receive layout: rx0, rx1, or dual.",
     ),
+    iq_decoder: str = typer.Option(
+        "pyadi",
+        "--iq-decoder",
+        help="Host IQ decoder: pyadi (control) or opt-in layout-validated raw-complex64.",
+    ),
     samples: int = typer.Option(
         262_144,
         "--samples",
@@ -1321,6 +1327,9 @@ def radio_ladder(
     normalized_channels = channels.strip().lower()
     if normalized_channels not in LADDER_CHANNEL_SELECTIONS:
         _fail("ladder_failed", "channels must be rx0, rx1, or dual", 5)
+    normalized_iq_decoder = iq_decoder.strip().lower()
+    if normalized_iq_decoder not in {"pyadi", "raw-complex64"}:
+        _fail("ladder_failed", "IQ decoder must be pyadi or raw-complex64", 5)
     if frames is not None and duration_seconds is not None:
         _fail(
             "invalid_ladder_bounds",
@@ -1357,6 +1366,7 @@ def radio_ladder(
             warmup_frames=warmup_frames,
             kernel_buffers=kernel_buffers,
             allow_unsafe_kernel_queue=allow_unsafe_kernel_queue,
+            iq_decoder=cast(Any, normalized_iq_decoder),
         )
 
     try:
@@ -1456,6 +1466,11 @@ def radio_metadata_ladder(
         "dual",
         "--channels",
         help="Canonical receive layout: rx0, rx1, or dual (single RX requires ABI 3).",
+    ),
+    iq_decoder: str = typer.Option(
+        "pyadi",
+        "--iq-decoder",
+        help="Host IQ decoder: pyadi (control) or opt-in layout-validated raw-complex64.",
     ),
     samples: str = typer.Option(
         DEFAULT_METADATA_SAMPLE_LADDER,
@@ -1635,6 +1650,9 @@ def radio_metadata_ladder(
         _fail("metadata_ladder_failed", "metadata ABI must be 1, 2, or 3", 5)
     if normalized_channels not in METADATA_CHANNEL_SELECTIONS:
         _fail("metadata_ladder_failed", "channels must be rx0, rx1, or dual", 5)
+    normalized_iq_decoder = iq_decoder.strip().lower()
+    if normalized_iq_decoder not in {"pyadi", "raw-complex64"}:
+        _fail("metadata_ladder_failed", "IQ decoder must be pyadi or raw-complex64", 5)
     if ddr_burst and ddr_ring_bytes:
         _fail(
             "metadata_ladder_ddr_modes_conflict",
@@ -1686,6 +1704,7 @@ def radio_metadata_ladder(
             ddr_ring_bytes=ddr_ring_bytes,
             tandem_mode=cast(Any, normalized_tandem_mode),
             acceptance_mode=cast(Any, normalized_acceptance),
+            iq_decoder=cast(Any, normalized_iq_decoder),
         )
 
     try:

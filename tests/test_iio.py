@@ -90,6 +90,43 @@ class FakeAdi:
         return self.device
 
 
+def test_opt_in_raw_decoder_returns_owned_complex64_and_resets_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adi = FakeAdi()
+    radio = IioRadioDevice(
+        "ip:192.0.2.1", serial="SERIAL_A", adi_module=adi, iq_decoder="raw-complex64"
+    )
+    expected = np.ones((2, 1024), dtype=np.complex64)
+    calls: list[tuple[int, tuple[int, ...]]] = []
+
+    def decode(
+        device: object, *, samples_per_channel: int, channels: tuple[int, ...]
+    ) -> np.ndarray:
+        assert device is adi.device
+        calls.append((samples_per_channel, channels))
+        return expected
+
+    monkeypatch.setattr("pluto_plus.hardware.iio.read_interleaved_complex64", decode)
+    radio.open()
+    try:
+        block = radio.read_block(1024)
+        assert block.samples is expected
+        assert calls == [(1024, (0, 1))]
+        assert adi.device is not None
+        destroyed = adi.device.destroy_count
+
+        def fail_decode(*_args: object, **_kwargs: object) -> np.ndarray:
+            raise RuntimeError("unproven scan layout")
+
+        monkeypatch.setattr("pluto_plus.hardware.iio.read_interleaved_complex64", fail_decode)
+        with pytest.raises(RuntimeError, match="unproven scan layout"):
+            radio.read_block(1024)
+        assert adi.device.destroy_count == destroyed + 1
+    finally:
+        radio.close()
+
+
 class UnsafeFakeAd9361(FakeAd9361):
     def disable_dds(self) -> None:
         pass

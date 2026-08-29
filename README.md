@@ -315,6 +315,13 @@ link-limited rung takes longer to transfer. Duration mode remains bounded to 60
 seconds and 4,096 timed refills per rung; increase `--samples` if the requested
 rate/duration pair would exceed that refill bound.
 
+`--iq-decoder raw-complex64` opts into the vectorized Pluto RX decoder. The
+default `pyadi` decoder remains the control. The opt-in path accepts only the
+canonical RX0, RX1, or dual `cf-ad9361-lpc` scan: exact scan indexes, no padding,
+and fully defined signed little-endian 16-bit I/Q storage are revalidated before
+every refill. A changed or unsupported layout fails instead of silently falling
+back. The report records the selected decoder so their results cannot be mixed.
+
 `kept_pace` compares delivered sample periods with the configured rate. The
 ordinary-buffer ladder measures host transport performance; it does not claim a
 gapless FPGA timeline. Use `radio metadata-ladder` for counter-proven continuity.
