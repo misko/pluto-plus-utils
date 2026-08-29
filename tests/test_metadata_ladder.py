@@ -33,8 +33,38 @@ class _Capture:
         self.ddr_burst_admitted_bytes = 0
         self.ddr_burst_frames = 0
         self.ddr_burst_enabled = False
+        self.ddr_ring_requested_bytes = 0
+        self.ddr_ring_admitted_bytes = 0
+        self.ddr_ring_capacity_frames = 0
+        self.ddr_ring_capture_frames = 0
+        self.ddr_ring_continuous = False
+        self.ddr_ring_enabled = False
         self.closed = False
         self.previous_sequence: int | None = None
+
+    def ddr_ring_status(self) -> dict[str, object]:
+        if not self.ddr_ring_enabled or self.previous_sequence is None:
+            raise RuntimeError("DDR ring has not completed")
+        target = self.ddr_ring_capture_frames
+        capacity = self.ddr_ring_capacity_frames
+        return {
+            "state": "complete",
+            "terminal_reason": "target_complete",
+            "error_code": 0,
+            "requested_capacity_iq_bytes": self.ddr_ring_requested_bytes,
+            "admitted_capacity_iq_bytes": self.ddr_ring_admitted_bytes,
+            "target_frames": target,
+            "produced_frames": target,
+            "consumed_frames": target,
+            "high_water_frames": min(target, capacity),
+            "wrap_count": target // capacity,
+            "producer_position": target % capacity,
+            "consumer_position": target % capacity,
+            "last_contiguous_sample_sequence": (
+                1_000 + (self.previous_sequence + 1) * self.samples
+            ),
+            "first_unavailable_sample_sequence": None,
+        }
 
     def read_block(self) -> SampleBlockV2:
         sequence = next(self.sequences)
@@ -99,7 +129,14 @@ class _Radio:
         return settings
 
     def begin_metadata_capture(
-        self, sample_count: int, *, kernel_buffers: int, ddr_burst_bytes: int = 0
+        self,
+        sample_count: int,
+        *,
+        kernel_buffers: int,
+        ddr_burst_bytes: int = 0,
+        ddr_ring_bytes: int = 0,
+        ddr_ring_frames: int = 0,
+        ddr_ring_continuous: bool = False,
     ) -> _Capture:
         self.capture_requests.append(sample_count)
         capture = _Capture(
@@ -112,6 +149,15 @@ class _Radio:
         capture.ddr_burst_admitted_bytes = ddr_burst_bytes
         capture.ddr_burst_frames = ddr_burst_bytes // (sample_count * 4)
         capture.ddr_burst_enabled = bool(ddr_burst_bytes)
+        frame_bytes = sample_count * len(self.settings.channels) * 4
+        capture.ddr_ring_requested_bytes = ddr_ring_bytes
+        capture.ddr_ring_capacity_frames = (
+            0 if not ddr_ring_bytes else ddr_ring_bytes // frame_bytes
+        )
+        capture.ddr_ring_admitted_bytes = capture.ddr_ring_capacity_frames * frame_bytes
+        capture.ddr_ring_capture_frames = ddr_ring_frames
+        capture.ddr_ring_continuous = ddr_ring_continuous
+        capture.ddr_ring_enabled = bool(ddr_ring_bytes)
         return capture
 
 
@@ -335,6 +381,69 @@ def test_metadata_ladder_rejects_ddr_burst_outside_abi3_single_rx() -> None:
             frames=2,
             ddr_burst=True,
             radio_factory=lambda _uri, _serial, _abi: radio,
+        )
+
+
+@pytest.mark.parametrize("channels", ((0,), (0, 1)))
+def test_metadata_ladder_qualifies_finite_ddr_ring_with_exact_status(
+    channels: tuple[int, ...],
+) -> None:
+    samples = 262_144
+    frames = 6
+    frame_bytes = samples * len(channels) * 4
+    requested_ring_bytes = frame_bytes * 2 + 1
+    radio = _Radio({samples: tuple(range(frames))})
+    ticks = iter((0, 1_000_000_000))
+
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=5_000_000,
+        rf_bandwidth_hz=5_000_000,
+        metadata_abi=3,
+        channels=channels,
+        samples_per_channel=(samples,),
+        frames=frames,
+        kernel_buffers=4,
+        ddr_ring_bytes=requested_ring_bytes,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=lambda: next(ticks),
+    )
+
+    status = report.cells[0].ddr_ring_status
+    assert report.ddr_ring_requested_iq_bytes == requested_ring_bytes
+    assert status is not None
+    assert status.admitted_capacity_iq_bytes == frame_bytes * 2
+    assert status.produced_frames == status.consumed_frames == frames
+    assert status.high_water_frames == 2
+    assert report.cells[0].passed
+
+
+def test_metadata_ladder_rejects_ambiguous_or_incompatible_ddr_ring() -> None:
+    radio = _Radio({262_144: (0, 1)})
+    arguments = {
+        "uri": "ip:192.0.2.1",
+        "serial": "SERIAL_A",
+        "sample_rate_hz": 5_000_000,
+        "rf_bandwidth_hz": 5_000_000,
+        "samples_per_channel": (262_144,),
+        "frames": 2,
+        "radio_factory": lambda _uri, _serial, _abi: radio,
+    }
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        run_metadata_continuity_ladder(
+            **arguments,
+            metadata_abi=3,
+            channels=(0,),
+            ddr_burst=True,
+            ddr_ring_bytes=2_097_152,
+        )
+    with pytest.raises(ValueError, match="requires metadata ABI 3"):
+        run_metadata_continuity_ladder(
+            **arguments,
+            metadata_abi=2,
+            channels=(0, 1),
+            ddr_ring_bytes=2_097_152,
         )
     with pytest.raises(ValueError, match="must be even"):
         run_metadata_continuity_ladder(

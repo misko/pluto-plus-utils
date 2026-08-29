@@ -653,6 +653,9 @@ class IioRadioDevice:
         kernel_buffers: int,
         tandem_request: TandemSessionRequestV1 | None = None,
         ddr_burst_bytes: int = 0,
+        ddr_ring_bytes: int = 0,
+        ddr_ring_frames: int = 0,
+        ddr_ring_continuous: bool = False,
     ) -> IioMetadataCaptureSession:
         """Reset and arm one fail-closed FPGA-metadata capture generation."""
 
@@ -664,6 +667,23 @@ class IioRadioDevice:
             raise TypeError("ddr_burst_bytes must be an integer")
         if ddr_burst_bytes < 0:
             raise ValueError("ddr_burst_bytes must not be negative")
+        if isinstance(ddr_ring_bytes, bool) or not isinstance(ddr_ring_bytes, int):
+            raise TypeError("ddr_ring_bytes must be an integer")
+        if isinstance(ddr_ring_frames, bool) or not isinstance(ddr_ring_frames, int):
+            raise TypeError("ddr_ring_frames must be an integer")
+        if not isinstance(ddr_ring_continuous, bool):
+            raise TypeError("ddr_ring_continuous must be a bool")
+        if ddr_ring_bytes < 0 or ddr_ring_frames < 0:
+            raise ValueError("DDR ring values must not be negative")
+        if ddr_burst_bytes and ddr_ring_bytes:
+            raise ValueError("device DDR burst and DDR ring are mutually exclusive")
+        if ddr_ring_bytes:
+            if ddr_ring_continuous and ddr_ring_frames:
+                raise ValueError("continuous DDR ring must not specify a frame target")
+            if not ddr_ring_continuous and not ddr_ring_frames:
+                raise ValueError("finite DDR ring requires a positive frame target")
+        elif ddr_ring_frames or ddr_ring_continuous:
+            raise ValueError("DDR ring mode requires a positive byte budget")
         device = self._require_device()
         self.reset_receive_buffer()
         channels = tuple(int(item) for item in device.rx_enabled_channels)
@@ -712,6 +732,27 @@ class IioRadioDevice:
                 raise RadioConfigurationError(
                     "device DDR burst byte budget exceeds the advertised limit"
                 )
+        if ddr_ring_bytes:
+            if metadata_abi != 3:
+                raise RadioConfigurationError("device DDR ring v1 requires metadata ABI 3")
+            if facts.get("buffer_ddr_ring") is not True:
+                raise RadioConfigurationError("IIO context does not advertise device DDR ring v1")
+            if facts.get("buffer_ddr_ring_modes_raw") != "finite,continuous":
+                raise RadioConfigurationError("IIO DDR ring mode capability is not canonical")
+            if facts.get("buffer_metadata_status") is not True:
+                raise RadioConfigurationError("IIO context cannot report DDR ring status")
+            maximum_ring_bytes = facts.get("buffer_ddr_ring_max_iq_bytes")
+            if not isinstance(maximum_ring_bytes, int) or maximum_ring_bytes <= 0:
+                raise RadioConfigurationError("IIO DDR ring byte limit is invalid")
+            frame_iq_bytes = sample_count * len(channels) * 4
+            if ddr_ring_bytes < frame_iq_bytes:
+                raise RadioConfigurationError(
+                    "device DDR ring byte budget cannot hold one complete IIO frame"
+                )
+            if ddr_ring_bytes > maximum_ring_bytes:
+                raise RadioConfigurationError(
+                    "device DDR ring byte budget exceeds the advertised limit"
+                )
         if metadata_abi in {2, 3} and not facts.get("tandem_agc"):
             raise RadioConfigurationError(
                 "metadata ABI 2 and 3 capture requires the tandem-agc IIO device"
@@ -752,6 +793,9 @@ class IioRadioDevice:
             metadata_abi=int(metadata_abi),
             tandem_request=tandem_request,
             ddr_burst_bytes=ddr_burst_bytes,
+            ddr_ring_bytes=ddr_ring_bytes,
+            ddr_ring_frames=ddr_ring_frames,
+            ddr_ring_continuous=ddr_ring_continuous,
         )
         try:
             session.open()
@@ -872,6 +916,14 @@ def context_facts(context: Any) -> dict[str, object]:
     except (KeyError, TypeError, ValueError):
         ddr_burst_max_iq_bytes = None
         ddr_burst_reserve_bytes = None
+    ddr_ring_raw = attrs.get("iio,buffer-ddr-ring")
+    ddr_ring = ddr_ring_raw == "1"
+    try:
+        ddr_ring_max_iq_bytes = int(attrs["iio,buffer-ddr-ring-max-iq-bytes"])
+    except (KeyError, TypeError, ValueError):
+        ddr_ring_max_iq_bytes = None
+    ddr_ring_modes_raw = attrs.get("iio,buffer-ddr-ring-modes")
+    metadata_status_raw = attrs.get("iio,buffer-metadata-status")
     return {
         "serial": attrs.get("hw_serial") or attrs.get("usb,serial"),
         "model": attrs.get("hw_model") or attrs.get("usb,product"),
@@ -891,6 +943,12 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_ddr_burst_raw": ddr_burst_raw,
         "buffer_ddr_burst_max_iq_bytes": ddr_burst_max_iq_bytes,
         "buffer_ddr_burst_reserve_bytes": ddr_burst_reserve_bytes,
+        "buffer_ddr_ring": ddr_ring,
+        "buffer_ddr_ring_raw": ddr_ring_raw,
+        "buffer_ddr_ring_max_iq_bytes": ddr_ring_max_iq_bytes,
+        "buffer_ddr_ring_modes_raw": ddr_ring_modes_raw,
+        "buffer_metadata_status": metadata_status_raw == "1",
+        "buffer_metadata_status_raw": metadata_status_raw,
         "tandem_agc": _device_exists(context, "tandem-agc"),
         "tandem_agc_state": _optional_device_int_attribute(context, "tandem-agc", "state"),
         "tandem_agc_ownership_epoch": _optional_device_int_attribute(

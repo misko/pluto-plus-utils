@@ -11,7 +11,7 @@ not make continuity observable and must not be accepted as a fallback.
 | --- | --- | --- | --- |
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
-| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `ddr-burst-v1-rc2-source/libiio-v1` | `f72a72602e4ac0173bc7dd5842d831007baa3582` |
+| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `ddr-ring-v1-rc1-source/libiio-v1` | `739a250b92610184b12d773f6a367e549f0dfe29` |
 
 The currently deployed `.20` and `.21` radios advertise ABI 1. ABI 2 is a
 separate, gated firmware and host-runtime migration; it must not be selected
@@ -45,6 +45,31 @@ admitted whole frames before exposing the first refill, rejects discontinuity
 or overflow atomically, and drains through the same metadata/IQ refill API as
 an ordinary buffer. `radio metadata-ladder --ddr-burst` qualifies that path;
 omitting the flag is the explicit control case.
+
+ABI 3 additionally supports the optional streaming DDR ring when the radio
+advertises `iio,buffer-ddr-ring=1`, the exact modes `finite,continuous`, and
+`iio,buffer-metadata-status=1`. Unlike a sealed burst, a ring producer and the
+ordinary IIO consumer run concurrently. Full-ring backpressure preserves every
+frame; it never overwrites unread IQ. Capacity is independent of capture length:
+
+```python
+with radio.begin_metadata_capture(
+    samples_per_refill,
+    kernel_buffers=4,
+    ddr_ring_bytes=100_000_000,
+    ddr_ring_frames=50,
+) as capture:
+    blocks = [capture.read_block() for _ in range(capture.ddr_ring_capture_frames)]
+    status = capture.ddr_ring_status()
+    assert status["state"] == "complete"
+    assert status["produced_frames"] == status["consumed_frames"] == 50
+```
+
+Set `ddr_ring_continuous=True` and leave `ddr_ring_frames=0` for a stream that
+runs until buffer close/cancel. A zero `ddr_ring_bytes` selects the unchanged
+ordinary IIO path. DDR ring and sealed DDR burst are mutually exclusive.
+`radio metadata-ladder --ddr-ring-bytes BYTES` exercises finite capture and
+requires its atomic final status and FPGA sample boundary to close exactly.
 
 Build the matched native library and binding into a release-local virtual
 environment:

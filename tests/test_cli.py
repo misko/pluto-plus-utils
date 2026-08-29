@@ -1909,7 +1909,7 @@ def test_metadata_ladder_forwards_nondefault_ip_port(
     )
 
     def fail_with_uri(**kwargs: object) -> None:
-        raise RuntimeError(str(kwargs["uri"]))
+        raise RuntimeError(f"{kwargs['uri']} ring={kwargs['ddr_ring_bytes']}")
 
     monkeypatch.setattr("pluto_plus.cli.run_metadata_continuity_ladder", fail_with_uri)
 
@@ -1925,11 +1925,16 @@ def test_metadata_ladder_forwards_nondefault_ip_port(
             "SERIAL_A",
             "--ip-port",
             "40431",
+            "--metadata-abi",
+            "3",
+            "--ddr-ring-bytes",
+            "100000000",
         ],
     )
 
     assert result.exit_code == 5, result.output
     assert "ip:192.168.2.1:40431" in result.output
+    assert "ring=100000000" in result.output
 
 
 def test_metadata_ladder_rejects_ip_port_for_usb() -> None:

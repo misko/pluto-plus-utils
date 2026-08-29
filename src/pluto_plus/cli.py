@@ -65,6 +65,7 @@ from pluto_plus.ladder import (
 )
 from pluto_plus.metadata_ladder import (
     DEFAULT_METADATA_SAMPLE_LADDER,
+    MAX_DDR_RING_IQ_BYTES,
     MAX_METADATA_FRAMES,
     METADATA_CHANNEL_SELECTIONS,
     parse_metadata_sample_ladder,
@@ -1436,6 +1437,16 @@ def radio_metadata_ladder(
             "whole IQ frames (metadata ABI 3, one receiver)."
         ),
     ),
+    ddr_ring_bytes: int = typer.Option(
+        0,
+        "--ddr-ring-bytes",
+        min=0,
+        max=MAX_DDR_RING_IQ_BYTES,
+        help=(
+            "Opt in to the streaming device-DDR ring with this IQ-byte capacity; "
+            "each rung remains a finite --frames capture (metadata ABI 3)."
+        ),
+    ),
     report_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--report",
@@ -1575,6 +1586,7 @@ def radio_metadata_ladder(
             frames=frames,
             kernel_buffers=kernel_buffers,
             ddr_burst=ddr_burst,
+            ddr_ring_bytes=ddr_ring_bytes,
         )
 
     try:

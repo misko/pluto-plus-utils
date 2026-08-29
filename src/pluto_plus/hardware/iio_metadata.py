@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import gc
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any
@@ -183,6 +184,9 @@ class IioMetadataCaptureSession:
         metadata_capacity: int = DEFAULT_METADATA_CAPACITY,
         tandem_request: TandemSessionRequestV1 | None = None,
         ddr_burst_bytes: int = 0,
+        ddr_ring_bytes: int = 0,
+        ddr_ring_frames: int = 0,
+        ddr_ring_continuous: bool = False,
     ) -> None:
         if sample_rate_hz <= 0:
             raise ValueError("sample_rate_hz must be positive")
@@ -198,6 +202,23 @@ class IioMetadataCaptureSession:
             raise TypeError("ddr_burst_bytes must be an integer")
         if ddr_burst_bytes < 0:
             raise ValueError("ddr_burst_bytes must not be negative")
+        if isinstance(ddr_ring_bytes, bool) or not isinstance(ddr_ring_bytes, int):
+            raise TypeError("ddr_ring_bytes must be an integer")
+        if isinstance(ddr_ring_frames, bool) or not isinstance(ddr_ring_frames, int):
+            raise TypeError("ddr_ring_frames must be an integer")
+        if not isinstance(ddr_ring_continuous, bool):
+            raise TypeError("ddr_ring_continuous must be a bool")
+        if ddr_ring_bytes < 0 or ddr_ring_frames < 0:
+            raise ValueError("DDR ring values must not be negative")
+        if ddr_burst_bytes and ddr_ring_bytes:
+            raise ValueError("device DDR burst and DDR ring are mutually exclusive")
+        if ddr_ring_bytes:
+            if ddr_ring_continuous and ddr_ring_frames:
+                raise ValueError("continuous DDR ring must not specify a frame target")
+            if not ddr_ring_continuous and not ddr_ring_frames:
+                raise ValueError("finite DDR ring requires a positive frame target")
+        elif ddr_ring_frames or ddr_ring_continuous:
+            raise ValueError("DDR ring mode requires a positive byte budget")
         self._sdr = sdr
         self._metadata_buffer_type = metadata_buffer_type
         self._sample_rate_hz = int(sample_rate_hz)
@@ -206,6 +227,9 @@ class IioMetadataCaptureSession:
         self._metadata_abi = metadata_abi
         self._metadata_capacity = int(metadata_capacity)
         self._ddr_burst_requested_bytes = ddr_burst_bytes
+        self._ddr_ring_requested_bytes = ddr_ring_bytes
+        self._ddr_ring_capture_frames = ddr_ring_frames
+        self._ddr_ring_continuous = ddr_ring_continuous
         self._tandem_request = tandem_request or TandemSessionRequestV1.auto_for_sample_count(
             samples_per_channel
         )
@@ -218,6 +242,8 @@ class IioMetadataCaptureSession:
             raise ValueError("metadata ABI 3 single-RX sample count must be even")
         if ddr_burst_bytes and (metadata_abi != 3 or len(self._channels) != 1):
             raise ValueError("device DDR burst v1 requires metadata ABI 3 and one receiver")
+        if ddr_ring_bytes and metadata_abi != 3:
+            raise ValueError("device DDR ring v1 requires metadata ABI 3")
         frame_iq_bytes = samples_per_channel * len(self._channels) * 4
         self._ddr_burst_frames = (
             0 if not ddr_burst_bytes else ddr_burst_bytes // frame_iq_bytes
@@ -225,6 +251,12 @@ class IioMetadataCaptureSession:
         self._ddr_burst_admitted_bytes = self._ddr_burst_frames * frame_iq_bytes
         if ddr_burst_bytes and not self._ddr_burst_frames:
             raise ValueError("device DDR burst byte budget cannot hold one complete frame")
+        self._ddr_ring_capacity_frames = (
+            0 if not ddr_ring_bytes else ddr_ring_bytes // frame_iq_bytes
+        )
+        self._ddr_ring_admitted_bytes = self._ddr_ring_capacity_frames * frame_iq_bytes
+        if ddr_ring_bytes and not self._ddr_ring_capacity_frames:
+            raise ValueError("device DDR ring byte budget cannot hold one complete frame")
         self._buffer: Any | None = None
         self._time_anchors: list[HostTimeAnchorMeasurement] = []
         self._next_anchor_request_id = 1
@@ -255,6 +287,43 @@ class IioMetadataCaptureSession:
     @property
     def ddr_burst_frames(self) -> int:
         return self._ddr_burst_frames
+
+    @property
+    def ddr_ring_enabled(self) -> bool:
+        return self._ddr_ring_capacity_frames > 0
+
+    @property
+    def ddr_ring_requested_bytes(self) -> int:
+        return self._ddr_ring_requested_bytes
+
+    @property
+    def ddr_ring_admitted_bytes(self) -> int:
+        return self._ddr_ring_admitted_bytes
+
+    @property
+    def ddr_ring_capacity_frames(self) -> int:
+        return self._ddr_ring_capacity_frames
+
+    @property
+    def ddr_ring_capture_frames(self) -> int:
+        return self._ddr_ring_capture_frames
+
+    @property
+    def ddr_ring_continuous(self) -> bool:
+        return self._ddr_ring_continuous
+
+    def ddr_ring_status(self) -> Mapping[str, object]:
+        if not self.ddr_ring_enabled:
+            raise ValueError("this capture does not use the device DDR ring")
+        if self._buffer is None:
+            raise RuntimeError("IIO metadata capture is not open")
+        status = getattr(self._buffer, "ddr_ring_status", None)
+        if not callable(status):
+            raise RuntimeError("installed pylibiio cannot read DDR ring status")
+        result = status()
+        if not isinstance(result, Mapping):
+            raise RuntimeError("pylibiio returned malformed DDR ring status")
+        return dict(result)
 
     def open(self) -> None:
         if self._buffer is not None:
@@ -327,6 +396,17 @@ class IioMetadataCaptureSession:
                         self._metadata_capacity,
                         batch_frames=1,
                         ddr_burst_bytes=self._ddr_burst_requested_bytes,
+                    )
+                if self.ddr_ring_enabled:
+                    return self._metadata_buffer_type(
+                        self._sdr._rxadc,
+                        self._samples_per_channel,
+                        request,
+                        self._metadata_capacity,
+                        batch_frames=1,
+                        ddr_ring_bytes=self._ddr_ring_requested_bytes,
+                        ddr_ring_frames=self._ddr_ring_capture_frames,
+                        ddr_ring_continuous=self._ddr_ring_continuous,
                     )
                 return self._metadata_buffer_type(
                     self._sdr._rxadc,
