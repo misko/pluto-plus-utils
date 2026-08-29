@@ -442,6 +442,7 @@ def _open_radio(
     preserve_readback: bool = True,
     ddr_burst: bool = False,
     ddr_ring: bool = False,
+    iq_decoder: str = "pyadi",
 ) -> tuple[IioRadioDevice, FakeAdi, FakeMetadataBufferFactory]:
     adi = FakeAdi(
         headers,
@@ -458,11 +459,39 @@ def _open_radio(
         serial="SERIAL_A",
         adi_module=adi,
         iio_module=iio,
+        iq_decoder=iq_decoder,
     )
     radio.open()
     assert adi.device is not None
     adi.device.rx_enabled_channels = list(channels)
     return radio, adi, factory
+
+
+def test_opt_in_raw_decoder_keeps_metadata_on_the_same_buffer_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    header = _metadata_v3(buffer_sequence=0, first_sample_sequence=1_000).pack()
+    radio, adi, factory = _open_radio([header], iq_decoder="raw-complex64")
+    calls: list[tuple[int, tuple[int, ...]]] = []
+
+    def decode(
+        sdr: FakeAd9361, *, samples_per_channel: int, channels: tuple[int, ...]
+    ) -> np.ndarray:
+        assert sdr is adi.device
+        calls.append((samples_per_channel, channels))
+        return np.asarray(sdr.rx())
+
+    monkeypatch.setattr("pluto_plus.hardware.iio_metadata.read_interleaved_complex64", decode)
+    try:
+        with radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=8) as capture:
+            block = capture.read_block()
+        assert calls == [(SAMPLE_COUNT, (0, 1))]
+        assert block.buffer_sequence == 0
+        assert block.first_sample_sequence == 1_000
+        assert block.samples.dtype == np.complex64
+        assert factory.instances[0].closed
+    finally:
+        radio.close()
 
 
 def test_abi1_capture_reports_contiguous_counter_time_and_exact_constructor() -> None:

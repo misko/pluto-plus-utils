@@ -66,6 +66,7 @@ class VolatileFirmwarePlan:
     expected_ddr_ring_max_iq_bytes: int | None = None
     expected_ddr_ring_modes: str | None = None
     expected_buffer_metadata_status: bool = False
+    expected_buffer_metadata_timing_log: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +251,7 @@ def prepare_ram_boot_plan(
         expected_ddr_ring_max_iq_bytes=profile.ddr_ring_max_iq_bytes,
         expected_ddr_ring_modes=profile.ddr_ring_modes,
         expected_buffer_metadata_status=profile.buffer_metadata_status,
+        expected_buffer_metadata_timing_log=profile.buffer_metadata_timing_log,
     )
 
 
@@ -310,6 +312,7 @@ def execute_ram_boot_plan(
         "expected_ddr_ring_max_iq_bytes",
         "expected_ddr_ring_modes",
         "expected_buffer_metadata_status",
+        "expected_buffer_metadata_timing_log",
     ):
         if getattr(fresh, field) != getattr(plan, field):
             raise VolatileFirmwareError(f"RAM-boot precondition changed: {field}")
@@ -717,6 +720,7 @@ def _revalidate_plan_image(plan: VolatileFirmwarePlan) -> None:
         or plan.expected_ddr_ring_max_iq_bytes != profile.ddr_ring_max_iq_bytes
         or plan.expected_ddr_ring_modes != profile.ddr_ring_modes
         or plan.expected_buffer_metadata_status is not profile.buffer_metadata_status
+        or plan.expected_buffer_metadata_timing_log is not profile.buffer_metadata_timing_log
     ):
         raise VolatileFirmwareError("receipt image no longer matches its immutable profile")
 
@@ -818,6 +822,14 @@ def _attest_ram_return(
             ):
                 raise VolatileFirmwareError(
                     "returned RAM image DDR ring capability is wrong"
+                )
+            observed_timing_log = str(
+                facts.get("iio,buffer-metadata-timing-log") or ""
+            ).strip()
+            expected_timing_log = "1" if plan.expected_buffer_metadata_timing_log else ""
+            if observed_timing_log != expected_timing_log:
+                raise VolatileFirmwareError(
+                    "returned RAM image metadata timing-log capability is wrong"
                 )
             mute_returned_radio_at_path(plan.serial, Path(plan.usb_sysfs_path))
             return serial, firmware, phy

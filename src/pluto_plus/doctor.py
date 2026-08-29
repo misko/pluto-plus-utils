@@ -431,6 +431,23 @@ IIO_THROUGHPUT_HOLD_V2_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 29, 22, 52, 49, tzinfo=UTC),
 )
 
+# Exact RAM-only diagnostic candidate that adds aggregate iiOD stage timing to
+# the HOLD v2 refill-fence image. The capability and image hashes are attested;
+# no matching persistent profile exists.
+IIO_THROUGHPUT_TIMING_V1_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="iio-throughput-timing-v1-rc1-ram",
+    release_tag="iio-throughput-timing-v1-rc1-c29689931b6d",
+    device_firmware="v0.45-plutoplus-spf-iio-throughput-timing-v1-rc1",
+    asset_name="plutoplus-spf-iio-throughput-timing-v1-rc1-c29689931b6d-pluto.dfu",
+    asset_sha256="e6098cb32d399a04c9e02737026e17594e4f2860bcf4df7c0b41fac80c9d09b2",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33281020488",
+    source_commit="c29689931b6dc7f400c5f404130920e1392b2f27",
+    fit_body_sha256="dbedb588c8cb59d52b893450ed9f54769699ba0339c46e77fb7abbfcb7468db4",
+    fit_body_size=12_813_319,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 29, 23, 51, 58, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target

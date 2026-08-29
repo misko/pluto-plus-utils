@@ -182,6 +182,15 @@ uv run pluto radio metadata-ladder EXACT_SERIAL \
   --metadata-abi 3 --channels dual --samples 262144,131072
 ```
 
+Both ordinary and metadata ladders support the explicit
+`--iq-decoder raw-complex64` prototype. It reads the complete interleaved IIO
+buffer once, then fills an owned `complex64` array directly. This avoids the
+generic per-channel extraction and intermediate `complex128` allocation while
+retaining the same signed I/Q values. The mode is fail-closed: it requires the
+exact fully-defined Pluto LE16 scan geometry and never becomes an automatic
+fallback for a different IIO device or layout. Metadata is read from the same
+`MetadataBuffer` refill before that buffer can be reused.
+
 When several USB-attached Plutos share the default `192.168.2.1` endpoint, bind
 an IP ladder to one serial and sysfs path with the receipt-backed isolation
 gate. `--report` writes an absent-only canonical JSON evidence file beneath an

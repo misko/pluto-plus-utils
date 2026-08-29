@@ -19,6 +19,31 @@ from pluto_plus.ladder import (
 runner = CliRunner()
 
 
+@pytest.mark.parametrize(
+    ("command", "target"),
+    [
+        ("ladder", "pluto_plus.cli.run_iio_ladder"),
+        ("metadata-ladder", "pluto_plus.cli.run_metadata_continuity_ladder"),
+    ],
+)
+def test_ladders_forward_the_explicit_host_decoder(
+    monkeypatch: pytest.MonkeyPatch, command: str, target: str
+) -> None:
+    def record_decoder(**kwargs: object) -> None:
+        raise RuntimeError(f"selected-decoder={kwargs['iq_decoder']}")
+
+    monkeypatch.setattr(target, record_decoder)
+    result = runner.invoke(
+        app,
+        [
+            "radio", command, "192.168.1.15", "--transport", "ip",
+            "--expect-serial", "SERIAL_A", "--iq-decoder", "raw-complex64",
+        ],
+    )
+    assert result.exit_code == 5, result.output
+    assert "selected-decoder=raw-complex64" in result.output
+
+
 @pytest.fixture(autouse=True)
 def _healthy_environment(monkeypatch: Any) -> None:
     monkeypatch.setattr(

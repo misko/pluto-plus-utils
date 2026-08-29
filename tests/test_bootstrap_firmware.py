@@ -1058,6 +1058,40 @@ def test_iio_throughput_hold_v2_rc1_profile_is_exactly_bound_and_ram_only() -> N
     )
 
 
+def test_iio_throughput_timing_v1_rc1_profile_is_exactly_bound_and_ram_only() -> None:
+    policy = bootstrap.IIO_THROUGHPUT_TIMING_V1_RC1_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "iio-throughput-timing-v1-rc1-c29689931b6d"
+    assert policy.device_firmware == "v0.45-plutoplus-spf-iio-throughput-timing-v1-rc1"
+    assert policy.source_commit == "c29689931b6dc7f400c5f404130920e1392b2f27"
+    assert (
+        policy.asset_name
+        == "plutoplus-spf-iio-throughput-timing-v1-rc1-c29689931b6d-pluto.dfu"
+    )
+    assert policy.asset_sha256 == (
+        "e6098cb32d399a04c9e02737026e17594e4f2860bcf4df7c0b41fac80c9d09b2"
+    )
+    assert policy.fit_body_sha256 == (
+        "dbedb588c8cb59d52b893450ed9f54769699ba0339c46e77fb7abbfcb7468db4"
+    )
+    assert policy.fit_body_size == 12_813_319
+    assert policy.hardware_qualified is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert profile.ddr_burst_max_iq_bytes == 200_000_000
+    assert profile.ddr_burst_reserve_bytes == 128 * 1024 * 1024
+    assert profile.ddr_ring_max_iq_bytes == 200_000_000
+    assert profile.ddr_ring_modes == "finite,continuous"
+    assert profile.buffer_metadata_status is True
+    assert profile.buffer_metadata_timing_log is True
+    assert not any(
+        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
+        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
+    )
+
+
 def test_ddr_ring_v1_release_requires_distinct_persistent_promotion() -> None:
     policy = bootstrap.DDR_RING_V1_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]

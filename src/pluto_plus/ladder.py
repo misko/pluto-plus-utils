@@ -13,6 +13,7 @@ from pydantic import Field
 
 from pluto_plus.hardware.base import SampleBlock, restore_settings_exact
 from pluto_plus.hardware.iio import IioRadioDevice
+from pluto_plus.hardware.iio_iq_decode import IioIqDecoder, validate_iq_decoder
 from pluto_plus.models import ApiModel, RadioCapabilities, RadioIdentity, RadioSettings
 
 DEFAULT_RATE_LADDER = "1M,1.5M,2M,2.5M,3M,5M,10M,20M,30M"
@@ -78,6 +79,7 @@ class LadderReport(ApiModel):
     cells: tuple[LadderCell, ...]
     failures: tuple[LadderFailure, ...]
     original_settings_restored: bool
+    iq_decoder: IioIqDecoder = "pyadi"
     continuity_claim: str = (
         "kept_pace means host delivery reached at least 90% of the configured rate; "
         "ordinary libiio capture does not prove a gapless FPGA timeline"
@@ -144,12 +146,14 @@ def run_iio_ladder(
     warmup_frames: int = 2,
     kernel_buffers: int = 8,
     allow_unsafe_kernel_queue: bool = False,
+    iq_decoder: IioIqDecoder = "pyadi",
     radio_factory: Callable[[str, str | None], LadderRadio] | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> LadderReport:
     """Run a bounded RX-layout ladder and restore the exact original RX settings."""
 
     selected_channels = tuple(channels)
+    validate_iq_decoder(iq_decoder)
     effective_frames, kernel_queue_bytes = _validate_shape(
         rates_hz,
         selected_channels,
@@ -160,8 +164,11 @@ def run_iio_ladder(
         kernel_buffers,
         allow_unsafe_kernel_queue,
     )
-    factory = radio_factory or _default_radio_factory
-    radio = factory(uri, serial)
+    radio = (
+        radio_factory(uri, serial)
+        if radio_factory is not None
+        else _default_radio_factory(uri, serial, iq_decoder=iq_decoder)
+    )
     opened = False
     original: RadioSettings | None = None
     cells: list[LadderCell] = []
@@ -294,11 +301,14 @@ def run_iio_ladder(
         cells=tuple(cells),
         failures=tuple(failures),
         original_settings_restored=restored,
+        iq_decoder=iq_decoder,
     )
 
 
-def _default_radio_factory(uri: str, serial: str | None) -> LadderRadio:
-    return IioRadioDevice(uri, serial=serial, radio_id=serial or uri)
+def _default_radio_factory(
+    uri: str, serial: str | None, *, iq_decoder: IioIqDecoder = "pyadi"
+) -> LadderRadio:
+    return IioRadioDevice(uri, serial=serial, radio_id=serial or uri, iq_decoder=iq_decoder)
 
 
 def _validate_shape(
