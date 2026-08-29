@@ -28,6 +28,76 @@ uv run pluto artifact list
 uv run pluto analyze ARTIFACT_ID --analyzer spectrum --parameters '{"fft_size":4096}'
 ```
 
+### Measuring reference error against a seeded frequency hop
+
+> **⚠️ Closed, conducted paths only.** The example below uses 11 GHz, which is
+> satellite downlink spectrum. These are theoretical bench procedures and must
+> **never be performed over open air** -- terrestrial transmission there is
+> prohibited in essentially every jurisdiction and interferes with satellite
+> reception well beyond your own site. This host only *listens*, but whoever
+> operates the transmitter must keep it conducted: coax, attenuation, shielding,
+> and no antenna on either end.
+
+A transmitter that this host does not control can hop among a set of frequencies
+in an order derived entirely from a seed both ends already know. The receiver
+regenerates the identical schedule, so it never infers which point it is
+hearing: the only unknown is the epoch, and that is one bounded search. After
+alignment, every frame's frequency point is known and each point's frequency
+error follows directly.
+
+This supersedes duration coding, where a point announced itself by how long its
+burst lasted. On this bench, over the same hardware and equal capture time, the
+duration-coded ladder never identified more than **1 burst in 95**, while the
+seeded hop identified **100% of points in every configuration tried**. Duration
+estimation needs hysteresis, gap merging and a rounding tolerance, and it fails
+outright once several points share the capture band, because the envelope never
+returns to the floor between them.
+
+**Transmit side.** Not this tool -- the hop comes from whatever generates it, and
+whoever runs it is responsible for keeping it off the air. With an ADF5355
+driven by [`adf5355_tester`](https://github.com/misko/adf5355_tester):
+
+```bash
+adf5355 hop --seed 0xC0FFEE --start-ghz 11.0 --stop-ghz 11.00171 \
+            --points 20 --min-hop-ms 10 --cycles 300 --power 0 --enable-rf
+```
+
+**Receive side.** One capture is enough: the whole span must fit the receiver's
+instantaneous bandwidth so a single tuning hears every point. Tune to the span
+midpoint, minus the nominal LNB LO, minus the LO error already known -- here
+11.000855 - 9.750 GHz = 1.250855 GHz, less the 94 kHz this LNB measures high, so
+1.250761 GHz. Skipping that last term is not cosmetic: it slides the whole comb
+94 kHz down the passband and leaves the lowest point about 960 kHz off centre, at
+the edge of what 2.5 MS/s actually resolves. Pin the analog bandwidth too, so a
+narrower setting left over from an earlier session cannot quietly filter the
+outer points:
+
+```bash
+uv run pluto radio settings set RADIO \
+  --frequency 1250761000 --sample-rate 2500000 --bandwidth 2500000
+uv run pluto capture start RADIO --duration 8
+
+uv run pluto calibrate seeded-hop ARTIFACT_ID \
+  --seed 0xC0FFEE --rung-start-hz 11.0e9 --rung-stop-hz 11.00171e9 \
+  --points 20 --hop-seconds 0.010 --lo-hz 9.75e9
+```
+
+Recommended defaults, all measured on 8 s captures at 2.5 MS/s: fixed 10 ms
+dwell, 20 points, 1.71 MHz span (11.0 to 11.00171 GHz, 90 kHz spacing), seed
+`0xC0FFEE`. Precision tracks dwell, because dwell is integration time -- 2 ms
+gave 2946 Hz of scatter, 5 ms gave 1361 Hz, and 10 ms gave 730 Hz. Dwell jitter
+changed nothing measurable, so a fixed dwell is preferred: it makes epoch
+alignment a uniform grid search.
+
+The decode reports its own confidence and never hides a weak result. `comb`
+carries the bulk offset of the whole comb - the LNB local-oscillator error,
+about -106 kHz at a 1.25 GHz IF on this bench - with a sharpness figure that ran
+37x to 422x on real captures. `epoch` carries the alignment and how far it stood
+above every other shift. A capture that decodes weakly comes back with
+`confident: false` and named warnings, and points with too few strong frames
+report a null measurement instead of a median of noise. The same analyzer is
+reachable as `pluto analyze ARTIFACT_ID --analyzer seeded_hop`.
+
 Use `--hardware` to discover serial-pinned USB IIO radios. The `hardware` extra
 installs the Python packages, but it cannot install the native libiio shared
 library. Check both layers and the required USB backend before opening a radio:
@@ -469,8 +539,9 @@ uv run pluto --endpoint unix:///run/pluto-plus/plutod.sock radio list
 - Preview streams can tune live. Persistent captures lock frequency, sample
   rate, bandwidth, and channel axes so an analysis never silently combines
   incompatible epochs.
-- Spectrum, carrier, occupancy, CI16 quality, and dual-receiver
-  delay/coherence/phase analyzers operate only on immutable artifacts.
+- Spectrum, carrier, occupancy, CI16 quality, dual-receiver
+  delay/coherence/phase, and seeded frequency-hop reference-error analyzers
+  operate only on immutable artifacts.
 
 State is stored below `--state-root`: SQLite catalog, captures, scan results,
 analysis documents, firmware staging, and firmware receipts.

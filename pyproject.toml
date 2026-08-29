@@ -11,7 +11,9 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
   "httpx>=0.27",
-  "numpy>=1.26",
+  # NumPy 2.5's stubs use PEP 695 syntax even when mypy checks our supported
+  # Python 3.11 target. Keep the last 3.11-compatible typed release series.
+  "numpy>=1.26,<2.5",
   "pexpect>=4.9",
   "pydantic>=2.9",
   "typer>=0.12",

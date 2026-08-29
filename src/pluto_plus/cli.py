@@ -79,6 +79,18 @@ from pluto_plus.metadata_soak import (
     prepare_metadata_soak,
     run_live_metadata_slot,
 )
+from pluto_plus.seeded_hop import (
+    DEFAULT_FRAME_SIZE,
+    DEFAULT_HOP_SECONDS,
+    DEFAULT_JITTER,
+    DEFAULT_PERIOD_CYCLES,
+    DEFAULT_POINTS,
+    DEFAULT_SEARCH_HALF_WIDTH_HZ,
+    DEFAULT_SEED,
+    DEFAULT_START_HZ,
+    DEFAULT_STOP_HZ,
+    DEFAULT_THRESHOLD_DB,
+)
 from pluto_plus.setup_helper import BoundSshTransport
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
@@ -140,6 +152,10 @@ config_app = typer.Typer(
     no_args_is_help=True,
     help="Read redacted config.txt and plan validated static-IP changes.",
 )
+calibrate_app = typer.Typer(
+    no_args_is_help=True,
+    help="Recover reference errors from captures of an uncontrolled transmitter.",
+)
 
 app.add_typer(radio_app, name="radio")
 radio_app.add_typer(settings_app, name="settings")
@@ -154,6 +170,7 @@ firmware_app.add_typer(comparator_ram_app, name="comparator-ram")
 app.add_typer(environment_survey_app, name="environment-survey")
 app.add_typer(setup_app, name="setup")
 app.add_typer(config_app, name="config")
+app.add_typer(calibrate_app, name="calibrate")
 
 
 @dataclass
@@ -5691,6 +5708,125 @@ def analyze(
         _fail("invalid_parameters", "parameters must decode to a JSON object", 2)
     body = {"artifact_id": artifact_id, "analyzer": analyzer, "parameters": decoded}
     _emit(_api(ctx).request("POST", "analyses", json_body=body))
+
+
+@calibrate_app.command("seeded-hop")
+def calibrate_seeded_hop(
+    ctx: typer.Context,
+    artifact_id: str = typer.Argument(..., help="Capture artifact that observed the hop."),
+    seed: str = typer.Option(
+        hex(DEFAULT_SEED),
+        "--seed",
+        help="Shared schedule seed, decimal or 0x hex. Both ends must use the same one.",
+    ),
+    rung_start_hz: float = typer.Option(
+        float(DEFAULT_START_HZ), "--rung-start-hz", help="Transmitted frequency of point 0."
+    ),
+    rung_stop_hz: float = typer.Option(
+        float(DEFAULT_STOP_HZ), "--rung-stop-hz", help="Transmitted frequency of the last point."
+    ),
+    points: int = typer.Option(DEFAULT_POINTS, "--points", help="Number of frequency points."),
+    hop_seconds: float = typer.Option(
+        DEFAULT_HOP_SECONDS, "--hop-seconds", help="Dwell per hop; precision tracks this."
+    ),
+    lo_hz: float = typer.Option(
+        ..., "--lo-hz", help="Nominal LNB local-oscillator frequency, for example 9.75e9."
+    ),
+    jitter: float = typer.Option(
+        DEFAULT_JITTER, "--jitter", help="Transmitter dwell jitter; 0 keeps a uniform grid."
+    ),
+    period_cycles: int = typer.Option(
+        DEFAULT_PERIOD_CYCLES,
+        "--period-cycles",
+        help="Permutations before the pattern repeats; the epoch search spans one period.",
+    ),
+    frame_size: int = typer.Option(DEFAULT_FRAME_SIZE, "--frame-size", help="Samples per frame."),
+    threshold_db: float = typer.Option(
+        DEFAULT_THRESHOLD_DB,
+        "--threshold-db",
+        help="Envelope level above a point's own median before a frame is measured.",
+    ),
+    search_half_width_hz: float = typer.Option(
+        DEFAULT_SEARCH_HALF_WIDTH_HZ,
+        "--search-half-width-hz",
+        help="Half-width of the comb-offset search, sized to the expected LO error.",
+    ),
+    receiver: int = typer.Option(0, "--receiver", help="Receiver index to analyse."),
+) -> None:
+    """Decode one seeded-hop capture and report every point's frequency error.
+
+    Identity is regenerated from the seed rather than measured, so the decode
+    either aligns or says it did not: check ``confident`` before believing the
+    numbers.
+    """
+
+    if not artifact_id.strip() or artifact_id.strip() != artifact_id:
+        _fail(
+            "invalid_artifact_id",
+            "the artifact ID must be non-empty and without surrounding spaces",
+            2,
+        )
+    try:
+        seed_value = int(seed, 0)
+    except ValueError:
+        _fail("invalid_seed", "seed must be a decimal or 0x-prefixed integer", 2)
+    if not 0 <= seed_value < 2**64:
+        _fail("invalid_seed", "seed must fit in an unsigned 64-bit integer", 2)
+    document = _api(ctx).request(
+        "POST",
+        "analyses",
+        json_body={
+            "artifact_id": artifact_id,
+            "analyzer": "seeded_hop",
+            "parameters": {
+                "seed": seed_value,
+                "rung_start_hz": rung_start_hz,
+                "rung_stop_hz": rung_stop_hz,
+                "points": points,
+                "hop_seconds": hop_seconds,
+                "lo_hz": lo_hz,
+                "jitter": jitter,
+                "period_cycles": period_cycles,
+                "frame_size": frame_size,
+                "threshold_db": threshold_db,
+                "search_half_width_hz": search_half_width_hz,
+                "receiver": receiver,
+            },
+        },
+    )
+    if not isinstance(document, dict) or not isinstance(document.get("result"), dict):
+        _fail("invalid_daemon_response", "plutod returned an invalid analysis document", 5)
+    result = cast(dict[str, Any], document["result"])
+    _emit(
+        {
+            "analyzer": "seeded_hop",
+            "artifact_id": artifact_id,
+            "analysis_id": document.get("analysis_id"),
+            "seed": seed_value,
+            "confident": result.get("confident"),
+            "warnings": result.get("warnings"),
+            "comb_offset_hz": result.get("comb", {}).get("offset_hz"),
+            "comb_sharpness": result.get("comb", {}).get("sharpness"),
+            "epoch_shift_seconds": result.get("epoch", {}).get("shift_seconds"),
+            "epoch_sharpness_sigma": result.get("epoch", {}).get("sharpness_sigma"),
+            "point_count": points,
+            "measured_point_count": result.get("measured_point_count"),
+            "median_frequency_error_hz": result.get("median_frequency_error_hz"),
+            "frequency_error_stdev_hz": result.get("frequency_error_stdev_hz"),
+            "points": [
+                {
+                    "point": row.get("point"),
+                    "nominal_rf_hz": row.get("nominal_rf_hz"),
+                    "nominal_if_hz": row.get("nominal_if_hz"),
+                    "measured_if_hz": row.get("measured_if_hz"),
+                    "frequency_error_hz": row.get("frequency_error_hz"),
+                    "strong_frame_count": row.get("strong_frame_count"),
+                    "rejection": row.get("rejection"),
+                }
+                for row in result.get("points", [])
+            ],
+        }
+    )
 
 
 def _discover_production_devices() -> tuple[Any, ...]:

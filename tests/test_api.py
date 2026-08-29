@@ -213,7 +213,14 @@ def test_capture_artifact_and_analysis_workflow(
     analyzers = client.get(f"{API_PREFIX}/analyzers")
     assert analyzers.status_code == 200
     assert analyzers.json() == {
-        "analyzers": ["carrier", "dual_receiver", "occupancy", "quality", "spectrum"]
+        "analyzers": [
+            "carrier",
+            "dual_receiver",
+            "occupancy",
+            "quality",
+            "seeded_hop",
+            "spectrum",
+        ]
     }
 
     analyzed = client.post(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -13,6 +13,16 @@ import numpy as np
 from pluto_plus.artifacts import data_path
 from pluto_plus.errors import AnalyzerNotFoundError
 from pluto_plus.models import AnalysisResult, ArtifactSummary, utc_now
+from pluto_plus.seeded_hop import (
+    DEFAULT_BLOCK_FRAMES,
+    DEFAULT_FRAME_SIZE,
+    DEFAULT_JITTER,
+    DEFAULT_PERIOD_CYCLES,
+    DEFAULT_SEARCH_HALF_WIDTH_HZ,
+    DEFAULT_THRESHOLD_DB,
+    build_schedule,
+    decode_capture,
+)
 
 
 class Analyzer(Protocol):
@@ -341,6 +351,135 @@ def _delay_aligned(
     return first, second
 
 
+class SeededHopAnalyzer:
+    """Decode a seeded pseudorandom frequency hop and measure every point.
+
+    The transmitter is not controlled from here. Both ends already share a seed,
+    so the visiting order of the frequency points is regenerated rather than
+    inferred: the only quantity estimated from the signal itself is the epoch.
+    That is what supersedes the duration-coded frequency ladder that preceded it
+    (a companion change, not present here), which had to recover a point's
+    identity by measuring how long its burst lasted - on this bench that
+    identified at most one burst in ninety-five, while a seeded hop identified
+    every transmitted point in every configuration tried. See
+    :mod:`pluto_plus.seeded_hop` for the physics, the comb-offset search, and why
+    the epoch search is bounded to exactly one schedule period.
+    """
+
+    name = "seeded_hop"
+    version = "1"
+
+    def run(self, artifact: ArtifactSummary, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        required = ("seed", "rung_start_hz", "rung_stop_hz", "points", "hop_seconds", "lo_hz")
+        missing = [name for name in required if parameters.get(name) is None]
+        if missing:
+            raise ValueError(f"seeded_hop requires {', '.join(missing)}")
+        seed = int(parameters["seed"])
+        rung_start_hz = float(parameters["rung_start_hz"])
+        rung_stop_hz = float(parameters["rung_stop_hz"])
+        points = int(parameters["points"])
+        hop_seconds = float(parameters["hop_seconds"])
+        lo_hz = float(parameters["lo_hz"])
+        jitter = float(parameters.get("jitter", DEFAULT_JITTER))
+        period_cycles = int(parameters.get("period_cycles", DEFAULT_PERIOD_CYCLES))
+        frame_size = int(parameters.get("frame_size", DEFAULT_FRAME_SIZE))
+        threshold_db = float(parameters.get("threshold_db", DEFAULT_THRESHOLD_DB))
+        search_half_width_hz = float(
+            parameters.get("search_half_width_hz", DEFAULT_SEARCH_HALF_WIDTH_HZ)
+        )
+        receiver = int(parameters.get("receiver", 0))
+
+        if not 0 <= seed < 2**64:
+            raise ValueError("seed must fit in an unsigned 64-bit integer")
+        if rung_start_hz <= 0:
+            raise ValueError("rung_start_hz must be positive")
+        if rung_stop_hz <= rung_start_hz:
+            raise ValueError("rung_stop_hz must be above rung_start_hz")
+        if points < 2:
+            raise ValueError("points must be at least two")
+        if hop_seconds <= 0:
+            raise ValueError("hop_seconds must be positive")
+        if not 0 <= jitter <= 1:
+            raise ValueError("jitter must be between zero and one")
+        if period_cycles < 1:
+            raise ValueError("period_cycles must be at least one")
+        if lo_hz <= 0:
+            raise ValueError("lo_hz must be positive")
+        if lo_hz >= rung_start_hz:
+            raise ValueError("lo_hz must be below rung_start_hz so every point has a positive IF")
+        if frame_size < 64 or frame_size & (frame_size - 1):
+            raise ValueError("frame_size must be a power of two of at least 64")
+        if artifact.sample_count < frame_size:
+            raise ValueError("capture is shorter than frame_size")
+        if threshold_db <= 0:
+            raise ValueError("threshold_db must be positive")
+        if not 0 < search_half_width_hz <= artifact.sample_rate_hz / 2:
+            raise ValueError("search_half_width_hz must be positive and at most half the rate")
+        if not 0 <= receiver < artifact.receiver_count:
+            raise ValueError("receiver is outside the capture")
+
+        frame_seconds = frame_size / artifact.sample_rate_hz
+        if frame_seconds > hop_seconds / 2:
+            raise ValueError(
+                "frame_size must cover at most half a dwell so a frame belongs to one point"
+            )
+        schedule = build_schedule(
+            seed=seed,
+            start_hz=round(rung_start_hz),
+            stop_hz=round(rung_stop_hz),
+            points=points,
+            hop_seconds=hop_seconds,
+            jitter=jitter,
+            period_cycles=period_cycles,
+        )
+        capture_seconds = artifact.sample_count / artifact.sample_rate_hz
+        if capture_seconds < schedule.period_seconds:
+            raise ValueError(
+                f"capture covers {capture_seconds:g} s but one schedule period is "
+                f"{schedule.period_seconds:g} s; a shorter capture cannot exclude epoch aliases"
+            )
+        expected_if_hz = schedule.intermediate_frequencies_hz(lo_hz)
+        edge_hz = artifact.sample_rate_hz / 2
+        if (
+            float(expected_if_hz.min()) < artifact.center_frequency_hz - edge_hz
+            or float(expected_if_hz.max()) > artifact.center_frequency_hz + edge_hz
+        ):
+            raise ValueError(
+                "the hop span does not fit this capture band; one tuning must hear every "
+                "point, so centre the capture on the span midpoint minus lo_hz"
+            )
+
+        raw = _samples(artifact)
+        frame_count = artifact.sample_count // frame_size
+
+        def blocks() -> Iterator[np.ndarray]:
+            for start in range(0, frame_count, DEFAULT_BLOCK_FRAMES):
+                count = min(DEFAULT_BLOCK_FRAMES, frame_count - start)
+                components = raw[start * frame_size : (start + count) * frame_size, receiver]
+                values = components[:, 0].astype(np.float64) + 1j * components[:, 1].astype(
+                    np.float64
+                )
+                yield values.reshape(count, frame_size)
+
+        decode = decode_capture(
+            blocks,
+            schedule=schedule,
+            lo_hz=lo_hz,
+            sample_rate_hz=artifact.sample_rate_hz,
+            center_frequency_hz=artifact.center_frequency_hz,
+            frame_size=frame_size,
+            threshold_db=threshold_db,
+            search_half_width_hz=search_half_width_hz,
+        )
+        return {
+            "receiver": receiver,
+            "capture_seconds": capture_seconds,
+            "center_frequency_hz": artifact.center_frequency_hz,
+            "sample_rate_hz": artifact.sample_rate_hz,
+            **decode.model_dump(mode="json"),
+        }
+
+
 class AnalysisService:
     def __init__(self, root: Path, analyzers: tuple[Analyzer, ...] | None = None) -> None:
         self.root = root
@@ -350,6 +489,7 @@ class AnalysisService:
             OccupancyAnalyzer(),
             SignalQualityAnalyzer(),
             DualReceiverAnalyzer(),
+            SeededHopAnalyzer(),
         )
         self._analyzers = {analyzer.name: analyzer for analyzer in selected}
 

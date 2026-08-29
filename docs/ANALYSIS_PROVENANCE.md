@@ -21,6 +21,26 @@ Two analyzers were implemented independently from standard DSP definitions:
   delay search. At the best delay it reports the least-squares complex gain,
   relative phase, residual-power fraction, ordinary coherence, and a conjugate
   coherence diagnostic. A positive delay means receiver B lags receiver A.
+- `seeded_hop` was added later, also independently. It regenerates a transmitted
+  hop schedule from a shared seed, finds the bulk comb offset, aligns the epoch
+  over exactly one schedule period, and measures each frequency point over the
+  frames the schedule assigns to it. Its SplitMix64 generator is a
+  cross-implementation protocol shared with the transmitter of record,
+  `adf5355_tester`'s `adf5355/hopper.py` at `5be028d`; the algorithm is the
+  published SplitMix64, and the pinned expectations in its tests are the
+  published vectors for seed 0 plus schedules produced by that transmitter. Its
+  numerical constants - a 15 dB envelope threshold, a +/-400 kHz comb search,
+  and the -106 kHz offset and 730 Hz scatter quoted in its documentation - are
+  measurements taken on this project's own bench, not values imported from
+  another repository. The 100%-identification and 1-in-95 comparison against
+  duration coding are likewise bench measurements made here. Two constants are
+  deliberately *not* independent: the 8x comb-sharpness and 10-sigma alignment
+  confidence floors are copied from `adf5355_tester`'s `tools/hop_decode.py`
+  (`MIN_COMB_SHARPNESS`, `MIN_EPOCH_SIGMA`), which computes the same two
+  statistics from the same definitions. Deriving those separately would be worse
+  than copying them: two ends that score a capture identically but disagree about
+  whether to trust the score turn a decode rejected at one end into a published
+  number at the other.
 
 The tests generate deterministic tones, sparse clipped samples, and seeded
 QPSK-like paired data in memory, then pass them through this repository's CI16
