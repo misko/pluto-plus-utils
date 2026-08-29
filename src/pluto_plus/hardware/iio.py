@@ -773,6 +773,14 @@ class IioRadioDevice:
                 ddr_burst_frames=(
                     0 if not ddr_burst_bytes else ddr_burst_bytes // (sample_count * 4)
                 ),
+                ddr_ring_prefill_frames=(
+                    0
+                    if not ddr_ring_bytes
+                    else min(
+                        ddr_ring_frames or ddr_ring_bytes // (sample_count * len(channels) * 4),
+                        ddr_ring_bytes // (sample_count * len(channels) * 4),
+                    )
+                ),
             ),
         )
         module = self._iio_module

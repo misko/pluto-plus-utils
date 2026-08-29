@@ -553,6 +553,35 @@ def test_metadata_context_timeout_covers_complete_ddr_burst() -> None:
     )
 
 
+def test_metadata_context_timeout_covers_complete_ddr_ring_prefill() -> None:
+    assert (
+        metadata_iio_context_timeout_ms(
+            5_000_000,
+            1_000_000,
+            ddr_ring_prefill_frames=50,
+        )
+        == 25_000
+    )
+    assert (
+        metadata_iio_context_timeout_ms(
+            20_000_000,
+            1_000_000,
+            ddr_ring_prefill_frames=50,
+        )
+        == 10_000
+    )
+
+
+def test_metadata_context_timeout_rejects_combined_buffered_modes() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        metadata_iio_context_timeout_ms(
+            20_000_000,
+            1_000_000,
+            ddr_burst_frames=1,
+            ddr_ring_prefill_frames=1,
+        )
+
+
 @pytest.mark.parametrize(
     ("sample_rate_hz", "samples_per_channel"),
     ((0, 1), (1, 0), (True, 1), (1, False)),
