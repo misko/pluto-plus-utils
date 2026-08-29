@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from types import TracebackType
+from weakref import ref
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from pluto_plus.hardware.base import SampleBlockV2
 from pluto_plus.metadata_ladder import (
@@ -203,6 +205,58 @@ def test_metadata_ladder_selects_largest_counter_continuous_refill_and_restores(
     assert report.original_settings_restored
     assert radio.settings == radio.original
     assert not radio.opened
+
+
+def test_metadata_ladder_releases_iq_frames_while_accounting() -> None:
+    samples = 131_072
+
+    class _RetentionCapture(_Capture):
+        def __init__(self) -> None:
+            super().__init__(samples, tuple(range(16)), 4, 1)
+            self.references: list[ref[NDArray[np.generic]]] = []
+            self.maximum_live_arrays = 0
+
+        def read_block(self) -> SampleBlockV2:
+            self.references = [item for item in self.references if item() is not None]
+            self.maximum_live_arrays = max(self.maximum_live_arrays, len(self.references))
+            block = super().read_block()
+            self.references.append(ref(block.samples))
+            return block
+
+    class _RetentionRadio(_Radio):
+        def __init__(self) -> None:
+            super().__init__({samples: tuple(range(16))})
+            self.capture = _RetentionCapture()
+
+        def begin_metadata_capture(
+            self,
+            sample_count: int,
+            *,
+            kernel_buffers: int,
+            ddr_burst_bytes: int = 0,
+            ddr_ring_bytes: int = 0,
+            ddr_ring_frames: int = 0,
+            ddr_ring_continuous: bool = False,
+        ) -> _Capture:
+            return self.capture
+
+    radio = _RetentionRadio()
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=5_000_000,
+        rf_bandwidth_hz=5_000_000,
+        metadata_abi=3,
+        channels=(0,),
+        samples_per_channel=(samples,),
+        frames=16,
+        kernel_buffers=4,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=iter((0, 1_000_000_000)).__next__,
+    )
+
+    assert report.cells[0].observed_frames == 16
+    assert radio.capture.maximum_live_arrays <= 1
 
 
 def test_metadata_ladder_requires_native_bandwidth_and_four_kernel_buffers() -> None:

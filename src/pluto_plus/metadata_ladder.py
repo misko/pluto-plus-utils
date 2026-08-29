@@ -11,7 +11,6 @@ from pydantic import Field, model_validator
 from pluto_plus.hardware.base import (
     MetadataCapture,
     RadioDevice,
-    SampleBlockV2,
     restore_settings_exact,
 )
 from pluto_plus.hardware.iio import IioRadioDevice
@@ -20,10 +19,10 @@ from pluto_plus.models import ApiModel, RadioSettings
 
 DEFAULT_METADATA_SAMPLE_LADDER = "4194304,2097152,1048576,524288,262144,131072"
 MAX_METADATA_SAMPLE_RUNGS = 16
-# Fifty 1,000,000-sample CI16 frames are the reviewed 200-MB/two-second
-# single-RX burst geometry at 25 MS/s. Keep a small bounded margin above that
-# exact release gate without encouraging larger DMA frames or unbounded runs.
-MAX_METADATA_FRAMES = 64
+# Keep the ladder bounded while allowing a 1-GB target to prove five complete
+# reuses of a 200-MB ring. Cell accounting is constant-memory; IQ frames are
+# validated and released as they arrive instead of accumulating on the host.
+MAX_METADATA_FRAMES = 256
 MINIMUM_OBSERVED_FRACTION = 0.95
 # Hardware qualification found intermittent whole-frame loss at 8 ms.  The
 # first passing boundary was 10 ms; retain 50% headroom over the failure point
@@ -424,7 +423,12 @@ def _run_cell(
                 f"samples={samples_per_channel} rate={sample_rate_hz} "
                 f"duration_us={frame_duration_us:.3f}"
             )
-    blocks: list[SampleBlockV2] = []
+    observed_frames = 0
+    first_sample_sequence: int | None = None
+    last_sample_sequence_exclusive: int | None = None
+    missing = 0
+    gap_count = 0
+    overflow_count = 0
     ddr_burst_bytes = samples_per_channel * receiver_count * 4 * frames if ddr_burst else 0
     frame_iq_bytes = samples_per_channel * receiver_count * 4
     expected_ring_admitted_bytes = (
@@ -462,7 +466,13 @@ def _run_cell(
                 block = capture.read_block()
                 if block.samples.shape != (receiver_count, samples_per_channel):
                     raise RuntimeError("metadata ladder block shape is not the selected RX layout")
-                blocks.append(block)
+                if first_sample_sequence is None:
+                    first_sample_sequence = block.first_sample_sequence
+                last_sample_sequence_exclusive = block.last_sample_sequence_exclusive
+                observed_frames += 1
+                missing += block.missing_samples_before
+                gap_count += int(bool(block.missing_samples_before))
+                overflow_count += int(block.overflow_observed)
             ring_status = (
                 None
                 if not ddr_ring_bytes
@@ -484,26 +494,26 @@ def _run_cell(
     elapsed_seconds = (clock_ns() - started_ns) / 1_000_000_000
     if elapsed_seconds <= 0:
         raise RuntimeError("metadata ladder clock did not advance")
-    observed = len(blocks) * samples_per_channel
-    missing = sum(block.missing_samples_before for block in blocks)
-    span = blocks[-1].last_sample_sequence_exclusive - blocks[0].first_sample_sequence
+    if first_sample_sequence is None or last_sample_sequence_exclusive is None:
+        raise RuntimeError("metadata ladder returned no frames")
+    observed = observed_frames * samples_per_channel
+    span = last_sample_sequence_exclusive - first_sample_sequence
     if span != observed + missing:
         raise RuntimeError("metadata ladder FPGA counter span does not close")
     fraction = observed / span
-    overflow_count = sum(1 for block in blocks if block.overflow_observed)
     if (
         ring_status is not None
-        and ring_status.last_contiguous_sample_sequence != blocks[-1].last_sample_sequence_exclusive
+        and ring_status.last_contiguous_sample_sequence != last_sample_sequence_exclusive
     ):
         raise RuntimeError("DDR ring sample boundary disagrees with captured metadata")
     return MetadataContinuityCell(
         samples_per_channel=samples_per_channel,
         requested_frames=frames,
-        observed_frames=len(blocks),
+        observed_frames=observed_frames,
         observed_sample_count=observed,
         device_span_sample_count=span,
         missing_sample_count=missing,
-        gap_count=sum(1 for block in blocks if block.missing_samples_before),
+        gap_count=gap_count,
         overflow_count=overflow_count,
         elapsed_seconds=elapsed_seconds,
         observed_fraction=fraction,
