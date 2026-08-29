@@ -60,8 +60,41 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     assert result.returncode == 2
     assert "--uv-bin must be absolute" in result.stderr
     text = script.read_text()
-    assert "pip setuptools" not in text
+    assert "import setuptools" in text
     assert '"$uv_bin" pip install' in text
     assert "--no-build-isolation" in text
-    assert "ddr-ring-v1-rc1-source/libiio-v1" in text
-    assert "739a250b92610184b12d773f6a367e549f0dfe29" in text
+    assert "ddr-ring-v1-rc2-source/libiio-v1" in text
+    assert "1e5002702f3033f5bc741da315dfe5d5558ef394" in text
+
+
+def test_source_installer_fails_fast_when_setuptools_is_missing(tmp_path: Path) -> None:
+    script = Path(__file__).parents[1] / "scripts/install_native_libiio.sh"
+    python = tmp_path / "python"
+    uv = tmp_path / "uv"
+    python.write_text("#!/bin/sh\nexit 1\n")
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    python.chmod(0o755)
+    uv.chmod(0o755)
+
+    result = subprocess.run(
+        (
+            str(script),
+            "--metadata-abi",
+            "3",
+            "--python",
+            str(python),
+            "--prefix",
+            str(tmp_path / "prefix"),
+            "--uv-bin",
+            str(uv),
+        ),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 1
+    assert "build dependency setuptools is missing" in result.stderr
+    assert "uv sync --extra hardware" in result.stderr

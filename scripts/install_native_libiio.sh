@@ -47,8 +47,8 @@ case "$metadata_abi" in
     source_commit="6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7"
     ;;
 3)
-    source_ref="ddr-ring-v1-rc1-source/libiio-v1"
-    source_commit="739a250b92610184b12d773f6a367e549f0dfe29"
+    source_ref="ddr-ring-v1-rc2-source/libiio-v1"
+    source_commit="1e5002702f3033f5bc741da315dfe5d5558ef394"
     ;;
 *)
     printf 'ERROR: --metadata-abi must be 1, 2, or 3\n' >&2
@@ -63,6 +63,12 @@ esac
 [[ -x "$python_bin" ]] || {
     printf 'ERROR: Python environment is missing: %s (run uv sync --extra hardware)\n' \
         "$python_bin" >&2
+    exit 1
+}
+"$python_bin" -c 'import setuptools' >/dev/null 2>&1 || {
+    printf 'ERROR: Python build dependency setuptools is missing from %s\n' \
+        "$python_bin" >&2
+    printf 'Run uv sync --extra hardware before installing the metadata runtime.\n' >&2
     exit 1
 }
 [[ -f "$uv_bin" && -x "$uv_bin" && ! -L "$uv_bin" ]] || {
