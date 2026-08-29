@@ -914,10 +914,37 @@ def test_abi3_ddr_ring_is_a_finite_streaming_buffer_with_atomic_status() -> None
         radio.close()
 
 
-def test_abi3_ddr_ring_supports_explicit_continuous_mode_and_cancel() -> None:
-    radio, _adi, factory = _open_radio(
-        [], metadata_abi=3, channels=(0,), ddr_ring=True
+def test_abi3_ddr_ring_preserves_terminal_status_when_read_fails_closed() -> None:
+    radio, adi, factory = _open_radio(
+        [],
+        metadata_abi=3,
+        channels=(0,),
+        ddr_ring=True,
     )
+    assert adi.device is not None
+    frames = 3
+    try:
+        capture = radio.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_ring_bytes=SAMPLE_COUNT * 4 * 2,
+            ddr_ring_frames=frames,
+        )
+        adi.device.rx_failure = OSError(errno.EOVERFLOW, "counter gap")
+        with pytest.raises(OSError, match="counter gap"):
+            capture.read_block()
+
+        assert not capture.is_open
+        assert factory.instances[0].closed
+        status = capture.ddr_ring_status()
+        assert status["state"] == "complete"
+        assert status["produced_frames"] == status["consumed_frames"] == frames
+    finally:
+        radio.close()
+
+
+def test_abi3_ddr_ring_supports_explicit_continuous_mode_and_cancel() -> None:
+    radio, _adi, factory = _open_radio([], metadata_abi=3, channels=(0,), ddr_ring=True)
     try:
         capture = radio.begin_metadata_capture(
             SAMPLE_COUNT,
@@ -948,9 +975,7 @@ def test_ddr_ring_requires_capability_mode_status_and_valid_geometry() -> None:
     finally:
         radio.close()
 
-    radio, adi, _factory = _open_radio(
-        [], metadata_abi=3, channels=(0,), ddr_ring=True
-    )
+    radio, adi, _factory = _open_radio([], metadata_abi=3, channels=(0,), ddr_ring=True)
     assert adi.device is not None
     try:
         with pytest.raises(RadioConfigurationError, match="one complete IIO frame"):
@@ -991,9 +1016,7 @@ def test_ddr_burst_requires_capability_single_rx_and_valid_byte_budget() -> None
     finally:
         radio.close()
 
-    radio, _adi, _factory = _open_radio(
-        [], metadata_abi=3, channels=(0, 1), ddr_burst=True
-    )
+    radio, _adi, _factory = _open_radio([], metadata_abi=3, channels=(0, 1), ddr_burst=True)
     try:
         with pytest.raises(RadioConfigurationError, match="exactly one receiver"):
             radio.begin_metadata_capture(
@@ -1004,9 +1027,7 @@ def test_ddr_burst_requires_capability_single_rx_and_valid_byte_budget() -> None
     finally:
         radio.close()
 
-    radio, _adi, _factory = _open_radio(
-        [], metadata_abi=3, channels=(0,), ddr_burst=True
-    )
+    radio, _adi, _factory = _open_radio([], metadata_abi=3, channels=(0,), ddr_burst=True)
     try:
         with pytest.raises(RadioConfigurationError, match="one complete IIO frame"):
             radio.begin_metadata_capture(

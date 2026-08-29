@@ -245,9 +245,7 @@ class IioMetadataCaptureSession:
         if ddr_ring_bytes and metadata_abi != 3:
             raise ValueError("device DDR ring v1 requires metadata ABI 3")
         frame_iq_bytes = samples_per_channel * len(self._channels) * 4
-        self._ddr_burst_frames = (
-            0 if not ddr_burst_bytes else ddr_burst_bytes // frame_iq_bytes
-        )
+        self._ddr_burst_frames = 0 if not ddr_burst_bytes else ddr_burst_bytes // frame_iq_bytes
         self._ddr_burst_admitted_bytes = self._ddr_burst_frames * frame_iq_bytes
         if ddr_burst_bytes and not self._ddr_burst_frames:
             raise ValueError("device DDR burst byte budget cannot hold one complete frame")
@@ -263,6 +261,8 @@ class IioMetadataCaptureSession:
         self._stream_id: int | None = None
         self._previous_buffer_sequence: int | None = None
         self._previous_sample_end: int | None = None
+        self._terminal_ddr_ring_status: dict[str, object] | None = None
+        self._terminal_ddr_ring_status_error: str | None = None
 
     @property
     def kernel_buffers(self) -> int:
@@ -316,7 +316,17 @@ class IioMetadataCaptureSession:
         if not self.ddr_ring_enabled:
             raise ValueError("this capture does not use the device DDR ring")
         if self._buffer is None:
-            raise RuntimeError("IIO metadata capture is not open")
+            if self._terminal_ddr_ring_status is not None:
+                return dict(self._terminal_ddr_ring_status)
+            detail = (
+                ""
+                if self._terminal_ddr_ring_status_error is None
+                else f": {self._terminal_ddr_ring_status_error}"
+            )
+            raise RuntimeError(f"IIO metadata capture is not open{detail}")
+        return self._read_live_ddr_ring_status()
+
+    def _read_live_ddr_ring_status(self) -> dict[str, object]:
         status = getattr(self._buffer, "ddr_ring_status", None)
         if not callable(status):
             raise RuntimeError("installed pylibiio cannot read DDR ring status")
@@ -325,9 +335,19 @@ class IioMetadataCaptureSession:
             raise RuntimeError("pylibiio returned malformed DDR ring status")
         return dict(result)
 
+    def _cache_failed_ddr_ring_status(self) -> None:
+        if not self.ddr_ring_enabled or self._buffer is None:
+            return
+        try:
+            self._terminal_ddr_ring_status = self._read_live_ddr_ring_status()
+        except Exception as error:
+            self._terminal_ddr_ring_status_error = f"{type(error).__name__}: {error}"
+
     def open(self) -> None:
         if self._buffer is not None:
             raise RuntimeError("IIO metadata capture is already open")
+        self._terminal_ddr_ring_status = None
+        self._terminal_ddr_ring_status_error = None
         self._prime_ordinary_rx()
         self._verify_kernel_buffers()
         try:
@@ -426,6 +446,7 @@ class IioMetadataCaptureSession:
         try:
             return self._read_block()
         except BaseException:
+            self._cache_failed_ddr_ring_status()
             self.close()
             raise
 

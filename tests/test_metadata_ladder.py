@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from types import TracebackType
+from weakref import ref
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from pluto_plus.hardware.base import SampleBlockV2
 from pluto_plus.metadata_ladder import (
@@ -205,6 +207,58 @@ def test_metadata_ladder_selects_largest_counter_continuous_refill_and_restores(
     assert not radio.opened
 
 
+def test_metadata_ladder_releases_iq_frames_while_accounting() -> None:
+    samples = 131_072
+
+    class _RetentionCapture(_Capture):
+        def __init__(self) -> None:
+            super().__init__(samples, tuple(range(16)), 4, 1)
+            self.references: list[ref[NDArray[np.generic]]] = []
+            self.maximum_live_arrays = 0
+
+        def read_block(self) -> SampleBlockV2:
+            self.references = [item for item in self.references if item() is not None]
+            self.maximum_live_arrays = max(self.maximum_live_arrays, len(self.references))
+            block = super().read_block()
+            self.references.append(ref(block.samples))
+            return block
+
+    class _RetentionRadio(_Radio):
+        def __init__(self) -> None:
+            super().__init__({samples: tuple(range(16))})
+            self.capture = _RetentionCapture()
+
+        def begin_metadata_capture(
+            self,
+            sample_count: int,
+            *,
+            kernel_buffers: int,
+            ddr_burst_bytes: int = 0,
+            ddr_ring_bytes: int = 0,
+            ddr_ring_frames: int = 0,
+            ddr_ring_continuous: bool = False,
+        ) -> _Capture:
+            return self.capture
+
+    radio = _RetentionRadio()
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=5_000_000,
+        rf_bandwidth_hz=5_000_000,
+        metadata_abi=3,
+        channels=(0,),
+        samples_per_channel=(samples,),
+        frames=16,
+        kernel_buffers=4,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=iter((0, 1_000_000_000)).__next__,
+    )
+
+    assert report.cells[0].observed_frames == 16
+    assert radio.capture.maximum_live_arrays <= 1
+
+
 def test_metadata_ladder_requires_native_bandwidth_and_four_kernel_buffers() -> None:
     radio = _Radio({262_144: (0, 1)})
     for bandwidth, kernel_buffers in ((5_000_001, 4), (5_000_000, 3)):
@@ -307,9 +361,7 @@ def test_metadata_ladder_rejects_short_ddr_frames_before_capture() -> None:
     assert radio.capture_requests == [300_000]
     assert [failure.samples_per_channel for failure in report.failures] == [299_998, 250_000]
     assert all(failure.error_type == "ValueError" for failure in report.failures)
-    assert all(
-        "at least a 12 ms frame period" in failure.message for failure in report.failures
-    )
+    assert all("at least a 12 ms frame period" in failure.message for failure in report.failures)
     assert "duration_us=11999.920" in report.failures[0].message
     assert "duration_us=10000.000" in report.failures[1].message
     assert report.original_settings_restored
@@ -417,6 +469,106 @@ def test_metadata_ladder_qualifies_finite_ddr_ring_with_exact_status(
     assert status.produced_frames == status.consumed_frames == frames
     assert status.high_water_frames == 2
     assert report.cells[0].passed
+
+
+def test_metadata_ladder_preserves_failed_ring_status_before_close() -> None:
+    samples = 262_144
+    frames = 6
+
+    class _FailedRingCapture(_Capture):
+        def read_block(self) -> SampleBlockV2:
+            if self.previous_sequence == 1:
+                raise OSError(75, "Value too large for defined data type")
+            return super().read_block()
+
+        def ddr_ring_status(self) -> dict[str, object]:
+            return {
+                "state": "failed",
+                "terminal_reason": "counter_gap",
+                "error_code": -75,
+                "requested_capacity_iq_bytes": self.ddr_ring_requested_bytes,
+                "admitted_capacity_iq_bytes": self.ddr_ring_admitted_bytes,
+                "target_frames": self.ddr_ring_capture_frames,
+                "produced_frames": 3,
+                "consumed_frames": 2,
+                "high_water_frames": 2,
+                "wrap_count": 0,
+                "producer_position": 3,
+                "consumer_position": 2,
+                "last_contiguous_sample_sequence": 1_000 + 3 * self.samples,
+                "first_unavailable_sample_sequence": 1_000 + 4 * self.samples,
+            }
+
+    class _FailedRingRadio(_Radio):
+        def begin_metadata_capture(
+            self,
+            sample_count: int,
+            *,
+            kernel_buffers: int,
+            ddr_burst_bytes: int = 0,
+            ddr_ring_bytes: int = 0,
+            ddr_ring_frames: int = 0,
+            ddr_ring_continuous: bool = False,
+        ) -> _Capture:
+            capture = _FailedRingCapture(
+                sample_count,
+                tuple(range(frames)),
+                kernel_buffers,
+                len(self.settings.channels),
+            )
+            frame_bytes = sample_count * len(self.settings.channels) * 4
+            capture.ddr_ring_requested_bytes = ddr_ring_bytes
+            capture.ddr_ring_capacity_frames = ddr_ring_bytes // frame_bytes
+            capture.ddr_ring_admitted_bytes = capture.ddr_ring_capacity_frames * frame_bytes
+            capture.ddr_ring_capture_frames = ddr_ring_frames
+            capture.ddr_ring_continuous = ddr_ring_continuous
+            capture.ddr_ring_enabled = True
+            return capture
+
+    radio = _FailedRingRadio({samples: tuple(range(frames))})
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=5_000_000,
+        rf_bandwidth_hz=5_000_000,
+        metadata_abi=3,
+        channels=(0,),
+        samples_per_channel=(samples,),
+        frames=frames,
+        kernel_buffers=4,
+        ddr_ring_bytes=samples * 4 * 4,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+    )
+
+    assert not report.cells
+    assert len(report.failures) == 1
+    failure = report.failures[0]
+    assert failure.error_type == "OSError"
+    assert failure.ddr_ring_status is not None
+    assert failure.ddr_ring_status.state == "failed"
+    assert failure.ddr_ring_status.produced_frames == 3
+    assert failure.ddr_ring_status.consumed_frames == 2
+    assert failure.ddr_ring_status.first_unavailable_sample_sequence is not None
+    assert failure.ddr_ring_status_error is None
+    assert radio.settings == radio.original
+
+
+def test_metadata_ladder_normalizes_generic_radio_open_failure() -> None:
+    class _OpenFailureRadio(_Radio):
+        def open(self) -> None:
+            raise Exception("No device found")
+
+    radio = _OpenFailureRadio({262_144: (0, 1)})
+    with pytest.raises(RuntimeError, match="could not open radio: No device found"):
+        run_metadata_continuity_ladder(
+            uri="ip:192.0.2.1",
+            serial="SERIAL_A",
+            sample_rate_hz=5_000_000,
+            rf_bandwidth_hz=5_000_000,
+            samples_per_channel=(262_144,),
+            frames=2,
+            radio_factory=lambda _uri, _serial, _abi: radio,
+        )
 
 
 def test_metadata_ladder_rejects_ambiguous_or_incompatible_ddr_ring() -> None:
