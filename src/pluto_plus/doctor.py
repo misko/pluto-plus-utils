@@ -395,6 +395,24 @@ DDR_RING_PREFILL_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 29, 18, 51, 2, tzinfo=UTC),
 )
 
+# Exact RAM-only prototype that reduces ABI-3 HOLD gain/RSSI observation work
+# while leaving AUTO cadence and every transport/metadata ABI unchanged. It is
+# deliberately not persistence-authorized; the selected spare radio must first
+# prove the expected observation cadence, throughput gain, and clean recovery.
+IIO_THROUGHPUT_HOLD_V1_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="iio-throughput-hold-v1-rc1-ram",
+    release_tag="iio-throughput-hold-v1-rc1-425b20b352cc",
+    device_firmware="v0.45-plutoplus-spf-iio-throughput-hold-v1-rc1",
+    asset_name="plutoplus-spf-iio-throughput-hold-v1-rc1-425b20b352cc-pluto.dfu",
+    asset_sha256="c10dbf365099f718cb0134b1be8a01fca24db7028e55a98d9340813d3c9f35e4",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33277054955",
+    source_commit="425b20b352ccaba697cb90b5d95db00635f80118",
+    fit_body_sha256="869a4de6b608ba3801f891bb4ca097a48adc7fafb49a20cad2a336cf063972be",
+    fit_body_size=12_811_503,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 29, 22, 14, 39, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
