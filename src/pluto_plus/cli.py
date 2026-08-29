@@ -485,8 +485,17 @@ def _ladder_table(report: LadderReport) -> str:
     )
     if report.unsafe_kernel_queue_override:
         identity += " (UNVALIDATED OVERRIDE)"
+    duration = (
+        f"Requested nominal capture per rung: {report.requested_duration_seconds:g} s"
+        if report.requested_duration_seconds is not None
+        else ""
+    )
     restore = "Original RX settings restored: yes"
-    return "\n".join((identity, header, separator, *body, restore, report.continuity_claim))
+    return "\n".join(
+        line
+        for line in (identity, duration, header, separator, *body, restore, report.continuity_claim)
+        if line
+    )
 
 
 def _fastlock_table(report: FastLockProbeReport, report_path: Path) -> str:
@@ -1172,8 +1181,22 @@ def radio_ladder(
         max=4_194_304,
         help="Samples per channel in each receive frame.",
     ),
-    frames: int = typer.Option(
-        12, "--frames", min=1, max=100, help="Timed frames captured at each rung."
+    frames: int | None = typer.Option(
+        None,
+        "--frames",
+        min=1,
+        max=100,
+        help="Fixed timed frames at each rung; mutually exclusive with --duration-seconds.",
+    ),
+    duration_seconds: float | None = typer.Option(
+        None,
+        "--duration-seconds",
+        min=0.001,
+        max=60.0,
+        help=(
+            "Minimum nominal sample-time coverage at each rung; rate-specific frame "
+            "counts are rounded up and reported."
+        ),
     ),
     warmup_frames: int = typer.Option(
         2,
@@ -1298,6 +1321,12 @@ def radio_ladder(
     normalized_channels = channels.strip().lower()
     if normalized_channels not in LADDER_CHANNEL_SELECTIONS:
         _fail("ladder_failed", "channels must be rx0, rx1, or dual", 5)
+    if frames is not None and duration_seconds is not None:
+        _fail(
+            "invalid_ladder_bounds",
+            "--frames and --duration-seconds are mutually exclusive",
+            2,
+        )
     try:
         parsed_rates = parse_rate_ladder(rates)
     except ValueError as error:
@@ -1324,6 +1353,7 @@ def radio_ladder(
             channels=LADDER_CHANNEL_SELECTIONS[normalized_channels],
             samples_per_channel=samples,
             frames=frames,
+            duration_seconds=duration_seconds,
             warmup_frames=warmup_frames,
             kernel_buffers=kernel_buffers,
             allow_unsafe_kernel_queue=allow_unsafe_kernel_queue,

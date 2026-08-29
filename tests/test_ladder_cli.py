@@ -58,6 +58,7 @@ def _report(uri: str, serial: str, channels: tuple[int, ...] = (0, 1)) -> Ladder
                 actual_sample_rate_hz=1_000_000,
                 samples_per_channel=262_144,
                 frames=12,
+                nominal_capture_seconds=3.145728,
                 wire_bytes=25_165_824,
                 elapsed_seconds=3.2,
                 offered_payload_mbps=8.0,
@@ -120,6 +121,64 @@ def test_ip_ladder_is_standalone_and_forwards_exact_identity(
     assert calls[0]["kernel_buffers"] == 8
     assert calls[0]["allow_unsafe_kernel_queue"] is False
     assert json.loads(result.stdout)["original_settings_restored"] is True
+
+
+def test_ip_ladder_forwards_bounded_duration_without_fixed_frames(
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def run(**kwargs: Any) -> LadderReport:
+        calls.append(kwargs)
+        return _report(kwargs["uri"], kwargs["serial"], channels=(0,))
+
+    monkeypatch.setattr("pluto_plus.cli.run_iio_ladder", run)
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "ladder",
+            "192.168.1.20",
+            "--transport",
+            "ip",
+            "--expect-serial",
+            "SERIAL_A",
+            "--rates",
+            "5M,30M",
+            "--channels",
+            "rx0",
+            "--samples",
+            "1000000",
+            "--duration-seconds",
+            "20",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["frames"] is None
+    assert calls[0]["duration_seconds"] == 20
+
+
+def test_ip_ladder_rejects_duration_with_fixed_frames() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "ladder",
+            "192.168.1.20",
+            "--transport",
+            "ip",
+            "--expect-serial",
+            "SERIAL_A",
+            "--frames",
+            "4",
+            "--duration-seconds",
+            "5",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
 
 
 def test_ip_ladder_forwards_exact_unsafe_kernel_queue_confirmation(
