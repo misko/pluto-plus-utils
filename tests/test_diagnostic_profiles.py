@@ -172,7 +172,7 @@ def test_upgrade_target_is_strictly_upgrade_only() -> None:
 
     older = select_diagnostic_profile("v0.38-plutoplus-spf-libiio-metadata-v5")
     intermediate = select_diagnostic_profile("v0.40-plutoplus-spf-tandem-agc-v7")
-    at_target = select_diagnostic_profile("v0.42-plutoplus-spf-ddr-burst-v1")
+    at_target = select_diagnostic_profile("v0.43-plutoplus-spf-ddr-ring-v1")
 
     assert upgrade_target_for(older) is UPGRADE_TARGET_PROFILE
     # Never a sideways move, never a downgrade, never a guess.

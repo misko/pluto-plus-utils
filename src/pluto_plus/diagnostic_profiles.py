@@ -196,7 +196,7 @@ DDR_RING_V1_RELEASE_PROFILE = DiagnosticProfile(
     firmware_version="v0.43-plutoplus-spf-ddr-ring-v1",
     metadata_abis=(3,),
     tandem_agc_required=True,
-    release_status="final release bytes; RAM qualification pending",
+    release_status="hardware-qualified release",
     release_rank=18,
 )
 
@@ -258,7 +258,7 @@ def parse_metadata_abi(value: object) -> MetadataAbi:
 # hardware-qualified release.  Release candidates, development builds, and
 # RAM-only promotion candidates are deliberately excluded, so doctor never
 # proposes moving a radio onto an image that was not qualified for persistence.
-UPGRADE_TARGET_PROFILE = DDR_BURST_V1_RELEASE_PROFILE
+UPGRADE_TARGET_PROFILE = DDR_RING_V1_RELEASE_PROFILE
 
 
 def upgrade_target_for(profile: DiagnosticProfile | None) -> DiagnosticProfile | None:
