@@ -109,12 +109,13 @@ def _credentials(tmp_path: Path) -> Path:
     return path
 
 
-def _plan(tmp_path: Path):
+def _plan(tmp_path: Path, *, expected_return_firmware: str | None = None):
     return prepare_local_reboot(
         SERIAL,
         PATH,
         ssh_host="192.168.2.1",
         known_hosts_file=_credentials(tmp_path),
+        expected_return_firmware=expected_return_firmware,
         scanner=lambda: (_radio(),),
         route_checker=lambda interface, host: ROUTE,
         interface_validator=lambda interface, path: None,
@@ -131,7 +132,15 @@ def test_prepare_binds_exact_serial_path_interface_route_and_private_trust(
     assert plan.usb_sysfs_path == str(PATH)
     assert plan.usb_interface == INTERFACE
     assert plan.confirmation_phrase == f"REBOOT {SERIAL}"
+    assert plan.expected_return_firmware is None
     assert len(plan.known_hosts_sha256) == 64
+
+
+def test_prepare_binds_expected_return_firmware(tmp_path: Path) -> None:
+    plan = _plan(tmp_path, expected_return_firmware="v0.42-qspi")
+
+    assert plan.schema_version == 4
+    assert plan.expected_return_firmware == "v0.42-qspi"
 
 
 def test_prepare_unique_lan_host_keeps_usb_identity_but_does_not_bind_usb_route(
@@ -225,6 +234,36 @@ def test_success_reboots_only_after_safe_state_and_attests_same_return(
     document = json.loads(Path(receipt.receipt_path).read_text())
     assert document["outcome"] == "success"
     assert document["completed_phases"][-1] == "tx_safe_after_reboot"
+
+
+def test_success_accepts_exact_expected_firmware_return(tmp_path: Path) -> None:
+    plan = _plan(tmp_path, expected_return_firmware="v0.42-qspi")
+    known_hosts = tmp_path / "known_hosts"
+    transport = FakeTransport(
+        (
+            _attestation("before", firmware="v0.42-ram-candidate"),
+            _attestation("after", firmware="v0.42-qspi"),
+        )
+    )
+    scans = iter(((_radio(),), (), (_radio(),)))
+
+    receipt = execute_local_reboot(
+        plan,
+        confirmation=plan.confirmation_phrase,
+        transport=transport,
+        known_hosts_file=known_hosts,
+        receipt_directory=tmp_path / "receipts",
+        scanner=lambda: next(scans),
+        route_checker=lambda interface, host: ROUTE,
+        interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
+        timeout_s=0.2,
+        poll_interval_s=0.001,
+    )
+
+    assert receipt.outcome == "success"
+    assert receipt.before and receipt.before.firmware == "v0.42-ram-candidate"
+    assert receipt.after and receipt.after.firmware == "v0.42-qspi"
 
 
 def test_refuses_confirmation_without_touching_transport(tmp_path: Path) -> None:
@@ -422,4 +461,30 @@ def test_usb_return_accepts_equivalent_rev_c_models_from_ssh_and_iiod(
     after = local_reboot.attest_and_mute_returned_usb(plan, before)
 
     assert after.capabilities.board_model.endswith("(Z7010-AD9361)")
+    assert muted == [SERIAL]
+
+
+def test_usb_return_accepts_exact_expected_firmware_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan(tmp_path, expected_return_firmware="v0.42-qspi")
+    before = _attestation("before", firmware="v0.42-ram-candidate")
+    monkeypatch.setattr(
+        bootstrap,
+        "inspect_bound_iiod",
+        lambda interface: {
+            "hw_serial": SERIAL,
+            "hw_model": "Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
+            "fw_version": "v0.42-qspi",
+            "ad9361-phy,model": "ad9361",
+            "device_names": ("cf-ad9361-lpc", "tandem-agc"),
+            "cf-ad9361-lpc,scan_channels": CAPABILITIES.rx_scan_channels,
+        },
+    )
+    muted: list[str] = []
+    monkeypatch.setattr(bootstrap, "mute_returned_radio", muted.append)
+
+    after = local_reboot.attest_and_mute_returned_usb(plan, before)
+
+    assert after.firmware == "v0.42-qspi"
     assert muted == [SERIAL]

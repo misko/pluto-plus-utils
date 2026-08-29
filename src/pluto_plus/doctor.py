@@ -299,6 +299,26 @@ DDR_BURST_V2_RELEASE_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 21, 53, 18, tzinfo=UTC),
 )
 
+# Exact RAM-only capacity experiment built from the final v2 source graph. Its
+# sole runtime change raises iiOD's static and advertised single-RX burst ceiling
+# to 300,000,000 IQ bytes; the 128 MiB ordinary-memory reserve, 16 MiB CMA
+# reserve, full prefault, and post-prefault checks remain unchanged. This policy
+# exists only to qualify 250 MB and 300 MB admission on physical radios and can
+# never authorize a persistent write.
+DDR_CAPACITY_TEST_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-capacity-test-rc1-ram",
+    release_tag="ddr-capacity-test-rc1-84f05685a590",
+    device_firmware="v0.42-plutoplus-spf-ddr-capacity-test-rc1",
+    asset_name="plutoplus-spf-ddr-capacity-test-rc1-84f05685a590-pluto.dfu",
+    asset_sha256="eab63fd6003751ee007230cdaafab341a93bbe830e71747166cac5be777f11ce",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33220868991",
+    source_commit="84f05685a59007a01448628bf0f2be258594ee87",
+    fit_body_sha256="510f5848442376bb2f03ded4390ad916de074791fff2f4bd85c37aa96f263338",
+    fit_body_size=12_798_519,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 28, 23, 59, 24, tzinfo=UTC),
+)
+
 # The exact same final DFU/FIT receives a distinct QSPI authorization only
 # after both physical PHY types passed the final-byte RAM matrix: 12 ms and
 # 200 MB on RX0/RX1, USB and physical Ethernet, deterministic lower-bound

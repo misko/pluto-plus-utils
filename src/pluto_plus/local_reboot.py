@@ -72,6 +72,7 @@ class LocalRebootPlan:
     ssh_route_mode: Literal["usb_gadget", "lan"]
     known_hosts_sha256: str
     route_observation: UsbSshRouteObservation | None
+    expected_return_firmware: str | None
     confirmation_phrase: str
 
 
@@ -154,6 +155,7 @@ def prepare_local_reboot(
     *,
     ssh_host: str,
     known_hosts_file: Path,
+    expected_return_firmware: str | None = None,
     scanner: Callable[[], Sequence[LocalUsbPluto]] = scan_local_usb_plutos,
     route_checker: Callable[[str, str], UsbSshRouteObservation] = (
         require_unambiguous_usb_ssh_route
@@ -164,6 +166,8 @@ def prepare_local_reboot(
     """Build a read-only plan for exactly one locally attached USB radio."""
 
     _validate_serial(serial)
+    if expected_return_firmware is not None and not expected_return_firmware.strip():
+        raise LocalRebootError("expected return firmware must not be empty")
     path = usb_sysfs_path.expanduser().absolute()
     if path.parent != Path("/sys/bus/usb/devices"):
         raise LocalRebootError("USB path must be one direct /sys/bus/usb/devices child")
@@ -191,7 +195,7 @@ def prepare_local_reboot(
         raise LocalRebootError(str(error)) from error
     known_hosts_sha256 = _private_file_sha256(known_hosts_file, "SSH known-hosts")
     return LocalRebootPlan(
-        schema_version=3,
+        schema_version=4,
         plan_id=uuid.uuid4().hex,
         created_at=_now(),
         serial=serial,
@@ -203,6 +207,7 @@ def prepare_local_reboot(
         ssh_route_mode=route_mode,
         known_hosts_sha256=known_hosts_sha256,
         route_observation=route,
+        expected_return_firmware=expected_return_firmware,
         confirmation_phrase=f"REBOOT {serial}",
     )
 
@@ -276,6 +281,7 @@ def execute_local_reboot(
             Path(plan.usb_sysfs_path),
             ssh_host=plan.ssh_host,
             known_hosts_file=known_hosts_file,
+            expected_return_firmware=plan.expected_return_firmware,
             scanner=scanner,
             route_checker=route_checker,
             interface_validator=interface_validator,
@@ -290,6 +296,7 @@ def execute_local_reboot(
             fresh.ssh_host,
             fresh.ssh_route_mode,
             fresh.known_hosts_sha256,
+            fresh.expected_return_firmware,
         ) != (
             plan.serial,
             plan.usb_sysfs_path,
@@ -299,6 +306,7 @@ def execute_local_reboot(
             plan.ssh_host,
             plan.ssh_route_mode,
             plan.known_hosts_sha256,
+            plan.expected_return_firmware,
         ):
             raise LocalRebootError("local reboot plan identity or SSH trust changed")
         if not fresh.raw_usb_write_access:
@@ -348,7 +356,8 @@ def execute_local_reboot(
                 raise LocalRebootError("radio returned without a new boot identity")
             if candidate.serial != before.serial:
                 raise LocalRebootError("radio serial changed across reboot")
-            if candidate.firmware != before.firmware:
+            expected_firmware = plan.expected_return_firmware or before.firmware
+            if candidate.firmware != expected_firmware:
                 raise LocalRebootError("radio firmware changed across reboot")
             if not _equivalent_capabilities(candidate.capabilities, before.capabilities):
                 raise LocalRebootError("radio capabilities changed across reboot")
@@ -419,7 +428,7 @@ def attest_and_mute_returned_usb(
         ),
     )
     if (
-        candidate.firmware != before.firmware
+        candidate.firmware != (plan.expected_return_firmware or before.firmware)
         or not _equivalent_capabilities(candidate.capabilities, before.capabilities)
     ):
         raise LocalRebootError("returned USB-IIO firmware or capabilities changed across reboot")

@@ -771,6 +771,14 @@ def radio_reboot_local(
             "other addresses use the normal LAN route."
         ),
     ),
+    expect_return_profile: str | None = typer.Option(
+        None,
+        "--expect-return-profile",
+        help=(
+            "Exact hardware-qualified persistent profile expected after reboot; "
+            "use this when returning a volatile RAM image to QSPI."
+        ),
+    ),
     execute: bool = typer.Option(
         False,
         "--execute",
@@ -821,6 +829,23 @@ def radio_reboot_local(
     from pluto_plus.setup_helper import BoundSshTransport
 
     selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
+    expected_return_firmware = None
+    if expect_return_profile is not None:
+        from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
+
+        return_profile = STANDALONE_FLASH_PROFILES.get(expect_return_profile)
+        if (
+            return_profile is None
+            or not return_profile.persistent_allowed
+            or not return_profile.policy.hardware_qualified
+        ):
+            _fail(
+                "local_reboot_return_profile_invalid",
+                "--expect-return-profile must select an exact hardware-qualified "
+                "persistent profile",
+                2,
+            )
+        expected_return_firmware = str(return_profile.policy.device_firmware)
     isolation_plan = None
     route_checker_override: Callable[[str, str], UsbSshRouteObservation] | None = None
     pluto_interfaces: tuple[str, ...] = ()
@@ -866,6 +891,7 @@ def radio_reboot_local(
             usb_sysfs_path,
             ssh_host=ssh_host,
             known_hosts_file=selected_known_hosts,
+            expected_return_firmware=expected_return_firmware,
             **prepare_options,
         )
     except (LocalRebootError, OSError, ValueError) as error:
