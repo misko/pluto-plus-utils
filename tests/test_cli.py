@@ -1927,6 +1927,8 @@ def test_metadata_ladder_forwards_nondefault_ip_port(
             "40431",
             "--metadata-abi",
             "3",
+            "--channels",
+            "rx0",
             "--ddr-ring-bytes",
             "100000000",
         ],
@@ -1951,6 +1953,33 @@ def test_metadata_ladder_rejects_ip_port_for_usb() -> None:
 
     assert result.exit_code == 2, result.output
     assert "invalid_metadata_ladder_port" in result.output
+
+
+def test_metadata_ladder_rejects_dual_receiver_ddr_ring_before_opening_radio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda **_kwargs: pytest.fail("invalid DDR geometry reached hardware preflight"),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "SERIAL_A",
+            "--metadata-abi",
+            "3",
+            "--channels",
+            "dual",
+            "--ddr-ring-bytes",
+            "200000000",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "metadata_ladder_ddr_requires_single_receiver" in result.output
+    assert "ordinary dual RX is unchanged" in result.output
 
 
 def _patch_network_bootstrap(

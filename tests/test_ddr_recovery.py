@@ -18,11 +18,29 @@ from pluto_plus.ddr_recovery import (
     prepare_ddr_recovery,
 )
 from pluto_plus.hardware.preflight import IioEnvironmentReport, IioEnvironmentStatus
+from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.metadata_soak import MetadataHealth
 
 SERIAL = "104000b29905000e17000800065934759d"
 PROFILE = "ddr-burst-v1-release-ram"
 runner = CliRunner()
+
+
+def _usb_radio() -> LocalUsbPluto:
+    return LocalUsbPluto(
+        usb_path="/sys/bus/usb/devices/5-2",
+        bus_number=5,
+        device_number=41,
+        product="PlutoSDR+ with timestamp support",
+        serial=SERIAL,
+        speed_mbps=480,
+        interface_count=7,
+        host_network_interfaces=(
+            HostNetworkInterface(name="enx001", ipv4_addresses=("192.168.2.10",)),
+        ),
+        terminal_devices=("/dev/ttyACM0",),
+        storage_devices=("/dev/sdb1",),
+    )
 
 
 def _health(**updates: Any) -> MetadataHealth:
@@ -320,3 +338,52 @@ def test_cli_execute_forwards_pinned_health_and_live_runner(
     execution = calls[2]["execute"]
     assert execution["report_path"] == report_path.resolve()
     assert execution["cycle_runner"].__name__ == "run_live_ddr_recovery_cycle"
+
+
+def test_cli_isolated_recovery_requires_exact_second_confirmation(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    password = tmp_path / "password"
+    report_path = tmp_path / "report.json"
+    known_hosts.write_text("192.168.2.1 ssh-ed25519 AAAATEST\n")
+    password.write_text("analog\n")
+    known_hosts.chmod(0o600)
+    password.chmod(0o600)
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_usb_radio(),))
+    monkeypatch.setattr(
+        "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            confirmation_phrase="ISOLATE USB SSH enx001",
+            schema_version=1,
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "qualify-ddr-recovery",
+            "192.168.2.1",
+            "--expect-serial",
+            SERIAL,
+            "--cycles",
+            "1",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--report",
+            str(report_path),
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/5-2",
+            "--isolate-usb-route",
+            "--execute",
+            "--confirm",
+            f"QUALIFY DDR RECOVERY {SERIAL} 1",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "host_isolation_confirmation_required" in result.output
+    assert "ISOLATE USB SSH enx001" in result.output

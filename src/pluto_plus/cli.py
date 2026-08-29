@@ -1582,14 +1582,32 @@ def radio_metadata_ladder(
         parsed_samples = parse_metadata_sample_ladder(samples)
     except ValueError as error:
         _fail("metadata_ladder_failed", str(error), 5)
-    environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
-    if not environment.healthy:
-        _fail(environment.status.value, environment.actionable_message, 5)
     normalized_channels = channels.strip().lower()
     if metadata_abi not in {1, 2, 3}:
         _fail("metadata_ladder_failed", "metadata ABI must be 1, 2, or 3", 5)
     if normalized_channels not in METADATA_CHANNEL_SELECTIONS:
         _fail("metadata_ladder_failed", "channels must be rx0, rx1, or dual", 5)
+    if ddr_burst and ddr_ring_bytes:
+        _fail(
+            "metadata_ladder_ddr_modes_conflict",
+            "--ddr-burst and --ddr-ring-bytes are mutually exclusive",
+            2,
+        )
+    if (ddr_burst or ddr_ring_bytes) and metadata_abi != 3:
+        _fail(
+            "metadata_ladder_ddr_requires_abi3",
+            "DDR burst and ring modes require --metadata-abi 3",
+            2,
+        )
+    if (ddr_burst or ddr_ring_bytes) and normalized_channels == "dual":
+        _fail(
+            "metadata_ladder_ddr_requires_single_receiver",
+            "DDR burst and ring modes require --channels rx0 or rx1; ordinary dual RX is unchanged",
+            2,
+        )
+    environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
 
     def ladder_action() -> Any:
         return run_metadata_continuity_ladder(
@@ -1938,6 +1956,26 @@ def radio_qualify_ddr_recovery(
     confirmation: str | None = typer.Option(
         None, "--confirm", help="With --execute, the exact phrase printed by the dry run."
     ),
+    usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--usb-sysfs-path",
+        help="Exact local USB sysfs node anchoring an isolated USB-gadget IP target.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing Pluto NICs/routes around the recovery campaign.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="With execution, exact phrase ISOLATE USB SSH <interface>.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for durable host-isolation receipts.",
+    ),
 ) -> None:
     """Prove immediate IIO recovery after abrupt high-rate DDR client loss."""
 
@@ -1958,20 +1996,66 @@ def radio_qualify_ddr_recovery(
         if report_path is None
         else report_path.expanduser().resolve()
     )
-    if not execute:
-        _emit(
-            {
-                "execute": False,
-                "plan": plan.model_dump(mode="json"),
-                "confirmation_phrase": plan.confirmation_phrase,
-                "report_path": str(selected_report),
-            }
+    isolation_plan = None
+    pluto_interfaces: tuple[str, ...] = ()
+    selected_interface: str | None = None
+    if isolate_usb_route:
+        if usb_sysfs_path is None:
+            _fail(
+                "host_isolation_target_required",
+                "DDR recovery route isolation requires --usb-sysfs-path",
+                2,
+            )
+        from pluto_plus.host_isolation import HostIsolationError, prepare_usb_ssh_isolation
+
+        local_devices = scan_local_usb_plutos()
+        selected = [
+            item
+            for item in local_devices
+            if item.serial == plan.serial and item.usb_path == str(usb_sysfs_path)
+        ]
+        if len(selected) != 1 or len(selected[0].host_network_interfaces) != 1:
+            _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
+        selected_interface = selected[0].host_network_interfaces[0].name
+        pluto_interfaces = tuple(
+            interface.name for item in local_devices for interface in item.host_network_interfaces
         )
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                selected_interface,
+                plan.target,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+    elif usb_sysfs_path is not None:
+        _fail(
+            "host_isolation_not_enabled",
+            "--usb-sysfs-path requires --isolate-usb-route for DDR recovery",
+            2,
+        )
+    if not execute:
+        payload: dict[str, object] = {
+            "execute": False,
+            "plan": plan.model_dump(mode="json"),
+            "confirmation_phrase": plan.confirmation_phrase,
+            "report_path": str(selected_report),
+        }
+        if isolation_plan is not None:
+            payload["host_isolation"] = asdict(isolation_plan)
+            payload["isolation_confirmation_phrase"] = isolation_plan.confirmation_phrase
+        _emit(payload)
         return
     if confirmation != plan.confirmation_phrase:
         _fail(
             "ddr_recovery_confirmation_required",
             f"--confirm must be exactly {plan.confirmation_phrase!r}",
+            2,
+        )
+    if isolation_plan is not None and isolation_confirmation != isolation_plan.confirmation_phrase:
+        _fail(
+            "host_isolation_confirmation_required",
+            f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
             2,
         )
     if ssh_known_hosts_file is None:
@@ -2002,23 +2086,53 @@ def radio_qualify_ddr_recovery(
     environment = inspect_iio_environment(require_usb=False)
     if not environment.healthy:
         _fail(environment.status.value, environment.actionable_message, 5)
-    try:
+    def recovery_action() -> Any:
         transport = BoundSshTransport(
             host=plan.target,
-            interface=None,
+            interface=selected_interface,
             password=password,
             known_hosts_file=selected_known_hosts,
         )
         probe = SshMetadataHealthProbe(transport, serial=plan.serial)
-        report = execute_ddr_recovery(
+        return execute_ddr_recovery(
             plan,
             report_path=selected_report,
             health_probe=probe,
             cycle_runner=run_live_ddr_recovery_cycle,
         )
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            report = recovery_action()
+        else:
+            from pluto_plus.host_isolation import (
+                HostIsolationError,
+                HostIsolationExecutionError,
+                execute_usb_ssh_isolated,
+            )
+
+            try:
+                report, isolation_receipt = execute_usb_ssh_isolated(
+                    isolation_plan,
+                    confirmation=isolation_confirmation or "",
+                    receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                    action=recovery_action,
+                    pluto_interfaces=pluto_interfaces,
+                )
+            except HostIsolationExecutionError as error:
+                _emit({"host_isolation": asdict(error.receipt)})
+                raise typer.Exit(5) from error
+            except HostIsolationError as error:
+                _fail("host_isolation_failed", str(error), 4)
     except (DdrRecoveryError, ImportError, OSError, RuntimeError, ValueError) as error:
         _fail("ddr_recovery_failed", str(error), 5)
-    _emit(report.model_dump(mode="json"))
+    payload = report.model_dump(mode="json")
+    _emit(
+        payload
+        if isolation_receipt is None
+        else {"host_isolation": asdict(isolation_receipt), "result": payload}
+    )
 
 
 @radio_app.command("qualify-tandem")
