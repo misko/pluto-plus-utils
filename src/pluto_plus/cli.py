@@ -1885,7 +1885,12 @@ def radio_qualify_ddr_recovery(
         "--cycles",
         min=1,
         max=MAX_DDR_RECOVERY_CYCLES,
-        help="Abrupt 200 MB burst disconnect/reopen cycles; RX0 and RX1 alternate.",
+        help="Abrupt 200 MB DDR disconnect/reopen cycles; RX0 and RX1 alternate.",
+    ),
+    mode: str = typer.Option(
+        "burst",
+        "--mode",
+        help="DDR client semantics to interrupt: burst or ring.",
     ),
     disconnect_delay_ms: int = typer.Option(
         DEFAULT_DISCONNECT_DELAY_MS,
@@ -1897,7 +1902,7 @@ def radio_qualify_ddr_recovery(
     profile_id: str = typer.Option(
         "ddr-burst-v1-release-ram",
         "--profile",
-        help="Exact immutable ABI-3 DDR-burst firmware profile.",
+        help="Exact immutable ABI-3 firmware profile supporting the selected DDR mode.",
     ),
     ssh_known_hosts_file: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1925,12 +1930,14 @@ def radio_qualify_ddr_recovery(
             expect_serial,
             cycles=cycles,
             profile_id=profile_id,
+            mode=cast(Any, mode.strip().lower()),
             disconnect_delay_ms=disconnect_delay_ms,
         )
     except DdrRecoveryError as error:
         _fail("ddr_recovery_plan_failed", str(error), 2)
     selected_report = (
-        DEFAULT_DDR_RECOVERY_REPORTS / f"ddr-recovery-{plan.serial}-{time.time_ns()}.json"
+        DEFAULT_DDR_RECOVERY_REPORTS
+        / f"ddr-{plan.mode}-recovery-{plan.serial}-{time.time_ns()}.json"
         if report_path is None
         else report_path.expanduser().resolve()
     )

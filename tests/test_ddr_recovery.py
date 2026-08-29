@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+import pluto_plus.bootstrap_firmware as bootstrap
 from pluto_plus.cli import app
 from pluto_plus.ddr_recovery import (
     DdrRecoveryCycleResult,
@@ -104,6 +105,53 @@ def test_prepare_ddr_recovery_locks_release_geometry_and_profile() -> None:
             SERIAL,
             cycles=1,
             profile_id="single-rx-metadata-rc1-ram",
+        )
+
+
+def test_prepare_ddr_ring_recovery_separates_capacity_from_wrapping_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_id = "test-ddr-ring-ram"
+    base = bootstrap.STANDALONE_FLASH_PROFILES[PROFILE]
+    monkeypatch.setitem(
+        bootstrap.STANDALONE_FLASH_PROFILES,
+        profile_id,
+        bootstrap.StandaloneFlashProfile(
+            base.policy,
+            3,
+            True,
+            persistent_allowed=False,
+            ddr_burst_max_iq_bytes=200_000_000,
+            ddr_burst_reserve_bytes=128 * 1024 * 1024,
+            ddr_ring_max_iq_bytes=200_000_000,
+            ddr_ring_modes="finite,continuous",
+            buffer_metadata_status=True,
+        ),
+    )
+
+    plan = prepare_ddr_recovery(
+        "192.168.1.15",
+        SERIAL,
+        cycles=2,
+        profile_id=profile_id,
+        mode="ring",
+    )
+
+    assert plan.mode == "ring"
+    assert plan.victim_iq_bytes == 200_000_000
+    assert plan.victim_frames == 100
+    assert plan.victim_frames > plan.victim_iq_bytes // (plan.victim_samples_per_frame * 4)
+    assert plan.confirmation_phrase == f"QUALIFY DDR RING RECOVERY {SERIAL} 2"
+
+
+def test_prepare_ddr_ring_recovery_rejects_burst_only_profile() -> None:
+    with pytest.raises(DdrRecoveryError, match="ABI-3 200 MB ring profile"):
+        prepare_ddr_recovery(
+            "192.168.1.15",
+            SERIAL,
+            cycles=1,
+            profile_id=PROFILE,
+            mode="ring",
         )
 
 

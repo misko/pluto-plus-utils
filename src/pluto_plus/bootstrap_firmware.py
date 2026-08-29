@@ -84,6 +84,9 @@ class StandaloneFlashProfile:
     persistent_allowed: bool = True
     ddr_burst_max_iq_bytes: int | None = None
     ddr_burst_reserve_bytes: int | None = None
+    ddr_ring_max_iq_bytes: int | None = None
+    ddr_ring_modes: str | None = None
+    buffer_metadata_status: bool = False
 
 
 STANDALONE_FLASH_PROFILES = {
