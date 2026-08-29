@@ -1,4 +1,4 @@
-"""Bounded abrupt-disconnect recovery qualification for device DDR bursts."""
+"""Bounded abrupt-disconnect recovery qualification for device DDR modes."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import Field, model_validator
 
@@ -32,6 +32,7 @@ VICTIM_SAMPLE_RATE_HZ = 25_000_000
 VICTIM_RF_BANDWIDTH_HZ = 20_000_000
 VICTIM_SAMPLES_PER_FRAME = 1_000_000
 VICTIM_FRAMES = 50
+RING_VICTIM_FRAMES = 100
 VICTIM_IQ_BYTES = VICTIM_SAMPLES_PER_FRAME * 4 * VICTIM_FRAMES
 RECOVERY_DDR_FRAMES = 2
 RECOVERY_ORDINARY_SAMPLE_RATE_HZ = 1_250_000
@@ -40,6 +41,7 @@ RECOVERY_ORDINARY_FRAMES = 2
 KERNEL_BUFFERS = 4
 VICTIM_READY_TIMEOUT_SECONDS = 15.0
 VICTIM_STOP_TIMEOUT_SECONDS = 5.0
+DdrRecoveryMode = Literal["burst", "ring"]
 
 
 class DdrRecoveryError(RuntimeError):
@@ -47,6 +49,7 @@ class DdrRecoveryError(RuntimeError):
 
 
 class DdrRecoveryPlan(ApiModel):
+    mode: DdrRecoveryMode
     profile_id: str
     target: str
     serial: str
@@ -65,10 +68,16 @@ class DdrRecoveryPlan(ApiModel):
 
     @model_validator(mode="after")
     def validate_fixed_release_geometry(self) -> DdrRecoveryPlan:
-        if self.victim_iq_bytes != self.victim_samples_per_frame * 4 * self.victim_frames:
-            raise ValueError("DDR recovery victim byte geometry does not close")
         if self.victim_iq_bytes != VICTIM_IQ_BYTES:
             raise ValueError("DDR recovery must use the reviewed 200 MB victim geometry")
+        frame_iq_bytes = self.victim_samples_per_frame * 4
+        capacity_frames, remainder = divmod(self.victim_iq_bytes, frame_iq_bytes)
+        if remainder:
+            raise ValueError("DDR recovery capacity must contain whole frames")
+        if self.mode == "burst" and self.victim_frames != capacity_frames:
+            raise ValueError("DDR burst recovery target must equal its sealed capacity")
+        if self.mode == "ring" and self.victim_frames <= capacity_frames:
+            raise ValueError("DDR ring recovery target must wrap beyond its capacity")
         return self
 
 
@@ -146,6 +155,7 @@ def prepare_ddr_recovery(
     *,
     cycles: int,
     profile_id: str,
+    mode: DdrRecoveryMode = "burst",
     disconnect_delay_ms: int = DEFAULT_DISCONNECT_DELAY_MS,
 ) -> DdrRecoveryPlan:
     """Prepare an exact-profile, fixed-geometry recovery campaign."""
@@ -165,15 +175,25 @@ def prepare_ddr_recovery(
             "DDR recovery disconnect delay must be between "
             f"{MIN_DISCONNECT_DELAY_MS} and {MAX_DISCONNECT_DELAY_MS} ms"
         )
+    if mode not in {"burst", "ring"}:
+        raise DdrRecoveryError("DDR recovery mode must be burst or ring")
     profile = STANDALONE_FLASH_PROFILES.get(profile_id)
-    if (
-        profile is None
-        or profile.metadata_abi != 3
-        or profile.ddr_burst_max_iq_bytes is None
+    if profile is None or profile.metadata_abi != 3:
+        raise DdrRecoveryError("DDR recovery requires a known ABI-3 DDR profile")
+    if mode == "burst" and (
+        profile.ddr_burst_max_iq_bytes is None
         or profile.ddr_burst_max_iq_bytes < VICTIM_IQ_BYTES
     ):
-        raise DdrRecoveryError("DDR recovery requires a known ABI-3 200 MB burst profile")
+        raise DdrRecoveryError("DDR burst recovery requires a known ABI-3 200 MB burst profile")
+    if mode == "ring" and (
+        profile.ddr_ring_max_iq_bytes is None
+        or profile.ddr_ring_max_iq_bytes < VICTIM_IQ_BYTES
+        or profile.ddr_ring_modes != "finite,continuous"
+        or not profile.buffer_metadata_status
+    ):
+        raise DdrRecoveryError("DDR ring recovery requires a known ABI-3 200 MB ring profile")
     return DdrRecoveryPlan(
+        mode=mode,
         profile_id=profile_id,
         target=str(address),
         serial=serial,
@@ -184,11 +204,15 @@ def prepare_ddr_recovery(
         sample_rate_hz=VICTIM_SAMPLE_RATE_HZ,
         rf_bandwidth_hz=VICTIM_RF_BANDWIDTH_HZ,
         victim_samples_per_frame=VICTIM_SAMPLES_PER_FRAME,
-        victim_frames=VICTIM_FRAMES,
+        victim_frames=VICTIM_FRAMES if mode == "burst" else RING_VICTIM_FRAMES,
         victim_iq_bytes=VICTIM_IQ_BYTES,
         recovery_ddr_frames=RECOVERY_DDR_FRAMES,
         kernel_buffers=KERNEL_BUFFERS,
-        confirmation_phrase=f"QUALIFY DDR RECOVERY {serial} {cycles}",
+        confirmation_phrase=(
+            f"QUALIFY DDR RECOVERY {serial} {cycles}"
+            if mode == "burst"
+            else f"QUALIFY DDR RING RECOVERY {serial} {cycles}"
+        ),
     )
 
 
@@ -248,14 +272,14 @@ def execute_ddr_recovery(
 def run_live_ddr_recovery_cycle(
     plan: DdrRecoveryPlan, cycle: int, channel: int
 ) -> DdrRecoveryCycleResult:
-    """Kill one active burst client, then immediately prove DDR and ordinary reuse."""
+    """Kill one active DDR client, then immediately prove DDR and ordinary reuse."""
 
     uri = f"ip:{plan.target}"
     radio = _new_radio(plan)
     radio.open()
     original = radio.read_settings()
     radio.close()
-    victim_exit_code = _kill_live_burst_client(plan, channel)
+    victim_exit_code = _kill_live_ddr_client(plan, channel)
     failure: BaseException | None = None
     ddr_probe: DdrRecoveryProbe | None = None
     ordinary_probe: DdrRecoveryProbe | None = None
@@ -271,9 +295,10 @@ def run_live_ddr_recovery_cycle(
             samples_per_channel=(plan.victim_samples_per_frame,),
             frames=plan.recovery_ddr_frames,
             kernel_buffers=plan.kernel_buffers,
-            ddr_burst=True,
+            ddr_burst=plan.mode == "burst",
+            ddr_ring_bytes=plan.victim_iq_bytes if plan.mode == "ring" else 0,
         )
-        ddr_probe = _probe_from_ladder("ddr", ddr_report)
+        ddr_probe = _probe_from_ladder(plan.mode, ddr_report)
         ordinary_report = run_metadata_continuity_ladder(
             uri=uri,
             serial=plan.serial,
@@ -325,37 +350,37 @@ def _new_radio(plan: DdrRecoveryPlan) -> IioRadioDevice:
     )
 
 
-def _kill_live_burst_client(plan: DdrRecoveryPlan, channel: int) -> int:
+def _kill_live_ddr_client(plan: DdrRecoveryPlan, channel: int) -> int:
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe(duplex=False)
     process = context.Process(
-        target=_burst_victim_worker,
+        target=_ddr_victim_worker,
         args=(plan.model_dump(mode="json"), channel, child),
     )
     process.start()
     child.close()
     try:
         if not parent.poll(VICTIM_READY_TIMEOUT_SECONDS):
-            raise DdrRecoveryError("burst victim did not reach active refill before deadline")
+            raise DdrRecoveryError("DDR victim did not reach active refill before deadline")
         message = cast(dict[str, Any], parent.recv())
         if message.get("state") != "refill-started":
-            raise DdrRecoveryError(str(message.get("error") or "burst victim failed to arm"))
+            raise DdrRecoveryError(str(message.get("error") or "DDR victim failed to arm"))
         if (
             message.get("requested_bytes") != plan.victim_iq_bytes
             or message.get("admitted_bytes") != plan.victim_iq_bytes
             or message.get("frames") != plan.victim_frames
         ):
-            raise DdrRecoveryError("burst victim admission readback is not exact")
+            raise DdrRecoveryError("DDR victim admission readback is not exact")
         time.sleep(plan.disconnect_delay_ms / 1_000)
         if not process.is_alive():
-            raise DdrRecoveryError("burst victim completed before the abrupt disconnect")
+            raise DdrRecoveryError("DDR victim completed before the abrupt disconnect")
         process.terminate()
         process.join(VICTIM_STOP_TIMEOUT_SECONDS)
         if process.is_alive():
             process.kill()
             process.join(VICTIM_STOP_TIMEOUT_SECONDS)
         if process.is_alive() or process.exitcode is None or process.exitcode >= 0:
-            raise DdrRecoveryError("burst victim did not terminate from an abrupt signal")
+            raise DdrRecoveryError("DDR victim did not terminate from an abrupt signal")
         return process.exitcode
     finally:
         parent.close()
@@ -364,7 +389,7 @@ def _kill_live_burst_client(plan: DdrRecoveryPlan, channel: int) -> int:
             process.join(VICTIM_STOP_TIMEOUT_SECONDS)
 
 
-def _burst_victim_worker(raw_plan: dict[str, Any], channel: int, connection: Any) -> None:
+def _ddr_victim_worker(raw_plan: dict[str, Any], channel: int, connection: Any) -> None:
     radio: IioRadioDevice | None = None
     capture: Any | None = None
     try:
@@ -372,7 +397,7 @@ def _burst_victim_worker(raw_plan: dict[str, Any], channel: int, connection: Any
         environment = inspect_iio_environment(require_usb=False)
         if not environment.healthy:
             raise DdrRecoveryError(
-                f"burst victim IIO environment failed: {environment.actionable_message}"
+                f"DDR victim IIO environment failed: {environment.actionable_message}"
             )
         radio = _new_radio(plan)
         radio.open()
@@ -391,18 +416,35 @@ def _burst_victim_worker(raw_plan: dict[str, Any], channel: int, connection: Any
             or round(actual.bandwidth_hz) != plan.rf_bandwidth_hz
             or tuple(actual.channels) != (channel,)
         ):
-            raise DdrRecoveryError("burst victim RX settings did not read back exactly")
+            raise DdrRecoveryError("DDR victim RX settings did not read back exactly")
         capture = radio.begin_metadata_capture(
             plan.victim_samples_per_frame,
             kernel_buffers=plan.kernel_buffers,
-            ddr_burst_bytes=plan.victim_iq_bytes,
+            ddr_burst_bytes=plan.victim_iq_bytes if plan.mode == "burst" else 0,
+            ddr_ring_bytes=plan.victim_iq_bytes if plan.mode == "ring" else 0,
+            ddr_ring_frames=plan.victim_frames if plan.mode == "ring" else 0,
+        )
+        requested_bytes = (
+            capture.ddr_burst_requested_bytes
+            if plan.mode == "burst"
+            else capture.ddr_ring_requested_bytes
+        )
+        admitted_bytes = (
+            capture.ddr_burst_admitted_bytes
+            if plan.mode == "burst"
+            else capture.ddr_ring_admitted_bytes
+        )
+        frames = (
+            capture.ddr_burst_frames
+            if plan.mode == "burst"
+            else capture.ddr_ring_capture_frames
         )
         connection.send(
             {
                 "state": "refill-started",
-                "requested_bytes": capture.ddr_burst_requested_bytes,
-                "admitted_bytes": capture.ddr_burst_admitted_bytes,
-                "frames": capture.ddr_burst_frames,
+                "requested_bytes": requested_bytes,
+                "admitted_bytes": admitted_bytes,
+                "frames": frames,
             }
         )
         capture.read_block()

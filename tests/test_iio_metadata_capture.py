@@ -249,6 +249,31 @@ class FakeMetadataBuffer:
     def cancel(self) -> None:
         self.cancelled = True
 
+    def ddr_ring_status(self) -> dict[str, object]:
+        requested = int(self.keywords.get("ddr_ring_bytes", 0))
+        target = int(self.keywords.get("ddr_ring_frames", 0))
+        if not requested or not target:
+            raise ValueError("not a finite DDR ring")
+        samples = int(self.signature[0])
+        frame_bytes = samples * 4
+        capacity = requested // frame_bytes
+        return {
+            "state": "complete",
+            "terminal_reason": "target_complete",
+            "error_code": 0,
+            "requested_capacity_iq_bytes": requested,
+            "admitted_capacity_iq_bytes": capacity * frame_bytes,
+            "target_frames": target,
+            "produced_frames": target,
+            "consumed_frames": target,
+            "high_water_frames": min(capacity, target),
+            "wrap_count": target // capacity,
+            "producer_position": target % capacity,
+            "consumer_position": target % capacity,
+            "last_contiguous_sample_sequence": 1_000 + target * samples,
+            "first_unavailable_sample_sequence": None,
+        }
+
 
 class FakeMetadataBufferFactory:
     def __init__(self) -> None:
@@ -271,6 +296,7 @@ class FakeAd9361:
         metadata_abi: int | None,
         metadata_layouts: str | None,
         ddr_burst: bool = False,
+        ddr_ring: bool = False,
         preserve_readback: bool = True,
     ) -> None:
         self.uri = uri
@@ -294,6 +320,15 @@ class FakeAd9361:
                     "iio,buffer-ddr-burst": "1",
                     "iio,buffer-ddr-burst-max-iq-bytes": "200000000",
                     "iio,buffer-ddr-burst-reserve-bytes": "134217728",
+                }
+            )
+        if ddr_ring:
+            attrs.update(
+                {
+                    "iio,buffer-ddr-ring": "1",
+                    "iio,buffer-ddr-ring-max-iq-bytes": "200000000",
+                    "iio,buffer-ddr-ring-modes": "finite,continuous",
+                    "iio,buffer-metadata-status": "1",
                 }
             )
         channels = tuple(
@@ -370,6 +405,7 @@ class FakeAdi:
         metadata_layouts: str | None = None,
         preserve_readback: bool = True,
         ddr_burst: bool = False,
+        ddr_ring: bool = False,
     ) -> None:
         self.headers = headers
         self.metadata_abi = metadata_abi
@@ -380,6 +416,7 @@ class FakeAdi:
         )
         self.preserve_readback = preserve_readback
         self.ddr_burst = ddr_burst
+        self.ddr_ring = ddr_ring
         self.device: FakeAd9361 | None = None
 
     def ad9361(self, uri: str) -> FakeAd9361:
@@ -390,6 +427,7 @@ class FakeAdi:
             metadata_layouts=self.metadata_layouts,
             preserve_readback=self.preserve_readback,
             ddr_burst=self.ddr_burst,
+            ddr_ring=self.ddr_ring,
         )
         return self.device
 
@@ -403,6 +441,7 @@ def _open_radio(
     include_metadata_buffer: bool = True,
     preserve_readback: bool = True,
     ddr_burst: bool = False,
+    ddr_ring: bool = False,
 ) -> tuple[IioRadioDevice, FakeAdi, FakeMetadataBufferFactory]:
     adi = FakeAdi(
         headers,
@@ -410,6 +449,7 @@ def _open_radio(
         metadata_layouts=metadata_layouts,
         preserve_readback=preserve_readback,
         ddr_burst=ddr_burst,
+        ddr_ring=ddr_ring,
     )
     factory = FakeMetadataBufferFactory()
     iio = SimpleNamespace(MetadataBuffer=factory) if include_metadata_buffer else SimpleNamespace()
@@ -825,6 +865,116 @@ def test_ddr_burst_cancel_reaches_underlying_iio_buffer() -> None:
         assert factory.instances[0].cancelled
         assert factory.instances[0].closed
         assert not capture.is_open
+    finally:
+        radio.close()
+
+
+def test_abi3_ddr_ring_is_a_finite_streaming_buffer_with_atomic_status() -> None:
+    frames = 3
+    headers = [
+        _metadata_v6(
+            channels=(0,),
+            buffer_sequence=sequence,
+            first_sample_sequence=1_000 + sequence * SAMPLE_COUNT,
+        )
+        for sequence in range(frames)
+    ]
+    radio, _adi, factory = _open_radio(
+        headers,
+        metadata_abi=3,
+        channels=(0,),
+        ddr_ring=True,
+    )
+    requested_bytes = SAMPLE_COUNT * 4 * 2 + 1
+    try:
+        capture = radio.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_ring_bytes=requested_bytes,
+            ddr_ring_frames=frames,
+        )
+        assert capture.ddr_ring_enabled
+        assert capture.ddr_ring_requested_bytes == requested_bytes
+        assert capture.ddr_ring_admitted_bytes == SAMPLE_COUNT * 4 * 2
+        assert capture.ddr_ring_capacity_frames == 2
+        assert capture.ddr_ring_capture_frames == frames
+        assert not capture.ddr_ring_continuous
+        assert factory.instances[0].keywords == {
+            "batch_frames": 1,
+            "ddr_ring_bytes": requested_bytes,
+            "ddr_ring_frames": frames,
+            "ddr_ring_continuous": False,
+        }
+        assert [capture.read_block().buffer_sequence for _ in range(frames)] == [0, 1, 2]
+        status = capture.ddr_ring_status()
+        assert status["state"] == "complete"
+        assert status["produced_frames"] == status["consumed_frames"] == frames
+        assert status["last_contiguous_sample_sequence"] == 1_000 + frames * SAMPLE_COUNT
+    finally:
+        radio.close()
+
+
+def test_abi3_ddr_ring_supports_explicit_continuous_mode_and_cancel() -> None:
+    radio, _adi, factory = _open_radio(
+        [], metadata_abi=3, channels=(0,), ddr_ring=True
+    )
+    try:
+        capture = radio.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_ring_bytes=SAMPLE_COUNT * 4 * 2,
+            ddr_ring_continuous=True,
+        )
+        assert capture.ddr_ring_continuous
+        assert capture.ddr_ring_capture_frames == 0
+        assert factory.instances[0].keywords["ddr_ring_continuous"] is True
+        capture.cancel()
+        assert factory.instances[0].cancelled
+        assert factory.instances[0].closed
+    finally:
+        radio.close()
+
+
+def test_ddr_ring_requires_capability_mode_status_and_valid_geometry() -> None:
+    radio, _adi, _factory = _open_radio([], metadata_abi=3, channels=(0,))
+    try:
+        with pytest.raises(RadioConfigurationError, match="does not advertise"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=1,
+            )
+    finally:
+        radio.close()
+
+    radio, adi, _factory = _open_radio(
+        [], metadata_abi=3, channels=(0,), ddr_ring=True
+    )
+    assert adi.device is not None
+    try:
+        with pytest.raises(RadioConfigurationError, match="one complete IIO frame"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4 - 1,
+                ddr_ring_frames=1,
+            )
+        with pytest.raises(RadioConfigurationError, match="advertised limit"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=200_000_001,
+                ddr_ring_frames=1,
+            )
+        adi.device.ctx.attrs["iio,buffer-ddr-ring-modes"] = "finite"
+        with pytest.raises(RadioConfigurationError, match="mode capability"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=1,
+            )
     finally:
         radio.close()
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, Self
 
@@ -182,6 +183,26 @@ class MetadataCapture(Protocol):
 
     @property
     def ddr_burst_frames(self) -> int: ...
+
+    @property
+    def ddr_ring_enabled(self) -> bool: ...
+
+    @property
+    def ddr_ring_requested_bytes(self) -> int: ...
+
+    @property
+    def ddr_ring_admitted_bytes(self) -> int: ...
+
+    @property
+    def ddr_ring_capacity_frames(self) -> int: ...
+
+    @property
+    def ddr_ring_capture_frames(self) -> int: ...
+
+    @property
+    def ddr_ring_continuous(self) -> bool: ...
+
+    def ddr_ring_status(self) -> Mapping[str, object]: ...
 
     def read_block(self) -> SampleBlockV2: ...
 
