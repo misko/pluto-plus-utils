@@ -944,6 +944,39 @@ def test_ddr_ring_prefill_v1_rc1_profile_is_exactly_bound_and_ram_only() -> None
     )
 
 
+def test_ddr_ring_prefill_v1_release_is_exactly_bound_and_ram_only() -> None:
+    policy = bootstrap.DDR_RING_PREFILL_V1_RELEASE_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "v0.44-plutoplus-spf-ddr-ring-prefill-v1"
+    assert policy.device_firmware == "v0.44-plutoplus-spf-ddr-ring-prefill-v1"
+    assert policy.source_commit == "0c49d6837847cefba9b139106dcffb1942f0ee22"
+    assert (
+        policy.asset_name
+        == "plutoplus-spf-ddr-ring-prefill-v1-0c49d6837847-pluto.dfu"
+    )
+    assert policy.asset_sha256 == (
+        "eb7d39f2f456d79f005239ddcff204166c9c607cd3647f1dd90464f99f439925"
+    )
+    assert policy.fit_body_sha256 == (
+        "589a33b865161ac5820031ae0666d7b04b5346f0aad56fc422dd94a50f43c24d"
+    )
+    assert policy.fit_body_size == 12_809_519
+    assert policy.hardware_qualified is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert profile.ddr_burst_max_iq_bytes == 200_000_000
+    assert profile.ddr_burst_reserve_bytes == 128 * 1024 * 1024
+    assert profile.ddr_ring_max_iq_bytes == 200_000_000
+    assert profile.ddr_ring_modes == "finite,continuous"
+    assert profile.buffer_metadata_status is True
+    assert not any(
+        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
+        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
+    )
+
+
 def test_ddr_ring_v1_release_requires_distinct_persistent_promotion() -> None:
     policy = bootstrap.DDR_RING_V1_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
