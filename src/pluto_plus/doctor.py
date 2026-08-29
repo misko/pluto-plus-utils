@@ -357,6 +357,24 @@ DDR_RING_V1_RC2_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 29, 3, 21, 53, tzinfo=UTC),
 )
 
+# Exact final-version-stamped DDR ring v1 image from protected main run
+# 33235840830. Its source graph is the hardware-qualified RC2 graph, but the
+# byte-distinct final DFU/FIT remains RAM-only until it repeats the focused
+# USB/IP, wrap, recovery, ordinary-IIO, and QSPI-unchanged hardware gates.
+DDR_RING_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-ring-v1-release-ram",
+    release_tag="v0.43-plutoplus-spf-ddr-ring-v1",
+    device_firmware="v0.43-plutoplus-spf-ddr-ring-v1",
+    asset_name="plutoplus-spf-ddr-ring-v1-49bb74657748-pluto.dfu",
+    asset_sha256="73714ac4caea187f69d4006d36bc461f7f9e1d1c7d6a3536997273420eac24db",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33235840830",
+    source_commit="49bb746577485463e32be0ef3c55bd723ea170aa",
+    fit_body_sha256="9bee5cfd9cc5cc3bebf50be1ce823d7f1af2e752a9962d842a8fa605ee1df74d",
+    fit_body_size=12_809_347,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 29, 5, 46, 5, tzinfo=UTC),
+)
+
 # The exact DDR burst v2 release DFU/FIT receives a distinct QSPI authorization
 # only after both physical PHY types passed the final-byte RAM matrix: 12 ms
 # and 200 MB on RX0/RX1, USB and physical Ethernet, deterministic lower-bound
