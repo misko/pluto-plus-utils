@@ -319,9 +319,29 @@ DDR_CAPACITY_TEST_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 28, 23, 59, 24, tzinfo=UTC),
 )
 
-# The exact same final DFU/FIT receives a distinct QSPI authorization only
-# after both physical PHY types passed the final-byte RAM matrix: 12 ms and
-# 200 MB on RX0/RX1, USB and physical Ethernet, deterministic lower-bound
+# Exact optional DDR-ring candidate built from the RC32-based release graph.
+# The ring extends ordinary IIO streaming with a device-side 200 MB circular
+# store and remains disabled unless a client explicitly requests it. The
+# protected build is release-eligible offline, but this identity permits only a
+# volatile DFU boot until the USB/IP, wrap, cancellation, recovery, and memory
+# gates pass on physical radios.
+DDR_RING_V1_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="ddr-ring-v1-rc1-ram",
+    release_tag="ddr-ring-v1-rc1-d6b3029aa6f2",
+    device_firmware="v0.43-plutoplus-spf-ddr-ring-v1-rc1",
+    asset_name="plutoplus-spf-ddr-ring-v1-rc1-d6b3029aa6f2-pluto.dfu",
+    asset_sha256="3dddf1eefed9ad87981183febddb7c3f9ae3cd43aa8c8c74901bb0b2ce3d9f7e",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33228159014",
+    source_commit="d6b3029aa6f21810f754fffd56428c149479ef05",
+    fit_body_sha256="9d350b9fd94f2e1f350d368458309a69cf412100bdb472b8f1c792d4cb16abfe",
+    fit_body_size=12_809_275,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 29, 2, 28, 15, tzinfo=UTC),
+)
+
+# The exact DDR burst v2 release DFU/FIT receives a distinct QSPI authorization
+# only after both physical PHY types passed the final-byte RAM matrix: 12 ms
+# and 200 MB on RX0/RX1, USB and physical Ethernet, deterministic lower-bound
 # rejection, abrupt-client recovery, and ordinary dual-RX postflight.
 DDR_BURST_V2_RELEASE_PERSISTENT_POLICY = DDR_BURST_V2_RELEASE_RAM_POLICY.model_copy(
     update={

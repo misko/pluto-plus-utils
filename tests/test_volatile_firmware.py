@@ -315,6 +315,51 @@ def test_ram_return_attestation_requires_exact_ddr_burst_capability(
         )
 
 
+def test_ram_return_attestation_requires_exact_ddr_ring_capability(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, _, _, radios = ram_plan
+    ring_plan = replace(
+        plan,
+        expected_ddr_ring_max_iq_bytes=200_000_000,
+        expected_ddr_ring_modes="finite,continuous",
+        expected_buffer_metadata_status=True,
+    )
+    facts = _facts("candidate-v1")
+    facts.update(
+        {
+            "iio,buffer-ddr-ring": "1",
+            "iio,buffer-ddr-ring-max-iq-bytes": "200000000",
+            "iio,buffer-ddr-ring-modes": "finite,continuous",
+            "iio,buffer-metadata-status": "1",
+        }
+    )
+    muted: list[str] = []
+    monkeypatch.setattr(volatile, "mute_returned_radio", muted.append)
+
+    returned = volatile._attest_ram_return(
+        ring_plan,
+        scanner=lambda: radios,
+        iiod_inspector=lambda interface: facts,
+        timeout_s=0.05,
+        poll_interval_s=0.001,
+    )
+
+    assert returned == ("SERIAL_A", "candidate-v1", "ad9361")
+    assert muted == ["SERIAL_A"]
+
+    facts["iio,buffer-ddr-ring-modes"] = "finite"
+    with pytest.raises(volatile.VolatileFirmwareError, match="DDR ring capability"):
+        volatile._attest_ram_return(
+            ring_plan,
+            scanner=lambda: radios,
+            iiod_inspector=lambda interface: facts,
+            timeout_s=0.01,
+            poll_interval_s=0.001,
+        )
+
+
 def test_transition_uncertainty_is_receipted_and_never_retryable(
     ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
     tmp_path: Path,
