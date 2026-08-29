@@ -419,6 +419,17 @@ def test_metadata_ladder_qualifies_exact_200_mb_release_burst_geometry() -> None
     assert report.cells[0].passed
 
 
+def test_metadata_ladder_frame_bound_covers_twenty_seconds_at_30_msps() -> None:
+    samples_per_channel = 1_000_000
+    sample_rate_hz = 30_000_000
+    nominal_seconds = 20
+
+    required_frames = nominal_seconds * sample_rate_hz // samples_per_channel
+
+    assert required_frames == 600
+    assert required_frames == MAX_METADATA_FRAMES
+
+
 def test_metadata_ladder_rejects_ddr_burst_outside_abi3_single_rx() -> None:
     radio = _Radio({262_144: (0, 1)})
     with pytest.raises(ValueError, match="ABI 3 and one receiver"):
