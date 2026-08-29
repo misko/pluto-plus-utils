@@ -49,8 +49,13 @@ omitting the flag is the explicit control case.
 ABI 3 additionally supports the optional streaming DDR ring when the radio
 advertises `iio,buffer-ddr-ring=1`, the exact modes `finite,continuous`, and
 `iio,buffer-metadata-status=1`. Unlike a sealed burst, a ring producer and the
-ordinary IIO consumer run concurrently. Full-ring backpressure preserves every
-frame; it never overwrites unread IQ. Capacity is independent of capture length:
+ordinary IIO consumer run concurrently. Before it starts transport, iiOD fills
+the admitted ring completely (or captures the smaller finite target). That
+prefix is strict and contiguous. During a longer capture, unread ring frames are
+never overwritten; if finite DDR plus the kernel queue cannot absorb sustained
+source-versus-transport pressure, later IQ gaps are carried explicitly by ABI 3
+metadata instead of terminating the capture. Capacity is independent of capture
+length:
 
 ```python
 with radio.begin_metadata_capture(
@@ -69,7 +74,11 @@ Set `ddr_ring_continuous=True` and leave `ddr_ring_frames=0` for a stream that
 runs until buffer close/cancel. A zero `ddr_ring_bytes` selects the unchanged
 ordinary IIO path. DDR ring and sealed DDR burst are mutually exclusive.
 `radio metadata-ladder --ddr-ring-bytes BYTES` exercises finite capture and
-requires its atomic final status and FPGA sample boundary to close exactly.
+requires clean target completion, exact producer/consumer closure, a full
+high-water mark, and a counter-proven contiguous admitted prefix. Its report
+separately records later gaps and delivery fraction. Transport qualification
+uses tandem HOLD by default so gain transitions do not confound the data-path
+result; pass `--tandem-mode auto` to exercise both systems together.
 
 Build the matched native library and binding into a release-local virtual
 environment:
@@ -186,4 +195,20 @@ uv run pluto radio metadata-ladder 192.168.2.1 \
   --metadata-abi 3 --channels rx0 --sample-rate-hz 2500000 \
   --rf-bandwidth-hz 2500000 --samples 4194304,2097152,1048576,524288 \
   --frames 6 --kernel-buffers 4 --report /ABSOLUTE/PRIVATE/PATH/rx0.json
+```
+
+For the 20 MS/s, 20-second single-RX issue qualification over physical
+Ethernet, use 1,000,000-sample frames (400 frames) and compare the ordinary path
+with the 200 MB ring path:
+
+```bash
+uv run pluto radio metadata-ladder 192.168.1.17 \
+  --transport ip --expect-serial EXACT_SERIAL --metadata-abi 3 --channels rx0 \
+  --sample-rate-hz 20000000 --rf-bandwidth-hz 20000000 \
+  --samples 1000000 --frames 400 --kernel-buffers 4 --tandem-mode hold
+uv run pluto radio metadata-ladder 192.168.1.17 \
+  --transport ip --expect-serial EXACT_SERIAL --metadata-abi 3 --channels rx0 \
+  --sample-rate-hz 20000000 --rf-bandwidth-hz 20000000 \
+  --samples 1000000 --frames 400 --kernel-buffers 4 --tandem-mode hold \
+  --ddr-ring-bytes 200000000
 ```

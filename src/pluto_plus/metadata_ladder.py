@@ -16,6 +16,7 @@ from pluto_plus.hardware.base import (
 from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.ladder import MAX_SAMPLES_PER_CHANNEL, MIN_SAMPLES_PER_CHANNEL
 from pluto_plus.models import ApiModel, RadioSettings
+from pluto_plus.tandem import TandemMode, TandemSessionRequestV1
 
 DEFAULT_METADATA_SAMPLE_LADDER = "4194304,2097152,1048576,524288,262144,131072"
 MAX_METADATA_SAMPLE_RUNGS = 16
@@ -33,6 +34,7 @@ DDR_BURST_MIN_FRAME_DURATION_US = 12_000
 MAX_DDR_RING_IQ_BYTES = 200_000_000
 MetadataAbi = Literal[1, 2, 3]
 MetadataChannels = Literal["rx0", "rx1", "dual"]
+MetadataTandemMode = Literal["hold", "auto"]
 METADATA_CHANNEL_SELECTIONS: dict[MetadataChannels, tuple[int, ...]] = {
     "rx0": (0,),
     "rx1": (1,),
@@ -58,7 +60,7 @@ class DdrRingStatusSnapshot(ApiModel):
 
 
 class DdrRingFinalStatus(DdrRingStatusSnapshot):
-    """A terminal ring status that proves an exact successful capture."""
+    """A terminal ring status that proves every requested host frame arrived."""
 
     @model_validator(mode="after")
     def validate_complete_capture(self) -> DdrRingFinalStatus:
@@ -72,8 +74,6 @@ class DdrRingFinalStatus(DdrRingStatusSnapshot):
             raise ValueError("DDR ring producer/consumer frame counts do not close")
         if self.high_water_frames < 1:
             raise ValueError("DDR ring did not report occupied storage")
-        if self.first_unavailable_sample_sequence is not None:
-            raise ValueError("DDR ring reported an unavailable sample boundary")
         return self
 
 
@@ -86,6 +86,8 @@ class MetadataContinuityCell(ApiModel):
     observed_frames: int = Field(gt=0)
     observed_sample_count: int = Field(gt=0)
     device_span_sample_count: int = Field(gt=0)
+    first_sample_sequence: int = Field(ge=0)
+    last_sample_sequence_exclusive: int = Field(gt=0)
     missing_sample_count: int = Field(ge=0)
     gap_count: int = Field(ge=0)
     overflow_count: int = Field(ge=0)
@@ -95,6 +97,9 @@ class MetadataContinuityCell(ApiModel):
     ddr_burst_admitted_iq_bytes: int = Field(default=0, ge=0)
     ddr_burst_frames: int = Field(default=0, ge=0)
     ddr_ring_status: DdrRingFinalStatus | None = None
+    ddr_ring_prefix_frames: int = Field(default=0, ge=0)
+    ddr_ring_prefix_iq_bytes: int = Field(default=0, ge=0)
+    ddr_ring_prefix_contiguous: bool = False
     passed: bool
 
     @model_validator(mode="after")
@@ -107,6 +112,10 @@ class MetadataContinuityCell(ApiModel):
             self.observed_sample_count + self.missing_sample_count
         ):
             raise ValueError("metadata ladder device span does not close")
+        if self.last_sample_sequence_exclusive - self.first_sample_sequence != (
+            self.device_span_sample_count
+        ):
+            raise ValueError("metadata ladder sample boundaries do not close")
         expected_fraction = self.observed_sample_count / self.device_span_sample_count
         if abs(self.observed_fraction - expected_fraction) > 1e-12:
             raise ValueError("metadata ladder observed fraction does not close")
@@ -132,6 +141,18 @@ class MetadataContinuityCell(ApiModel):
                 or status.last_contiguous_sample_sequence is None
             ):
                 raise ValueError("metadata ladder DDR ring status does not close")
+            if (
+                self.ddr_ring_prefix_frames < 1
+                or self.ddr_ring_prefix_iq_bytes < 1
+                or not self.ddr_ring_prefix_contiguous
+            ):
+                raise ValueError("metadata ladder DDR ring prefix is not proven contiguous")
+        elif (
+            self.ddr_ring_prefix_frames
+            or self.ddr_ring_prefix_iq_bytes
+            or self.ddr_ring_prefix_contiguous
+        ):
+            raise ValueError("ordinary metadata ladder cannot report a DDR ring prefix")
         return self
 
 
@@ -172,6 +193,7 @@ class MetadataContinuityLadderReport(ApiModel):
     rf_bandwidth_hz: int = Field(gt=0)
     channels: tuple[int, ...]
     kernel_buffers: int = Field(ge=4, le=64)
+    tandem_mode: MetadataTandemMode = "hold"
     ddr_burst_enabled: bool = False
     ddr_ring_requested_iq_bytes: int = Field(default=0, ge=0)
     minimum_observed_fraction: float = Field(
@@ -221,11 +243,14 @@ class MetadataContinuityLadderReport(ApiModel):
             expected_admitted = (
                 self.ddr_ring_requested_iq_bytes // frame_iq_bytes
             ) * frame_iq_bytes
+            expected_prefix_frames = min(status.target_frames, capacity_frames)
             if (
                 remainder
                 or status.admitted_capacity_iq_bytes != expected_admitted
                 or capacity_frames < 1
-                or status.high_water_frames > capacity_frames
+                or status.high_water_frames != expected_prefix_frames
+                or cell.ddr_ring_prefix_frames != expected_prefix_frames
+                or cell.ddr_ring_prefix_iq_bytes != expected_prefix_frames * frame_iq_bytes
             ):
                 raise ValueError("metadata ladder DDR ring capacity does not close")
         return self
@@ -241,6 +266,7 @@ class MetadataLadderRadio(RadioDevice, Protocol):
         ddr_ring_bytes: int = 0,
         ddr_ring_frames: int = 0,
         ddr_ring_continuous: bool = False,
+        tandem_request: TandemSessionRequestV1 | None = None,
     ) -> MetadataCapture: ...
 
 
@@ -276,6 +302,7 @@ def run_metadata_continuity_ladder(
     kernel_buffers: int = 4,
     ddr_burst: bool = False,
     ddr_ring_bytes: int = 0,
+    tandem_mode: MetadataTandemMode = "hold",
     radio_factory: Callable[[str, str, MetadataAbi], MetadataLadderRadio] | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> MetadataContinuityLadderReport:
@@ -291,6 +318,8 @@ def run_metadata_continuity_ladder(
     selected_channels = tuple(channels)
     if metadata_abi not in {1, 2, 3}:
         raise ValueError("metadata ABI must be 1, 2, or 3")
+    if tandem_mode not in {"hold", "auto"}:
+        raise ValueError("metadata tandem mode must be hold or auto")
     if selected_channels not in set(METADATA_CHANNEL_SELECTIONS.values()):
         raise ValueError("metadata channels must be RX0, RX1, or dual")
     if metadata_abi in {1, 2} and selected_channels != (0, 1):
@@ -352,6 +381,7 @@ def run_metadata_continuity_ladder(
                         receiver_count=len(selected_channels),
                         ddr_burst=ddr_burst,
                         ddr_ring_bytes=ddr_ring_bytes,
+                        tandem_mode=tandem_mode,
                         clock_ns=clock_ns,
                     )
                 )
@@ -393,6 +423,7 @@ def run_metadata_continuity_ladder(
         rf_bandwidth_hz=rf_bandwidth_hz,
         channels=selected_channels,
         kernel_buffers=kernel_buffers,
+        tandem_mode=tandem_mode,
         ddr_burst_enabled=ddr_burst,
         ddr_ring_requested_iq_bytes=ddr_ring_bytes,
         cells=tuple(cells),
@@ -415,6 +446,7 @@ def _run_cell(
     receiver_count: int,
     ddr_burst: bool,
     ddr_ring_bytes: int,
+    tandem_mode: MetadataTandemMode,
     clock_ns: Callable[[], int],
 ) -> MetadataContinuityCell:
     if ddr_burst:
@@ -443,6 +475,11 @@ def _run_cell(
         ddr_burst_bytes=ddr_burst_bytes,
         ddr_ring_bytes=ddr_ring_bytes,
         ddr_ring_frames=frames if ddr_ring_bytes else 0,
+        tandem_request=(
+            TandemSessionRequestV1(mode=TandemMode.HOLD)
+            if tandem_mode == "hold"
+            else TandemSessionRequestV1.auto_for_sample_count(samples_per_channel)
+        ),
     ) as capture:
         try:
             if capture.kernel_buffers != kernel_buffers:
@@ -503,17 +540,40 @@ def _run_cell(
     if span != observed + missing:
         raise RuntimeError("metadata ladder FPGA counter span does not close")
     fraction = observed / span
-    if (
-        ring_status is not None
-        and ring_status.last_contiguous_sample_sequence != last_sample_sequence_exclusive
-    ):
-        raise RuntimeError("DDR ring sample boundary disagrees with captured metadata")
+    ring_prefix_frames = 0
+    ring_prefix_iq_bytes = 0
+    ring_prefix_contiguous = False
+    if ring_status is not None:
+        ring_prefix_frames = min(frames, expected_ring_admitted_bytes // frame_iq_bytes)
+        ring_prefix_iq_bytes = ring_prefix_frames * frame_iq_bytes
+        prefix_end = first_sample_sequence + ring_prefix_frames * samples_per_channel
+        ring_prefix_contiguous = (
+            ring_status.high_water_frames >= ring_prefix_frames
+            and ring_status.last_contiguous_sample_sequence is not None
+            and ring_status.last_contiguous_sample_sequence >= prefix_end
+            and (
+                ring_status.first_unavailable_sample_sequence is None
+                or ring_status.first_unavailable_sample_sequence >= prefix_end
+            )
+        )
+        if not ring_prefix_contiguous:
+            raise RuntimeError("DDR ring did not preserve its admitted contiguous prefix")
+        if ring_status.first_unavailable_sample_sequence is None:
+            if ring_status.last_contiguous_sample_sequence != last_sample_sequence_exclusive:
+                raise RuntimeError("DDR ring final contiguous boundary disagrees with metadata")
+        elif (
+            ring_status.last_contiguous_sample_sequence
+            != ring_status.first_unavailable_sample_sequence
+        ):
+            raise RuntimeError("DDR ring first unavailable boundary is not canonical")
     return MetadataContinuityCell(
         samples_per_channel=samples_per_channel,
         requested_frames=frames,
         observed_frames=observed_frames,
         observed_sample_count=observed,
         device_span_sample_count=span,
+        first_sample_sequence=first_sample_sequence,
+        last_sample_sequence_exclusive=last_sample_sequence_exclusive,
         missing_sample_count=missing,
         gap_count=gap_count,
         overflow_count=overflow_count,
@@ -523,6 +583,9 @@ def _run_cell(
         ddr_burst_admitted_iq_bytes=ddr_burst_bytes,
         ddr_burst_frames=frames if ddr_burst else 0,
         ddr_ring_status=ring_status,
+        ddr_ring_prefix_frames=ring_prefix_frames,
+        ddr_ring_prefix_iq_bytes=ring_prefix_iq_bytes,
+        ddr_ring_prefix_contiguous=ring_prefix_contiguous,
         passed=fraction >= MINIMUM_OBSERVED_FRACTION and overflow_count == 0,
     )
 

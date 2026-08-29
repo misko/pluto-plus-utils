@@ -1982,6 +1982,28 @@ def test_metadata_ladder_rejects_dual_receiver_ddr_ring_before_opening_radio(
     assert "ordinary dual RX is unchanged" in result.output
 
 
+def test_metadata_ladder_rejects_unknown_tandem_mode_before_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda **_kwargs: pytest.fail("invalid tandem mode reached hardware preflight"),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "metadata-ladder",
+            "SERIAL_A",
+            "--tandem-mode",
+            "adaptive",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "invalid_metadata_ladder_tandem_mode" in result.output
+
+
 def _patch_network_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2200,6 +2222,8 @@ def test_metadata_ladder_writes_an_absent_only_private_report(
                 observed_frames=2,
                 observed_sample_count=524_288,
                 device_span_sample_count=524_288,
+                first_sample_sequence=1_000,
+                last_sample_sequence_exclusive=525_288,
                 missing_sample_count=0,
                 gap_count=0,
                 overflow_count=0,

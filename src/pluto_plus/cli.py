@@ -1494,6 +1494,14 @@ def radio_metadata_ladder(
             "each rung remains a finite --frames capture (metadata ABI 3)."
         ),
     ),
+    tandem_mode: str = typer.Option(
+        "hold",
+        "--tandem-mode",
+        help=(
+            "Tandem AGC mode during transport qualification: hold isolates transport; "
+            "auto also exercises gain transitions."
+        ),
+    ),
     report_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--report",
@@ -1635,6 +1643,13 @@ def radio_metadata_ladder(
             "DDR burst and ring modes require --channels rx0 or rx1; ordinary dual RX is unchanged",
             2,
         )
+    normalized_tandem_mode = tandem_mode.strip().lower()
+    if normalized_tandem_mode not in {"hold", "auto"}:
+        _fail(
+            "invalid_metadata_ladder_tandem_mode",
+            "--tandem-mode must be hold or auto",
+            2,
+        )
     environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
     if not environment.healthy:
         _fail(environment.status.value, environment.actionable_message, 5)
@@ -1652,6 +1667,7 @@ def radio_metadata_ladder(
             kernel_buffers=kernel_buffers,
             ddr_burst=ddr_burst,
             ddr_ring_bytes=ddr_ring_bytes,
+            tandem_mode=cast(Any, normalized_tandem_mode),
         )
 
     try:

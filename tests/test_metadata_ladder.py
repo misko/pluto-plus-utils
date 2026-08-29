@@ -17,6 +17,7 @@ from pluto_plus.metadata_ladder import (
     run_metadata_continuity_ladder,
 )
 from pluto_plus.models import RadioCapabilities, RadioIdentity, RadioSettings, Transport
+from pluto_plus.tandem import TandemMode
 
 
 class _Capture:
@@ -82,7 +83,7 @@ class _Capture:
             stream_id=1,
             buffer_sequence=sequence,
             first_sample_sequence=1_000 + sequence * self.samples,
-            metadata_flags=(1 << 2),
+            metadata_flags=(1 << 2) | ((1 << 11) | (1 << 23) if missing else 0),
             metadata_abi=1,
             missing_samples_before=missing,
         )
@@ -116,6 +117,7 @@ class _Radio:
         self.capabilities = RadioCapabilities(receiver_channels=(0, 1))
         self.opened = False
         self.capture_requests: list[int] = []
+        self.tandem_requests: list[object | None] = []
 
     def open(self) -> None:
         self.opened = True
@@ -139,8 +141,10 @@ class _Radio:
         ddr_ring_bytes: int = 0,
         ddr_ring_frames: int = 0,
         ddr_ring_continuous: bool = False,
+        tandem_request: object | None = None,
     ) -> _Capture:
         self.capture_requests.append(sample_count)
+        self.tandem_requests.append(tandem_request)
         capture = _Capture(
             sample_count,
             self.sequences[sample_count],
@@ -237,7 +241,9 @@ def test_metadata_ladder_releases_iq_frames_while_accounting() -> None:
             ddr_ring_bytes: int = 0,
             ddr_ring_frames: int = 0,
             ddr_ring_continuous: bool = False,
+            tandem_request: object | None = None,
         ) -> _Capture:
+            del tandem_request
             return self.capture
 
     radio = _RetentionRadio()
@@ -294,6 +300,92 @@ def test_metadata_ladder_supports_every_abi3_layout(channels: tuple[int, ...]) -
     )
     assert report.channels == channels
     assert report.cells[0].passed
+    assert report.tandem_mode == "hold"
+    assert all(
+        getattr(request, "mode", None) is TandemMode.HOLD
+        for request in radio.tandem_requests
+    )
+
+
+def test_metadata_ladder_accepts_gaps_only_after_exact_ddr_prefix() -> None:
+    samples = 262_144
+    frames = 6
+    sequences = (0, 1, 4, 5, 8, 9)
+
+    class _PostPrefixGapCapture(_Capture):
+        def ddr_ring_status(self) -> dict[str, object]:
+            prefix_end = 1_000 + 2 * self.samples
+            return {
+                "state": "complete",
+                "terminal_reason": "target_complete",
+                "error_code": 0,
+                "requested_capacity_iq_bytes": self.ddr_ring_requested_bytes,
+                "admitted_capacity_iq_bytes": self.ddr_ring_admitted_bytes,
+                "target_frames": self.ddr_ring_capture_frames,
+                "produced_frames": self.ddr_ring_capture_frames,
+                "consumed_frames": self.ddr_ring_capture_frames,
+                "high_water_frames": 2,
+                "wrap_count": 3,
+                "producer_position": 0,
+                "consumer_position": 0,
+                "last_contiguous_sample_sequence": prefix_end,
+                "first_unavailable_sample_sequence": prefix_end,
+            }
+
+    class _PostPrefixGapRadio(_Radio):
+        def begin_metadata_capture(
+            self,
+            sample_count: int,
+            *,
+            kernel_buffers: int,
+            ddr_burst_bytes: int = 0,
+            ddr_ring_bytes: int = 0,
+            ddr_ring_frames: int = 0,
+            ddr_ring_continuous: bool = False,
+            tandem_request: object | None = None,
+        ) -> _Capture:
+            del ddr_burst_bytes
+            self.tandem_requests.append(tandem_request)
+            capture = _PostPrefixGapCapture(
+                sample_count,
+                sequences,
+                kernel_buffers,
+                len(self.settings.channels),
+            )
+            frame_bytes = sample_count * len(self.settings.channels) * 4
+            capture.ddr_ring_requested_bytes = ddr_ring_bytes
+            capture.ddr_ring_capacity_frames = ddr_ring_bytes // frame_bytes
+            capture.ddr_ring_admitted_bytes = capture.ddr_ring_capacity_frames * frame_bytes
+            capture.ddr_ring_capture_frames = ddr_ring_frames
+            capture.ddr_ring_continuous = ddr_ring_continuous
+            capture.ddr_ring_enabled = True
+            return capture
+
+    frame_bytes = samples * 4
+    radio = _PostPrefixGapRadio({samples: sequences})
+    report = run_metadata_continuity_ladder(
+        uri="ip:192.0.2.1",
+        serial="SERIAL_A",
+        sample_rate_hz=20_000_000,
+        rf_bandwidth_hz=20_000_000,
+        metadata_abi=3,
+        channels=(0,),
+        samples_per_channel=(samples,),
+        frames=frames,
+        kernel_buffers=4,
+        ddr_ring_bytes=2 * frame_bytes,
+        radio_factory=lambda _uri, _serial, _abi: radio,
+        clock_ns=iter((0, 1_000_000_000)).__next__,
+    )
+
+    cell = report.cells[0]
+    assert not report.failures
+    assert cell.ddr_ring_prefix_frames == 2
+    assert cell.ddr_ring_prefix_iq_bytes == 2 * frame_bytes
+    assert cell.ddr_ring_prefix_contiguous
+    assert cell.gap_count == 2
+    assert cell.overflow_count == 2
+    assert not cell.passed
 
 
 def test_metadata_ladder_rejects_single_rx_before_abi3_and_odd_abi3_counts() -> None:
@@ -520,7 +612,9 @@ def test_metadata_ladder_preserves_failed_ring_status_before_close() -> None:
             ddr_ring_bytes: int = 0,
             ddr_ring_frames: int = 0,
             ddr_ring_continuous: bool = False,
+            tandem_request: object | None = None,
         ) -> _Capture:
+            del tandem_request
             capture = _FailedRingCapture(
                 sample_count,
                 tuple(range(frames)),
