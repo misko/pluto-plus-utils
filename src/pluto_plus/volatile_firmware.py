@@ -68,6 +68,7 @@ class VolatileFirmwarePlan:
     expected_buffer_metadata_status: bool = False
     expected_buffer_metadata_timing_log: bool = False
     expected_iiod_cpu_affinity: int | None = None
+    expected_iiod_rw_cpu_affinity: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +255,7 @@ def prepare_ram_boot_plan(
         expected_buffer_metadata_status=profile.buffer_metadata_status,
         expected_buffer_metadata_timing_log=profile.buffer_metadata_timing_log,
         expected_iiod_cpu_affinity=profile.iiod_cpu_affinity,
+        expected_iiod_rw_cpu_affinity=profile.iiod_rw_cpu_affinity,
     )
 
 
@@ -316,6 +318,7 @@ def execute_ram_boot_plan(
         "expected_buffer_metadata_status",
         "expected_buffer_metadata_timing_log",
         "expected_iiod_cpu_affinity",
+        "expected_iiod_rw_cpu_affinity",
     ):
         if getattr(fresh, field) != getattr(plan, field):
             raise VolatileFirmwareError(f"RAM-boot precondition changed: {field}")
@@ -725,6 +728,7 @@ def _revalidate_plan_image(plan: VolatileFirmwarePlan) -> None:
         or plan.expected_buffer_metadata_status is not profile.buffer_metadata_status
         or plan.expected_buffer_metadata_timing_log is not profile.buffer_metadata_timing_log
         or plan.expected_iiod_cpu_affinity != profile.iiod_cpu_affinity
+        or plan.expected_iiod_rw_cpu_affinity != profile.iiod_rw_cpu_affinity
     ):
         raise VolatileFirmwareError("receipt image no longer matches its immutable profile")
 
@@ -827,6 +831,18 @@ def _attest_ram_return(
             if observed_cpu_affinity != expected_cpu_affinity:
                 raise VolatileFirmwareError(
                     "returned RAM image iiOD CPU-affinity capability is wrong"
+                )
+            observed_rw_cpu_affinity = str(
+                facts.get("iio,iiod-rw-cpu-affinity") or ""
+            ).strip()
+            expected_rw_cpu_affinity = (
+                ""
+                if plan.expected_iiod_rw_cpu_affinity is None
+                else str(plan.expected_iiod_rw_cpu_affinity)
+            )
+            if observed_rw_cpu_affinity != expected_rw_cpu_affinity:
+                raise VolatileFirmwareError(
+                    "returned RAM image iiOD R/W CPU-affinity capability is wrong"
                 )
             mute_returned_radio_at_path(plan.serial, Path(plan.usb_sysfs_path))
             return serial, firmware, phy
