@@ -13,8 +13,11 @@ from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.release_candidate import (
     CANDIDATE_PLAN_SCHEMA,
     OPERATION_PLAN_SCHEMA,
+    PLUTO_REV_C_AD9361_MODEL,
+    PLUTO_REV_C_AD9363A_MODEL,
     RAM_RECEIPT_SCHEMA,
     USB_INVENTORY_SCHEMA,
+    CanonicalHardwareSetup,
     CleanupReceipt,
     ContentIdentity,
     DfuIdentity,
@@ -63,7 +66,7 @@ def _candidate() -> ReleaseCandidatePlan:
         fit=ContentIdentity(bytes=12_788_447, sha256="5" * 64),
         expected_runtime=ExpectedRuntime(
             firmware_version="v0.41-plutoplus-spf-tandem-agc-v8-rc14",
-            hardware_model="Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
+            hardware_model=PLUTO_REV_C_AD9361_MODEL,
             metadata_abi="frame-metadata-v5",
             capabilities=("tandem-agc",),
         ),
@@ -139,18 +142,37 @@ def _safe() -> SafeState:
     )
 
 
-def _runtime(*, firmware: str, boot_id: str) -> RuntimeObservation:
+def _canonical_setup(*, phy_model: str = "ad9363a") -> CanonicalHardwareSetup:
+    return CanonicalHardwareSetup.model_validate(
+        {
+            "uboot_attr_name_absent": True,
+            "uboot_attr_val_absent": True,
+            "uboot_compatible": "ad9361",
+            "uboot_mode": "2r2t",
+            "phy_model": phy_model,
+            "rx_scan_channels": ("voltage0", "voltage1", "voltage2", "voltage3"),
+            "tandem_device": True,
+        }
+    )
+
+
+def _runtime(
+    *, firmware: str, boot_id: str, model: str = PLUTO_REV_C_AD9361_MODEL
+) -> RuntimeObservation:
     return RuntimeObservation(
         serial=SERIAL,
         topology=TOPOLOGY,
         usb_uri="usb:3.29.5",
-        hardware_model="Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
+        hardware_model=model,
         firmware_version=firmware,
         metadata_abi="frame-metadata-v5",
         capabilities=("tandem-agc",),
         boot_id=boot_id,
         qspi=QspiObservation(bytes=31_457_280, sha256="9" * 64),
         safe_state=_safe(),
+        canonical_hardware_setup=(
+            _canonical_setup() if model == PLUTO_REV_C_AD9363A_MODEL else None
+        ),
     )
 
 
@@ -171,7 +193,7 @@ def _receipt() -> ReleaseCandidateRamReceipt:
         candidate_fit=candidate.fit,
         target=_target(),
         expected_firmware="v0.41-plutoplus-spf-tandem-agc-v8-rc14",
-        expected_hardware_model="Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
+        expected_hardware_model=PLUTO_REV_C_AD9361_MODEL,
         expected_metadata_abi="frame-metadata-v5",
         required_capabilities=("tandem-agc",),
         pre_runtime=_runtime(
@@ -215,6 +237,55 @@ def test_candidate_plan_is_ram_only_exact_and_canonical() -> None:
     assert payload.endswith(b"\n")
     assert json.loads(payload)["fit"]["sha256"] == "5" * 64
     assert canonical_json_bytes(json.loads(payload)) == payload
+
+
+def test_candidate_contract_accepts_only_exact_supported_revc_models() -> None:
+    payload = _candidate().model_dump(mode="python", by_alias=True)
+    expected = payload["expected_runtime"]
+    assert isinstance(expected, dict)
+    expected["hardware_model"] = PLUTO_REV_C_AD9363A_MODEL
+
+    native = ReleaseCandidatePlan.model_validate(payload)
+
+    assert native.expected_runtime.hardware_model == PLUTO_REV_C_AD9363A_MODEL
+    expected["hardware_model"] = "Analog Devices PlutoSDR Rev.C (Z7010/AD9363A)"
+    with pytest.raises(ValidationError, match="exact supported PlutoSDR Rev.C"):
+        ReleaseCandidatePlan.model_validate(payload)
+
+
+def test_native_ad9363a_runtime_requires_canonical_setup_proof() -> None:
+    runtime = _runtime(
+        firmware="candidate",
+        boot_id="11111111-1111-4111-8111-111111111111",
+        model=PLUTO_REV_C_AD9363A_MODEL,
+    )
+    payload = runtime.model_dump(mode="python", by_alias=True)
+    payload["canonical_hardware_setup"] = None
+
+    with pytest.raises(ValidationError, match="requires canonical AD9361/2R2T"):
+        RuntimeObservation.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("uboot_attr_name_absent", False, "Input should be True"),
+        ("uboot_attr_val_absent", False, "Input should be True"),
+        ("uboot_compatible", "ad9363a", "ad9361"),
+        ("uboot_mode", "1r1t", "2r2t"),
+        ("phy_model", "ad9364", "ad9361"),
+        ("rx_scan_channels", ("voltage0", "voltage1"), "paired-RX"),
+        ("tandem_device", False, "Input should be True"),
+    ],
+)
+def test_canonical_hardware_setup_rejects_noncanonical_mutations(
+    field: str, value: object, message: str
+) -> None:
+    payload = _canonical_setup().model_dump(mode="python")
+    payload[field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        CanonicalHardwareSetup.model_validate(payload)
 
 
 @pytest.mark.parametrize(
@@ -377,6 +448,7 @@ def test_operation_plan_rejects_live_or_ambiguous_inputs(
 
 def test_passing_receipt_proves_new_boot_unchanged_qspi_and_cleanup() -> None:
     receipt = _receipt()
+    serialized = receipt.model_dump(mode="python", by_alias=True)
 
     assert receipt.schema_id == RAM_RECEIPT_SCHEMA
     assert receipt.outcome == "pass"
@@ -387,6 +459,8 @@ def test_passing_receipt_proves_new_boot_unchanged_qspi_and_cleanup() -> None:
     assert receipt.transition.persistent_write is False
     assert receipt.host_route.release_verified is True
     assert receipt.cleanup.verified is True
+    assert "canonical_hardware_setup" not in serialized["pre_runtime"]
+    assert "canonical_hardware_setup" not in serialized["post_runtime"]
     validate_contract_bundle(
         _candidate(),
         _operation(),
@@ -394,6 +468,44 @@ def test_passing_receipt_proves_new_boot_unchanged_qspi_and_cleanup() -> None:
         candidate_path=Path("/evidence/candidate-plan.json"),
         operation_path=Path("/evidence/operation-plan.json"),
     )
+
+
+def test_native_ad9363a_candidate_and_receipt_remain_exact_model_bound() -> None:
+    candidate_payload = _candidate().model_dump(mode="python", by_alias=True)
+    expected = candidate_payload["expected_runtime"]
+    assert isinstance(expected, dict)
+    expected["hardware_model"] = PLUTO_REV_C_AD9363A_MODEL
+    candidate = ReleaseCandidatePlan.model_validate(candidate_payload)
+    operation = _operation(candidate)
+    receipt_payload = _receipt().model_dump(mode="python", by_alias=True)
+    receipt_payload["candidate_plan"] = model_file_identity(
+        Path("/evidence/candidate-plan.json"), candidate
+    ).model_dump(mode="python")
+    receipt_payload["operation_plan"] = model_file_identity(
+        Path("/evidence/operation-plan.json"), operation
+    ).model_dump(mode="python")
+    receipt_payload["expected_hardware_model"] = PLUTO_REV_C_AD9363A_MODEL
+    for runtime_name in ("pre_runtime", "post_runtime"):
+        runtime = receipt_payload[runtime_name]
+        assert isinstance(runtime, dict)
+        runtime["hardware_model"] = PLUTO_REV_C_AD9363A_MODEL
+        runtime["canonical_hardware_setup"] = _canonical_setup().model_dump(mode="python")
+    receipt = ReleaseCandidateRamReceipt.model_validate(receipt_payload)
+
+    validate_contract_bundle(
+        candidate,
+        operation,
+        receipt,
+        candidate_path=Path("/evidence/candidate-plan.json"),
+        operation_path=Path("/evidence/operation-plan.json"),
+    )
+    assert receipt.pre_runtime is not None
+    assert receipt.post_runtime is not None
+    assert receipt.pre_runtime.hardware_model == PLUTO_REV_C_AD9363A_MODEL
+    assert receipt.post_runtime.hardware_model == PLUTO_REV_C_AD9363A_MODEL
+    serialized = receipt.model_dump(mode="python", by_alias=True)
+    assert serialized["pre_runtime"]["canonical_hardware_setup"]["uboot_mode"] == "2r2t"
+    assert serialized["post_runtime"]["canonical_hardware_setup"]["tandem_device"] is True
 
 
 @pytest.mark.parametrize(
@@ -426,7 +538,10 @@ def test_passing_receipt_rejects_planted_semantic_failures(mutation: str, messag
     elif mutation == "wrong_firmware":
         payload["post_runtime"]["firmware_version"] = "wrong"
     elif mutation == "wrong_model":
-        payload["post_runtime"]["hardware_model"] = "wrong model"
+        payload["post_runtime"]["hardware_model"] = PLUTO_REV_C_AD9363A_MODEL
+        payload["post_runtime"]["canonical_hardware_setup"] = _canonical_setup().model_dump(
+            mode="python"
+        )
     elif mutation == "wrong_abi":
         payload["post_runtime"]["metadata_abi"] = "frame-metadata-v4"
     elif mutation == "wrong_capabilities":

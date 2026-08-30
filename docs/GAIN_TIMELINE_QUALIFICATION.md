@@ -27,6 +27,17 @@ legacy scalars remain `iio,buffer-metadata=3` and
 and status V2. The host selects 4/2 from those sets; it never interprets either
 legacy scalar as the v8 wire version.
 
+Hardware identity remains exact rather than interchangeable. Candidate plans,
+operation plans, and receipts retain one raw `hw_model`, chosen from the two
+supported Rev.C identities: `Z7010-AD9361` or the native
+`Z7010-AD9363A`. An AD9361 plan cannot accept an AD9363A observation (or the
+reverse). The native AD9363A identity is admitted only with a typed, read-only
+setup attestation proving that `attr_name` and `attr_val` are absent,
+`compatible=ad9361`, `mode=2r2t`, the live PHY is a supported AD9361/AD9363A
+compatible, the RX scan layout is exactly `voltage0` through `voltage3`, and the
+candidate exposes the tandem device. Serial, USB topology, QSPI identity, and
+the safe-state checks remain independent mandatory gates.
+
 Create one private plan per radio without touching hardware:
 
 ```console

@@ -20,7 +20,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from pluto_plus.inventory import LocalUsbPluto
 from pluto_plus.models import ApiModel
@@ -51,6 +57,11 @@ Interface = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")]
 FirmwareVersion = Annotated[str, Field(min_length=1, max_length=256)]
 HardwareModel = Annotated[str, Field(min_length=1, max_length=256)]
 ContractModel = TypeVar("ContractModel", bound=ApiModel)
+
+PLUTO_REV_C_AD9361_MODEL = "Analog Devices PlutoSDR Rev.C (Z7010-AD9361)"
+PLUTO_REV_C_AD9363A_MODEL = "Analog Devices PlutoSDR Rev.C (Z7010-AD9363A)"
+SUPPORTED_PLUTO_REV_C_MODELS = frozenset((PLUTO_REV_C_AD9361_MODEL, PLUTO_REV_C_AD9363A_MODEL))
+CANONICAL_RX_SCAN_CHANNELS = ("voltage0", "voltage1", "voltage2", "voltage3")
 
 
 class ReleaseCandidateContractError(RuntimeError):
@@ -93,6 +104,31 @@ def _canonical_capabilities(value: tuple[str, ...]) -> tuple[str, ...]:
     return value
 
 
+def _supported_hardware_model(value: str) -> str:
+    if value not in SUPPORTED_PLUTO_REV_C_MODELS:
+        raise ValueError("hardware model is not an exact supported PlutoSDR Rev.C model")
+    return value
+
+
+class CanonicalHardwareSetup(ApiModel):
+    """Read-only proof that one Rev.C runtime has the canonical 2R2T setup."""
+
+    uboot_attr_name_absent: Literal[True]
+    uboot_attr_val_absent: Literal[True]
+    uboot_compatible: Literal["ad9361"]
+    uboot_mode: Literal["2r2t"]
+    phy_model: Literal["ad9361", "ad9363a"]
+    rx_scan_channels: tuple[str, ...]
+    tandem_device: Literal[True]
+
+    @field_validator("rx_scan_channels")
+    @classmethod
+    def validate_rx_scan_channels(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != CANONICAL_RX_SCAN_CHANNELS:
+            raise ValueError("canonical Rev.C setup requires the exact paired-RX scan layout")
+        return value
+
+
 class ContentIdentity(ApiModel):
     bytes: int = Field(gt=0)
     sha256: Sha256
@@ -125,6 +161,11 @@ class ExpectedRuntime(ApiModel):
     @classmethod
     def validate_capabilities(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _canonical_capabilities(value)
+
+    @field_validator("hardware_model")
+    @classmethod
+    def validate_hardware_model(cls, value: str) -> str:
+        return _supported_hardware_model(value)
 
 
 class ReleaseCandidatePlan(ApiModel):
@@ -310,11 +351,35 @@ class RuntimeObservation(ApiModel):
     ]
     qspi: QspiObservation
     safe_state: SafeState
+    canonical_hardware_setup: CanonicalHardwareSetup | None = None
 
     @field_validator("capabilities")
     @classmethod
     def validate_capabilities(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _canonical_capabilities(value)
+
+    @model_serializer(mode="wrap")
+    def serialize_compatibility_proof(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        payload = handler(self)
+        if not isinstance(payload, dict):
+            raise TypeError("runtime observation serializer did not produce an object")
+        if self.canonical_hardware_setup is None:
+            payload.pop("canonical_hardware_setup", None)
+        return payload
+
+    @model_validator(mode="after")
+    def validate_hardware_identity(self) -> RuntimeObservation:
+        _supported_hardware_model(self.hardware_model)
+        if (
+            self.hardware_model == PLUTO_REV_C_AD9363A_MODEL
+            and self.canonical_hardware_setup is None
+        ):
+            raise ValueError(
+                "native AD9363A Rev.C requires canonical AD9361/2R2T hardware setup proof"
+            )
+        return self
 
 
 class HostRouteReceipt(ApiModel):
@@ -402,6 +467,11 @@ class ReleaseCandidateRamReceipt(ApiModel):
     @classmethod
     def validate_capabilities(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _canonical_capabilities(value)
+
+    @field_validator("expected_hardware_model")
+    @classmethod
+    def validate_hardware_model(cls, value: str) -> str:
+        return _supported_hardware_model(value)
 
     @model_validator(mode="after")
     def validate_relationships(self) -> ReleaseCandidateRamReceipt:
