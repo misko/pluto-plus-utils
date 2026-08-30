@@ -51,6 +51,7 @@ from pluto_plus.doctor import (
     IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY,
     IIO_THROUGHPUT_HOLD_V1_RC1_RAM_POLICY,
     IIO_THROUGHPUT_HOLD_V2_RC1_RAM_POLICY,
+    IIO_THROUGHPUT_RW_AFFINITY_V2_RC1_RAM_POLICY,
     IIO_THROUGHPUT_TIMING_V1_RC1_RAM_POLICY,
     SINGLE_RX_METADATA_RC1_RAM_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
@@ -100,6 +101,14 @@ class StandaloneFlashProfile:
     buffer_metadata_status: bool = False
     buffer_metadata_timing_log: bool = False
     iiod_cpu_affinity: int | None = None
+    iiod_rw_cpu_affinity: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.iiod_cpu_affinity is not None and self.iiod_rw_cpu_affinity is not None:
+            raise ValueError("iiOD whole-process and R/W-worker affinity are mutually exclusive")
+        for cpu in (self.iiod_cpu_affinity, self.iiod_rw_cpu_affinity):
+            if cpu is not None and cpu < 0:
+                raise ValueError("iiOD CPU affinity must be non-negative")
 
 
 STANDALONE_FLASH_PROFILES = {
@@ -220,6 +229,19 @@ STANDALONE_FLASH_PROFILES = {
         buffer_metadata_status=True,
         buffer_metadata_timing_log=True,
         iiod_cpu_affinity=1,
+    ),
+    IIO_THROUGHPUT_RW_AFFINITY_V2_RC1_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        IIO_THROUGHPUT_RW_AFFINITY_V2_RC1_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+        ddr_ring_max_iq_bytes=200_000_000,
+        ddr_ring_modes="finite,continuous",
+        buffer_metadata_status=True,
+        buffer_metadata_timing_log=True,
+        iiod_rw_cpu_affinity=1,
     ),
     DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
         DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,

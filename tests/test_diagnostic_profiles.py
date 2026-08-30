@@ -20,6 +20,7 @@ from pluto_plus.diagnostic_profiles import (
     IIO_THROUGHPUT_AFFINITY_V1_RC1_PROFILE,
     IIO_THROUGHPUT_HOLD_V1_RC1_PROFILE,
     IIO_THROUGHPUT_HOLD_V2_RC1_PROFILE,
+    IIO_THROUGHPUT_RW_AFFINITY_V2_RC1_PROFILE,
     IIO_THROUGHPUT_TIMING_V1_RC1_PROFILE,
     SINGLE_RX_METADATA_RC1_PROFILE,
     TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE,
@@ -93,6 +94,7 @@ def test_metadata_abi_preserves_exact_observation(
         (IIO_THROUGHPUT_HOLD_V2_RC1_PROFILE, 3, True),
         (IIO_THROUGHPUT_TIMING_V1_RC1_PROFILE, 3, True),
         (IIO_THROUGHPUT_AFFINITY_V1_RC1_PROFILE, 3, True),
+        (IIO_THROUGHPUT_RW_AFFINITY_V2_RC1_PROFILE, 3, True),
     ],
 )
 def test_known_profiles_are_accepted_without_changing_mutation_policy(

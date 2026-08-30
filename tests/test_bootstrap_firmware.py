@@ -1064,6 +1064,7 @@ def test_iio_throughput_timing_v1_rc1_profile_is_exactly_bound_and_ram_only() ->
     assert profile.buffer_metadata_status is True
     assert profile.buffer_metadata_timing_log is True
     assert profile.iiod_cpu_affinity is None
+    assert profile.iiod_rw_cpu_affinity is None
     assert not any(
         candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
         for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
@@ -1098,10 +1099,68 @@ def test_iio_throughput_affinity_v1_rc1_profile_is_exactly_bound_and_ram_only() 
     assert profile.buffer_metadata_status is True
     assert profile.buffer_metadata_timing_log is True
     assert profile.iiod_cpu_affinity == 1
+    assert profile.iiod_rw_cpu_affinity is None
     assert not any(
         candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
         for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
     )
+
+
+def test_iio_throughput_rw_affinity_v2_rc1_profile_is_exactly_bound_and_ram_only() -> None:
+    policy = bootstrap.IIO_THROUGHPUT_RW_AFFINITY_V2_RC1_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "iio-throughput-rw-affinity-v2-rc1-6d0ece066f2f"
+    assert policy.device_firmware == "v0.45-plutoplus-spf-iio-throughput-rw-affinity-v2-rc1"
+    assert policy.source_commit == "6d0ece066f2f780dbb558358cf6d64ce089e8ee7"
+    assert policy.asset_name == (
+        "plutoplus-spf-iio-throughput-rw-affinity-v2-rc1-6d0ece066f2f-pluto.dfu"
+    )
+    assert policy.asset_sha256 == (
+        "5ef822b253e7bdd46cae2bc0fc291863911e0057de3e8321a9af56097fce2361"
+    )
+    assert policy.fit_body_sha256 == (
+        "0f975c56eceace56c4335f64c13ff4583951b4e695154251052389966b7c148c"
+    )
+    assert policy.fit_body_size == 12_814_483
+    assert policy.hardware_qualified is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert profile.ddr_burst_max_iq_bytes == 200_000_000
+    assert profile.ddr_burst_reserve_bytes == 128 * 1024 * 1024
+    assert profile.ddr_ring_max_iq_bytes == 200_000_000
+    assert profile.ddr_ring_modes == "finite,continuous"
+    assert profile.buffer_metadata_status is True
+    assert profile.buffer_metadata_timing_log is True
+    assert profile.iiod_cpu_affinity is None
+    assert profile.iiod_rw_cpu_affinity == 1
+    assert not any(
+        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
+        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
+    )
+
+
+def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:
+    policy = bootstrap.IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        bootstrap.StandaloneFlashProfile(
+            policy,
+            3,
+            True,
+            persistent_allowed=False,
+            iiod_cpu_affinity=1,
+            iiod_rw_cpu_affinity=1,
+        )
+    with pytest.raises(ValueError, match="non-negative"):
+        bootstrap.StandaloneFlashProfile(
+            policy,
+            3,
+            True,
+            persistent_allowed=False,
+            iiod_rw_cpu_affinity=-1,
+        )
 
 
 def test_ddr_ring_v1_release_requires_distinct_persistent_promotion() -> None:
