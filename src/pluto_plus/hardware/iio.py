@@ -24,10 +24,16 @@ from pluto_plus.hardware.iio_iq_decode import (
 )
 from pluto_plus.hardware.iio_metadata import (
     ABI3_METADATA_LAYOUTS,
+    ABI4_METADATA_FEATURES_TEXT,
+    ABI4_METADATA_LAYOUTS,
+    ABI4_METADATA_RECORD,
+    SUPPORTED_METADATA_ABIS,
+    SUPPORTED_METADATA_STATUS_VERSIONS,
     IioMetadataCaptureSession,
     configure_iio_context_timeout,
     metadata_iio_context_timeout_ms,
     parse_metadata_layout_capabilities,
+    parse_metadata_version_capabilities,
 )
 from pluto_plus.hardware.preflight import MetadataRuntimeVerification, verify_metadata_runtime
 from pluto_plus.models import (
@@ -96,8 +102,8 @@ class IioRadioDevice:
         expected_metadata_abi: int | None = None,
         iq_decoder: IioIqDecoder = "pyadi",
     ) -> None:
-        if expected_metadata_abi not in {None, 1, 2, 3}:
-            raise ValueError("expected_metadata_abi must be 1, 2, 3, or None")
+        if expected_metadata_abi not in {None, 1, 2, 3, 4}:
+            raise ValueError("expected_metadata_abi must be 1, 2, 3, 4, or None")
         validate_iq_decoder(iq_decoder)
         normalized = uri.removeprefix("pluto://")
         self._configured_uri = normalized
@@ -112,6 +118,7 @@ class IioRadioDevice:
         self._expected_metadata_abi = expected_metadata_abi
         self._iq_decoder = iq_decoder
         self._metadata_runtime: MetadataRuntimeVerification | None = None
+        self._selected_metadata_abi: int | None = None
         self._device: Any | None = None
         self._buffer_size: int | None = None
         self._metadata_capture: IioMetadataCaptureSession | None = None
@@ -156,6 +163,7 @@ class IioRadioDevice:
             raise RuntimeError("IIO radio is already open")
         self._diagnostic_facts = {}
         self._metadata_runtime = None
+        self._selected_metadata_abi = None
         injected_runtime = self._adi_module is not None and self._iio_module is not None
         if self._expected_metadata_abi is not None and not injected_runtime:
             # This must happen before importing pyadi: pyadi imports pylibiio,
@@ -247,23 +255,34 @@ class IioRadioDevice:
             # from those getters rather than AttributeError.
             _mute_transmit(device)
             _require_canonical_rx_layout(facts)
-            actual_metadata_abi = facts.get("buffer_metadata_abi")
-            if (
-                self._expected_metadata_abi is not None
-                and actual_metadata_abi != self._expected_metadata_abi
-            ):
-                raise RadioConfigurationError(
-                    "radio metadata ABI does not match the release-local host runtime: "
-                    f"radio={actual_metadata_abi!r}, host={self._expected_metadata_abi}"
-                )
+            actual_metadata_abi = _select_context_metadata_abi(
+                facts, expected=self._expected_metadata_abi
+            )
+            facts["buffer_metadata_selected_abi"] = actual_metadata_abi
+            self._diagnostic_facts["buffer_metadata_selected_abi"] = actual_metadata_abi
             injected_runtime = self._adi_module is not None and self._iio_module is not None
-            if actual_metadata_abi == 3 and facts.get("buffer_metadata_layouts") != (
+            expected_layouts = (
                 ABI3_METADATA_LAYOUTS
+                if actual_metadata_abi == 3
+                else ABI4_METADATA_LAYOUTS
+                if actual_metadata_abi == 4
+                else None
+            )
+            if expected_layouts is not None and facts.get("buffer_metadata_layouts") != (
+                expected_layouts
             ):
                 raise RadioConfigurationError(
-                    "metadata ABI 3 radio did not advertise the canonical RX layouts"
+                    f"metadata ABI {actual_metadata_abi} radio did not advertise "
+                    "the canonical RX layouts"
                 )
-            runtime_ready = actual_metadata_abi in {1, 2, 3} and (
+            if actual_metadata_abi == 4 and (
+                facts.get("buffer_metadata_record_raw") != str(ABI4_METADATA_RECORD)
+                or facts.get("buffer_metadata_features_raw") != ABI4_METADATA_FEATURES_TEXT
+            ):
+                raise RadioConfigurationError(
+                    "metadata ABI 4 radio did not advertise the exact record/features contract"
+                )
+            runtime_ready = actual_metadata_abi in {1, 2, 3, 4} and (
                 self._metadata_runtime is not None or injected_runtime
             )
             if runtime_ready:
@@ -285,7 +304,9 @@ class IioRadioDevice:
                 }
             )
             self._device = device
+            self._selected_metadata_abi = actual_metadata_abi
         except BaseException as failure:
+            self._selected_metadata_abi = None
             try:
                 if attested:
                     _release_device(device)
@@ -304,6 +325,7 @@ class IioRadioDevice:
         device, self._device = self._device, None
         self._buffer_size = None
         self._metadata_runtime = None
+        self._selected_metadata_abi = None
         self._capabilities = self._capabilities.model_copy(
             update={
                 "supports_device_sample_counter": False,
@@ -713,19 +735,29 @@ class IioRadioDevice:
             raise RadioConfigurationError("metadata capture receiver selection is not canonical")
         require_safe_iio_buffer(sample_count, len(channels))
         facts = context_facts(device.ctx)
-        metadata_abi = facts.get("buffer_metadata_abi")
-        if metadata_abi not in {1, 2, 3}:
+        metadata_abi = _select_context_metadata_abi(
+            facts, expected=self._expected_metadata_abi
+        )
+        if metadata_abi != self._selected_metadata_abi:
+            raise RadioConfigurationError(
+                "metadata ABI capability changed after the radio was opened"
+            )
+        if metadata_abi not in {1, 2, 3, 4}:
             raise RadioConfigurationError(
                 "metadata capture requires supported context capability "
-                "iio,buffer-metadata=1, 2, or 3"
+                "iio,buffer-metadata=1, 2, 3, or 4"
             )
         if metadata_abi in {1, 2} and channels != (0, 1):
             raise RadioConfigurationError("metadata ABI 1 and 2 require paired RX channels")
-        if metadata_abi == 3:
+        if metadata_abi in {3, 4}:
             layouts = facts.get("buffer_metadata_layouts")
-            if layouts != ABI3_METADATA_LAYOUTS:
+            expected_layouts = (
+                ABI3_METADATA_LAYOUTS if metadata_abi == 3 else ABI4_METADATA_LAYOUTS
+            )
+            if layouts != expected_layouts:
                 raise RadioConfigurationError(
-                    "metadata ABI 3 requires the exact canonical RX layout capability"
+                    f"metadata ABI {metadata_abi} requires the exact canonical RX "
+                    "layout capability"
                 )
             expected_mask = {(0,): 0x03, (1,): 0x0C, (0, 1): 0x0F}[channels]
             layout = next(item for item in layouts if item.scan_mask == expected_mask)
@@ -733,10 +765,17 @@ class IioRadioDevice:
                 raise RadioConfigurationError(
                     "metadata sample count violates the advertised RX layout multiple"
                 )
+        if metadata_abi == 4 and (
+            facts.get("buffer_metadata_record_raw") != str(ABI4_METADATA_RECORD)
+            or facts.get("buffer_metadata_features_raw") != ABI4_METADATA_FEATURES_TEXT
+        ):
+            raise RadioConfigurationError(
+                "metadata ABI 4 requires the exact record/features capability contract"
+            )
         if ddr_burst_bytes:
-            if metadata_abi != 3 or len(channels) != 1:
+            if metadata_abi not in {3, 4} or len(channels) != 1:
                 raise RadioConfigurationError(
-                    "device DDR burst v1 requires metadata ABI 3 and exactly one receiver"
+                    "device DDR burst v1 requires metadata ABI 3/4 and exactly one receiver"
                 )
             if facts.get("buffer_ddr_burst") is not True:
                 raise RadioConfigurationError(
@@ -755,12 +794,25 @@ class IioRadioDevice:
                     "device DDR burst byte budget exceeds the advertised limit"
                 )
         if ddr_ring_bytes:
-            if metadata_abi != 3:
-                raise RadioConfigurationError("device DDR ring v1 requires metadata ABI 3")
+            if metadata_abi not in {3, 4} or len(channels) != 1:
+                raise RadioConfigurationError(
+                    "device DDR ring v1 requires metadata ABI 3/4 and one receiver"
+                )
             if facts.get("buffer_ddr_ring") is not True:
                 raise RadioConfigurationError("IIO context does not advertise device DDR ring v1")
             if facts.get("buffer_ddr_ring_modes_raw") != "finite,continuous":
                 raise RadioConfigurationError("IIO DDR ring mode capability is not canonical")
+            status_versions = facts.get("buffer_metadata_status_versions")
+            status_versions_state = facts.get("buffer_metadata_status_versions_state")
+            if metadata_abi == 4 and (
+                status_versions_state != "available"
+                or not isinstance(status_versions, tuple)
+                or 2 not in status_versions
+            ):
+                raise RadioConfigurationError(
+                    "metadata ABI 4 DDR ring requires metadata status v2 in the explicit "
+                    "version set"
+                )
             if facts.get("buffer_metadata_status") is not True:
                 raise RadioConfigurationError("IIO context cannot report DDR ring status")
             maximum_ring_bytes = facts.get("buffer_ddr_ring_max_iq_bytes")
@@ -775,9 +827,9 @@ class IioRadioDevice:
                 raise RadioConfigurationError(
                     "device DDR ring byte budget exceeds the advertised limit"
                 )
-        if metadata_abi in {2, 3} and not facts.get("tandem_agc"):
+        if metadata_abi in {2, 3, 4} and not facts.get("tandem_agc"):
             raise RadioConfigurationError(
-                "metadata ABI 2 and 3 capture requires the tandem-agc IIO device"
+                "metadata ABI 2, 3, and 4 capture requires the tandem-agc IIO device"
             )
         if not (
             self._capabilities.supports_device_sample_counter
@@ -929,9 +981,74 @@ def find_usb_sysfs_path(serial: str, usb_root: Path = Path("/sys/bus/usb/devices
     return str(matches[0]) if matches else None
 
 
+def _resolve_version_capability(
+    legacy_version: int | None,
+    versions_raw: object,
+    *,
+    host_versions: tuple[int, ...],
+) -> tuple[tuple[int, ...], str, int | None]:
+    if versions_raw is None:
+        selected = legacy_version if legacy_version in host_versions else None
+        return (), "absent", selected
+    try:
+        versions = parse_metadata_version_capabilities(versions_raw)
+    except ValueError:
+        return (), "malformed", None
+    if legacy_version is None or legacy_version not in versions:
+        return versions, "inconsistent", None
+    compatible = tuple(version for version in versions if version in host_versions)
+    if not compatible:
+        return versions, "unsupported", None
+    return versions, "available", compatible[-1]
+
+
+def _select_context_metadata_abi(
+    facts: Mapping[str, object], *, expected: int | None
+) -> int | None:
+    versions_state = facts.get("buffer_metadata_abi_versions_state")
+    versions = facts.get("buffer_metadata_abi_versions")
+    if versions_state == "absent":
+        selected = facts.get("buffer_metadata_abi")
+        if selected == 4:
+            raise RadioConfigurationError(
+                "metadata ABI 4 requires an explicit iio,buffer-metadata-abi-versions set"
+            )
+    elif versions_state == "available" and isinstance(versions, tuple):
+        selected = facts.get("buffer_metadata_abi") if expected is None else expected
+        if selected not in SUPPORTED_METADATA_ABIS or selected not in versions:
+            raise RadioConfigurationError(
+                "radio metadata ABI version set does not contain the requested host ABI: "
+                f"radio={versions!r}, host={expected!r}"
+            )
+    else:
+        raise RadioConfigurationError(
+            "radio metadata ABI version capability is malformed or inconsistent"
+        )
+    if selected is None and expected is None:
+        return None
+    if selected not in SUPPORTED_METADATA_ABIS:
+        raise RadioConfigurationError(
+            "metadata capture requires a supported radio metadata ABI"
+        )
+    if expected is not None and selected != expected:
+        raise RadioConfigurationError(
+            "radio metadata ABI does not match the release-local host runtime: "
+            f"radio={selected!r}, host={expected}"
+        )
+    return selected
+
+
 def context_facts(context: Any) -> dict[str, object]:
     attrs = dict(getattr(context, "attrs", {}) or {})
     metadata = parse_metadata_abi(attrs.get("iio,buffer-metadata"))
+    metadata_abi_versions_raw = attrs.get("iio,buffer-metadata-abi-versions")
+    metadata_abi_versions, metadata_abi_versions_state, effective_metadata_abi = (
+        _resolve_version_capability(
+            metadata.abi,
+            metadata_abi_versions_raw,
+            host_versions=SUPPORTED_METADATA_ABIS,
+        )
+    )
     layouts_raw = attrs.get("iio,buffer-metadata-layouts")
     try:
         layouts = parse_metadata_layout_capabilities(layouts_raw)
@@ -955,6 +1072,25 @@ def context_facts(context: Any) -> dict[str, object]:
         ddr_ring_max_iq_bytes = None
     ddr_ring_modes_raw = attrs.get("iio,buffer-ddr-ring-modes")
     metadata_status_raw = attrs.get("iio,buffer-metadata-status")
+    legacy_metadata_status_version = (
+        1 if metadata_status_raw == "1" else 2 if metadata_status_raw == "2" else None
+    )
+    metadata_status_versions_raw = attrs.get("iio,buffer-metadata-status-versions")
+    (
+        metadata_status_versions,
+        metadata_status_versions_state,
+        metadata_status_max_version,
+    ) = _resolve_version_capability(
+        legacy_metadata_status_version,
+        metadata_status_versions_raw,
+        host_versions=SUPPORTED_METADATA_STATUS_VERSIONS,
+    )
+    metadata_record_raw = attrs.get("iio,buffer-metadata-record")
+    try:
+        metadata_record = int(str(metadata_record_raw))
+    except (TypeError, ValueError):
+        metadata_record = None
+    metadata_features_raw = attrs.get("iio,buffer-metadata-features")
     return {
         "serial": attrs.get("hw_serial") or attrs.get("usb,serial"),
         "model": attrs.get("hw_model") or attrs.get("usb,product"),
@@ -963,10 +1099,14 @@ def context_facts(context: Any) -> dict[str, object]:
         "usb_path": attrs.get("usb,path"),
         "context_uri": attrs.get("uri"),
         "phy_model": attrs.get("ad9361-phy,model"),
-        "buffer_metadata": metadata.abi is not None,
-        "buffer_metadata_abi": metadata.abi,
+        "buffer_metadata": effective_metadata_abi is not None,
+        "buffer_metadata_abi": effective_metadata_abi,
+        "buffer_metadata_legacy_abi": metadata.abi,
         "buffer_metadata_raw": metadata.raw,
         "buffer_metadata_state": metadata.state.value,
+        "buffer_metadata_abi_versions_raw": metadata_abi_versions_raw,
+        "buffer_metadata_abi_versions": metadata_abi_versions,
+        "buffer_metadata_abi_versions_state": metadata_abi_versions_state,
         "buffer_metadata_layouts_raw": layouts_raw,
         "buffer_metadata_layouts": layouts,
         "buffer_metadata_layouts_state": layouts_state,
@@ -978,8 +1118,16 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_ddr_ring_raw": ddr_ring_raw,
         "buffer_ddr_ring_max_iq_bytes": ddr_ring_max_iq_bytes,
         "buffer_ddr_ring_modes_raw": ddr_ring_modes_raw,
-        "buffer_metadata_status": metadata_status_raw == "1",
+        "buffer_metadata_status": metadata_status_max_version is not None,
         "buffer_metadata_status_raw": metadata_status_raw,
+        "buffer_metadata_status_legacy_version": legacy_metadata_status_version,
+        "buffer_metadata_status_versions_raw": metadata_status_versions_raw,
+        "buffer_metadata_status_versions": metadata_status_versions,
+        "buffer_metadata_status_versions_state": metadata_status_versions_state,
+        "buffer_metadata_status_max_version": metadata_status_max_version,
+        "buffer_metadata_record": metadata_record,
+        "buffer_metadata_record_raw": metadata_record_raw,
+        "buffer_metadata_features_raw": metadata_features_raw,
         "tandem_agc": _device_exists(context, "tandem-agc"),
         "tandem_agc_state": _optional_device_int_attribute(context, "tandem-agc", "state"),
         "tandem_agc_ownership_epoch": _optional_device_int_attribute(

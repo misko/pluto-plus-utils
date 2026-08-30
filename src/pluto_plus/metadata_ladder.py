@@ -8,6 +8,7 @@ from typing import Literal, Protocol, cast
 
 from pydantic import Field, model_validator
 
+from pluto_plus.ddr_ring import DdrRingFinalStatus, DdrRingStatusSnapshot
 from pluto_plus.hardware.base import (
     MetadataCapture,
     RadioDevice,
@@ -17,23 +18,22 @@ from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.hardware.iio_iq_decode import IioIqDecoder, validate_iq_decoder
 from pluto_plus.ladder import MAX_SAMPLES_PER_CHANNEL, MIN_SAMPLES_PER_CHANNEL
 from pluto_plus.models import ApiModel, RadioSettings
-from pluto_plus.tandem import TandemMode, TandemSessionRequestV1
+from pluto_plus.tandem import RadioMetadataV7, TandemMode, TandemSessionRequestV1
 
 DEFAULT_METADATA_SAMPLE_LADDER = "4194304,2097152,1048576,524288,262144,131072"
 MAX_METADATA_SAMPLE_RUNGS = 16
-# Keep the ladder bounded while allowing the release throughput matrix to cover
-# 20 nominal seconds at 30 MS/s with 1,000,000-sample refills.  That 2.4-GB
-# target proves twelve complete reuses of a 200-MB ring.  Cell accounting is
-# constant-memory; IQ frames are validated and released as they arrive instead
-# of accumulating on the host.
-MAX_METADATA_FRAMES = 600
+# Keep the ladder bounded while allowing the authoritative-timeline release
+# campaign to run its fixed 5,000-frame soak. Cell accounting is constant-memory;
+# IQ frames are validated and released as they arrive instead of accumulating on
+# the host.
+MAX_METADATA_FRAMES = 5_000
 MINIMUM_OBSERVED_FRACTION = 0.95
 # Hardware qualification found intermittent whole-frame loss at 8 ms.  The
 # first passing boundary was 10 ms; retain 50% headroom over the failure point
 # so client admission agrees with iiOD's conservative scheduling envelope.
 DDR_BURST_MIN_FRAME_DURATION_US = 12_000
 MAX_DDR_RING_IQ_BYTES = 200_000_000
-MetadataAbi = Literal[1, 2, 3]
+MetadataAbi = Literal[1, 2, 3, 4]
 MetadataChannels = Literal["rx0", "rx1", "dual"]
 MetadataTandemMode = Literal["hold", "auto"]
 MetadataAcceptanceMode = Literal["continuity", "capture-completion"]
@@ -42,41 +42,6 @@ METADATA_CHANNEL_SELECTIONS: dict[MetadataChannels, tuple[int, ...]] = {
     "rx1": (1,),
     "dual": (0, 1),
 }
-
-
-class DdrRingStatusSnapshot(ApiModel):
-    state: str
-    terminal_reason: str
-    error_code: int
-    requested_capacity_iq_bytes: int = Field(gt=0)
-    admitted_capacity_iq_bytes: int = Field(gt=0)
-    target_frames: int = Field(gt=0)
-    produced_frames: int = Field(ge=0)
-    consumed_frames: int = Field(ge=0)
-    high_water_frames: int = Field(ge=0)
-    wrap_count: int = Field(ge=0)
-    producer_position: int = Field(ge=0)
-    consumer_position: int = Field(ge=0)
-    last_contiguous_sample_sequence: int | None = Field(default=None, ge=0)
-    first_unavailable_sample_sequence: int | None = Field(default=None, ge=0)
-
-
-class DdrRingFinalStatus(DdrRingStatusSnapshot):
-    """A terminal ring status that proves every requested host frame arrived."""
-
-    @model_validator(mode="after")
-    def validate_complete_capture(self) -> DdrRingFinalStatus:
-        if (
-            self.state != "complete"
-            or self.terminal_reason != "target_complete"
-            or self.error_code != 0
-        ):
-            raise ValueError("DDR ring did not reach a clean target-complete state")
-        if not (self.produced_frames == self.consumed_frames == self.target_frames):
-            raise ValueError("DDR ring producer/consumer frame counts do not close")
-        if self.high_water_frames < 1:
-            raise ValueError("DDR ring did not report occupied storage")
-        return self
 
 
 class MetadataContinuityCell(ApiModel):
@@ -99,6 +64,7 @@ class MetadataContinuityCell(ApiModel):
     achieved_payload_mibps: float = Field(gt=0)
     observed_fraction: float = Field(ge=0.0, le=1.0)
     tandem_metadata_frames: int = Field(default=0, ge=0)
+    authoritative_gain_timeline_frames: int = Field(default=0, ge=0)
     gain_observation_interval_samples: int | None = Field(default=None, ge=1)
     gain_observation_count: int = Field(default=0, ge=0)
     gain_observation_overflow_count: int = Field(default=0, ge=0)
@@ -145,11 +111,16 @@ class MetadataContinuityCell(ApiModel):
             if (
                 self.tandem_metadata_frames != self.observed_frames
                 or self.gain_observation_interval_samples is None
-                or self.gain_observation_count < self.tandem_metadata_frames
             ):
                 raise ValueError("metadata ladder tandem observation accounting does not close")
+            if self.authoritative_gain_timeline_frames:
+                if self.authoritative_gain_timeline_frames != self.tandem_metadata_frames:
+                    raise ValueError("metadata ladder authoritative timeline does not close")
+            elif self.gain_observation_count < self.tandem_metadata_frames:
+                raise ValueError("metadata ladder tandem observation accounting does not close")
         elif (
-            self.gain_observation_interval_samples is not None
+            self.authoritative_gain_timeline_frames
+            or self.gain_observation_interval_samples is not None
             or self.gain_observation_count
             or self.gain_observation_overflow_count
             or self.gain_event_count
@@ -356,8 +327,8 @@ def run_metadata_continuity_ladder(
     )
     selected_channels = tuple(channels)
     validate_iq_decoder(iq_decoder)
-    if metadata_abi not in {1, 2, 3}:
-        raise ValueError("metadata ABI must be 1, 2, or 3")
+    if metadata_abi not in {1, 2, 3, 4}:
+        raise ValueError("metadata ABI must be 1, 2, 3, or 4")
     if tandem_mode not in {"hold", "auto"}:
         raise ValueError("metadata tandem mode must be hold or auto")
     if acceptance_mode not in {"continuity", "capture-completion"}:
@@ -368,18 +339,18 @@ def run_metadata_continuity_ladder(
         raise ValueError("metadata channels must be RX0, RX1, or dual")
     if metadata_abi in {1, 2} and selected_channels != (0, 1):
         raise ValueError("metadata ABI 1 and 2 require dual RX")
-    if ddr_burst and (metadata_abi != 3 or len(selected_channels) != 1):
-        raise ValueError("device DDR burst ladder requires metadata ABI 3 and one receiver")
+    if ddr_burst and (metadata_abi not in {3, 4} or len(selected_channels) != 1):
+        raise ValueError("device DDR burst ladder requires metadata ABI 3/4 and one receiver")
     if isinstance(ddr_ring_bytes, bool) or not isinstance(ddr_ring_bytes, int):
         raise TypeError("DDR ring byte budget must be an integer")
     if not 0 <= ddr_ring_bytes <= MAX_DDR_RING_IQ_BYTES:
         raise ValueError(f"DDR ring byte budget must be in [0, {MAX_DDR_RING_IQ_BYTES}]")
     if ddr_burst and ddr_ring_bytes:
         raise ValueError("device DDR burst and DDR ring are mutually exclusive")
-    if ddr_ring_bytes and metadata_abi != 3:
-        raise ValueError("device DDR ring ladder requires metadata ABI 3")
+    if ddr_ring_bytes and (metadata_abi not in {3, 4} or len(selected_channels) != 1):
+        raise ValueError("device DDR ring ladder requires metadata ABI 3/4 and one receiver")
     if (
-        metadata_abi == 3
+        metadata_abi in {3, 4}
         and len(selected_channels) == 1
         and any(samples & 1 for samples in samples_per_channel)
     ):
@@ -426,6 +397,7 @@ def run_metadata_continuity_ladder(
                         frames=frames,
                         kernel_buffers=kernel_buffers,
                         receiver_count=len(selected_channels),
+                        metadata_abi=metadata_abi,
                         ddr_burst=ddr_burst,
                         ddr_ring_bytes=ddr_ring_bytes,
                         tandem_mode=tandem_mode,
@@ -493,6 +465,7 @@ def _run_cell(
     frames: int,
     kernel_buffers: int,
     receiver_count: int,
+    metadata_abi: MetadataAbi,
     ddr_burst: bool,
     ddr_ring_bytes: int,
     tandem_mode: MetadataTandemMode,
@@ -513,6 +486,7 @@ def _run_cell(
     gap_count = 0
     overflow_count = 0
     tandem_metadata_frames = 0
+    authoritative_gain_timeline_frames = 0
     gain_observation_interval_samples: int | None = None
     gain_observation_count = 0
     gain_observation_overflow_count = 0
@@ -533,7 +507,10 @@ def _run_cell(
         tandem_request=(
             TandemSessionRequestV1(mode=TandemMode.HOLD)
             if tandem_mode == "hold"
-            else TandemSessionRequestV1.auto_for_sample_count(samples_per_channel)
+            else TandemSessionRequestV1.auto_for_sample_count(
+                samples_per_channel,
+                retention_frames=(kernel_buffers + 1 if metadata_abi == 4 else 2),
+            )
         ),
     ) as capture:
         try:
@@ -577,6 +554,9 @@ def _run_cell(
                             "metadata ladder gain-observation interval changed within a rung"
                         )
                     tandem_metadata_frames += 1
+                    authoritative_gain_timeline_frames += int(
+                        isinstance(tandem, RadioMetadataV7)
+                    )
                     gain_observation_count += len(tandem.gain_observations)
                     gain_observation_overflow_count += tandem.gain_observation_overflow_count
                     gain_event_count += len(tandem.gain_events)
@@ -653,6 +633,7 @@ def _run_cell(
         achieved_payload_mibps=iq_bytes / elapsed_seconds / (1024 * 1024),
         observed_fraction=fraction,
         tandem_metadata_frames=tandem_metadata_frames,
+        authoritative_gain_timeline_frames=authoritative_gain_timeline_frames,
         gain_observation_interval_samples=gain_observation_interval_samples,
         gain_observation_count=gain_observation_count,
         gain_observation_overflow_count=gain_observation_overflow_count,

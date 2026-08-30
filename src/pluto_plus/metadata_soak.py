@@ -19,7 +19,10 @@ from pydantic import Field
 
 from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
 from pluto_plus.doctor import TANDEM_AGC_V7_RAM_POLICY
-from pluto_plus.hardware.iio_metadata import configure_iio_context_timeout
+from pluto_plus.hardware.iio_metadata import (
+    configure_iio_context_timeout,
+    require_metadata_abi_capability,
+)
 from pluto_plus.hardware.preflight import inspect_iio_environment
 from pluto_plus.models import ApiModel
 from pluto_plus.setup_helper import SetupTransport
@@ -249,6 +252,8 @@ def _execute_live_metadata_slot(
     cell: MetadataMatrixCell,
     slot: int,
 ) -> MetadataSlotResult:
+    if plan.expected_metadata_abi not in {2, 3}:
+        raise MetadataSoakError("legacy metadata soak supports only metadata ABI 2 or 3")
     import adi
     import iio
 
@@ -267,8 +272,12 @@ def _execute_live_metadata_slot(
                 raise MetadataSoakError("IIO context serial does not match the soak plan")
             if sdr._ctx.attrs.get("fw_version") != plan.expected_firmware:
                 raise MetadataSoakError("IIO context firmware does not match the soak profile")
-            if sdr._ctx.attrs.get("iio,buffer-metadata") != str(plan.expected_metadata_abi):
-                raise MetadataSoakError("IIO context metadata ABI does not match the soak profile")
+            try:
+                require_metadata_abi_capability(sdr._ctx.attrs, plan.expected_metadata_abi)
+            except ValueError as error:
+                raise MetadataSoakError(
+                    "IIO context metadata ABI does not match the soak profile"
+                ) from error
             if sdr._ctx.find_device("tandem-agc") is None:
                 raise MetadataSoakError("IIO context lacks the tandem-AGC device")
             metadata_buffer = getattr(iio, "MetadataBuffer", None)
@@ -684,6 +693,8 @@ def execute_metadata_soak(
 ) -> MetadataSoakReport:
     """Execute a bounded soak, fail closed, and always enforce TX cleanup."""
 
+    if plan.expected_metadata_abi not in {2, 3}:
+        raise MetadataSoakError("legacy metadata soak supports only metadata ABI 2 or 3")
     started = time.time_ns()
     initial: MetadataHealth | None = None
     checkpoints: list[MetadataSoakCheckpoint] = []

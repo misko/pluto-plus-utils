@@ -18,7 +18,10 @@ import numpy as np
 from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
 from pluto_plus.doctor import TANDEM_AGC_V7_RAM_POLICY
 from pluto_plus.hardware.iio import _mute_transmit
-from pluto_plus.hardware.iio_metadata import configure_iio_context_timeout
+from pluto_plus.hardware.iio_metadata import (
+    configure_iio_context_timeout,
+    require_metadata_abi_capability,
+)
 from pluto_plus.inventory import scan_local_usb_plutos
 from pluto_plus.tandem import (
     RadioMetadataV5,
@@ -63,9 +66,14 @@ class TandemQualificationPlan:
 
 
 class _MetadataReceiver:
-    def __init__(self, sdr: Any, mode: TandemMode) -> None:
+    def __init__(self, sdr: Any, mode: TandemMode, metadata_abi: int) -> None:
+        if metadata_abi not in {2, 3}:
+            raise TandemQualificationError(
+                "legacy tandem qualification supports only metadata ABI 2 or 3"
+            )
         self.sdr = sdr
         self.mode = mode
+        self.metadata_abi = metadata_abi
         self.buffer: Any | None = None
 
     def open(self) -> None:
@@ -105,7 +113,7 @@ class _MetadataReceiver:
             raise TandemQualificationError("metadata refill returned no header")
         metadata = (
             RadioMetadataV6.unpack(raw).tandem
-            if self.sdr._ctx.attrs.get("iio,buffer-metadata") == "3"
+            if self.metadata_abi == 3
             else RadioMetadataV5.unpack(raw)
         )
         if signal.shape != (2, SAMPLES_PER_CHANNEL):
@@ -190,6 +198,10 @@ def execute_tandem_qualification(
 ) -> dict[str, Any]:
     """Run HOLD, AUTO, and watchdog gates while guaranteeing TX cleanup."""
 
+    if plan.expected_metadata_abi not in {2, 3}:
+        raise TandemQualificationError(
+            "legacy tandem qualification supports only metadata ABI 2 or 3"
+        )
     if confirmation != plan.confirmation_phrase:
         raise TandemQualificationError(f"confirmation must be exactly {plan.confirmation_phrase!r}")
     fresh = prepare_tandem_qualification(
@@ -229,8 +241,10 @@ def execute_tandem_qualification(
             raise TandemQualificationError("opened IIO context has the wrong serial")
         if sdr._ctx.attrs.get("fw_version") != plan.expected_firmware:
             raise TandemQualificationError("radio firmware does not match the tandem profile")
-        if sdr._ctx.attrs.get("iio,buffer-metadata") != str(plan.expected_metadata_abi):
-            raise TandemQualificationError("radio metadata ABI does not match the plan")
+        try:
+            require_metadata_abi_capability(sdr._ctx.attrs, plan.expected_metadata_abi)
+        except ValueError as error:
+            raise TandemQualificationError("radio metadata ABI does not match the plan") from error
         if sdr._ctx.find_device("tandem-agc") is None:
             raise TandemQualificationError("radio lacks the tandem-agc capability")
         _configure(sdr)
@@ -243,13 +257,19 @@ def execute_tandem_qualification(
                 "expected_gain_table_id": int(gain_table),
             }
             report["checks"]["bands"].append(band_report)
-            band_report["hold"] = _qualify_hold(sdr, gain_table)
+            band_report["hold"] = _qualify_hold(
+                sdr, gain_table, plan.expected_metadata_abi
+            )
             band_report["tone"] = _qualify_tone(sdr, plan.strong_tx_gain_db, frequency_hz)
             band_report["auto"] = _qualify_auto(sdr, plan, gain_table)
         if include_watchdog:
-            report["checks"]["watchdog"] = _qualify_watchdog(sdr)
+            report["checks"]["watchdog"] = _qualify_watchdog(
+                sdr, plan.expected_metadata_abi
+            )
             report["checks"]["post_watchdog_hold"] = _qualify_hold(
-                sdr, _expected_gain_table(plan.frequencies_hz[-1])
+                sdr,
+                _expected_gain_table(plan.frequencies_hz[-1]),
+                plan.expected_metadata_abi,
             )
         report["outcome"] = "pass"
     except BaseException as error:
@@ -334,8 +354,10 @@ def _temperature_summary(frames: list[RadioMetadataV5]) -> dict[str, int]:
     }
 
 
-def _qualify_hold(sdr: Any, expected_gain_table: TandemGainTable) -> dict[str, Any]:
-    receiver = _MetadataReceiver(sdr, TandemMode.HOLD)
+def _qualify_hold(
+    sdr: Any, expected_gain_table: TandemGainTable, metadata_abi: int
+) -> dict[str, Any]:
+    receiver = _MetadataReceiver(sdr, TandemMode.HOLD, metadata_abi)
     receiver.open()
     try:
         frames = [receiver.capture()[1] for _ in range(2)]
@@ -456,7 +478,7 @@ def _qualify_auto(
     plan: TandemQualificationPlan,
     expected_gain_table: TandemGainTable,
 ) -> dict[str, Any]:
-    receiver = _MetadataReceiver(sdr, TandemMode.AUTO)
+    receiver = _MetadataReceiver(sdr, TandemMode.AUTO, plan.expected_metadata_abi)
     sdr.dds_single_tone(TONE_HZ, AUTO_TONE_SCALE, channel=1)
     sdr.tx_hardwaregain_chan1 = plan.weak_tx_gain_db
     receiver.open()
@@ -526,9 +548,9 @@ def _qualify_auto(
     }
 
 
-def _qualify_watchdog(sdr: Any) -> dict[str, Any]:
+def _qualify_watchdog(sdr: Any, metadata_abi: int) -> dict[str, Any]:
     _mute_transmit(sdr)
-    receiver = _MetadataReceiver(sdr, TandemMode.HOLD)
+    receiver = _MetadataReceiver(sdr, TandemMode.HOLD, metadata_abi)
     receiver.open()
     try:
         time.sleep(WATCHDOG_SETTLE_SECONDS)

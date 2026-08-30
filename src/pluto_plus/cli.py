@@ -1459,13 +1459,13 @@ def radio_metadata_ladder(
         1,
         "--metadata-abi",
         min=1,
-        max=3,
+        max=4,
         help="Exact release-local and radio metadata ABI to attest.",
     ),
     channels: str = typer.Option(
         "dual",
         "--channels",
-        help="Canonical receive layout: rx0, rx1, or dual (single RX requires ABI 3).",
+        help="Canonical receive layout: rx0, rx1, or dual (single RX requires ABI 3/4).",
     ),
     iq_decoder: str = typer.Option(
         "pyadi",
@@ -1496,7 +1496,7 @@ def radio_metadata_ladder(
         "--ddr-burst",
         help=(
             "Opt in to device-RAM burst capture; each rung requests exactly --frames "
-            "whole IQ frames (metadata ABI 3, one receiver)."
+            "whole IQ frames (metadata ABI 3/4, one receiver)."
         ),
     ),
     ddr_ring_bytes: int = typer.Option(
@@ -1506,7 +1506,7 @@ def radio_metadata_ladder(
         max=MAX_DDR_RING_IQ_BYTES,
         help=(
             "Opt in to the streaming device-DDR ring with this IQ-byte capacity; "
-            "each rung remains a finite --frames capture (metadata ABI 3)."
+            "each rung remains a finite --frames capture (metadata ABI 3/4, one receiver)."
         ),
     ),
     tandem_mode: str = typer.Option(
@@ -1646,8 +1646,8 @@ def radio_metadata_ladder(
     except ValueError as error:
         _fail("metadata_ladder_failed", str(error), 5)
     normalized_channels = channels.strip().lower()
-    if metadata_abi not in {1, 2, 3}:
-        _fail("metadata_ladder_failed", "metadata ABI must be 1, 2, or 3", 5)
+    if metadata_abi not in {1, 2, 3, 4}:
+        _fail("metadata_ladder_failed", "metadata ABI must be 1, 2, 3, or 4", 5)
     if normalized_channels not in METADATA_CHANNEL_SELECTIONS:
         _fail("metadata_ladder_failed", "channels must be rx0, rx1, or dual", 5)
     normalized_iq_decoder = iq_decoder.strip().lower()
@@ -1659,10 +1659,10 @@ def radio_metadata_ladder(
             "--ddr-burst and --ddr-ring-bytes are mutually exclusive",
             2,
         )
-    if (ddr_burst or ddr_ring_bytes) and metadata_abi != 3:
+    if (ddr_burst or ddr_ring_bytes) and metadata_abi not in {3, 4}:
         _fail(
             "metadata_ladder_ddr_requires_abi3",
-            "DDR burst and ring modes require --metadata-abi 3",
+            "DDR burst and ring modes require --metadata-abi 3 or 4",
             2,
         )
     if (ddr_burst or ddr_ring_bytes) and normalized_channels == "dual":
@@ -5008,6 +5008,156 @@ def firmware_candidate_ram_inventory(
             "serial_filter": serial,
             "output": str(identity.path),
             "sha256": identity.sha256,
+        }
+    )
+
+
+@candidate_ram_app.command("qualification-plan")
+def firmware_candidate_ram_qualification_plan(
+    operation_plan: Path = typer.Option(  # noqa: B008
+        ...,
+        "--operation-plan",
+        help="Immutable single-radio candidate RAM operation plan.",
+    ),
+    physical_ip: str = typer.Option(
+        ..., "--physical-ip", help="Exact 192.168.1.* IIO endpoint for the same radio."
+    ),
+    report: Path = typer.Option(  # noqa: B008
+        ..., "--report", help="Absent private output reserved for execution evidence."
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        ..., "--output", help="Absent private qualification-plan output."
+    ),
+) -> None:
+    """Freeze the authoritative-timeline RAM qualification matrix without hardware access."""
+
+    from pluto_plus.qualification_campaign import (
+        QualificationCampaignError,
+        prepare_gain_timeline_qualification,
+        qualification_cases,
+    )
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
+        write_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+
+    try:
+        plan = prepare_gain_timeline_qualification(
+            operation_plan,
+            physical_ip=physical_ip,
+            report_path=report,
+        )
+        identity = write_private_contract(output.expanduser().absolute(), plan)
+    except (
+        OSError,
+        ValueError,
+        QualificationCampaignError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        _fail("gain_timeline_qualification_plan_failed", str(error), 4)
+    _emit(
+        {
+            "mode": "read_only_qualification_plan",
+            "hardware_accessed": False,
+            "serial": plan.serial,
+            "physical_ip": plan.physical_ip,
+            "case_count": len(qualification_cases()),
+            "confirmation_phrase": plan.confirmation_phrase,
+            "output": str(identity.path),
+            "sha256": identity.sha256,
+        }
+    )
+
+
+@candidate_ram_app.command("qualification-execute")
+def firmware_candidate_ram_qualification_execute(
+    plan_path: Path = typer.Option(  # noqa: B008
+        ..., "--plan", help="Private plan produced by qualification-plan."
+    ),
+    ssh_password_file: Path = typer.Option(  # noqa: B008
+        ..., "--ssh-password-file", help="Owned mode-0600 one-line radio password file."
+    ),
+    confirmation: str = typer.Option(
+        ..., "--confirm", help="Exact campaign phrase printed by qualification-plan."
+    ),
+    tool_repository: Path = typer.Option(  # noqa: B008
+        DEFAULT_TOOL_REPOSITORY,
+        "--tool-repository",
+        help="Clean pluto-plus-utils checkout bound by the candidate plan.",
+    ),
+    state_root: Path = typer.Option(  # noqa: B008
+        DEFAULT_STATE_ROOT,
+        "--state-root",
+        help="Private daemon state root used for candidate transition exclusion.",
+    ),
+    timeout_s: float = typer.Option(
+        60.0, "--timeout", min=5.0, max=600.0, help="Per-transition device wait timeout."
+    ),
+) -> None:
+    """RAM-boot, run all 60 cases, and always reset into unchanged persistent QSPI."""
+
+    from pluto_plus import __version__
+    from pluto_plus.qualification_campaign import (
+        GainTimelineQualificationPlan,
+        LinuxQualificationCampaignBackend,
+        QualificationCampaignError,
+        execute_gain_timeline_qualification,
+    )
+    from pluto_plus.radio_lock import shared_radio_lock_root
+    from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
+        ReleaseCandidateOperationPlan,
+        load_private_contract,
+    )
+    from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_linux import attest_clean_tool_repository
+
+    try:
+        selected_plan = plan_path.expanduser().absolute()
+        campaign = load_private_contract(selected_plan, GainTimelineQualificationPlan)
+        operation = load_private_contract(
+            campaign.operation_plan.path, ReleaseCandidateOperationPlan
+        )
+        source = attest_clean_tool_repository(tool_repository.expanduser().absolute())
+        backend = LinuxQualificationCampaignBackend(
+            operation=operation,
+            state_root=state_root.expanduser().absolute(),
+            radio_lock_root=shared_radio_lock_root(),
+            tool_repository=source.repository,
+            tool_version=__version__,
+            tool_source_commit=source.commit,
+            timeout_s=timeout_s,
+        )
+        report, digest = execute_gain_timeline_qualification(
+            selected_plan,
+            password_path=ssh_password_file.expanduser().absolute(),
+            confirmation=confirmation,
+            backend=backend,
+        )
+    except (
+        OSError,
+        ValueError,
+        QualificationCampaignError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
+        detail = (
+            ""
+            if not isinstance(error, QualificationCampaignError)
+            or error.report_sha256 is None
+            else f"; report_sha256={error.report_sha256}"
+        )
+        _fail("gain_timeline_qualification_failed", f"{error}{detail}", 5)
+    _emit(
+        {
+            "outcome": report.outcome,
+            "serial": campaign.serial,
+            "case_count": len(report.cases),
+            "persistent_qspi_unchanged": report.persistent_qspi_unchanged,
+            "report": str(campaign.report_path),
+            "report_sha256": digest,
         }
     )
 

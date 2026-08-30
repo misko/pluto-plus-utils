@@ -11,7 +11,9 @@ from types import TracebackType
 from typing import Any
 
 import numpy as np
+from pydantic import ValidationError
 
+from pluto_plus.ddr_ring import DdrRingStatusSnapshot
 from pluto_plus.direct_radio.usb import (
     MetadataFlags,
     RadioMetadataV3,
@@ -32,9 +34,13 @@ from pluto_plus.hardware.sample_clock import (
     fit_sample_clock,
 )
 from pluto_plus.tandem import (
+    MetadataTransportKind,
     RadioMetadataV5,
     RadioMetadataV6,
+    RadioMetadataV7,
+    TandemEventDirection,
     TandemSessionRequestV1,
+    pack_metadata_provider_request_v1,
 )
 
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
@@ -63,12 +69,84 @@ class MetadataLayoutCapability:
     sample_count_multiple: int
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingMetadataSequence:
+    stream_id: int
+    buffer_sequence: int
+    sample_end: int
+    missing_samples_before: int
+
+
 ABI3_METADATA_LAYOUTS = (
     MetadataLayoutCapability(0x03, 1, 4, 2),
     MetadataLayoutCapability(0x0C, 1, 4, 2),
     MetadataLayoutCapability(0x0F, 2, 8, 1),
 )
 ABI3_METADATA_LAYOUTS_TEXT = "00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1"
+# ABI 4 changes metadata authority and request negotiation, not the canonical
+# RX scan layouts inherited from ABI 3.
+ABI4_METADATA_LAYOUTS = ABI3_METADATA_LAYOUTS
+ABI4_METADATA_LAYOUTS_TEXT = ABI3_METADATA_LAYOUTS_TEXT
+ABI4_METADATA_RECORD = 7
+ABI4_METADATA_FEATURES_TEXT = (
+    "fpga-gain-timeline,exact-event-sequence,optional-rssi-telemetry,typed-capture-errors"
+)
+SUPPORTED_METADATA_ABIS = (1, 2, 3, 4)
+SUPPORTED_METADATA_STATUS_VERSIONS = (1, 2)
+
+
+def parse_metadata_version_capabilities(value: object) -> tuple[int, ...]:
+    """Parse one canonical, strictly increasing metadata version set."""
+
+    if not isinstance(value, str) or not value:
+        raise ValueError("metadata version capability is absent")
+    versions: list[int] = []
+    for encoded in value.split(","):
+        try:
+            version = int(encoded, 10)
+        except ValueError as error:
+            raise ValueError("metadata version capability is not numeric") from error
+        if encoded != str(version) or not 1 <= version <= 0xFFFF:
+            raise ValueError("metadata version capability is not canonical")
+        if versions and version <= versions[-1]:
+            raise ValueError("metadata version capability is not strictly increasing")
+        versions.append(version)
+    return tuple(versions)
+
+
+def require_metadata_abi_capability(
+    attrs: Mapping[str, object], expected_abi: int
+) -> int:
+    """Select one release-local metadata ABI from canonical context attributes.
+
+    ABI 4 is additive: firmware keeps the legacy scalar at ABI 3 for old hosts
+    and advertises ABI 4 in the explicit version set.  Earlier ABIs retain the
+    exact scalar admission rule so this helper cannot silently change their
+    compatibility behavior.
+    """
+
+    if isinstance(expected_abi, bool) or expected_abi not in SUPPORTED_METADATA_ABIS:
+        raise ValueError("expected metadata ABI is unsupported")
+    legacy_raw = attrs.get("iio,buffer-metadata")
+    if expected_abi < 4:
+        if legacy_raw != str(expected_abi):
+            raise ValueError(
+                f"metadata ABI scalar is {legacy_raw!r}, expected {expected_abi}"
+            )
+        return expected_abi
+
+    if legacy_raw != "3":
+        raise ValueError(
+            "metadata ABI 4 requires the compatibility-preserving legacy scalar '3'"
+        )
+    versions = parse_metadata_version_capabilities(
+        attrs.get("iio,buffer-metadata-abi-versions")
+    )
+    if 3 not in versions:
+        raise ValueError("metadata ABI version set is inconsistent with legacy scalar 3")
+    if expected_abi not in versions:
+        raise ValueError("metadata ABI version set does not advertise requested ABI 4")
+    return expected_abi
 
 
 def parse_metadata_layout_capabilities(value: object) -> tuple[MetadataLayoutCapability, ...]:
@@ -205,8 +283,8 @@ class IioMetadataCaptureSession:
             raise ValueError("samples_per_channel must be positive")
         if kernel_buffers <= 0:
             raise ValueError("kernel_buffers must be positive")
-        if metadata_abi not in {1, 2, 3}:
-            raise ValueError("metadata_abi must be one of the supported ABIs 1, 2, or 3")
+        if metadata_abi not in {1, 2, 3, 4}:
+            raise ValueError("metadata_abi must be one of the supported ABIs 1, 2, 3, or 4")
         if metadata_capacity <= 0:
             raise ValueError("metadata_capacity must be positive")
         if isinstance(ddr_burst_bytes, bool) or not isinstance(ddr_burst_bytes, int):
@@ -243,19 +321,20 @@ class IioMetadataCaptureSession:
         self._ddr_ring_capture_frames = ddr_ring_frames
         self._ddr_ring_continuous = ddr_ring_continuous
         self._tandem_request = tandem_request or TandemSessionRequestV1.auto_for_sample_count(
-            samples_per_channel
+            samples_per_channel,
+            retention_frames=(kernel_buffers + 1 if metadata_abi == 4 else 2),
         )
         self._channels = tuple(int(item) for item in sdr.rx_enabled_channels)
         if self._channels not in {(0,), (1,), (0, 1)}:
             raise ValueError("metadata capture receiver selection is not canonical")
         if metadata_abi in {1, 2} and self._channels != (0, 1):
             raise ValueError("metadata ABI 1 and 2 require paired RX channels")
-        if metadata_abi == 3 and len(self._channels) == 1 and samples_per_channel & 1:
-            raise ValueError("metadata ABI 3 single-RX sample count must be even")
-        if ddr_burst_bytes and (metadata_abi != 3 or len(self._channels) != 1):
-            raise ValueError("device DDR burst v1 requires metadata ABI 3 and one receiver")
-        if ddr_ring_bytes and metadata_abi != 3:
-            raise ValueError("device DDR ring v1 requires metadata ABI 3")
+        if metadata_abi in {3, 4} and len(self._channels) == 1 and samples_per_channel & 1:
+            raise ValueError("metadata ABI 3/4 single-RX sample count must be even")
+        if ddr_burst_bytes and (metadata_abi not in {3, 4} or len(self._channels) != 1):
+            raise ValueError("device DDR burst v1 requires metadata ABI 3/4 and one receiver")
+        if ddr_ring_bytes and (metadata_abi not in {3, 4} or len(self._channels) != 1):
+            raise ValueError("device DDR ring v1 requires metadata ABI 3/4 and one receiver")
         frame_iq_bytes = samples_per_channel * len(self._channels) * 4
         self._ddr_burst_frames = 0 if not ddr_burst_bytes else ddr_burst_bytes // frame_iq_bytes
         self._ddr_burst_admitted_bytes = self._ddr_burst_frames * frame_iq_bytes
@@ -273,6 +352,7 @@ class IioMetadataCaptureSession:
         self._stream_id: int | None = None
         self._previous_buffer_sequence: int | None = None
         self._previous_sample_end: int | None = None
+        self._previous_v7_metadata: RadioMetadataV7 | None = None
         self._terminal_ddr_ring_status: dict[str, object] | None = None
         self._terminal_ddr_ring_status_error: str | None = None
 
@@ -345,7 +425,11 @@ class IioMetadataCaptureSession:
         result = status()
         if not isinstance(result, Mapping):
             raise RuntimeError("pylibiio returned malformed DDR ring status")
-        return dict(result)
+        try:
+            typed = DdrRingStatusSnapshot.model_validate(result)
+        except ValidationError as error:
+            raise RuntimeError("pylibiio returned malformed DDR ring status") from error
+        return typed.model_dump(mode="python")
 
     def _cache_failed_ddr_ring_status(self) -> None:
         if not self.ddr_ring_enabled or self._buffer is None:
@@ -407,11 +491,25 @@ class IioMetadataCaptureSession:
             )
 
     def _open_metadata_buffer(self) -> Any:
-        request = (
-            None
-            if self._metadata_abi == 1
-            else self._tandem_request.pack(self._samples_per_channel)
-        )
+        request: bytes | None
+        if self._metadata_abi == 1:
+            request = None
+        elif self._metadata_abi in {2, 3}:
+            request = self._tandem_request.pack(self._samples_per_channel)
+        else:
+            transport_kind = (
+                MetadataTransportKind.DDR_BURST
+                if self.ddr_burst_enabled
+                else MetadataTransportKind.DDR_RING
+                if self.ddr_ring_enabled
+                else MetadataTransportKind.ORDINARY
+            )
+            request = pack_metadata_provider_request_v1(
+                self._tandem_request,
+                self._samples_per_channel,
+                transport_kind=transport_kind,
+                retention_frames=self._kernel_buffers + 1,
+            )
         for attempt in range(1, _OPEN_MAX_ATTEMPTS + 1):
             try:
                 if self._metadata_abi == 1:
@@ -500,7 +598,9 @@ class IioMetadataCaptureSession:
         if raw_metadata is None:
             raise RuntimeError("metadata buffer refill returned no metadata header")
         declared_missing: int | None = None
-        tandem_metadata: RadioMetadataV5 | None = None
+        tandem_metadata: RadioMetadataV5 | RadioMetadataV7 | None = None
+        parsed_v7: RadioMetadataV7 | None = None
+        metadata: Any
         if self._metadata_abi == 1:
             metadata = RadioMetadataV3.unpack(raw_metadata)
         elif self._metadata_abi == 2:
@@ -509,15 +609,26 @@ class IioMetadataCaptureSession:
             tandem_metadata = parsed
             if len(raw_metadata) != parsed.header_bytes:
                 raise RuntimeError("metadata refill returned trailing bytes")
-        else:
+        elif self._metadata_abi == 3:
             parsed_v6 = RadioMetadataV6.unpack(raw_metadata)
             metadata = parsed_v6.base
             tandem_metadata = parsed_v6.tandem
             declared_missing = parsed_v6.missing_samples_before
             if len(raw_metadata) != parsed_v6.header_bytes:
                 raise RuntimeError("metadata refill returned trailing bytes")
+        else:
+            parsed_v7 = RadioMetadataV7.unpack(raw_metadata)
+            metadata = parsed_v7
+            tandem_metadata = parsed_v7
+            declared_missing = parsed_v7.missing_samples_before
+            if len(raw_metadata) != parsed_v7.header_bytes:
+                raise RuntimeError("metadata refill returned trailing bytes")
         self._validate_header(metadata)
-        missing = self._validate_sequence(metadata, declared_missing=declared_missing)
+        pending_sequence = self._validate_sequence(
+            metadata, declared_missing=declared_missing
+        )
+        if parsed_v7 is not None:
+            self._validate_v7_ledger(parsed_v7)
         self._refresh_time_anchors(initial=False)
         timing = self._capture_time(metadata.first_sample_sequence)
         utc_ns = (
@@ -525,6 +636,7 @@ class IioMetadataCaptureSession:
             if timing is not None
             else (host_before_ns + host_after_ns) // 2
         )
+        self._commit_sequence(pending_sequence, v7_metadata=parsed_v7)
         return SampleBlockV2(
             utc_ns=int(utc_ns),
             samples=signal.astype(np.complex64, copy=False),
@@ -533,7 +645,7 @@ class IioMetadataCaptureSession:
             first_sample_sequence=int(metadata.first_sample_sequence),
             metadata_flags=int(metadata.flags),
             metadata_abi=self._metadata_abi,
-            missing_samples_before=missing,
+            missing_samples_before=pending_sequence.missing_samples_before,
             sample_time_realtime_start_ns=(
                 None if timing is None else timing["sample_time_realtime_start_ns"]
             ),
@@ -570,7 +682,9 @@ class IioMetadataCaptureSession:
         if not metadata.flags & MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID:
             raise RuntimeError("IIO metadata lacks a valid FPGA sample counter")
 
-    def _validate_sequence(self, metadata: Any, *, declared_missing: int | None) -> int:
+    def _validate_sequence(
+        self, metadata: Any, *, declared_missing: int | None
+    ) -> _PendingMetadataSequence:
         stream_id = int(metadata.stream_id)
         buffer_sequence = int(metadata.buffer_sequence)
         first_sample = int(metadata.first_sample_sequence)
@@ -582,10 +696,12 @@ class IioMetadataCaptureSession:
                 or metadata.flags & MetadataFlags.SAMPLE_GAP_BEFORE
             ):
                 raise RuntimeError("new metadata capture declared a preceding gap")
-            self._stream_id = stream_id
-            self._previous_buffer_sequence = buffer_sequence
-            self._previous_sample_end = first_sample + self._samples_per_channel
-            return 0
+            return _PendingMetadataSequence(
+                stream_id=stream_id,
+                buffer_sequence=buffer_sequence,
+                sample_end=first_sample + self._samples_per_channel,
+                missing_samples_before=0,
+            )
         if stream_id != self._stream_id:
             raise RuntimeError("metadata stream changed without a capture reset")
         assert self._previous_buffer_sequence is not None
@@ -597,18 +713,110 @@ class IioMetadataCaptureSession:
         if missing < 0:
             raise RuntimeError("FPGA sample counter repeated or regressed")
         skipped_buffers = buffer_delta - 1
-        if self._metadata_abi == 3:
+        if self._metadata_abi in {3, 4}:
             if declared_missing != missing:
                 raise RuntimeError("metadata exact gap count disagrees with the FPGA counter")
             if bool(metadata.flags & MetadataFlags.SAMPLE_GAP_BEFORE) != bool(missing):
                 raise RuntimeError("metadata gap flag disagrees with the FPGA counter")
             if skipped_buffers != missing // self._samples_per_channel:
                 raise RuntimeError("metadata buffer and FPGA sample sequences disagree")
+            if self._metadata_abi == 4 and missing:
+                raise RuntimeError("ABI4 metadata capture is not contiguous")
         elif missing != skipped_buffers * self._samples_per_channel:
             raise RuntimeError("metadata buffer and FPGA sample sequences disagree")
-        self._previous_buffer_sequence = buffer_sequence
-        self._previous_sample_end = first_sample + self._samples_per_channel
-        return missing
+        return _PendingMetadataSequence(
+            stream_id=stream_id,
+            buffer_sequence=buffer_sequence,
+            sample_end=first_sample + self._samples_per_channel,
+            missing_samples_before=missing,
+        )
+
+    def _commit_sequence(
+        self,
+        pending: _PendingMetadataSequence,
+        *,
+        v7_metadata: RadioMetadataV7 | None,
+    ) -> None:
+        if self._metadata_abi == 4 and v7_metadata is None:  # pragma: no cover
+            raise RuntimeError("ABI4 sequence commit lacks V7 metadata")
+        self._stream_id = pending.stream_id
+        self._previous_buffer_sequence = pending.buffer_sequence
+        self._previous_sample_end = pending.sample_end
+        if self._metadata_abi == 4:
+            assert v7_metadata is not None
+            self._previous_v7_metadata = v7_metadata
+
+    def _validate_v7_ledger(self, metadata: RadioMetadataV7) -> None:
+        previous = self._previous_v7_metadata
+        if previous is None:
+            if metadata.tandem_transition_count_start != 0 or metadata.event_sequence_start != 0:
+                raise RuntimeError("ABI4 capture did not begin with a zero-seeded gain ledger")
+            return
+        stable_contract = (
+            "ownership_epoch",
+            "tandem_state",
+            "gain_table_id",
+            "threshold_provenance",
+            "minimum_gain_db",
+            "maximum_gain_db",
+            "initial_gain_db",
+            "minimum_gain_index",
+            "maximum_gain_index",
+            "gain_observation_interval_samples",
+            "gain_observation_capacity",
+            "gain_event_capacity",
+        )
+        if any(getattr(metadata, name) != getattr(previous, name) for name in stable_contract):
+            raise RuntimeError("ABI4 gain-ledger contract changed within one capture")
+        if metadata.tandem_transition_count_start != previous.tandem_transition_count:
+            raise RuntimeError("ABI4 gain-ledger transition sequence is discontinuous")
+        expected_event_sequence = (
+            previous.event_sequence_start + len(previous.gain_events)
+        ) & 0xFFFFFFFF
+        if metadata.event_sequence_start != expected_event_sequence:
+            raise RuntimeError("ABI4 gain-ledger event sequence is discontinuous")
+        boundary_events = tuple(
+            event
+            for event in metadata.gain_events
+            if event.sample_sequence == metadata.first_sample_sequence
+        )
+        previous_index = previous.rx1_gain_index
+        if boundary_events:
+            current_index = previous_index
+            for event in boundary_events:
+                if event.direction is TandemEventDirection.INCREASE:
+                    direction_matches = event.rx1_gain_index > current_index
+                else:
+                    direction_matches = event.rx1_gain_index < current_index
+                if not direction_matches:
+                    raise RuntimeError(
+                        "ABI4 frame-boundary gain event contradicts its direction"
+                    )
+                current_index = event.rx1_gain_index
+            if current_index != metadata.rx1_gain_index_start:
+                raise RuntimeError(
+                    "ABI4 frame-boundary gain events disagree with the start index"
+                )
+            index_delta = metadata.rx1_gain_index_start - previous_index
+            db_delta = metadata.rx1_gain_db_start - previous.rx1_gain_db_end
+            if (
+                (index_delta > 0 and db_delta < 0)
+                or (index_delta < 0 and db_delta > 0)
+                or (index_delta == 0 and db_delta != 0)
+            ):
+                raise RuntimeError(
+                    "ABI4 frame-boundary gain index and dB direction disagree"
+                )
+        elif (
+            metadata.rx1_gain_index_start,
+            metadata.rx2_gain_index_start,
+        ) != (previous.rx1_gain_index, previous.rx2_gain_index):
+            raise RuntimeError("ABI4 gain-ledger index endpoints are discontinuous")
+        elif (
+            metadata.rx1_gain_db_start,
+            metadata.rx2_gain_db_start,
+        ) != (previous.rx1_gain_db_end, previous.rx2_gain_db_end):
+            raise RuntimeError("ABI4 gain-ledger dB endpoints are discontinuous")
 
     def _query_time_anchor(self) -> HostTimeAnchorMeasurement | None:
         reader = getattr(self._sdr._rxadc, "reg_read", None)
@@ -688,6 +896,7 @@ class IioMetadataCaptureSession:
         self._stream_id = None
         self._previous_buffer_sequence = None
         self._previous_sample_end = None
+        self._previous_v7_metadata = None
         if getattr(self._sdr, "_rxbuf", None) is buffer:
             self._sdr._rxbuf = None
         try:

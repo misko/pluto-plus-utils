@@ -61,6 +61,7 @@ class _Capture:
         target = self.ddr_ring_capture_frames
         capacity = self.ddr_ring_capacity_frames
         return {
+            "version": 1,
             "state": "complete",
             "terminal_reason": "target_complete",
             "error_code": 0,
@@ -77,6 +78,8 @@ class _Capture:
                 1_000 + (self.previous_sequence + 1) * self.samples
             ),
             "first_unavailable_sample_sequence": None,
+            "failure_frame_index": None,
+            "failure_sample_sequence": None,
         }
 
     def read_block(self) -> SampleBlockV2:
@@ -394,6 +397,7 @@ def test_metadata_ladder_accepts_gaps_only_after_exact_ddr_prefix() -> None:
         def ddr_ring_status(self) -> dict[str, object]:
             prefix_end = 1_000 + 2 * self.samples
             return {
+                "version": 1,
                 "state": "complete",
                 "terminal_reason": "target_complete",
                 "error_code": 0,
@@ -408,6 +412,8 @@ def test_metadata_ladder_accepts_gaps_only_after_exact_ddr_prefix() -> None:
                 "consumer_position": 0,
                 "last_contiguous_sample_sequence": prefix_end,
                 "first_unavailable_sample_sequence": prefix_end,
+                "failure_frame_index": None,
+                "failure_sample_sequence": None,
             }
 
     class _PostPrefixGapRadio(_Radio):
@@ -599,12 +605,13 @@ def test_metadata_ladder_frame_bound_covers_twenty_seconds_at_30_msps() -> None:
     required_frames = nominal_seconds * sample_rate_hz // samples_per_channel
 
     assert required_frames == 600
-    assert required_frames == MAX_METADATA_FRAMES
+    assert required_frames <= MAX_METADATA_FRAMES
+    assert MAX_METADATA_FRAMES == 5_000
 
 
 def test_metadata_ladder_rejects_ddr_burst_outside_abi3_single_rx() -> None:
     radio = _Radio({262_144: (0, 1)})
-    with pytest.raises(ValueError, match="ABI 3 and one receiver"):
+    with pytest.raises(ValueError, match="ABI 3/4 and one receiver"):
         run_metadata_continuity_ladder(
             uri="ip:192.0.2.1",
             serial="SERIAL_A",
@@ -619,10 +626,8 @@ def test_metadata_ladder_rejects_ddr_burst_outside_abi3_single_rx() -> None:
         )
 
 
-@pytest.mark.parametrize("channels", ((0,), (0, 1)))
-def test_metadata_ladder_qualifies_finite_ddr_ring_with_exact_status(
-    channels: tuple[int, ...],
-) -> None:
+def test_metadata_ladder_qualifies_finite_ddr_ring_with_exact_status() -> None:
+    channels = (0,)
     samples = 262_144
     frames = 6
     frame_bytes = samples * len(channels) * 4
@@ -666,6 +671,7 @@ def test_metadata_ladder_preserves_failed_ring_status_before_close() -> None:
 
         def ddr_ring_status(self) -> dict[str, object]:
             return {
+                "version": 2,
                 "state": "failed",
                 "terminal_reason": "counter_gap",
                 "error_code": -75,
@@ -680,6 +686,8 @@ def test_metadata_ladder_preserves_failed_ring_status_before_close() -> None:
                 "consumer_position": 2,
                 "last_contiguous_sample_sequence": 1_000 + 3 * self.samples,
                 "first_unavailable_sample_sequence": 1_000 + 4 * self.samples,
+                "failure_frame_index": 3,
+                "failure_sample_sequence": 1_000 + 4 * self.samples,
             }
 
     class _FailedRingRadio(_Radio):
@@ -734,6 +742,9 @@ def test_metadata_ladder_preserves_failed_ring_status_before_close() -> None:
     assert failure.ddr_ring_status.produced_frames == 3
     assert failure.ddr_ring_status.consumed_frames == 2
     assert failure.ddr_ring_status.first_unavailable_sample_sequence is not None
+    assert failure.ddr_ring_status.version == 2
+    assert failure.ddr_ring_status.failure_frame_index == 3
+    assert failure.ddr_ring_status.failure_sample_sequence == 1_000 + 4 * samples
     assert failure.ddr_ring_status_error is None
     assert radio.settings == radio.original
 
@@ -779,6 +790,13 @@ def test_metadata_ladder_rejects_ambiguous_or_incompatible_ddr_ring() -> None:
         run_metadata_continuity_ladder(
             **arguments,
             metadata_abi=2,
+            channels=(0, 1),
+            ddr_ring_bytes=2_097_152,
+        )
+    with pytest.raises(ValueError, match="one receiver"):
+        run_metadata_continuity_ladder(
+            **arguments,
+            metadata_abi=4,
             channels=(0, 1),
             ddr_ring_bytes=2_097_152,
         )

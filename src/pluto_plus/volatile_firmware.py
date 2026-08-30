@@ -24,6 +24,7 @@ from pluto_plus.bootstrap_firmware import (
     mute_returned_radio_at_path,
 )
 from pluto_plus.firmware import FirmwareImageError, validate_dfu
+from pluto_plus.hardware.iio_metadata import require_metadata_abi_capability
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 from pluto_plus.local_reboot import FixedSshLocalRebootTransport
 
@@ -768,7 +769,6 @@ def _attest_ram_return(
             serial = str(facts.get("hw_serial") or "").strip()
             firmware = str(facts.get("fw_version") or "").strip()
             phy = str(facts.get("ad9361-phy,model") or "").strip()
-            metadata = str(facts.get("iio,buffer-metadata") or "").strip()
             raw_names = facts.get("device_names", ())
             device_names = (
                 {str(value) for value in raw_names}
@@ -777,8 +777,12 @@ def _attest_ram_return(
             )
             if serial != plan.serial or firmware != plan.expected_firmware:
                 raise VolatileFirmwareError("returned RAM image identity/version is wrong")
-            if phy != plan.before_phy or metadata != str(plan.expected_metadata_abi):
-                raise VolatileFirmwareError("returned RAM image PHY/metadata ABI is wrong")
+            if phy != plan.before_phy:
+                raise VolatileFirmwareError("returned RAM image PHY is wrong")
+            try:
+                require_metadata_abi_capability(facts, plan.expected_metadata_abi)
+            except ValueError as error:
+                raise VolatileFirmwareError("returned RAM image metadata ABI is wrong") from error
             if ("tandem-agc" in device_names) is not plan.expected_tandem_agc:
                 raise VolatileFirmwareError("returned RAM image tandem capability is wrong")
             observed_burst = str(facts.get("iio,buffer-ddr-burst") or "").strip()

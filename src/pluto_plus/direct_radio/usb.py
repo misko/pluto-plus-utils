@@ -51,11 +51,13 @@ class MetadataFeatures(enum.IntFlag):
     HARDWARE_SAMPLE_COUNTER = 1 << 7
     CANONICAL_RX_LAYOUT = 1 << 10
     EXACT_GAP_ACCOUNTING = 1 << 11
+    FPGA_GAIN_TIMELINE = 1 << 12
 
 
 KNOWN_FEATURES = MetadataFeatures(0xFF)
 KNOWN_FEATURES_V3 = KNOWN_FEATURES
 KNOWN_FEATURES_V6 = MetadataFeatures(0xCFF)
+KNOWN_FEATURES_V7 = MetadataFeatures(0x1FFF)
 
 
 class MetadataFlags(enum.IntFlag):
@@ -82,11 +84,13 @@ class MetadataFlags(enum.IntFlag):
     GAIN_OBSERVATION_OVERFLOW = 1 << 20
     HARDWARE_SAMPLE_COUNTER_VALID = 1 << 21
     SAMPLE_GAP_BEFORE = 1 << 23
+    FPGA_GAIN_TIMELINE_VALID = 1 << 24
 
 
 KNOWN_FLAGS = MetadataFlags((1 << 22) - 1)
 KNOWN_FLAGS_V3 = KNOWN_FLAGS
 KNOWN_FLAGS_V6 = MetadataFlags((1 << 24) - 1)
+KNOWN_FLAGS_V7 = MetadataFlags((1 << 25) - 1)
 
 
 class GainObservationFlags(enum.IntFlag):

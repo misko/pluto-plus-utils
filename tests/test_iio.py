@@ -576,3 +576,50 @@ def test_context_facts_include_live_model_metadata_and_dual_rx_scan() -> None:
         "voltage2",
         "voltage3",
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "abi_versions",
+        "status_versions",
+        "abi_state",
+        "status_state",
+        "effective_abi",
+        "effective_status",
+    ),
+    (
+        ("1,2,3,4", "1,2", "available", "available", 4, 2),
+        ("1,2,4", "1,2", "inconsistent", "available", None, 2),
+        ("1,2,3,03,4", "1,2", "malformed", "available", None, 2),
+        ("1,2,3,4", "2", "available", "inconsistent", 4, None),
+        ("1,2,3,4", "1,02", "available", "malformed", 4, None),
+    ),
+)
+def test_context_facts_resolve_explicit_metadata_version_sets_fail_closed(
+    abi_versions: str,
+    status_versions: str,
+    abi_state: str,
+    status_state: str,
+    effective_abi: int | None,
+    effective_status: int | None,
+) -> None:
+    context = SimpleNamespace(
+        attrs={
+            "iio,buffer-metadata": "3",
+            "iio,buffer-metadata-abi-versions": abi_versions,
+            "iio,buffer-metadata-status": "1",
+            "iio,buffer-metadata-status-versions": status_versions,
+        },
+        find_device=lambda _name: None,
+    )
+
+    facts = context_facts(context)
+
+    assert facts["buffer_metadata_legacy_abi"] == 3
+    assert facts["buffer_metadata_abi_versions_raw"] == abi_versions
+    assert facts["buffer_metadata_abi_versions_state"] == abi_state
+    assert facts["buffer_metadata_abi"] == effective_abi
+    assert facts["buffer_metadata_status_legacy_version"] == 1
+    assert facts["buffer_metadata_status_versions_raw"] == status_versions
+    assert facts["buffer_metadata_status_versions_state"] == status_state
+    assert facts["buffer_metadata_status_max_version"] == effective_status

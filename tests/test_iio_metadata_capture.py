@@ -27,20 +27,28 @@ from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.hardware.iio_metadata import (
     ABI3_METADATA_LAYOUTS_TEXT,
+    ABI4_METADATA_FEATURES_TEXT,
+    ABI4_METADATA_LAYOUTS_TEXT,
     IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER,
     IIO_CONTEXT_TIMEOUT_MAX_MS,
     IIO_CONTEXT_TIMEOUT_MS,
     IIO_DDR_BURST_TIMEOUT_MAX_MS,
     metadata_iio_context_timeout_ms,
+    parse_metadata_version_capabilities,
+    require_metadata_abi_capability,
 )
 from pluto_plus.tandem import (
     AD9361_TEMPERATURE_FEATURE,
     CANONICAL_RX_LAYOUT_FEATURE,
     EXACT_GAP_ACCOUNTING_FEATURE,
+    HEADER_PREFIX_BYTES_V7,
+    METADATA_PROVIDER_REQUEST_BYTES,
     SAMPLE_GAP_BEFORE_FLAG,
     TANDEM_METADATA_FEATURE,
     TANDEM_METADATA_VALID_FLAG,
+    MetadataTransportKind,
     RadioMetadataV6,
+    RadioMetadataV7,
     TandemGainTable,
     TandemState,
 )
@@ -48,6 +56,102 @@ from pluto_plus.tandem import (
 SAMPLE_COUNT = 4
 STREAM = 0x1234
 REQUIRED_FEATURES = MetadataFeatures(0xF7)
+V7_HOLD_GOLDEN = bytes.fromhex(
+    "53474d310700e800ff1f00001314660134120000000000000000000000000000"
+    "e80300000000000004000000200000000f000000010002141414140000000000"
+    "00000000ffffffffffffffffffffffffffffffff000000000000000004000000"
+    "0000010020000000010010000000000000000000000000000000000009000000"
+    "02000000000000000700000002000000143a3130000000003e00000014000000"
+    "004c1414f8a70000070000001414010037000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "00000000507fe84f"
+)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    (("1", (1,)), ("1,2,3,4", (1, 2, 3, 4)), ("1,2,5", (1, 2, 5))),
+)
+def test_metadata_version_capability_parser_accepts_only_canonical_sets(
+    raw: str, expected: tuple[int, ...]
+) -> None:
+    assert parse_metadata_version_capabilities(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        None,
+        "",
+        "0",
+        "01",
+        "1,",
+        "1, 2",
+        "1,1",
+        "2,1",
+        "1,65536",
+        "1,+2",
+        "1,-2",
+        "1,2.0",
+        "1,,2",
+    ),
+)
+def test_metadata_version_capability_parser_rejects_aliases_and_bad_sets(
+    raw: object,
+) -> None:
+    with pytest.raises(ValueError, match="metadata version capability"):
+        parse_metadata_version_capabilities(raw)
+
+
+@pytest.mark.parametrize("abi", (1, 2, 3))
+def test_metadata_abi_capability_preserves_legacy_scalar_selection(abi: int) -> None:
+    assert require_metadata_abi_capability({"iio,buffer-metadata": str(abi)}, abi) == abi
+
+
+def test_metadata_abi_capability_selects_additive_abi4() -> None:
+    attrs = {
+        "iio,buffer-metadata": "3",
+        "iio,buffer-metadata-abi-versions": "1,2,3,4",
+    }
+    assert require_metadata_abi_capability(attrs, 4) == 4
+
+
+@pytest.mark.parametrize(
+    "attrs",
+    (
+        {"iio,buffer-metadata": "3"},
+        {
+            "iio,buffer-metadata": "3",
+            "iio,buffer-metadata-abi-versions": "1,2,3",
+        },
+        {
+            "iio,buffer-metadata": "3",
+            "iio,buffer-metadata-abi-versions": "1,2,4",
+        },
+        {
+            "iio,buffer-metadata": "3",
+            "iio,buffer-metadata-abi-versions": "1,2,3,04",
+        },
+        {
+            "iio,buffer-metadata": "4",
+            "iio,buffer-metadata-abi-versions": "1,2,3,4",
+        },
+    ),
+)
+def test_metadata_abi_capability_rejects_incomplete_or_incoherent_abi4(
+    attrs: dict[str, str],
+) -> None:
+    with pytest.raises(ValueError):
+        require_metadata_abi_capability(attrs, 4)
+
+
+def test_metadata_abi_capability_does_not_use_additive_set_for_legacy_selection() -> None:
+    attrs = {
+        "iio,buffer-metadata": "3",
+        "iio,buffer-metadata-abi-versions": "1,2,3,4",
+    }
+    with pytest.raises(ValueError, match="scalar"):
+        require_metadata_abi_capability(attrs, 2)
 
 
 def _metadata_v3(
@@ -211,6 +315,115 @@ def _metadata_v6(
     return bytes(raw)
 
 
+def _v7_session_hold_frame(buffer_sequence: int, first_sample_sequence: int) -> bytes:
+    raw = bytearray(V7_HOLD_GOLDEN)
+    struct.pack_into("<QQ", raw, 24, buffer_sequence, first_sample_sequence)
+    struct.pack_into("<I", raw, 136, 0)
+    struct.pack_into("<I", raw, 168, 0)
+    struct.pack_into("<I", raw, 176, 0)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
+def _mutate_v7_session_contract(frame: bytes, mutation: str) -> bytes:
+    raw = bytearray(frame)
+    if mutation == "ownership":
+        struct.pack_into("<I", raw, 124, 10)
+    elif mutation == "state":
+        struct.pack_into("<I", raw, 128, int(TandemState.ARMED_AUTO))
+    elif mutation == "gain-table":
+        struct.pack_into("<I", raw, 140, 1)
+    elif mutation == "observation-interval":
+        struct.pack_into("<I", raw, 92, 2)
+    elif mutation == "observation-capacity":
+        raw[HEADER_PREFIX_BYTES_V7 + 32 : HEADER_PREFIX_BYTES_V7 + 32] = bytes(32)
+        struct.pack_into("<H", raw, 6, len(raw))
+        struct.pack_into("<H", raw, 98, 2)
+    elif mutation == "event-capacity":
+        raw[-4:-4] = bytes(16)
+        struct.pack_into("<H", raw, 6, len(raw))
+        struct.pack_into("<H", raw, 104, 2)
+    elif mutation == "transition":
+        struct.pack_into("<I", raw, 136, 1)
+        struct.pack_into("<I", raw, 168, 1)
+    elif mutation == "event-sequence":
+        struct.pack_into("<I", raw, 176, 1)
+    elif mutation == "gain-index":
+        struct.pack_into("<BB", raw, 162, 21, 21)
+        struct.pack_into("<BB", raw, 172, 21, 21)
+    elif mutation == "gain-db":
+        struct.pack_into("<bbbb", raw, 55, 21, 21, 21, 21)
+    else:  # pragma: no cover - test helper inventory is closed
+        raise AssertionError(mutation)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
+def _v7_session_gap_frame() -> bytes:
+    raw = bytearray(_v7_session_hold_frame(2, 1_008))
+    flags = struct.unpack_from("<I", raw, 12)[0]
+    flags |= int(MetadataFlags.SAMPLE_GAP_BEFORE | MetadataFlags.DEVICE_IIO_OVERFLOW)
+    struct.pack_into("<I", raw, 12, flags)
+    struct.pack_into("<II", raw, 116, SAMPLE_COUNT, 0)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
+def _v7_session_auto_boundary_frame(
+    buffer_sequence: int,
+    first_sample_sequence: int,
+    *,
+    transition_count_start: int,
+    event_sequence_start: int,
+    previous_index: int,
+    events: tuple[tuple[int, int], ...] = (),
+    event_capacity: int | None = None,
+) -> bytes:
+    raw = bytearray(_v7_session_hold_frame(buffer_sequence, first_sample_sequence))
+    event_capacity = max(1, len(events)) if event_capacity is None else event_capacity
+    assert event_capacity >= max(1, len(events))
+    if event_capacity > 1:
+        raw[-4:-4] = bytes((event_capacity - 1) * 16)
+    start_index = events[-1][1] if events else previous_index
+    struct.pack_into("<H", raw, 6, len(raw))
+    struct.pack_into("<bbbb", raw, 55, start_index, start_index, start_index, start_index)
+    struct.pack_into(
+        "<II", raw, 68, 0 if events else 0xFFFFFFFF, 0 if events else 0xFFFFFFFF
+    )
+    struct.pack_into("<HH", raw, 102, len(events), event_capacity)
+    struct.pack_into("<I", raw, 128, int(TandemState.ARMED_AUTO))
+    struct.pack_into("<I", raw, 136, transition_count_start + len(events))
+    struct.pack_into("<BB", raw, 162, start_index, start_index)
+    struct.pack_into("<I", raw, 168, transition_count_start)
+    struct.pack_into("<BB", raw, 172, start_index, start_index)
+    struct.pack_into("<I", raw, 176, event_sequence_start)
+    flags = struct.unpack_from("<I", raw, 12)[0]
+    if events:
+        flags |= int(
+            MetadataFlags.FPGA_EVENTS_VALID
+            | MetadataFlags.RX1_CHANGED_IN_BUFFER
+            | MetadataFlags.RX2_CHANGED_IN_BUFFER
+        )
+    struct.pack_into("<I", raw, 12, flags)
+    for index, (event_flags, result_index) in enumerate(events):
+        struct.pack_into(
+            "<QIHBB",
+            raw,
+            HEADER_PREFIX_BYTES_V7 + 32 + index * 16,
+            first_sample_sequence,
+            (event_sequence_start + index) & 0xFFFFFFFF,
+            event_flags,
+            result_index,
+            result_index,
+        )
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
 class FakeRxAdc:
     def __init__(self, headers: list[bytes], *, preserve_readback: bool = True) -> None:
         self.headers = deque(headers)
@@ -258,6 +471,12 @@ class FakeMetadataBuffer:
         frame_bytes = samples * 4
         capacity = requested // frame_bytes
         return {
+            "version": (
+                2
+                if isinstance(self.signature[1], bytes)
+                and self.signature[1][:4] == b"SMR1"
+                else 1
+            ),
             "state": "complete",
             "terminal_reason": "target_complete",
             "error_code": 0,
@@ -272,6 +491,8 @@ class FakeMetadataBuffer:
             "consumer_position": target % capacity,
             "last_contiguous_sample_sequence": 1_000 + target * samples,
             "first_unavailable_sample_sequence": None,
+            "failure_frame_index": None,
+            "failure_sample_sequence": None,
         }
 
 
@@ -298,6 +519,14 @@ class FakeAd9361:
         ddr_burst: bool = False,
         ddr_ring: bool = False,
         preserve_readback: bool = True,
+        abi4_contract: bool = True,
+        advertise_version_sets: bool = True,
+        metadata_abi_versions: str | None = None,
+        metadata_record: str = "7",
+        metadata_features: str | None = None,
+        metadata_status: str | None = None,
+        metadata_status_versions: str | None = None,
+        advertise_status_version_set: bool = True,
     ) -> None:
         self.uri = uri
         self.events: list[str] = []
@@ -311,9 +540,22 @@ class FakeAd9361:
             "ad9361-phy,model": "ad9361",
         }
         if metadata_abi is not None:
-            attrs["iio,buffer-metadata"] = str(metadata_abi)
+            attrs["iio,buffer-metadata"] = (
+                "3" if metadata_abi == 4 and advertise_version_sets else str(metadata_abi)
+            )
+        if metadata_abi == 4 and advertise_version_sets:
+            attrs["iio,buffer-metadata-abi-versions"] = (
+                "1,2,3,4" if metadata_abi_versions is None else metadata_abi_versions
+            )
         if metadata_layouts is not None:
             attrs["iio,buffer-metadata-layouts"] = metadata_layouts
+        if metadata_abi == 4 and abi4_contract:
+            attrs["iio,buffer-metadata-record"] = metadata_record
+            attrs["iio,buffer-metadata-features"] = (
+                ABI4_METADATA_FEATURES_TEXT
+                if metadata_features is None
+                else metadata_features
+            )
         if ddr_burst:
             attrs.update(
                 {
@@ -328,9 +570,21 @@ class FakeAd9361:
                     "iio,buffer-ddr-ring": "1",
                     "iio,buffer-ddr-ring-max-iq-bytes": "200000000",
                     "iio,buffer-ddr-ring-modes": "finite,continuous",
-                    "iio,buffer-metadata-status": "1",
+                    "iio,buffer-metadata-status": (
+                        metadata_status
+                        if metadata_status is not None
+                        else "1"
+                    ),
                 }
             )
+            if (
+                metadata_abi == 4
+                and advertise_version_sets
+                and advertise_status_version_set
+            ):
+                attrs["iio,buffer-metadata-status-versions"] = (
+                    "1,2" if metadata_status_versions is None else metadata_status_versions
+                )
         channels = tuple(
             SimpleNamespace(id=f"voltage{index}", scan_element=True) for index in range(4)
         )
@@ -340,7 +594,7 @@ class FakeAd9361:
                 SimpleNamespace(channels=channels)
                 if name == "cf-ad9361-lpc"
                 else SimpleNamespace(channels=())
-                if name == "tandem-agc" and metadata_abi in {2, 3}
+                if name == "tandem-agc" and metadata_abi in {2, 3, 4}
                 else None
             ),
             set_timeout=self._set_timeout,
@@ -406,17 +660,35 @@ class FakeAdi:
         preserve_readback: bool = True,
         ddr_burst: bool = False,
         ddr_ring: bool = False,
+        abi4_contract: bool = True,
+        advertise_version_sets: bool = True,
+        metadata_abi_versions: str | None = None,
+        metadata_record: str = "7",
+        metadata_features: str | None = None,
+        metadata_status: str | None = None,
+        metadata_status_versions: str | None = None,
+        advertise_status_version_set: bool = True,
     ) -> None:
         self.headers = headers
         self.metadata_abi = metadata_abi
         self.metadata_layouts = (
             ABI3_METADATA_LAYOUTS_TEXT
             if metadata_abi == 3 and metadata_layouts is None
+            else ABI4_METADATA_LAYOUTS_TEXT
+            if metadata_abi == 4 and metadata_layouts is None
             else metadata_layouts
         )
         self.preserve_readback = preserve_readback
         self.ddr_burst = ddr_burst
         self.ddr_ring = ddr_ring
+        self.abi4_contract = abi4_contract
+        self.advertise_version_sets = advertise_version_sets
+        self.metadata_abi_versions = metadata_abi_versions
+        self.metadata_record = metadata_record
+        self.metadata_features = metadata_features
+        self.metadata_status = metadata_status
+        self.metadata_status_versions = metadata_status_versions
+        self.advertise_status_version_set = advertise_status_version_set
         self.device: FakeAd9361 | None = None
 
     def ad9361(self, uri: str) -> FakeAd9361:
@@ -428,6 +700,14 @@ class FakeAdi:
             preserve_readback=self.preserve_readback,
             ddr_burst=self.ddr_burst,
             ddr_ring=self.ddr_ring,
+            abi4_contract=self.abi4_contract,
+            advertise_version_sets=self.advertise_version_sets,
+            metadata_abi_versions=self.metadata_abi_versions,
+            metadata_record=self.metadata_record,
+            metadata_features=self.metadata_features,
+            metadata_status=self.metadata_status,
+            metadata_status_versions=self.metadata_status_versions,
+            advertise_status_version_set=self.advertise_status_version_set,
         )
         return self.device
 
@@ -443,6 +723,15 @@ def _open_radio(
     ddr_burst: bool = False,
     ddr_ring: bool = False,
     iq_decoder: str = "pyadi",
+    abi4_contract: bool = True,
+    advertise_version_sets: bool = True,
+    metadata_abi_versions: str | None = None,
+    metadata_record: str = "7",
+    metadata_features: str | None = None,
+    metadata_status: str | None = None,
+    metadata_status_versions: str | None = None,
+    advertise_status_version_set: bool = True,
+    expected_metadata_abi: int | None = None,
 ) -> tuple[IioRadioDevice, FakeAdi, FakeMetadataBufferFactory]:
     adi = FakeAdi(
         headers,
@@ -451,6 +740,14 @@ def _open_radio(
         preserve_readback=preserve_readback,
         ddr_burst=ddr_burst,
         ddr_ring=ddr_ring,
+        abi4_contract=abi4_contract,
+        advertise_version_sets=advertise_version_sets,
+        metadata_abi_versions=metadata_abi_versions,
+        metadata_record=metadata_record,
+        metadata_features=metadata_features,
+        metadata_status=metadata_status,
+        metadata_status_versions=metadata_status_versions,
+        advertise_status_version_set=advertise_status_version_set,
     )
     factory = FakeMetadataBufferFactory()
     iio = SimpleNamespace(MetadataBuffer=factory) if include_metadata_buffer else SimpleNamespace()
@@ -459,6 +756,7 @@ def _open_radio(
         serial="SERIAL_A",
         adi_module=adi,
         iio_module=iio,
+        expected_metadata_abi=expected_metadata_abi,
         iq_decoder=iq_decoder,
     )
     radio.open()
@@ -796,6 +1094,456 @@ def test_default_metadata_request_scales_auto_cooldown_to_refill_size() -> None:
 
 
 @pytest.mark.parametrize(
+    ("kernel_buffers", "expected_cooldown"),
+    ((1, 127), (2, 191), (4, 319), (6, 447)),
+)
+def test_abi4_default_auto_request_covers_the_provider_retention_window(
+    kernel_buffers: int,
+    expected_cooldown: int,
+) -> None:
+    session = iio_adapter.IioMetadataCaptureSession(
+        SimpleNamespace(rx_enabled_channels=(0, 1)),
+        FakeMetadataBufferFactory(),
+        sample_rate_hz=2_500_000,
+        samples_per_channel=4_194_304,
+        kernel_buffers=kernel_buffers,
+        metadata_abi=4,
+    )
+
+    assert session._tandem_request.cooldown_periods == expected_cooldown  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("mode", "transport_kind", "transport_bytes"),
+    (
+        ("ordinary", MetadataTransportKind.ORDINARY, 0),
+        ("burst", MetadataTransportKind.DDR_BURST, 32),
+        ("ring", MetadataTransportKind.DDR_RING, 48),
+    ),
+)
+def test_abi4_buffer_request_declares_the_exact_transport_before_provider_trailer(
+    mode: str,
+    transport_kind: MetadataTransportKind,
+    transport_bytes: int,
+) -> None:
+    radio, _adi, factory = _open_radio(
+        [],
+        metadata_abi=4,
+        channels=(0,),
+        ddr_burst=mode == "burst",
+        ddr_ring=mode == "ring",
+    )
+    try:
+        capture = radio.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_burst_bytes=SAMPLE_COUNT * 4 if mode == "burst" else 0,
+            ddr_ring_bytes=SAMPLE_COUNT * 4 if mode == "ring" else 0,
+            ddr_ring_frames=1 if mode == "ring" else 0,
+        )
+        request = factory.instances[0].signature[1]
+        assert isinstance(request, bytes)
+        assert len(request) == METADATA_PROVIDER_REQUEST_BYTES + 104
+        assert struct.unpack_from("<IHHIHHHHIII", request) == (
+            0x31524D53,
+            1,
+            32,
+            0x0F,
+            7,
+            int(transport_kind),
+            104,
+            transport_bytes,
+            0,
+            0,
+            0,
+        )
+        capture.close()
+    finally:
+        radio.close()
+
+
+def test_abi4_capture_returns_the_standalone_authoritative_timeline() -> None:
+    radio, _adi, factory = _open_radio(
+        [_v7_session_hold_frame(0, 1_000)], metadata_abi=4
+    )
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        block = capture.read_block()
+
+        assert block.metadata_abi == 4
+        assert block.first_sample_sequence == 1_000
+        assert isinstance(block.tandem_metadata, RadioMetadataV7)
+        assert block.tandem_metadata.rx1_gain_index_start == 20
+        assert block.tandem_metadata.rx1_gain_index == 20
+        assert block.tandem_metadata.gain_observations == ()
+        assert factory.instances[0].signature[1][:METADATA_PROVIDER_REQUEST_BYTES] == (
+            struct.pack("<IHHIHHHHIII", 0x31524D53, 1, 32, 0x0F, 7, 0, 104, 0, 0, 0, 0)
+        )
+    finally:
+        radio.close()
+
+
+def test_abi4_session_rejects_a_valid_midstream_record_as_its_first_frame() -> None:
+    standalone = RadioMetadataV7.unpack(V7_HOLD_GOLDEN)
+    assert standalone.tandem_transition_count_start != 0
+    assert standalone.event_sequence_start != 0
+    radio, _adi, _factory = _open_radio([V7_HOLD_GOLDEN], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        with pytest.raises(RuntimeError, match="zero-seeded gain ledger"):
+            capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+def test_abi4_session_accepts_one_contiguous_authoritative_gain_ledger() -> None:
+    frames = [
+        _v7_session_hold_frame(0, 1_000),
+        _v7_session_hold_frame(1, 1_004),
+    ]
+    radio, _adi, _factory = _open_radio(frames, metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        assert [capture.read_block().buffer_sequence for _ in frames] == [0, 1]
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize(
+    "events",
+    (
+        ((0x13, 21),),
+        ((0x13, 21), (0x13, 22)),
+    ),
+)
+def test_abi4_session_accepts_deferred_events_at_the_next_frame_boundary(
+    events: tuple[tuple[int, int], ...],
+) -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+        event_capacity=len(events),
+    )
+    second = _v7_session_auto_boundary_frame(
+        1,
+        1_004,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+        events=events,
+        event_capacity=len(events),
+    )
+    assert RadioMetadataV7.unpack(second).rx1_first_change_sample == 0
+    radio, _adi, _factory = _open_radio([first, second], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        boundary = capture.read_block()
+        assert boundary.tandem_metadata is not None
+        assert boundary.tandem_metadata.rx1_gain_index_start == events[-1][1]
+    finally:
+        radio.close()
+
+
+def test_abi4_session_rejects_a_contradictory_deferred_boundary_direction() -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+    )
+    contradictory = _v7_session_auto_boundary_frame(
+        1,
+        1_004,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+        events=((0x23, 21),),
+    )
+    # A standalone frame lacks the prior endpoint needed for this validation.
+    RadioMetadataV7.unpack(contradictory)
+    radio, _adi, _factory = _open_radio([first, contradictory], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match="boundary gain event contradicts"):
+            capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+def test_abi4_rejects_boundary_event_result_that_disagrees_with_start() -> None:
+    raw = bytearray(
+        _v7_session_auto_boundary_frame(
+            1,
+            1_004,
+            transition_count_start=0,
+            event_sequence_start=0,
+            previous_index=20,
+            events=((0x13, 21),),
+        )
+    )
+    struct.pack_into("<bbbb", raw, 55, 22, 22, 22, 22)
+    struct.pack_into("<BB", raw, 162, 22, 22)
+    struct.pack_into("<BB", raw, 172, 22, 22)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+
+    with pytest.raises(ProtocolError, match="frame-start event result disagrees"):
+        RadioMetadataV7.unpack(bytes(raw))
+
+
+@pytest.mark.parametrize(
+    ("events", "serialized_db"),
+    (
+        (((0x13, 21),), 19),
+        (((0x23, 19),), 21),
+        (((0x13, 21), (0x23, 20)), 21),
+    ),
+)
+def test_abi4_session_rejects_boundary_start_db_with_opposite_direction(
+    events: tuple[tuple[int, int], ...], serialized_db: int
+) -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+        event_capacity=len(events),
+    )
+    raw = bytearray(
+        _v7_session_auto_boundary_frame(
+            1,
+            1_004,
+            transition_count_start=0,
+            event_sequence_start=0,
+            previous_index=20,
+            events=events,
+            event_capacity=len(events),
+        )
+    )
+    struct.pack_into(
+        "<bbbb", raw, 55, serialized_db, serialized_db, serialized_db, serialized_db
+    )
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    contradictory = bytes(raw)
+    RadioMetadataV7.unpack(contradictory)
+
+    radio, _adi, _factory = _open_radio([first, contradictory], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match="gain index and dB direction disagree"):
+            capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize(
+    "event",
+    (
+        (0x13, 21),
+        (0x23, 19),
+    ),
+)
+def test_abi4_session_accepts_boundary_index_move_on_a_gain_db_plateau(
+    event: tuple[int, int],
+) -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+    )
+    raw = bytearray(
+        _v7_session_auto_boundary_frame(
+            1,
+            1_004,
+            transition_count_start=0,
+            event_sequence_start=0,
+            previous_index=20,
+            events=(event,),
+        )
+    )
+    struct.pack_into("<bbbb", raw, 55, 20, 20, 20, 20)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    plateau = bytes(raw)
+    RadioMetadataV7.unpack(plateau)
+
+    radio, _adi, _factory = _open_radio([first, plateau], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        block = capture.read_block()
+        assert block.tandem_metadata is not None
+        assert block.tandem_metadata.rx1_gain_db_start == 20
+        assert block.tandem_metadata.rx1_gain_index_start == event[1]
+    finally:
+        radio.close()
+
+
+def test_abi4_session_rejects_a_standalone_valid_dma_gap() -> None:
+    first = _v7_session_hold_frame(0, 1_000)
+    gap = _v7_session_gap_frame()
+    assert RadioMetadataV7.unpack(gap).missing_samples_before == SAMPLE_COUNT
+    radio, _adi, _factory = _open_radio([first, gap], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match="ABI4 metadata capture is not contiguous"):
+            capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("ownership", "contract changed"),
+        ("state", "contract changed"),
+        ("gain-table", "contract changed"),
+        ("observation-interval", "contract changed"),
+        ("observation-capacity", "contract changed"),
+        ("event-capacity", "contract changed"),
+        ("transition", "transition sequence"),
+        ("event-sequence", "event sequence"),
+        ("gain-index", "index endpoints"),
+        ("gain-db", "dB endpoints"),
+    ),
+)
+def test_abi4_session_rejects_cross_frame_gain_ledger_discontinuity(
+    mutation: str, message: str
+) -> None:
+    first = _v7_session_hold_frame(0, 1_000)
+    second = _mutate_v7_session_contract(
+        _v7_session_hold_frame(1, 1_004), mutation
+    )
+    # The session rule is intentionally stronger than standalone frame validity.
+    RadioMetadataV7.unpack(second)
+    radio, _adi, _factory = _open_radio([first, second], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match=message):
+            capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+def test_abi4_ledger_rejection_does_not_advance_either_session_cursor() -> None:
+    first = _v7_session_hold_frame(0, 1_000)
+    bad_second = _mutate_v7_session_contract(
+        _v7_session_hold_frame(1, 1_004), "event-sequence"
+    )
+    radio, _adi, _factory = _open_radio([first, bad_second], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture._read_block()  # noqa: SLF001 - inspect the pre-poison transaction boundary
+        committed_v7 = capture._previous_v7_metadata  # noqa: SLF001
+        assert committed_v7 is not None
+
+        with pytest.raises(RuntimeError, match="event sequence"):
+            capture._read_block()  # noqa: SLF001
+
+        assert capture._stream_id == STREAM  # noqa: SLF001
+        assert capture._previous_buffer_sequence == 0  # noqa: SLF001
+        assert capture._previous_sample_end == 1_004  # noqa: SLF001
+        assert capture._previous_v7_metadata is committed_v7  # noqa: SLF001
+        assert capture._previous_v7_metadata.buffer_sequence == 0  # noqa: SLF001
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize(
+    ("abi4_contract", "metadata_record", "metadata_features"),
+    (
+        (False, "7", None),
+        (True, "07", None),
+        (
+            True,
+            "7",
+            "exact-event-sequence,fpga-gain-timeline,optional-rssi-telemetry,"
+            "typed-capture-errors",
+        ),
+    ),
+)
+def test_abi4_open_rejects_missing_or_noncanonical_record_feature_capabilities(
+    abi4_contract: bool,
+    metadata_record: str,
+    metadata_features: str | None,
+) -> None:
+    with pytest.raises(RadioConfigurationError, match="record/features contract"):
+        _open_radio(
+            [],
+            metadata_abi=4,
+            abi4_contract=abi4_contract,
+            metadata_record=metadata_record,
+            metadata_features=metadata_features,
+        )
+
+
+@pytest.mark.parametrize(
+    ("advertise_version_sets", "metadata_abi_versions"),
+    (
+        (False, None),
+        (True, "1,2,3"),
+        (True, "1,2,3,03,4"),
+        (True, "1,2,4"),
+    ),
+)
+def test_abi4_open_requires_a_canonical_coherent_explicit_version_set(
+    advertise_version_sets: bool,
+    metadata_abi_versions: str | None,
+) -> None:
+    with pytest.raises(RadioConfigurationError, match="ABI|version capability|version set"):
+        _open_radio(
+            [],
+            metadata_abi=4,
+            advertise_version_sets=advertise_version_sets,
+            metadata_abi_versions=metadata_abi_versions,
+            expected_metadata_abi=4,
+        )
+
+
+def test_versioned_v8_context_can_explicitly_select_legacy_abi3() -> None:
+    radio, _adi, factory = _open_radio(
+        [],
+        metadata_abi=4,
+        channels=(0,),
+        expected_metadata_abi=3,
+    )
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        assert len(factory.instances[0].signature[1]) == 104
+        capture.cancel()
+    finally:
+        radio.close()
+
+
+def test_legacy_metadata_abis_do_not_require_the_abi4_capability_attributes() -> None:
+    for metadata_abi in (1, 2, 3):
+        radio, _adi, _factory = _open_radio(
+            [],
+            metadata_abi=metadata_abi,
+            abi4_contract=False,
+        )
+        radio.close()
+
+
+@pytest.mark.parametrize(
     ("channels", "mask", "receivers", "iq_payload_bytes"),
     (
         ((0,), 0x03, 1, SAMPLE_COUNT * 4),
@@ -1020,7 +1768,141 @@ def test_abi3_ddr_ring_supports_explicit_continuous_mode_and_cancel() -> None:
         radio.close()
 
 
+def test_ddr_ring_status_capability_is_versioned_without_breaking_abi3() -> None:
+    abi3, adi3, _factory3 = _open_radio(
+        [],
+        metadata_abi=3,
+        channels=(0,),
+        ddr_ring=True,
+        metadata_status="2",
+    )
+    assert adi3.device is not None
+    abi3_facts = iio_adapter.context_facts(adi3.device.ctx)
+    assert abi3_facts["buffer_metadata_status"] is True
+    assert abi3_facts["buffer_metadata_status_raw"] == "2"
+    assert abi3_facts["buffer_metadata_status_max_version"] == 2
+    try:
+        capture = abi3.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_ring_bytes=SAMPLE_COUNT * 4,
+            ddr_ring_frames=1,
+        )
+        capture.cancel()
+    finally:
+        abi3.close()
+
+    abi4, _adi4, _factory4 = _open_radio(
+        [],
+        metadata_abi=4,
+        channels=(0,),
+        ddr_ring=True,
+        metadata_status_versions="1",
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="requires metadata status v2"):
+            abi4.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=1,
+            )
+    finally:
+        abi4.close()
+
+    abi4_v2, _adi4_v2, _factory4_v2 = _open_radio(
+        [],
+        metadata_abi=4,
+        channels=(0,),
+        ddr_ring=True,
+    )
+    try:
+        facts = iio_adapter.context_facts(_adi4_v2.device.ctx)
+        assert facts["buffer_metadata_legacy_abi"] == 3
+        assert facts["buffer_metadata_abi_versions"] == (1, 2, 3, 4)
+        assert facts["buffer_metadata_abi"] == 4
+        assert facts["buffer_metadata_status_raw"] == "1"
+        assert facts["buffer_metadata_status_versions"] == (1, 2)
+        assert facts["buffer_metadata_status_max_version"] == 2
+        capture_v2 = abi4_v2.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_ring_bytes=SAMPLE_COUNT * 4,
+            ddr_ring_frames=1,
+        )
+        assert capture_v2.ddr_ring_status()["version"] == 2
+        capture_v2.cancel()
+    finally:
+        abi4_v2.close()
+
+
+@pytest.mark.parametrize(
+    ("advertise_status_version_set", "metadata_status_versions"),
+    ((False, None), (True, "1"), (True, "1,02"), (True, "2")),
+)
+def test_abi4_ring_requires_a_canonical_coherent_explicit_status_v2_set(
+    advertise_status_version_set: bool,
+    metadata_status_versions: str | None,
+) -> None:
+    radio, _adi, _factory = _open_radio(
+        [],
+        metadata_abi=4,
+        channels=(0,),
+        ddr_ring=True,
+        advertise_status_version_set=advertise_status_version_set,
+        metadata_status_versions=metadata_status_versions,
+        expected_metadata_abi=4,
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="metadata status v2"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=1,
+            )
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize("metadata_status", ("0", "02", "3", "garbage"))
+def test_ddr_ring_rejects_unknown_metadata_status_capability(
+    metadata_status: str,
+) -> None:
+    radio, _adi, _factory = _open_radio(
+        [],
+        metadata_abi=3,
+        channels=(0,),
+        ddr_ring=True,
+        metadata_status=metadata_status,
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="cannot report DDR ring status"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=1,
+            )
+    finally:
+        radio.close()
+
+
 def test_ddr_ring_requires_capability_mode_status_and_valid_geometry() -> None:
+    dual, _dual_adi, _dual_factory = _open_radio(
+        [], metadata_abi=4, channels=(0, 1), ddr_ring=True
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="one receiver"):
+            dual.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 8,
+                ddr_ring_frames=1,
+            )
+    finally:
+        dual.close()
+
     radio, _adi, _factory = _open_radio([], metadata_abi=3, channels=(0,))
     try:
         with pytest.raises(RadioConfigurationError, match="does not advertise"):

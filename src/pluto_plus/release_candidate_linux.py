@@ -15,7 +15,7 @@ import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -46,6 +46,7 @@ USB_VENDOR = "0456"
 RUNTIME_PRODUCT = "b673"
 DFU_PRODUCT = "b674"
 F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+REMOTE_PERSISTENT_RESET_COMMAND = "/bin/sync; /usr/sbin/device_reboot reset"
 F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
 F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
 F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
@@ -165,6 +166,7 @@ class LinuxReleaseCandidateBackend:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         radio_lock_root: Path | None = None,
+        _prelocked_radio_serial: str | None = None,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("Linux candidate lifecycle timeout must be positive")
@@ -179,6 +181,7 @@ class LinuxReleaseCandidateBackend:
         self.sleep = sleep
         self.monotonic = monotonic
         self.radio_lock_root = radio_lock_root or shared_radio_lock_root()
+        self._prelocked_radio_serial = _prelocked_radio_serial
         self._active_target: UsbInventoryTarget | None = None
         self._active_route: HostRouteReceipt | None = None
         self._sealed_descriptor: int | None = None
@@ -190,7 +193,16 @@ class LinuxReleaseCandidateBackend:
         """Exclude the daemon, this radio, and all users of the shared endpoint."""
 
         try:
-            with acquire_radio_lock(target.serial, root=self.radio_lock_root):
+            if self._prelocked_radio_serial not in {None, target.serial}:
+                raise ReleaseCandidateLifecycleError(
+                    "prelocked candidate backend serial differs from its target"
+                )
+            radio_lock = (
+                nullcontext()
+                if self._prelocked_radio_serial == target.serial
+                else acquire_radio_lock(target.serial, root=self.radio_lock_root)
+            )
+            with radio_lock:
                 self._prepare_state_root()
                 locks = self.state_root / "locks"
                 locks.mkdir(mode=0o700, exist_ok=True)
@@ -634,6 +646,67 @@ class LinuxReleaseCandidateBackend:
         self.release_host_route(route)
         return observed, route.model_copy(update={"release_verified": True}), detached
 
+    def restore_persistent_runtime(
+        self,
+        target: UsbInventoryTarget,
+        *,
+        candidate_runtime: RuntimeObservation,
+        expected_firmware: str,
+        password: PasswordFileIdentity,
+        ssh_host: str,
+        timeout_s: float,
+    ) -> RuntimeObservation:
+        """Reset a RAM candidate into unchanged QSPI and attest the exact return."""
+
+        with self.transaction_locks(target, ssh_host):
+            fresh = self.revalidate_target(target)
+            route = self.acquire_host_route(fresh, ssh_host)
+            try:
+                before = self.attest_runtime(
+                    fresh,
+                    expected_firmware=candidate_runtime.firmware_version,
+                    password=password,
+                    route=route,
+                )
+                if (
+                    before.boot_id != candidate_runtime.boot_id
+                    or before.qspi != candidate_runtime.qspi
+                ):
+                    raise ReleaseCandidateLifecycleError(
+                        "candidate runtime changed before persistent restore"
+                    )
+                command = ssh_fixed_argv(
+                    fresh,
+                    ssh_host=ssh_host,
+                    password_path=password.path,
+                    remote_command=REMOTE_PERSISTENT_RESET_COMMAND,
+                )
+                self.runner.run(
+                    command,
+                    timeout_s=self.timeout_s,
+                    allowed_returncodes=(0, 255),
+                )
+                returned = self.wait_for_runtime(fresh, timeout_s=timeout_s)
+                self.ensure_host_route(route, returned)
+                restored = self.attest_runtime(
+                    returned,
+                    expected_firmware=expected_firmware,
+                    password=password,
+                    route=route,
+                )
+                if (
+                    restored.serial != candidate_runtime.serial
+                    or restored.topology != candidate_runtime.topology
+                    or restored.boot_id == candidate_runtime.boot_id
+                    or restored.qspi != candidate_runtime.qspi
+                ):
+                    raise ReleaseCandidateLifecycleError(
+                        "persistent restore identity, boot epoch, or QSPI changed"
+                    )
+            finally:
+                self.release_host_route(route)
+        return restored
+
     def _runtime_targets(self) -> tuple[UsbInventoryTarget, ...]:
         targets: list[UsbInventoryTarget] = []
         for device in self.scanner():
@@ -843,12 +916,14 @@ class LinuxReleaseCandidateBackend:
             state = round(_first_float(_read_attr(tandem, "state")))
             fifo = round(_first_float(_read_attr(tandem, "fifo_level")))
             faults = round(_first_float(_read_attr(tandem, "fault_flags")))
-            metadata_value = attrs.get("iio,buffer-metadata", "")
-            metadata = (
-                metadata_value
-                if metadata_value.startswith("frame-metadata-v")
-                else f"frame-metadata-v{metadata_value}"
-            )
+            from pluto_plus.hardware.iio import context_facts
+
+            metadata_value = context_facts(context).get("buffer_metadata_abi")
+            if not isinstance(metadata_value, int):
+                raise ReleaseCandidateLifecycleError(
+                    "runtime metadata ABI capability is absent, malformed, or inconsistent"
+                )
+            metadata = f"frame-metadata-v{metadata_value}"
             remote = self._remote_identity(target, password, route)
             if remote["firmware_version"] != firmware:
                 raise ReleaseCandidateLifecycleError("SSH and USB-IIO firmware differ")

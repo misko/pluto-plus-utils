@@ -24,6 +24,7 @@ from pluto_plus.release_candidate_lifecycle import (
     validate_password_file,
 )
 from pluto_plus.release_candidate_linux import (
+    REMOTE_PERSISTENT_RESET_COMMAND,
     LinuxReleaseCandidateBackend,
     attest_clean_tool_repository,
 )
@@ -139,6 +140,9 @@ class RouteRunner:
             assert self.route_present
             self.route_present = False
             return ""
+        if call and call[0] == "sshpass":
+            assert call[-1] == REMOTE_PERSISTENT_RESET_COMMAND
+            return ""
         raise AssertionError(f"unexpected command {call}")
 
 
@@ -168,6 +172,46 @@ def test_exact_host_route_is_added_verified_and_removed_under_locks(tmp_path: Pa
     assert runner.route_present is False
     assert any(call[:5] == ("sudo", "-n", "ip", "route", "add") for call in runner.calls)
     assert any(call[:5] == ("sudo", "-n", "ip", "route", "del") for call in runner.calls)
+
+
+def test_prelocked_campaign_backend_restores_unchanged_persistent_qspi(
+    tmp_path: Path,
+) -> None:
+    runner = RouteRunner()
+    runtimes = iter(
+        (
+            _runtime(boot_id="11111111-1111-4111-8111-111111111111"),
+            _runtime(boot_id="22222222-2222-4222-8222-222222222222"),
+        )
+    )
+    password_path = tmp_path / "password"
+    password_path.write_text("secret\n")
+    password_path.chmod(0o600)
+    password = validate_password_file(password_path)
+    lock_root = (tmp_path / "radio-locks").absolute()
+    backend = LinuxReleaseCandidateBackend(
+        state_root=(tmp_path / "state").absolute(),
+        radio_lock_root=lock_root,
+        scanner=lambda: (_local(),),
+        command_runner=runner,
+        runtime_attestor=lambda *_args: next(runtimes),
+        _prelocked_radio_serial=SERIAL,
+    )
+    candidate = _runtime(boot_id="11111111-1111-4111-8111-111111111111")
+
+    with acquire_radio_lock(SERIAL, root=lock_root):
+        restored = backend.restore_persistent_runtime(
+            _target(),
+            candidate_runtime=candidate,
+            expected_firmware=candidate.firmware_version,
+            password=password,
+            ssh_host="192.168.2.1",
+            timeout_s=5,
+        )
+
+    assert restored.boot_id == "22222222-2222-4222-8222-222222222222"
+    assert restored.qspi == candidate.qspi
+    assert runner.route_present is False
 
 
 def test_preexisting_host_route_is_never_replaced_or_deleted(tmp_path: Path) -> None:
@@ -387,6 +431,7 @@ def test_unknown_dfu_recovery_detaches_and_attests_unchanged_qspi(
     recovered = _runtime(boot_id="22222222-2222-4222-8222-222222222222")
     backend = RecoveryBackend(
         state_root=(tmp_path / "state").absolute(),
+        radio_lock_root=(tmp_path / "radio-locks").absolute(),
         sysfs_root=root,
         scanner=lambda: (),
         command_runner=runner,
@@ -422,6 +467,7 @@ def test_unknown_recovery_attests_already_returned_runtime_without_detach(
     recovered = _runtime(boot_id="22222222-2222-4222-8222-222222222222")
     backend = LinuxReleaseCandidateBackend(
         state_root=(tmp_path / "state").absolute(),
+        radio_lock_root=(tmp_path / "radio-locks").absolute(),
         scanner=lambda: (_local(),),
         command_runner=runner,
         runtime_attestor=lambda target, expected_firmware, password, route: recovered,

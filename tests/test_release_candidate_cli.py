@@ -75,6 +75,8 @@ def test_candidate_ram_help_has_native_plan_execute_and_no_known_hosts() -> None
     assert "execute" in result.output
     assert "recover" in result.output
     assert "receipt-verify" in result.output
+    assert "qualification-plan" in result.output
+    assert "qualification-execute" in result.output
     root = get_command(app)
     candidate = root.commands["firmware"].commands["candidate-ram"]  # type: ignore[attr-defined]
 
@@ -91,6 +93,11 @@ def test_candidate_ram_help_has_native_plan_execute_and_no_known_hosts() -> None
     assert "--output" in recover_options
     assert not any("known-host" in option for option in recover_options)
     assert "--serial" in options("inventory")
+    assert "--physical-ip" in options("qualification-plan")
+    qualification_execute_options = options("qualification-execute")
+    assert "--ssh-password-file" in qualification_execute_options
+    assert "--confirm" in qualification_execute_options
+    assert not any("known-host" in option for option in qualification_execute_options)
 
 
 def test_candidate_ram_defaults_to_the_source_checkout() -> None:
