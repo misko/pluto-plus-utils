@@ -1299,7 +1299,65 @@ def test_abi4_rejects_boundary_event_result_that_disagrees_with_start() -> None:
         RadioMetadataV7.unpack(bytes(raw))
 
 
-def test_abi4_session_rejects_boundary_start_db_with_opposite_direction() -> None:
+@pytest.mark.parametrize(
+    ("events", "serialized_db"),
+    (
+        (((0x13, 21),), 19),
+        (((0x23, 19),), 21),
+        (((0x13, 21), (0x23, 20)), 21),
+    ),
+)
+def test_abi4_session_rejects_boundary_start_db_with_opposite_direction(
+    events: tuple[tuple[int, int], ...], serialized_db: int
+) -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+        event_capacity=len(events),
+    )
+    raw = bytearray(
+        _v7_session_auto_boundary_frame(
+            1,
+            1_004,
+            transition_count_start=0,
+            event_sequence_start=0,
+            previous_index=20,
+            events=events,
+            event_capacity=len(events),
+        )
+    )
+    struct.pack_into(
+        "<bbbb", raw, 55, serialized_db, serialized_db, serialized_db, serialized_db
+    )
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    contradictory = bytes(raw)
+    RadioMetadataV7.unpack(contradictory)
+
+    radio, _adi, _factory = _open_radio([first, contradictory], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match="gain index and dB direction disagree"):
+            capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize(
+    "event",
+    (
+        (0x13, 21),
+        (0x23, 19),
+    ),
+)
+def test_abi4_session_accepts_boundary_index_move_on_a_gain_db_plateau(
+    event: tuple[int, int],
+) -> None:
     first = _v7_session_auto_boundary_frame(
         0,
         1_000,
@@ -1314,22 +1372,23 @@ def test_abi4_session_rejects_boundary_start_db_with_opposite_direction() -> Non
             transition_count_start=0,
             event_sequence_start=0,
             previous_index=20,
-            events=((0x13, 21),),
+            events=(event,),
         )
     )
-    struct.pack_into("<bbbb", raw, 55, 19, 19, 19, 19)
+    struct.pack_into("<bbbb", raw, 55, 20, 20, 20, 20)
     raw[-4:] = bytes(4)
     raw[-4:] = struct.pack("<I", zlib.crc32(raw))
-    contradictory = bytes(raw)
-    RadioMetadataV7.unpack(contradictory)
+    plateau = bytes(raw)
+    RadioMetadataV7.unpack(plateau)
 
-    radio, _adi, _factory = _open_radio([first, contradictory], metadata_abi=4)
+    radio, _adi, _factory = _open_radio([first, plateau], metadata_abi=4)
     try:
         capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
         capture.read_block()
-        with pytest.raises(RuntimeError, match="gain index and dB direction disagree"):
-            capture.read_block()
-        assert not capture.is_open
+        block = capture.read_block()
+        assert block.tandem_metadata is not None
+        assert block.tandem_metadata.rx1_gain_db_start == 20
+        assert block.tandem_metadata.rx1_gain_index_start == event[1]
     finally:
         radio.close()
 

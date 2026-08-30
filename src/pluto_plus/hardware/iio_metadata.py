@@ -799,7 +799,11 @@ class IioMetadataCaptureSession:
                 )
             index_delta = metadata.rx1_gain_index_start - previous_index
             db_delta = metadata.rx1_gain_db_start - previous.rx1_gain_db_end
-            if (index_delta > 0) != (db_delta > 0) or (index_delta < 0) != (db_delta < 0):
+            if (
+                (index_delta > 0 and db_delta < 0)
+                or (index_delta < 0 and db_delta > 0)
+                or (index_delta == 0 and db_delta != 0)
+            ):
                 raise RuntimeError(
                     "ABI4 frame-boundary gain index and dB direction disagree"
                 )
