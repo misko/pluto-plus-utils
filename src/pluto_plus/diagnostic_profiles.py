@@ -315,10 +315,21 @@ IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RELEASE_PROFILE = DiagnosticProfile(
     metadata_abis=(3,),
     tandem_agc_required=True,
     release_status=(
-        "RAM-only final release image; exact final-byte hardware qualification "
-        "pending; persistence not authorized"
+        "RAM-only failed final-byte qualification: 200 MB ring metadata coverage "
+        "ended with ENODATA at frame 69; persistence not authorized"
     ),
     release_rank=30,
+)
+
+IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_PROFILE = DiagnosticProfile(
+    profile_id="iio-throughput-buffered-sampler-v7-rc1",
+    firmware_version="v0.45-plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status=(
+        "RAM-only continuous buffered-sampler candidate; never persistence-qualified"
+    ),
+    release_rank=31,
 )
 
 DIAGNOSTIC_PROFILES = (
@@ -352,6 +363,7 @@ DIAGNOSTIC_PROFILES = (
     IIO_THROUGHPUT_SAMPLER_WAKE_V5_RC1_PROFILE,
     IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_PROFILE,
     IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RELEASE_PROFILE,
+    IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 

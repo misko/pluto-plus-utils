@@ -588,6 +588,29 @@ IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RELEASE_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 30, 15, 35, 7, tzinfo=UTC),
 )
 
+# Exact RAM-only successor to the failed v6 release bytes. V7 keeps the
+# gain/RSSI sampler continuously active for the lifetime of DDR burst/ring
+# buffers while retaining the exact per-refill fence. This replaces the finite
+# queue-depth timing estimate with a buffered-lifecycle invariant. Candidate
+# qualification is required on both reserved AD9363A radios; persistence is not
+# authorized.
+IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="iio-throughput-buffered-sampler-v7-rc1-ram",
+    release_tag="iio-throughput-buffered-sampler-v7-rc1-aaed8a8e38b0",
+    device_firmware="v0.45-plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1",
+    asset_name=(
+        "plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1-"
+        "aaed8a8e38b0-pluto.dfu"
+    ),
+    asset_sha256="9fd59860a169966d827a7dcafa57be555700faa8e3ea3e2538b31daeb64880ca",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33321123385",
+    source_commit="aaed8a8e38b02cb9802d18102a21dcead5c94a74",
+    fit_body_sha256="24bd04064f6e1bd7203f242a2731f947580bf51cc713ded4045eb801d98196eb",
+    fit_body_size=12_817_515,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 30, 16, 21, 47, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
