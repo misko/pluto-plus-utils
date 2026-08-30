@@ -309,6 +309,18 @@ IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_PROFILE = DiagnosticProfile(
     release_rank=29,
 )
 
+IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RELEASE_PROFILE = DiagnosticProfile(
+    profile_id="iio-throughput-coverage-window-v6-release",
+    firmware_version="v0.45-plutoplus-spf-iio-throughput-coverage-window-v6",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status=(
+        "RAM-only final release image; exact final-byte hardware qualification "
+        "pending; persistence not authorized"
+    ),
+    release_rank=30,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -339,6 +351,7 @@ DIAGNOSTIC_PROFILES = (
     IIO_THROUGHPUT_REFILL_SAMPLER_V4_RC1_PROFILE,
     IIO_THROUGHPUT_SAMPLER_WAKE_V5_RC1_PROFILE,
     IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_PROFILE,
+    IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RELEASE_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 

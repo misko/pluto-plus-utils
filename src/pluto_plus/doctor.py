@@ -567,6 +567,27 @@ IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 30, 5, 23, 5, tzinfo=UTC),
 )
 
+# Exact final-version-stamped coverage-window v6 image from protected main run
+# 33318745366. The RC's hardware evidence does not transfer to these
+# byte-distinct objects, so this identity remains RAM-only while the focused
+# physical-Ethernet ordinary/ring and recovery gates are repeated. No matching
+# persistent-write profile exists.
+IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RELEASE_RAM_POLICY = FirmwarePolicy(
+    profile_id="iio-throughput-coverage-window-v6-release-ram",
+    release_tag="v0.45-plutoplus-spf-iio-throughput-coverage-window-v6",
+    device_firmware="v0.45-plutoplus-spf-iio-throughput-coverage-window-v6",
+    asset_name=(
+        "plutoplus-spf-iio-throughput-coverage-window-v6-4f15c87033e3-pluto.dfu"
+    ),
+    asset_sha256="69224a5c0e927f4bb09c21b0bfc07f5d04b7998cf514c1478ccc1e2eb78dc2f8",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33318745366",
+    source_commit="4f15c87033e332293711ad679a50af0109c72862",
+    fit_body_sha256="34fce9b78c221af9be7870f81f126fc2bed89d439657104177573d37a94cee3c",
+    fit_body_size=12_817_075,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 30, 15, 35, 7, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
