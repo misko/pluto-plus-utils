@@ -12,6 +12,7 @@ not make continuity observable and must not be accepted as a fallback.
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
 | `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `ddr-ring-v1-rc1-source/libiio-v1` | `739a250b92610184b12d773f6a367e549f0dfe29` |
+| `iio,buffer-metadata=3` plus `iio,buffer-metadata-abi-versions=1,2,3,4` | strict `RadioMetadataV7` selected as ABI 4 | gain-timeline v8 release source | frozen by the release candidate plan |
 
 The currently deployed `.20` and `.21` radios advertise ABI 1. ABI 2 is a
 separate, gated firmware and host-runtime migration; it must not be selected
@@ -23,6 +24,13 @@ exact capability string
 per sample with an even sample count, while dual RX uses eight bytes per sample.
 V6 records arbitrary FPGA-counter gaps exactly; ABI 1/2 parsing and geometry
 remain unchanged.
+
+ABI 4 uses additive negotiation so old hosts remain operational: the legacy
+scalar stays at ABI 3, while a new host must parse the canonical version set
+and explicitly select ABI 4 before buffer creation. A missing, malformed,
+non-increasing, or scalar-inconsistent version set is an admission failure for
+ABI 4; ABI 1-3 firmware that has no version-set attribute continues to use its
+legacy scalar unchanged.
 
 ABI 3 also supports an opt-in, per-buffer device-DDR cache when the radio
 advertises `iio,buffer-ddr-burst=1`. A zero or omitted byte budget is the
@@ -48,8 +56,9 @@ omitting the flag is the explicit control case.
 
 ABI 3 additionally supports the optional streaming DDR ring when the radio
 advertises `iio,buffer-ddr-ring=1`, the exact modes `finite,continuous`, and
-`iio,buffer-metadata-status=1` or `2`. ABI 4 requires max status version `2`;
-ABI 3 continues to use the V1 wire status. Ring and burst capture each require
+`iio,buffer-metadata-status=1` or `2`. ABI 4 keeps the legacy scalar at `1` and
+requires `iio,buffer-metadata-status-versions=1,2`, selecting status V2; ABI 3
+continues to use the V1 wire status. Ring and burst capture each require
 one selected receiver. Unlike a sealed burst, a ring producer and the
 ordinary IIO consumer run concurrently. Before it starts transport, iiOD fills
 the admitted ring completely (or captures the smaller finite target). That

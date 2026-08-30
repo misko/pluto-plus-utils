@@ -822,7 +822,8 @@ class RadioMetadataV7:
         if not observations_valid and (prefix[18] or prefix[19]):
             raise ProtocolError("protocol v7 unavailable SPI observations have read durations")
         frame_end = prefix[7] + samples_per_channel
-        previous_observation = -1
+        previous_observation_before = -1
+        previous_observation_after = -1
         for observation in observations:
             required_observation_flags = (
                 GainObservationFlags.VALID
@@ -830,9 +831,13 @@ class RadioMetadataV7:
             )
             if observation.flags != required_observation_flags:
                 raise ProtocolError("protocol v7 valid SPI observation is incomplete")
-            if observation.sample_sequence_before < previous_observation:
+            if (
+                observation.sample_sequence_before < previous_observation_before
+                or observation.sample_sequence_after < previous_observation_after
+            ):
                 raise ProtocolError("protocol v7 SPI observations are not ordered")
-            previous_observation = observation.sample_sequence_before
+            previous_observation_before = observation.sample_sequence_before
+            previous_observation_after = observation.sample_sequence_after
             if not (
                 observation.sample_sequence_after >= prefix[7]
                 and observation.sample_sequence_before < frame_end

@@ -916,12 +916,14 @@ class LinuxReleaseCandidateBackend:
             state = round(_first_float(_read_attr(tandem, "state")))
             fifo = round(_first_float(_read_attr(tandem, "fifo_level")))
             faults = round(_first_float(_read_attr(tandem, "fault_flags")))
-            metadata_value = attrs.get("iio,buffer-metadata", "")
-            metadata = (
-                metadata_value
-                if metadata_value.startswith("frame-metadata-v")
-                else f"frame-metadata-v{metadata_value}"
-            )
+            from pluto_plus.hardware.iio import context_facts
+
+            metadata_value = context_facts(context).get("buffer_metadata_abi")
+            if not isinstance(metadata_value, int):
+                raise ReleaseCandidateLifecycleError(
+                    "runtime metadata ABI capability is absent, malformed, or inconsistent"
+                )
+            metadata = f"frame-metadata-v{metadata_value}"
             remote = self._remote_identity(target, password, route)
             if remote["firmware_version"] != firmware:
                 raise ReleaseCandidateLifecycleError("SSH and USB-IIO firmware differ")

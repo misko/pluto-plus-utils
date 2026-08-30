@@ -21,6 +21,12 @@ authoritative V7 gain timeline for every frame, exact settings restoration, and,
 for ring cases, clean status V2 plus its admitted contiguous prefix. The first
 failure stops further capture cases so cleanup can run immediately.
 
+Candidate admission also proves the compatibility-preserving negotiation:
+legacy scalars remain `iio,buffer-metadata=3` and
+`iio,buffer-metadata-status=1`, while the canonical explicit sets contain ABI 4
+and status V2. The host selects 4/2 from those sets; it never interprets either
+legacy scalar as the v8 wire version.
+
 Create one private plan per radio without touching hardware:
 
 ```console

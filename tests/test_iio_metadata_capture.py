@@ -34,11 +34,13 @@ from pluto_plus.hardware.iio_metadata import (
     IIO_CONTEXT_TIMEOUT_MS,
     IIO_DDR_BURST_TIMEOUT_MAX_MS,
     metadata_iio_context_timeout_ms,
+    parse_metadata_version_capabilities,
 )
 from pluto_plus.tandem import (
     AD9361_TEMPERATURE_FEATURE,
     CANONICAL_RX_LAYOUT_FEATURE,
     EXACT_GAP_ACCOUNTING_FEATURE,
+    HEADER_PREFIX_BYTES_V7,
     METADATA_PROVIDER_REQUEST_BYTES,
     SAMPLE_GAP_BEFORE_FLAG,
     TANDEM_METADATA_FEATURE,
@@ -63,6 +65,41 @@ V7_HOLD_GOLDEN = bytes.fromhex(
     "0000000000000000000000000000000000000000000000000000000000000000"
     "00000000507fe84f"
 )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    (("1", (1,)), ("1,2,3,4", (1, 2, 3, 4)), ("1,2,5", (1, 2, 5))),
+)
+def test_metadata_version_capability_parser_accepts_only_canonical_sets(
+    raw: str, expected: tuple[int, ...]
+) -> None:
+    assert parse_metadata_version_capabilities(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        None,
+        "",
+        "0",
+        "01",
+        "1,",
+        "1, 2",
+        "1,1",
+        "2,1",
+        "1,65536",
+        "1,+2",
+        "1,-2",
+        "1,2.0",
+        "1,,2",
+    ),
+)
+def test_metadata_version_capability_parser_rejects_aliases_and_bad_sets(
+    raw: object,
+) -> None:
+    with pytest.raises(ValueError, match="metadata version capability"):
+        parse_metadata_version_capabilities(raw)
 
 
 def _metadata_v3(
@@ -226,6 +263,63 @@ def _metadata_v6(
     return bytes(raw)
 
 
+def _v7_session_hold_frame(buffer_sequence: int, first_sample_sequence: int) -> bytes:
+    raw = bytearray(V7_HOLD_GOLDEN)
+    struct.pack_into("<QQ", raw, 24, buffer_sequence, first_sample_sequence)
+    struct.pack_into("<I", raw, 136, 0)
+    struct.pack_into("<I", raw, 168, 0)
+    struct.pack_into("<I", raw, 176, 0)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
+def _mutate_v7_session_contract(frame: bytes, mutation: str) -> bytes:
+    raw = bytearray(frame)
+    if mutation == "ownership":
+        struct.pack_into("<I", raw, 124, 10)
+    elif mutation == "state":
+        struct.pack_into("<I", raw, 128, int(TandemState.ARMED_AUTO))
+    elif mutation == "gain-table":
+        struct.pack_into("<I", raw, 140, 1)
+    elif mutation == "observation-interval":
+        struct.pack_into("<I", raw, 92, 2)
+    elif mutation == "observation-capacity":
+        raw[HEADER_PREFIX_BYTES_V7 + 32 : HEADER_PREFIX_BYTES_V7 + 32] = bytes(32)
+        struct.pack_into("<H", raw, 6, len(raw))
+        struct.pack_into("<H", raw, 98, 2)
+    elif mutation == "event-capacity":
+        raw[-4:-4] = bytes(16)
+        struct.pack_into("<H", raw, 6, len(raw))
+        struct.pack_into("<H", raw, 104, 2)
+    elif mutation == "transition":
+        struct.pack_into("<I", raw, 136, 1)
+        struct.pack_into("<I", raw, 168, 1)
+    elif mutation == "event-sequence":
+        struct.pack_into("<I", raw, 176, 1)
+    elif mutation == "gain-index":
+        struct.pack_into("<BB", raw, 162, 21, 21)
+        struct.pack_into("<BB", raw, 172, 21, 21)
+    elif mutation == "gain-db":
+        struct.pack_into("<bbbb", raw, 55, 21, 21, 21, 21)
+    else:  # pragma: no cover - test helper inventory is closed
+        raise AssertionError(mutation)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
+def _v7_session_gap_frame() -> bytes:
+    raw = bytearray(_v7_session_hold_frame(2, 1_008))
+    flags = struct.unpack_from("<I", raw, 12)[0]
+    flags |= int(MetadataFlags.SAMPLE_GAP_BEFORE | MetadataFlags.DEVICE_IIO_OVERFLOW)
+    struct.pack_into("<I", raw, 12, flags)
+    struct.pack_into("<II", raw, 116, SAMPLE_COUNT, 0)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
 class FakeRxAdc:
     def __init__(self, headers: list[bytes], *, preserve_readback: bool = True) -> None:
         self.headers = deque(headers)
@@ -322,9 +416,13 @@ class FakeAd9361:
         ddr_ring: bool = False,
         preserve_readback: bool = True,
         abi4_contract: bool = True,
+        advertise_version_sets: bool = True,
+        metadata_abi_versions: str | None = None,
         metadata_record: str = "7",
         metadata_features: str | None = None,
         metadata_status: str | None = None,
+        metadata_status_versions: str | None = None,
+        advertise_status_version_set: bool = True,
     ) -> None:
         self.uri = uri
         self.events: list[str] = []
@@ -338,7 +436,13 @@ class FakeAd9361:
             "ad9361-phy,model": "ad9361",
         }
         if metadata_abi is not None:
-            attrs["iio,buffer-metadata"] = str(metadata_abi)
+            attrs["iio,buffer-metadata"] = (
+                "3" if metadata_abi == 4 and advertise_version_sets else str(metadata_abi)
+            )
+        if metadata_abi == 4 and advertise_version_sets:
+            attrs["iio,buffer-metadata-abi-versions"] = (
+                "1,2,3,4" if metadata_abi_versions is None else metadata_abi_versions
+            )
         if metadata_layouts is not None:
             attrs["iio,buffer-metadata-layouts"] = metadata_layouts
         if metadata_abi == 4 and abi4_contract:
@@ -365,12 +469,18 @@ class FakeAd9361:
                     "iio,buffer-metadata-status": (
                         metadata_status
                         if metadata_status is not None
-                        else "2"
-                        if metadata_abi == 4
                         else "1"
                     ),
                 }
             )
+            if (
+                metadata_abi == 4
+                and advertise_version_sets
+                and advertise_status_version_set
+            ):
+                attrs["iio,buffer-metadata-status-versions"] = (
+                    "1,2" if metadata_status_versions is None else metadata_status_versions
+                )
         channels = tuple(
             SimpleNamespace(id=f"voltage{index}", scan_element=True) for index in range(4)
         )
@@ -447,9 +557,13 @@ class FakeAdi:
         ddr_burst: bool = False,
         ddr_ring: bool = False,
         abi4_contract: bool = True,
+        advertise_version_sets: bool = True,
+        metadata_abi_versions: str | None = None,
         metadata_record: str = "7",
         metadata_features: str | None = None,
         metadata_status: str | None = None,
+        metadata_status_versions: str | None = None,
+        advertise_status_version_set: bool = True,
     ) -> None:
         self.headers = headers
         self.metadata_abi = metadata_abi
@@ -464,9 +578,13 @@ class FakeAdi:
         self.ddr_burst = ddr_burst
         self.ddr_ring = ddr_ring
         self.abi4_contract = abi4_contract
+        self.advertise_version_sets = advertise_version_sets
+        self.metadata_abi_versions = metadata_abi_versions
         self.metadata_record = metadata_record
         self.metadata_features = metadata_features
         self.metadata_status = metadata_status
+        self.metadata_status_versions = metadata_status_versions
+        self.advertise_status_version_set = advertise_status_version_set
         self.device: FakeAd9361 | None = None
 
     def ad9361(self, uri: str) -> FakeAd9361:
@@ -479,9 +597,13 @@ class FakeAdi:
             ddr_burst=self.ddr_burst,
             ddr_ring=self.ddr_ring,
             abi4_contract=self.abi4_contract,
+            advertise_version_sets=self.advertise_version_sets,
+            metadata_abi_versions=self.metadata_abi_versions,
             metadata_record=self.metadata_record,
             metadata_features=self.metadata_features,
             metadata_status=self.metadata_status,
+            metadata_status_versions=self.metadata_status_versions,
+            advertise_status_version_set=self.advertise_status_version_set,
         )
         return self.device
 
@@ -498,9 +620,14 @@ def _open_radio(
     ddr_ring: bool = False,
     iq_decoder: str = "pyadi",
     abi4_contract: bool = True,
+    advertise_version_sets: bool = True,
+    metadata_abi_versions: str | None = None,
     metadata_record: str = "7",
     metadata_features: str | None = None,
     metadata_status: str | None = None,
+    metadata_status_versions: str | None = None,
+    advertise_status_version_set: bool = True,
+    expected_metadata_abi: int | None = None,
 ) -> tuple[IioRadioDevice, FakeAdi, FakeMetadataBufferFactory]:
     adi = FakeAdi(
         headers,
@@ -510,9 +637,13 @@ def _open_radio(
         ddr_burst=ddr_burst,
         ddr_ring=ddr_ring,
         abi4_contract=abi4_contract,
+        advertise_version_sets=advertise_version_sets,
+        metadata_abi_versions=metadata_abi_versions,
         metadata_record=metadata_record,
         metadata_features=metadata_features,
         metadata_status=metadata_status,
+        metadata_status_versions=metadata_status_versions,
+        advertise_status_version_set=advertise_status_version_set,
     )
     factory = FakeMetadataBufferFactory()
     iio = SimpleNamespace(MetadataBuffer=factory) if include_metadata_buffer else SimpleNamespace()
@@ -521,6 +652,7 @@ def _open_radio(
         serial="SERIAL_A",
         adi_module=adi,
         iio_module=iio,
+        expected_metadata_abi=expected_metadata_abi,
         iq_decoder=iq_decoder,
     )
     radio.open()
@@ -927,7 +1059,9 @@ def test_abi4_buffer_request_declares_the_exact_transport_before_provider_traile
 
 
 def test_abi4_capture_returns_the_standalone_authoritative_timeline() -> None:
-    radio, _adi, factory = _open_radio([V7_HOLD_GOLDEN], metadata_abi=4)
+    radio, _adi, factory = _open_radio(
+        [_v7_session_hold_frame(0, 1_000)], metadata_abi=4
+    )
     try:
         capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
         block = capture.read_block()
@@ -941,6 +1075,83 @@ def test_abi4_capture_returns_the_standalone_authoritative_timeline() -> None:
         assert factory.instances[0].signature[1][:METADATA_PROVIDER_REQUEST_BYTES] == (
             struct.pack("<IHHIHHHHIII", 0x31524D53, 1, 32, 0x0F, 7, 0, 104, 0, 0, 0, 0)
         )
+    finally:
+        radio.close()
+
+
+def test_abi4_session_rejects_a_valid_midstream_record_as_its_first_frame() -> None:
+    standalone = RadioMetadataV7.unpack(V7_HOLD_GOLDEN)
+    assert standalone.tandem_transition_count_start != 0
+    assert standalone.event_sequence_start != 0
+    radio, _adi, _factory = _open_radio([V7_HOLD_GOLDEN], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        with pytest.raises(RuntimeError, match="zero-seeded gain ledger"):
+            capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+def test_abi4_session_accepts_one_contiguous_authoritative_gain_ledger() -> None:
+    frames = [
+        _v7_session_hold_frame(0, 1_000),
+        _v7_session_hold_frame(1, 1_004),
+    ]
+    radio, _adi, _factory = _open_radio(frames, metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        assert [capture.read_block().buffer_sequence for _ in frames] == [0, 1]
+    finally:
+        radio.close()
+
+
+def test_abi4_session_rejects_a_standalone_valid_dma_gap() -> None:
+    first = _v7_session_hold_frame(0, 1_000)
+    gap = _v7_session_gap_frame()
+    assert RadioMetadataV7.unpack(gap).missing_samples_before == SAMPLE_COUNT
+    radio, _adi, _factory = _open_radio([first, gap], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match="ABI4 metadata capture is not contiguous"):
+            capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("ownership", "contract changed"),
+        ("state", "contract changed"),
+        ("gain-table", "contract changed"),
+        ("observation-interval", "contract changed"),
+        ("observation-capacity", "contract changed"),
+        ("event-capacity", "contract changed"),
+        ("transition", "transition sequence"),
+        ("event-sequence", "event sequence"),
+        ("gain-index", "index endpoints"),
+        ("gain-db", "dB endpoints"),
+    ),
+)
+def test_abi4_session_rejects_cross_frame_gain_ledger_discontinuity(
+    mutation: str, message: str
+) -> None:
+    first = _v7_session_hold_frame(0, 1_000)
+    second = _mutate_v7_session_contract(
+        _v7_session_hold_frame(1, 1_004), mutation
+    )
+    # The session rule is intentionally stronger than standalone frame validity.
+    RadioMetadataV7.unpack(second)
+    radio, _adi, _factory = _open_radio([first, second], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match=message):
+            capture.read_block()
+        assert not capture.is_open
     finally:
         radio.close()
 
@@ -971,6 +1182,44 @@ def test_abi4_open_rejects_missing_or_noncanonical_record_feature_capabilities(
             metadata_record=metadata_record,
             metadata_features=metadata_features,
         )
+
+
+@pytest.mark.parametrize(
+    ("advertise_version_sets", "metadata_abi_versions"),
+    (
+        (False, None),
+        (True, "1,2,3"),
+        (True, "1,2,3,03,4"),
+        (True, "1,2,4"),
+    ),
+)
+def test_abi4_open_requires_a_canonical_coherent_explicit_version_set(
+    advertise_version_sets: bool,
+    metadata_abi_versions: str | None,
+) -> None:
+    with pytest.raises(RadioConfigurationError, match="ABI|version capability|version set"):
+        _open_radio(
+            [],
+            metadata_abi=4,
+            advertise_version_sets=advertise_version_sets,
+            metadata_abi_versions=metadata_abi_versions,
+            expected_metadata_abi=4,
+        )
+
+
+def test_versioned_v8_context_can_explicitly_select_legacy_abi3() -> None:
+    radio, _adi, factory = _open_radio(
+        [],
+        metadata_abi=4,
+        channels=(0,),
+        expected_metadata_abi=3,
+    )
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        assert len(factory.instances[0].signature[1]) == 104
+        capture.cancel()
+    finally:
+        radio.close()
 
 
 def test_legacy_metadata_abis_do_not_require_the_abi4_capability_attributes() -> None:
@@ -1237,7 +1486,7 @@ def test_ddr_ring_status_capability_is_versioned_without_breaking_abi3() -> None
         metadata_abi=4,
         channels=(0,),
         ddr_ring=True,
-        metadata_status="1",
+        metadata_status_versions="1",
     )
     try:
         with pytest.raises(RadioConfigurationError, match="requires metadata status v2"):
@@ -1257,6 +1506,13 @@ def test_ddr_ring_status_capability_is_versioned_without_breaking_abi3() -> None
         ddr_ring=True,
     )
     try:
+        facts = iio_adapter.context_facts(_adi4_v2.device.ctx)
+        assert facts["buffer_metadata_legacy_abi"] == 3
+        assert facts["buffer_metadata_abi_versions"] == (1, 2, 3, 4)
+        assert facts["buffer_metadata_abi"] == 4
+        assert facts["buffer_metadata_status_raw"] == "1"
+        assert facts["buffer_metadata_status_versions"] == (1, 2)
+        assert facts["buffer_metadata_status_max_version"] == 2
         capture_v2 = abi4_v2.begin_metadata_capture(
             SAMPLE_COUNT,
             kernel_buffers=4,
@@ -1267,6 +1523,35 @@ def test_ddr_ring_status_capability_is_versioned_without_breaking_abi3() -> None
         capture_v2.cancel()
     finally:
         abi4_v2.close()
+
+
+@pytest.mark.parametrize(
+    ("advertise_status_version_set", "metadata_status_versions"),
+    ((False, None), (True, "1"), (True, "1,02"), (True, "2")),
+)
+def test_abi4_ring_requires_a_canonical_coherent_explicit_status_v2_set(
+    advertise_status_version_set: bool,
+    metadata_status_versions: str | None,
+) -> None:
+    radio, _adi, _factory = _open_radio(
+        [],
+        metadata_abi=4,
+        channels=(0,),
+        ddr_ring=True,
+        advertise_status_version_set=advertise_status_version_set,
+        metadata_status_versions=metadata_status_versions,
+        expected_metadata_abi=4,
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="metadata status v2"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=1,
+            )
+    finally:
+        radio.close()
 
 
 @pytest.mark.parametrize("metadata_status", ("0", "02", "3", "garbage"))

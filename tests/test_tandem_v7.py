@@ -291,6 +291,19 @@ def test_v7_available_spi_observation_must_be_fully_valid() -> None:
         RadioMetadataV7.unpack(_recrc(incomplete))
 
 
+def test_v7_spi_observation_endpoints_must_both_be_non_regressing() -> None:
+    raw = bytearray(_metadata_v7(with_observation=True))
+    first = _OBSERVATION.pack(1_000, 1_003, 100, 3, 20, 20, 20, 20, 0, 0)
+    second = _OBSERVATION.pack(1_001, 1_002, 101, 3, 20, 20, 20, 20, 0, 0)
+    raw[HEADER_PREFIX_BYTES_V7 : HEADER_PREFIX_BYTES_V7 + 32] = first
+    raw[HEADER_PREFIX_BYTES_V7 + 32 : HEADER_PREFIX_BYTES_V7 + 32] = second
+    struct.pack_into("<H", raw, 6, len(raw))
+    struct.pack_into("<HH", raw, 96, 2, 2)
+
+    with pytest.raises(ProtocolError, match="observations are not ordered"):
+        RadioMetadataV7.unpack(_recrc(raw))
+
+
 def test_v7_unavailable_spi_observation_has_zero_endpoint_read_durations() -> None:
     raw = bytearray(_metadata_v7())
     struct.pack_into("<I", raw, 60, 1)
