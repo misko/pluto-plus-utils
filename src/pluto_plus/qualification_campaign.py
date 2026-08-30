@@ -35,20 +35,39 @@ from pluto_plus.release_candidate_lifecycle import (
 )
 from pluto_plus.release_candidate_linux import LinuxReleaseCandidateBackend
 
-QUALIFICATION_PLAN_SCHEMA = "pluto-plus-utils.gain-timeline-qualification-plan.v1"
-QUALIFICATION_REPORT_SCHEMA = "pluto-plus-utils.gain-timeline-qualification-report.v1"
+QUALIFICATION_PLAN_SCHEMA: Literal[
+    "pluto-plus-utils.gain-timeline-qualification-plan.v2"
+] = "pluto-plus-utils.gain-timeline-qualification-plan.v2"
+QUALIFICATION_REPORT_SCHEMA: Literal[
+    "pluto-plus-utils.gain-timeline-qualification-report.v2"
+] = "pluto-plus-utils.gain-timeline-qualification-report.v2"
 PHYSICAL_LAN_LOCK_KEY = "__global_physical_lan_192.168.1.0_24__"
 DEFAULT_SAMPLE_RATE_HZ = 20_000_000
 DEFAULT_SAMPLES_PER_CHANNEL = 262_144
 REGRESSION_FRAME_COUNTS = (200, 600)
 REGRESSION_REPETITIONS = 2
 SOAK_FRAME_COUNT = 5_000
+ISSUE_49_LIFECYCLES = 64
+ISSUE_49_FRAMES = 100
+ISSUE_49_SAMPLES_PER_CHANNEL = (100_000,)
+ISSUE_54_SAMPLE_RATES_HZ = (2_500_000, 3_000_000, 5_000_000)
+ISSUE_54_MAX_SESSIONS_PER_RATE = 20
+ISSUE_54_FRAMES = 6
+ISSUE_54_MAX_SAMPLES_PER_CHANNEL = (4_194_304,)
+ISSUE_54_DESCENDING_LADDER = (4_194_304, 2_097_152, 1_048_576, 524_288)
+QUALIFICATION_CASE_COUNT = 187
 
 QualificationTransport = Literal["usb", "physical-ip"]
 QualificationBuffering = Literal["ordinary", "ring-200mb"]
 QualificationMode = Literal["hold", "auto"]
 QualificationLayout = Literal["single-rx0", "dual"]
 QualificationTier = Literal["regression", "soak"]
+QualificationProfile = Literal[
+    "matrix",
+    "issue-49-usb-enodata",
+    "issue-54-ip-max",
+    "issue-54-ip-ladder",
+]
 
 
 class QualificationCampaignError(RuntimeError):
@@ -68,9 +87,9 @@ class QualificationCampaignError(RuntimeError):
 
 class GainTimelineQualificationPlan(ApiModel):
     schema_id: Literal[
-        "pluto-plus-utils.gain-timeline-qualification-plan.v1"
-    ] = Field("pluto-plus-utils.gain-timeline-qualification-plan.v1", alias="schema")
-    schema_version: Literal[1] = 1
+        "pluto-plus-utils.gain-timeline-qualification-plan.v2"
+    ] = Field("pluto-plus-utils.gain-timeline-qualification-plan.v2", alias="schema")
+    schema_version: Literal[2] = 2
     campaign_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     created_at: datetime
     operation_plan: FileIdentity
@@ -91,6 +110,7 @@ class GainTimelineQualificationPlan(ApiModel):
         "dual",
     )
     ring_layouts: tuple[Literal["single-rx0"]] = ("single-rx0",)
+    planned_case_count: Literal[187] = 187
     confirmation_phrase: str
     hardware_accessed: Literal[False] = False
 
@@ -134,27 +154,82 @@ class GainTimelineQualificationPlan(ApiModel):
 
 
 class GainTimelineQualificationCase(ApiModel):
+    profile: QualificationProfile = "matrix"
     transport: QualificationTransport
     buffering: QualificationBuffering
     tandem_mode: QualificationMode
     layout: QualificationLayout
     tier: QualificationTier
-    frames: int = Field(ge=200, le=SOAK_FRAME_COUNT)
-    repetition: int = Field(ge=1, le=REGRESSION_REPETITIONS)
+    sample_rate_hz: int = Field(default=DEFAULT_SAMPLE_RATE_HZ, gt=0)
+    rf_bandwidth_hz: int = Field(default=DEFAULT_SAMPLE_RATE_HZ, gt=0)
+    samples_per_channel: tuple[int, ...] = (DEFAULT_SAMPLES_PER_CHANNEL,)
+    frames: int = Field(ge=2, le=SOAK_FRAME_COUNT)
+    kernel_buffers: int = Field(default=4, ge=4, le=64)
+    repetition: int = Field(ge=1, le=ISSUE_49_LIFECYCLES)
 
     @model_validator(mode="after")
     def validate_supported_case(self) -> GainTimelineQualificationCase:
         if self.buffering == "ring-200mb" and self.layout != "single-rx0":
             raise ValueError("DDR ring qualification supports only the single-RX layout")
-        if self.tier == "regression":
-            valid_tier = (
-                self.frames in REGRESSION_FRAME_COUNTS
-                and 1 <= self.repetition <= REGRESSION_REPETITIONS
-            )
-        else:
-            valid_tier = self.frames == SOAK_FRAME_COUNT and self.repetition == 1
-        if not valid_tier:
-            raise ValueError("qualification tier/frame/repetition tuple is not canonical")
+        matrix_tier = (
+            self.tier == "regression"
+            and self.frames in REGRESSION_FRAME_COUNTS
+            and self.repetition <= REGRESSION_REPETITIONS
+        ) or (
+            self.tier == "soak"
+            and self.frames == SOAK_FRAME_COUNT
+            and self.repetition == 1
+        )
+        profile_is_canonical = {
+            "matrix": (
+                self.sample_rate_hz == DEFAULT_SAMPLE_RATE_HZ
+                and self.rf_bandwidth_hz == DEFAULT_SAMPLE_RATE_HZ
+                and self.samples_per_channel == (DEFAULT_SAMPLES_PER_CHANNEL,)
+                and self.kernel_buffers == 4
+                and matrix_tier
+            ),
+            "issue-49-usb-enodata": (
+                self.transport == "usb"
+                and self.buffering == "ordinary"
+                and self.tandem_mode == "hold"
+                and self.layout == "dual"
+                and self.tier == "regression"
+                and self.sample_rate_hz == 1_000_000
+                and self.rf_bandwidth_hz == 1_000_000
+                and self.samples_per_channel == ISSUE_49_SAMPLES_PER_CHANNEL
+                and self.frames == ISSUE_49_FRAMES
+                and self.kernel_buffers == 8
+                and self.repetition <= ISSUE_49_LIFECYCLES
+            ),
+            "issue-54-ip-max": (
+                self.transport == "physical-ip"
+                and self.buffering == "ordinary"
+                and self.tandem_mode == "hold"
+                and self.layout == "dual"
+                and self.tier == "regression"
+                and self.sample_rate_hz in ISSUE_54_SAMPLE_RATES_HZ
+                and self.rf_bandwidth_hz == self.sample_rate_hz
+                and self.samples_per_channel == ISSUE_54_MAX_SAMPLES_PER_CHANNEL
+                and self.frames == ISSUE_54_FRAMES
+                and self.kernel_buffers == 4
+                and self.repetition <= ISSUE_54_MAX_SESSIONS_PER_RATE
+            ),
+            "issue-54-ip-ladder": (
+                self.transport == "physical-ip"
+                and self.buffering == "ordinary"
+                and self.tandem_mode == "hold"
+                and self.layout == "dual"
+                and self.tier == "regression"
+                and self.sample_rate_hz in ISSUE_54_SAMPLE_RATES_HZ
+                and self.rf_bandwidth_hz == self.sample_rate_hz
+                and self.samples_per_channel == ISSUE_54_DESCENDING_LADDER
+                and self.frames == ISSUE_54_FRAMES
+                and self.kernel_buffers == 4
+                and self.repetition == 1
+            ),
+        }[self.profile]
+        if not profile_is_canonical:
+            raise ValueError("qualification profile parameters are not canonical")
         return self
 
 
@@ -172,14 +247,14 @@ class GainTimelineQualificationCaseResult(ApiModel):
 
 class GainTimelineQualificationReport(ApiModel):
     schema_id: Literal[
-        "pluto-plus-utils.gain-timeline-qualification-report.v1"
-    ] = Field("pluto-plus-utils.gain-timeline-qualification-report.v1", alias="schema")
-    schema_version: Literal[1] = 1
+        "pluto-plus-utils.gain-timeline-qualification-report.v2"
+    ] = Field("pluto-plus-utils.gain-timeline-qualification-report.v2", alias="schema")
+    schema_version: Literal[2] = 2
     campaign_plan: FileIdentity
     started_at: datetime
     completed_at: datetime
     outcome: Literal["pass", "failed", "unknown"]
-    planned_case_count: Literal[60] = 60
+    planned_case_count: Literal[187] = 187
     boot_receipt: ReleaseCandidateRamReceipt | None = None
     cases: tuple[GainTimelineQualificationCaseResult, ...] = ()
     restored_runtime: RuntimeObservation | None = None
@@ -338,7 +413,7 @@ def prepare_gain_timeline_qualification(
         raise QualificationCampaignError("qualification report destination already exists")
     campaign_id = campaign_id_factory()
     return GainTimelineQualificationPlan(
-        schema="pluto-plus-utils.gain-timeline-qualification-plan.v1",
+        schema=QUALIFICATION_PLAN_SCHEMA,
         campaign_id=campaign_id,
         created_at=now(),
         operation_plan=model_file_identity(selected_operation, operation),
@@ -353,7 +428,7 @@ def prepare_gain_timeline_qualification(
 
 
 def qualification_cases() -> tuple[GainTimelineQualificationCase, ...]:
-    """Return the frozen 60-cell release matrix in deterministic order."""
+    """Return the frozen general matrix and named issue regressions."""
 
     cases: list[GainTimelineQualificationCase] = []
     tiers: tuple[tuple[QualificationTier, int, int], ...] = tuple(
@@ -361,28 +436,92 @@ def qualification_cases() -> tuple[GainTimelineQualificationCase, ...]:
         for frames in REGRESSION_FRAME_COUNTS
         for repetition in range(1, REGRESSION_REPETITIONS + 1)
     ) + (("soak", SOAK_FRAME_COUNT, 1),)
-    for transport in ("usb", "physical-ip"):
-        for buffering in ("ordinary", "ring-200mb"):
-            for tandem_mode in ("hold", "auto"):
-                layouts: tuple[QualificationLayout, ...] = (
-                    ("single-rx0", "dual")
-                    if buffering == "ordinary"
-                    else ("single-rx0",)
-                )
-                for layout in layouts:
-                    for tier, frames, repetition in tiers:
-                        cases.append(
-                            GainTimelineQualificationCase(
-                                transport=transport,
-                                buffering=buffering,
-                                tandem_mode=tandem_mode,
-                                layout=layout,
-                                tier=tier,
-                                frames=frames,
-                                repetition=repetition,
-                            )
-                        )
+    cases.extend(
+        GainTimelineQualificationCase(
+            profile="issue-49-usb-enodata",
+            transport="usb",
+            buffering="ordinary",
+            tandem_mode="hold",
+            layout="dual",
+            tier="regression",
+            sample_rate_hz=1_000_000,
+            rf_bandwidth_hz=1_000_000,
+            samples_per_channel=ISSUE_49_SAMPLES_PER_CHANNEL,
+            frames=ISSUE_49_FRAMES,
+            kernel_buffers=8,
+            repetition=repetition,
+        )
+        for repetition in range(1, ISSUE_49_LIFECYCLES + 1)
+    )
+    _append_matrix_cases(cases, "usb", tiers)
+    for sample_rate_hz in ISSUE_54_SAMPLE_RATES_HZ:
+        cases.extend(
+            GainTimelineQualificationCase(
+                profile="issue-54-ip-max",
+                transport="physical-ip",
+                buffering="ordinary",
+                tandem_mode="hold",
+                layout="dual",
+                tier="regression",
+                sample_rate_hz=sample_rate_hz,
+                rf_bandwidth_hz=sample_rate_hz,
+                samples_per_channel=ISSUE_54_MAX_SAMPLES_PER_CHANNEL,
+                frames=ISSUE_54_FRAMES,
+                kernel_buffers=4,
+                repetition=repetition,
+            )
+            for repetition in range(1, ISSUE_54_MAX_SESSIONS_PER_RATE + 1)
+        )
+        cases.append(
+            GainTimelineQualificationCase(
+                profile="issue-54-ip-ladder",
+                transport="physical-ip",
+                buffering="ordinary",
+                tandem_mode="hold",
+                layout="dual",
+                tier="regression",
+                sample_rate_hz=sample_rate_hz,
+                rf_bandwidth_hz=sample_rate_hz,
+                samples_per_channel=ISSUE_54_DESCENDING_LADDER,
+                frames=ISSUE_54_FRAMES,
+                kernel_buffers=4,
+                repetition=1,
+            )
+        )
+    _append_matrix_cases(cases, "physical-ip", tiers)
+    if len(cases) != QUALIFICATION_CASE_COUNT:
+        raise AssertionError("qualification case count is not canonical")
     return tuple(cases)
+
+
+def _append_matrix_cases(
+    cases: list[GainTimelineQualificationCase],
+    transport: QualificationTransport,
+    tiers: tuple[tuple[QualificationTier, int, int], ...],
+) -> None:
+    """Append only the general matrix; named regressions remain explicit."""
+
+    for buffering in ("ordinary", "ring-200mb"):
+        for tandem_mode in ("hold", "auto"):
+            layouts: tuple[QualificationLayout, ...] = (
+                ("single-rx0", "dual")
+                if buffering == "ordinary"
+                else ("single-rx0",)
+            )
+            for layout in layouts:
+                for tier, frames, repetition in tiers:
+                    cases.append(
+                        GainTimelineQualificationCase(
+                            profile="matrix",
+                            transport=transport,
+                            buffering=buffering,
+                            tandem_mode=tandem_mode,
+                            layout=layout,
+                            tier=tier,
+                            frames=frames,
+                            repetition=repetition,
+                        )
+                    )
 
 
 def execute_gain_timeline_qualification(
@@ -490,7 +629,7 @@ def execute_gain_timeline_qualification(
     if not passed and not errors:
         errors.append("qualification did not produce complete passing evidence")
     report = GainTimelineQualificationReport(
-        schema="pluto-plus-utils.gain-timeline-qualification-report.v1",
+        schema=QUALIFICATION_REPORT_SCHEMA,
         campaign_plan=model_file_identity(selected_plan, plan),
         started_at=started_at,
         completed_at=now(),
@@ -524,13 +663,13 @@ def _run_cases(
             report = runner(
                 uri="usb:" if case.transport == "usb" else f"ip:{plan.physical_ip}",
                 serial=plan.serial,
-                sample_rate_hz=plan.sample_rate_hz,
-                rf_bandwidth_hz=plan.rf_bandwidth_hz,
+                sample_rate_hz=case.sample_rate_hz,
+                rf_bandwidth_hz=case.rf_bandwidth_hz,
                 metadata_abi=4,
                 channels=(0,) if case.layout == "single-rx0" else (0, 1),
-                samples_per_channel=(plan.samples_per_channel,),
+                samples_per_channel=case.samples_per_channel,
                 frames=case.frames,
-                kernel_buffers=plan.kernel_buffers,
+                kernel_buffers=case.kernel_buffers,
                 ddr_ring_bytes=(
                     plan.ddr_ring_iq_bytes if case.buffering == "ring-200mb" else 0
                 ),
@@ -556,32 +695,36 @@ def _validate_case_report(
     if (
         report.serial != plan.serial
         or report.metadata_abi != 4
-        or report.sample_rate_hz != plan.sample_rate_hz
-        or report.rf_bandwidth_hz != plan.rf_bandwidth_hz
+        or report.sample_rate_hz != case.sample_rate_hz
+        or report.rf_bandwidth_hz != case.rf_bandwidth_hz
         or report.channels != ((0,) if case.layout == "single-rx0" else (0, 1))
+        or report.kernel_buffers != case.kernel_buffers
         or report.tandem_mode != case.tandem_mode
         or report.ddr_ring_requested_iq_bytes != expected_ring
         or report.failures
         or not report.original_settings_restored
-        or len(report.cells) != 1
+        or len(report.cells) != len(case.samples_per_channel)
     ):
         raise QualificationCampaignError("metadata ladder identity or closure is not exact")
-    cell = report.cells[0]
-    if (
-        cell.requested_frames != case.frames
-        or cell.observed_frames != case.frames
-        or cell.tandem_metadata_frames != case.frames
-        or cell.authoritative_gain_timeline_frames != case.frames
-        or cell.missing_sample_count
-        or cell.gap_count
-        or cell.overflow_count
-        or not cell.passed
-    ):
-        raise QualificationCampaignError("metadata ladder is not gapless and authoritative")
-    if expected_ring and (
-        cell.ddr_ring_status is None or cell.ddr_ring_status.version != 2
-    ):
-        raise QualificationCampaignError("ABI4 DDR ring case lacks terminal status v2")
+    for expected_samples, cell in zip(case.samples_per_channel, report.cells, strict=True):
+        if (
+            cell.samples_per_channel != expected_samples
+            or cell.requested_frames != case.frames
+            or cell.observed_frames != case.frames
+            or cell.tandem_metadata_frames != case.frames
+            or cell.authoritative_gain_timeline_frames != case.frames
+            or cell.missing_sample_count
+            or cell.gap_count
+            or cell.overflow_count
+            or not cell.passed
+        ):
+            raise QualificationCampaignError(
+                "metadata ladder is not gapless and authoritative"
+            )
+        if expected_ring and (
+            cell.ddr_ring_status is None or cell.ddr_ring_status.version != 2
+        ):
+            raise QualificationCampaignError("ABI4 DDR ring case lacks terminal status v2")
 
 
 def _receipt_is_candidate_runtime(
@@ -599,6 +742,8 @@ def _receipt_is_candidate_runtime(
 
 def _case_name(case: GainTimelineQualificationCase) -> str:
     return (
-        f"{case.transport}/{case.buffering}/{case.tandem_mode}/{case.layout}/"
+        f"{case.profile}/{case.transport}/{case.buffering}/{case.tandem_mode}/"
+        f"{case.layout}/{case.sample_rate_hz}hz/"
+        f"{','.join(str(item) for item in case.samples_per_channel)}samples/"
         f"{case.tier}-{case.frames}-r{case.repetition}"
     )

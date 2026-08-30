@@ -7,7 +7,7 @@ USB and physical `192.168.1.*` IIO paths, and resets into the pre-campaign QSPI
 runtime in a `finally` cleanup path. A passing report proves that the persistent
 `qspi-linux` identity did not change.
 
-The fixed matrix has 60 cases per radio:
+The general matrix has 60 cases per radio:
 
 - USB and physical IP;
 - HOLD and AUTO tandem modes;
@@ -15,6 +15,22 @@ The fixed matrix has 60 cases per radio:
 - 200 MB DDR ring with single RX0 only (firmware does not admit a dual-RX ring);
 - two 200-frame and two 600-frame regressions, followed by one 5,000-frame soak;
 - 20 MS/s, 20 MHz bandwidth, 262,144 samples per channel, four kernel buffers.
+
+Two named historical regressions are added explicitly, without creating a
+generic cross-product:
+
+- issue #49: 64 independent direct-USB ABI-4 open/capture/close lifecycles,
+  each dual RX in HOLD at 1 MS/s, 100,000 samples per channel, 100 frames, and
+  eight kernel buffers; and
+- issue #54: at each of 2.5, 3, and 5 MS/s over the physical `192.168.1.*`
+  endpoint, 20 independent dual-RX HOLD sessions of six 4,194,304-sample
+  frames, followed by one six-frame descending ladder through 4,194,304,
+  2,097,152, 1,048,576, and 524,288 samples per channel with four kernel
+  buffers.
+
+Together these are 187 independently receipted capture sessions per radio: 60
+general cases, 64 issue-#49 sessions, and 63 issue-#54 sessions. Each ladder is
+one lifecycle with a separate open/close capture at every rung.
 
 Every case must return all frames with no counter gap or overflow, a complete
 authoritative V7 gain timeline for every frame, exact settings restoration, and,
