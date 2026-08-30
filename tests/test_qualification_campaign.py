@@ -213,65 +213,68 @@ class _Backend:
 
 
 def _ladder(**kwargs: Any) -> MetadataContinuityLadderReport:
-    samples = int(kwargs["samples_per_channel"][0])
+    sample_ladder = tuple(int(item) for item in kwargs["samples_per_channel"])
     frames = int(kwargs["frames"])
     channels = tuple(kwargs["channels"])
     ring_bytes = int(kwargs["ddr_ring_bytes"])
-    observed = samples * frames
-    iq_bytes = observed * len(channels) * 4
-    frame_bytes = samples * len(channels) * 4
-    admitted = ring_bytes // frame_bytes * frame_bytes if ring_bytes else 0
-    capacity = admitted // frame_bytes if admitted else 0
-    prefix_frames = min(frames, capacity)
-    status = (
-        None
-        if not ring_bytes
-        else DdrRingFinalStatus(
-            version=2,
-            state="complete",
-            terminal_reason="target_complete",
-            error_code=0,
-            requested_capacity_iq_bytes=ring_bytes,
-            admitted_capacity_iq_bytes=admitted,
-            target_frames=frames,
-            produced_frames=frames,
-            consumed_frames=frames,
-            high_water_frames=prefix_frames,
-            wrap_count=frames // capacity,
-            producer_position=frames % capacity,
-            consumer_position=frames % capacity,
-            last_contiguous_sample_sequence=1_000 + observed,
-            first_unavailable_sample_sequence=None,
-            failure_frame_index=None,
-            failure_sample_sequence=None,
+    cells: list[MetadataContinuityCell] = []
+    for samples in sample_ladder:
+        observed = samples * frames
+        iq_bytes = observed * len(channels) * 4
+        frame_bytes = samples * len(channels) * 4
+        admitted = ring_bytes // frame_bytes * frame_bytes if ring_bytes else 0
+        capacity = admitted // frame_bytes if admitted else 0
+        prefix_frames = min(frames, capacity)
+        status = (
+            None
+            if not ring_bytes
+            else DdrRingFinalStatus(
+                version=2,
+                state="complete",
+                terminal_reason="target_complete",
+                error_code=0,
+                requested_capacity_iq_bytes=ring_bytes,
+                admitted_capacity_iq_bytes=admitted,
+                target_frames=frames,
+                produced_frames=frames,
+                consumed_frames=frames,
+                high_water_frames=prefix_frames,
+                wrap_count=frames // capacity,
+                producer_position=frames % capacity,
+                consumer_position=frames % capacity,
+                last_contiguous_sample_sequence=1_000 + observed,
+                first_unavailable_sample_sequence=None,
+                failure_frame_index=None,
+                failure_sample_sequence=None,
+            )
         )
-    )
-    elapsed = 1.0
-    cell = MetadataContinuityCell(
-        samples_per_channel=samples,
-        requested_frames=frames,
-        observed_frames=frames,
-        observed_sample_count=observed,
-        device_span_sample_count=observed,
-        first_sample_sequence=1_000,
-        last_sample_sequence_exclusive=1_000 + observed,
-        missing_sample_count=0,
-        gap_count=0,
-        overflow_count=0,
-        iq_bytes=iq_bytes,
-        elapsed_seconds=elapsed,
-        achieved_payload_mbps=iq_bytes / 1_000_000,
-        achieved_payload_mibps=iq_bytes / (1024 * 1024),
-        observed_fraction=1.0,
-        tandem_metadata_frames=frames,
-        authoritative_gain_timeline_frames=frames,
-        gain_observation_interval_samples=samples,
-        ddr_ring_status=status,
-        ddr_ring_prefix_frames=prefix_frames,
-        ddr_ring_prefix_iq_bytes=prefix_frames * frame_bytes,
-        ddr_ring_prefix_contiguous=bool(status),
-        passed=True,
-    )
+        cells.append(
+            MetadataContinuityCell(
+                samples_per_channel=samples,
+                requested_frames=frames,
+                observed_frames=frames,
+                observed_sample_count=observed,
+                device_span_sample_count=observed,
+                first_sample_sequence=1_000,
+                last_sample_sequence_exclusive=1_000 + observed,
+                missing_sample_count=0,
+                gap_count=0,
+                overflow_count=0,
+                iq_bytes=iq_bytes,
+                elapsed_seconds=1.0,
+                achieved_payload_mbps=iq_bytes / 1_000_000,
+                achieved_payload_mibps=iq_bytes / (1024 * 1024),
+                observed_fraction=1.0,
+                tandem_metadata_frames=frames,
+                authoritative_gain_timeline_frames=frames,
+                gain_observation_interval_samples=samples,
+                ddr_ring_status=status,
+                ddr_ring_prefix_frames=prefix_frames,
+                ddr_ring_prefix_iq_bytes=prefix_frames * frame_bytes,
+                ddr_ring_prefix_contiguous=bool(status),
+                passed=True,
+            )
+        )
     return MetadataContinuityLadderReport(
         serial=kwargs["serial"],
         uri=kwargs["uri"],
@@ -286,9 +289,9 @@ def _ladder(**kwargs: Any) -> MetadataContinuityLadderReport:
         tandem_mode=kwargs["tandem_mode"],
         acceptance_mode=kwargs["acceptance_mode"],
         ddr_ring_requested_iq_bytes=ring_bytes,
-        cells=(cell,),
+        cells=tuple(cells),
         failures=(),
-        largest_passing_samples_per_channel=samples,
+        largest_passing_samples_per_channel=sample_ladder[0],
         original_settings_restored=True,
     )
 
@@ -307,14 +310,54 @@ def _plan(root: Path) -> tuple[Path, _Backend]:
     return plan_path, _Backend(_receipt(operation_path, operation, candidate))
 
 
-def test_frozen_matrix_has_60_cases_and_never_requests_dual_ring() -> None:
+def test_frozen_campaign_has_exact_matrix_and_named_issue_regressions() -> None:
     cases = qualification_cases()
+    matrix = tuple(case for case in cases if case.profile == "matrix")
+    issue_49 = tuple(
+        case for case in cases if case.profile == "issue-49-usb-enodata"
+    )
+    issue_54_max = tuple(case for case in cases if case.profile == "issue-54-ip-max")
+    issue_54_ladders = tuple(
+        case for case in cases if case.profile == "issue-54-ip-ladder"
+    )
 
-    assert len(cases) == 60
+    assert len(cases) == 187
+    assert len(matrix) == 60
+    assert len(issue_49) == 64
+    assert len(issue_54_max) == 60
+    assert len(issue_54_ladders) == 3
     assert not any(case.buffering == "ring-200mb" and case.layout == "dual" for case in cases)
-    assert {case.frames for case in cases} == {200, 600, 5_000}
+    assert {case.frames for case in matrix} == {200, 600, 5_000}
     assert {case.transport for case in cases} == {"usb", "physical-ip"}
     assert {case.tandem_mode for case in cases} == {"hold", "auto"}
+    assert {case.repetition for case in issue_49} == set(range(1, 65))
+    assert all(
+        (
+            case.transport,
+            case.sample_rate_hz,
+            case.samples_per_channel,
+            case.frames,
+            case.kernel_buffers,
+        )
+        == ("usb", 1_000_000, (100_000,), 100, 8)
+        for case in issue_49
+    )
+    for sample_rate_hz in (2_500_000, 3_000_000, 5_000_000):
+        at_rate = tuple(
+            case for case in issue_54_max if case.sample_rate_hz == sample_rate_hz
+        )
+        assert len(at_rate) == 20
+        assert {case.repetition for case in at_rate} == set(range(1, 21))
+        ladder = tuple(
+            case for case in issue_54_ladders if case.sample_rate_hz == sample_rate_hz
+        )
+        assert len(ladder) == 1
+        assert ladder[0].samples_per_channel == (
+            4_194_304,
+            2_097_152,
+            1_048_576,
+            524_288,
+        )
     with pytest.raises(ValidationError, match="single-RX"):
         GainTimelineQualificationCase(
             transport="usb",
@@ -360,7 +403,7 @@ def test_campaign_runs_usb_then_locked_ip_and_restores_persistent_qspi(
 
     assert len(digest) == 64
     assert report.outcome == "pass"
-    assert len(report.cases) == 60
+    assert len(report.cases) == 187
     assert all(result.report is not None for result in report.cases)
     assert backend.events[:2] == [f"radio-enter:{SERIAL}", "boot"]
     assert backend.events[-2:] == ["restore", f"radio-exit:{SERIAL}"]

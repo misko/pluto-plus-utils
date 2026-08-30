@@ -5097,7 +5097,7 @@ def firmware_candidate_ram_qualification_execute(
         60.0, "--timeout", min=5.0, max=600.0, help="Per-transition device wait timeout."
     ),
 ) -> None:
-    """RAM-boot, run all 60 cases, and always reset into unchanged persistent QSPI."""
+    """RAM-boot, run the fixed matrix and issue regressions, then restore QSPI."""
 
     from pluto_plus import __version__
     from pluto_plus.qualification_campaign import (
