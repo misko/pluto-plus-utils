@@ -22,12 +22,11 @@ from pluto_plus.tandem import RadioMetadataV7, TandemMode, TandemSessionRequestV
 
 DEFAULT_METADATA_SAMPLE_LADDER = "4194304,2097152,1048576,524288,262144,131072"
 MAX_METADATA_SAMPLE_RUNGS = 16
-# Keep the ladder bounded while allowing the release throughput matrix to cover
-# 20 nominal seconds at 30 MS/s with 1,000,000-sample refills.  That 2.4-GB
-# target proves twelve complete reuses of a 200-MB ring.  Cell accounting is
-# constant-memory; IQ frames are validated and released as they arrive instead
-# of accumulating on the host.
-MAX_METADATA_FRAMES = 600
+# Keep the ladder bounded while allowing the authoritative-timeline release
+# campaign to run its fixed 5,000-frame soak. Cell accounting is constant-memory;
+# IQ frames are validated and released as they arrive instead of accumulating on
+# the host.
+MAX_METADATA_FRAMES = 5_000
 MINIMUM_OBSERVED_FRACTION = 0.95
 # Hardware qualification found intermittent whole-frame loss at 8 ms.  The
 # first passing boundary was 10 ms; retain 50% headroom over the failure point
@@ -348,8 +347,8 @@ def run_metadata_continuity_ladder(
         raise ValueError(f"DDR ring byte budget must be in [0, {MAX_DDR_RING_IQ_BYTES}]")
     if ddr_burst and ddr_ring_bytes:
         raise ValueError("device DDR burst and DDR ring are mutually exclusive")
-    if ddr_ring_bytes and metadata_abi not in {3, 4}:
-        raise ValueError("device DDR ring ladder requires metadata ABI 3/4")
+    if ddr_ring_bytes and (metadata_abi not in {3, 4} or len(selected_channels) != 1):
+        raise ValueError("device DDR ring ladder requires metadata ABI 3/4 and one receiver")
     if (
         metadata_abi in {3, 4}
         and len(selected_channels) == 1

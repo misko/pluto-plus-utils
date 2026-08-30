@@ -605,7 +605,8 @@ def test_metadata_ladder_frame_bound_covers_twenty_seconds_at_30_msps() -> None:
     required_frames = nominal_seconds * sample_rate_hz // samples_per_channel
 
     assert required_frames == 600
-    assert required_frames == MAX_METADATA_FRAMES
+    assert required_frames <= MAX_METADATA_FRAMES
+    assert MAX_METADATA_FRAMES == 5_000
 
 
 def test_metadata_ladder_rejects_ddr_burst_outside_abi3_single_rx() -> None:
@@ -625,10 +626,8 @@ def test_metadata_ladder_rejects_ddr_burst_outside_abi3_single_rx() -> None:
         )
 
 
-@pytest.mark.parametrize("channels", ((0,), (0, 1)))
-def test_metadata_ladder_qualifies_finite_ddr_ring_with_exact_status(
-    channels: tuple[int, ...],
-) -> None:
+def test_metadata_ladder_qualifies_finite_ddr_ring_with_exact_status() -> None:
+    channels = (0,)
     samples = 262_144
     frames = 6
     frame_bytes = samples * len(channels) * 4
@@ -791,6 +790,13 @@ def test_metadata_ladder_rejects_ambiguous_or_incompatible_ddr_ring() -> None:
         run_metadata_continuity_ladder(
             **arguments,
             metadata_abi=2,
+            channels=(0, 1),
+            ddr_ring_bytes=2_097_152,
+        )
+    with pytest.raises(ValueError, match="one receiver"):
+        run_metadata_continuity_ladder(
+            **arguments,
+            metadata_abi=4,
             channels=(0, 1),
             ddr_ring_bytes=2_097_152,
         )

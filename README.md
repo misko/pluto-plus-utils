@@ -747,6 +747,14 @@ and persistent targets are outside this command.
 The full ownership and migration decision is recorded in
 [`docs/adr/0006-release-candidate-device-lifecycle.md`](docs/adr/0006-release-candidate-device-lifecycle.md).
 
+ABI-4 authoritative gain-timeline candidates use the first-class
+`candidate-ram qualification-plan` and `qualification-execute` campaign. It
+owns the fixed USB/physical-IP, HOLD/AUTO, ordinary/single+dual, and
+200-MB-ring/single matrix, including repeated 200/600-frame regressions and a
+5,000-frame soak. It always attempts to reset the RAM candidate into the
+unchanged persistent QSPI runtime. See
+[`docs/GAIN_TIMELINE_QUALIFICATION.md`](docs/GAIN_TIMELINE_QUALIFICATION.md).
+
 ### Immutable approved-v7 comparator RAM lifecycle
 
 `firmware comparator-ram` is a separate, native evidence boundary for the

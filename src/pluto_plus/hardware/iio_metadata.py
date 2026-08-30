@@ -268,8 +268,8 @@ class IioMetadataCaptureSession:
             raise ValueError("metadata ABI 3/4 single-RX sample count must be even")
         if ddr_burst_bytes and (metadata_abi not in {3, 4} or len(self._channels) != 1):
             raise ValueError("device DDR burst v1 requires metadata ABI 3/4 and one receiver")
-        if ddr_ring_bytes and metadata_abi not in {3, 4}:
-            raise ValueError("device DDR ring v1 requires metadata ABI 3/4")
+        if ddr_ring_bytes and (metadata_abi not in {3, 4} or len(self._channels) != 1):
+            raise ValueError("device DDR ring v1 requires metadata ABI 3/4 and one receiver")
         frame_iq_bytes = samples_per_channel * len(self._channels) * 4
         self._ddr_burst_frames = 0 if not ddr_burst_bytes else ddr_burst_bytes // frame_iq_bytes
         self._ddr_burst_admitted_bytes = self._ddr_burst_frames * frame_iq_bytes

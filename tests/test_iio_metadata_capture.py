@@ -1293,6 +1293,20 @@ def test_ddr_ring_rejects_unknown_metadata_status_capability(
 
 
 def test_ddr_ring_requires_capability_mode_status_and_valid_geometry() -> None:
+    dual, _dual_adi, _dual_factory = _open_radio(
+        [], metadata_abi=4, channels=(0, 1), ddr_ring=True
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="one receiver"):
+            dual.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 8,
+                ddr_ring_frames=1,
+            )
+    finally:
+        dual.close()
+
     radio, _adi, _factory = _open_radio([], metadata_abi=3, channels=(0,))
     try:
         with pytest.raises(RadioConfigurationError, match="does not advertise"):

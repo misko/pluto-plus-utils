@@ -1,0 +1,92 @@
+---
+name: Gain timeline qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      campaigns_json:
+        description: >-
+          JSON array of {serial,plan,confirmation}; paths are private files on the
+          self-hosted runner
+        required: true
+        type: string
+      password_file:
+        description: Absolute mode-0600 password-file path on the self-hosted runner
+        required: true
+        type: string
+      state_root:
+        description: Absolute private pluto-plus-utils state root
+        required: true
+        type: string
+      transition_timeout_seconds:
+        description: Per-transition device wait timeout
+        required: true
+        default: "60"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev --locked
+      - run: >-
+          uv run pytest -q
+          tests/test_qualification_campaign.py
+          tests/test_tandem_v7.py
+          tests/test_ddr_ring_status.py
+          tests/test_iio_metadata_capture.py
+          tests/test_metadata_ladder.py
+      - run: uv run ruff check src tests
+      - run: uv run mypy src/pluto_plus
+
+  hardware:
+    needs: contract
+    runs-on: [self-hosted, linux, pluto-hardware]
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        campaign: ${{ fromJSON(inputs.campaigns_json) }}
+    concurrency:
+      group: gain-timeline-${{ matrix.campaign.serial }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev --extra hardware --locked
+      - name: RAM boot, qualify, and restore persistent QSPI
+        env:
+          QUALIFICATION_PLAN: ${{ matrix.campaign.plan }}
+          QUALIFICATION_CONFIRMATION: ${{ matrix.campaign.confirmation }}
+          QUALIFICATION_PASSWORD_FILE: ${{ inputs.password_file }}
+          QUALIFICATION_STATE_ROOT: ${{ inputs.state_root }}
+          QUALIFICATION_TIMEOUT: ${{ inputs.transition_timeout_seconds }}
+        run: >-
+          uv run pluto firmware candidate-ram qualification-execute
+          --plan "$QUALIFICATION_PLAN"
+          --ssh-password-file "$QUALIFICATION_PASSWORD_FILE"
+          --confirm "$QUALIFICATION_CONFIRMATION"
+          --tool-repository "$GITHUB_WORKSPACE"
+          --state-root "$QUALIFICATION_STATE_ROOT"
+          --timeout "$QUALIFICATION_TIMEOUT"

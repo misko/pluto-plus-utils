@@ -784,8 +784,10 @@ class IioRadioDevice:
                     "device DDR burst byte budget exceeds the advertised limit"
                 )
         if ddr_ring_bytes:
-            if metadata_abi not in {3, 4}:
-                raise RadioConfigurationError("device DDR ring v1 requires metadata ABI 3/4")
+            if metadata_abi not in {3, 4} or len(channels) != 1:
+                raise RadioConfigurationError(
+                    "device DDR ring v1 requires metadata ABI 3/4 and one receiver"
+                )
             if facts.get("buffer_ddr_ring") is not True:
                 raise RadioConfigurationError("IIO context does not advertise device DDR ring v1")
             if facts.get("buffer_ddr_ring_modes_raw") != "finite,continuous":

@@ -48,7 +48,9 @@ omitting the flag is the explicit control case.
 
 ABI 3 additionally supports the optional streaming DDR ring when the radio
 advertises `iio,buffer-ddr-ring=1`, the exact modes `finite,continuous`, and
-`iio,buffer-metadata-status=1`. Unlike a sealed burst, a ring producer and the
+`iio,buffer-metadata-status=1` or `2`. ABI 4 requires max status version `2`;
+ABI 3 continues to use the V1 wire status. Ring and burst capture each require
+one selected receiver. Unlike a sealed burst, a ring producer and the
 ordinary IIO consumer run concurrently. Before it starts transport, iiOD fills
 the admitted ring completely (or captures the smaller finite target). That
 prefix is strict and contiguous. During a longer capture, unread ring frames are
