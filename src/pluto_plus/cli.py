@@ -2429,6 +2429,16 @@ def radio_data_plane_status(
         "--ssh-password-file",
         help="Private one-line root password file; otherwise prompt without echo.",
     ),
+    ssh_interface: str | None = typer.Option(
+        None,
+        "--ssh-interface",
+        help="Exact USB network interface for the shared 192.168.2.1 endpoint.",
+    ),
+    usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--usb-sysfs-path",
+        help="Exact direct USB sysfs node anchoring --ssh-interface.",
+    ),
     probe: bool = typer.Option(
         False,
         "--probe",
@@ -2450,7 +2460,7 @@ def radio_data_plane_status(
         inspect_data_plane_runtime,
         probe_iio_data_plane,
     )
-    from pluto_plus.setup_helper import SetupHelperError
+    from pluto_plus.setup_helper import SetupHelperError, validate_bound_interface
 
     try:
         address = ip_address(ssh_host)
@@ -2462,10 +2472,65 @@ def radio_data_plane_status(
             "--ssh-host must be a canonical private IPv4",
             2,
         )
-    if ssh_host == "192.168.2.1":
+    usb_binding_requested = ssh_interface is not None or usb_sysfs_path is not None
+    if (ssh_interface is None) != (usb_sysfs_path is None):
         _fail(
-            "invalid_data_plane_status_host",
-            "data-plane status currently requires a unique LAN endpoint, not shared USB SSH",
+            "incomplete_data_plane_status_usb_binding",
+            "--ssh-interface and --usb-sysfs-path must be supplied together",
+            2,
+        )
+    route_preflight: Callable[[], None] | None = None
+    if ssh_host == "192.168.2.1":
+        if not usb_binding_requested:
+            _fail(
+                "data_plane_status_usb_binding_required",
+                "shared USB SSH requires --ssh-interface and --usb-sysfs-path",
+                2,
+            )
+        assert ssh_interface is not None
+        assert usb_sysfs_path is not None
+        selected_usb_path = usb_sysfs_path.expanduser().absolute()
+        if not selected_usb_path.is_absolute() or selected_usb_path.parent != Path(
+            "/sys/bus/usb/devices"
+        ):
+            _fail(
+                "invalid_data_plane_status_usb_path",
+                "--usb-sysfs-path must name one direct USB sysfs device",
+                2,
+            )
+        local_matches = [
+            device
+            for device in scan_local_usb_plutos()
+            if device.serial == serial and device.usb_path == str(selected_usb_path)
+        ]
+        if len(local_matches) != 1:
+            _fail(
+                "data_plane_status_usb_identity_unavailable",
+                "USB path must match exactly one local radio with the expected serial",
+                4,
+            )
+        interface_names = {
+            interface.name for interface in local_matches[0].host_network_interfaces
+        }
+        if ssh_interface not in interface_names:
+            _fail(
+                "data_plane_status_usb_interface_unavailable",
+                "--ssh-interface does not belong to the selected local radio",
+                4,
+            )
+        try:
+            validate_bound_interface(ssh_interface, str(selected_usb_path))
+        except (SetupHelperError, ValueError) as error:
+            _fail("data_plane_status_usb_interface_unavailable", str(error), 4)
+
+        def revalidate_usb_binding() -> None:
+            validate_bound_interface(ssh_interface, str(selected_usb_path))
+
+        route_preflight = revalidate_usb_binding
+    elif usb_binding_requested:
+        _fail(
+            "invalid_data_plane_status_usb_binding",
+            "--ssh-interface and --usb-sysfs-path are accepted only with 192.168.2.1",
             2,
         )
     selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
@@ -2482,11 +2547,16 @@ def radio_data_plane_status(
         )
     )
     try:
+        transport_options: dict[str, Any] = {
+            "host": ssh_host,
+            "interface": ssh_interface,
+            "password": password,
+            "known_hosts_file": selected_known_hosts,
+        }
+        if route_preflight is not None:
+            transport_options["route_preflight"] = route_preflight
         transport = BoundSshTransport(
-            host=ssh_host,
-            interface=None,
-            password=password,
-            known_hosts_file=selected_known_hosts,
+            **transport_options,
         )
         before = inspect_data_plane_runtime(transport, serial)
         bounded_probe = (
