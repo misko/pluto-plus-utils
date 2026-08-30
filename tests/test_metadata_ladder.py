@@ -30,6 +30,8 @@ class _Capture:
         tandem_interval: int | None = None,
         tandem_observations: int = 0,
         tandem_overflow: int = 0,
+        tandem_events: int = 0,
+        tandem_event_overflow: int = 0,
     ) -> None:
         self.samples = samples
         self.sequences: Iterator[int] = iter(sequences)
@@ -38,6 +40,8 @@ class _Capture:
         self.tandem_interval = tandem_interval
         self.tandem_observations = tandem_observations
         self.tandem_overflow = tandem_overflow
+        self.tandem_events = tandem_events
+        self.tandem_event_overflow = tandem_event_overflow
         self.ddr_burst_requested_bytes = 0
         self.ddr_burst_admitted_bytes = 0
         self.ddr_burst_frames = 0
@@ -90,6 +94,8 @@ class _Capture:
                     gain_observation_interval_samples=self.tandem_interval,
                     gain_observations=tuple(object() for _ in range(self.tandem_observations)),
                     gain_observation_overflow_count=self.tandem_overflow,
+                    gain_events=tuple(object() for _ in range(self.tandem_events)),
+                    gain_event_overflow_count=self.tandem_event_overflow,
                 )
             )
         return SampleBlockV2(
@@ -127,6 +133,8 @@ class _Radio:
         tandem_interval: int | None = None,
         tandem_observations: int = 0,
         tandem_overflow: int = 0,
+        tandem_events: int = 0,
+        tandem_event_overflow: int = 0,
     ) -> None:
         self.sequences = sequences
         self.original = RadioSettings()
@@ -144,6 +152,8 @@ class _Radio:
         self.tandem_interval = tandem_interval
         self.tandem_observations = tandem_observations
         self.tandem_overflow = tandem_overflow
+        self.tandem_events = tandem_events
+        self.tandem_event_overflow = tandem_event_overflow
 
     def open(self) -> None:
         self.opened = True
@@ -179,6 +189,8 @@ class _Radio:
             self.tandem_interval,
             self.tandem_observations,
             self.tandem_overflow,
+            self.tandem_events,
+            self.tandem_event_overflow,
         )
         capture.ddr_burst_requested_bytes = ddr_burst_bytes
         capture.ddr_burst_admitted_bytes = ddr_burst_bytes
@@ -246,6 +258,8 @@ def test_metadata_ladder_reports_tandem_sampler_observability() -> None:
         tandem_interval=65_536,
         tandem_observations=3,
         tandem_overflow=1,
+        tandem_events=2,
+        tandem_event_overflow=3,
     )
     ticks = iter((0, 1_000_000_000))
 
@@ -268,6 +282,8 @@ def test_metadata_ladder_reports_tandem_sampler_observability() -> None:
     assert cell.gain_observation_interval_samples == 65_536
     assert cell.gain_observation_count == 6
     assert cell.gain_observation_overflow_count == 2
+    assert cell.gain_event_count == 4
+    assert cell.gain_event_overflow_count == 6
     assert report.original_settings_restored
     assert radio.settings == radio.original
     assert not radio.opened

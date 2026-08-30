@@ -102,6 +102,8 @@ class MetadataContinuityCell(ApiModel):
     gain_observation_interval_samples: int | None = Field(default=None, ge=1)
     gain_observation_count: int = Field(default=0, ge=0)
     gain_observation_overflow_count: int = Field(default=0, ge=0)
+    gain_event_count: int = Field(default=0, ge=0)
+    gain_event_overflow_count: int = Field(default=0, ge=0)
     ddr_burst_requested_iq_bytes: int = Field(default=0, ge=0)
     ddr_burst_admitted_iq_bytes: int = Field(default=0, ge=0)
     ddr_burst_frames: int = Field(default=0, ge=0)
@@ -150,8 +152,10 @@ class MetadataContinuityCell(ApiModel):
             self.gain_observation_interval_samples is not None
             or self.gain_observation_count
             or self.gain_observation_overflow_count
+            or self.gain_event_count
+            or self.gain_event_overflow_count
         ):
-            raise ValueError("metadata ladder cannot report observations without tandem metadata")
+            raise ValueError("metadata ladder cannot report tandem records without tandem metadata")
         expected_burst_bytes = self.samples_per_channel * 4 * self.requested_frames
         if self.ddr_burst_requested_iq_bytes:
             if (
@@ -512,6 +516,8 @@ def _run_cell(
     gain_observation_interval_samples: int | None = None
     gain_observation_count = 0
     gain_observation_overflow_count = 0
+    gain_event_count = 0
+    gain_event_overflow_count = 0
     ddr_burst_bytes = samples_per_channel * receiver_count * 4 * frames if ddr_burst else 0
     frame_iq_bytes = samples_per_channel * receiver_count * 4
     expected_ring_admitted_bytes = (
@@ -573,6 +579,8 @@ def _run_cell(
                     tandem_metadata_frames += 1
                     gain_observation_count += len(tandem.gain_observations)
                     gain_observation_overflow_count += tandem.gain_observation_overflow_count
+                    gain_event_count += len(tandem.gain_events)
+                    gain_event_overflow_count += tandem.gain_event_overflow_count
             ring_status = (
                 None
                 if not ddr_ring_bytes
@@ -648,6 +656,8 @@ def _run_cell(
         gain_observation_interval_samples=gain_observation_interval_samples,
         gain_observation_count=gain_observation_count,
         gain_observation_overflow_count=gain_observation_overflow_count,
+        gain_event_count=gain_event_count,
+        gain_event_overflow_count=gain_event_overflow_count,
         ddr_burst_requested_iq_bytes=ddr_burst_bytes,
         ddr_burst_admitted_iq_bytes=ddr_burst_bytes,
         ddr_burst_frames=frames if ddr_burst else 0,
