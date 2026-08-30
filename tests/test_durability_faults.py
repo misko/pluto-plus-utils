@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import stat
 import threading
-from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -26,28 +25,45 @@ from pluto_plus.models import (
 )
 from pluto_plus.service import PlutoService
 
+# These deadlines detect a stuck worker; they are not performance assertions.  Leave
+# enough headroom for fsync and first-use NumPy work on contended CI runners.
+_BACKGROUND_JOB_TIMEOUT_S = 30.0
+
 
 class _SignalingCatalog(Catalog):
     def __init__(self, path: Path) -> None:
-        self._stream_events: defaultdict[str, threading.Event] = defaultdict(threading.Event)
-        self._scan_events: defaultdict[str, threading.Event] = defaultdict(threading.Event)
+        self._terminal_jobs = threading.Condition()
+        self._terminal_stream_jobs: set[str] = set()
+        self._terminal_scan_jobs: set[str] = set()
         super().__init__(path)
 
     def put_stream_job(self, job: StreamJob) -> None:
         super().put_stream_job(job)
         if job.state not in (JobState.PENDING, JobState.RUNNING):
-            self._stream_events[job.job_id].set()
+            with self._terminal_jobs:
+                self._terminal_stream_jobs.add(job.job_id)
+                self._terminal_jobs.notify_all()
 
     def put_scan_job(self, job: ScanJob) -> None:
         super().put_scan_job(job)
         if job.state not in (JobState.PENDING, JobState.RUNNING):
-            self._scan_events[job.job_id].set()
+            with self._terminal_jobs:
+                self._terminal_scan_jobs.add(job.job_id)
+                self._terminal_jobs.notify_all()
 
     def wait_stream(self, job_id: str) -> None:
-        assert self._stream_events[job_id].wait(2), f"stream job {job_id} did not finish"
+        with self._terminal_jobs:
+            assert self._terminal_jobs.wait_for(
+                lambda: job_id in self._terminal_stream_jobs,
+                timeout=_BACKGROUND_JOB_TIMEOUT_S,
+            ), f"stream job {job_id} did not finish"
 
     def wait_scan(self, job_id: str) -> None:
-        assert self._scan_events[job_id].wait(2), f"scan job {job_id} did not finish"
+        with self._terminal_jobs:
+            assert self._terminal_jobs.wait_for(
+                lambda: job_id in self._terminal_scan_jobs,
+                timeout=_BACKGROUND_JOB_TIMEOUT_S,
+            ), f"scan job {job_id} did not finish"
 
 
 class _BlockingRadio(FakeRadioDevice):
@@ -58,7 +74,7 @@ class _BlockingRadio(FakeRadioDevice):
 
     def read_block(self, sample_count: int):  # type: ignore[no-untyped-def]
         self.entered_read.set()
-        if not self.release_read.wait(2):
+        if not self.release_read.wait(_BACKGROUND_JOB_TIMEOUT_S):
             raise TimeoutError("test did not release blocked radio")
         return super().read_block(sample_count)
 
@@ -248,7 +264,7 @@ def test_scan_commit_syncs_file_and_parent_directory(
         assert active_scan is not None
         worker = active_scan.thread
         catalog.wait_scan(job.job_id)
-        worker.join(2)
+        worker.join(_BACKGROUND_JOB_TIMEOUT_S)
         assert not worker.is_alive()
         assert any(stat.S_ISREG(mode) for mode in synced_modes)
         assert any(stat.S_ISDIR(mode) for mode in synced_modes)
@@ -272,7 +288,7 @@ def test_timed_out_shutdown_does_not_close_device_under_live_worker(
     active = controller._active  # noqa: SLF001
     assert active is not None
     worker = active.thread
-    assert device.entered_read.wait(1)
+    assert device.entered_read.wait(_BACKGROUND_JOB_TIMEOUT_S)
 
     with pytest.raises(RadioBusyError, match="shutdown timed out"):
         controller.close()
@@ -280,7 +296,7 @@ def test_timed_out_shutdown_does_not_close_device_under_live_worker(
 
     device.release_read.set()
     catalog.wait_stream(job.job_id)
-    worker.join(1)
+    worker.join(_BACKGROUND_JOB_TIMEOUT_S)
     assert not worker.is_alive()
     assert controller.recover().state is RadioState.READY
     controller.close()
@@ -337,7 +353,7 @@ def test_spectrum_and_job_history_are_bounded_without_losing_durable_jobs(
             catalog.wait_stream(job.job_id)
             active = controller._active  # noqa: SLF001
             if active is not None:
-                active.thread.join(1)
+                active.thread.join(_BACKGROUND_JOB_TIMEOUT_S)
                 assert not active.thread.is_alive()
             job_ids.append(job.job_id)
         assert len(controller._jobs) <= 3  # noqa: SLF001
@@ -373,7 +389,7 @@ def test_short_deterministic_capture_and_scan_soak(tmp_path: Path) -> None:
             catalog.wait_stream(job.job_id)
             active = controller._active  # noqa: SLF001
             if active is not None:
-                active.thread.join(1)
+                active.thread.join(_BACKGROUND_JOB_TIMEOUT_S)
                 assert not active.thread.is_alive()
         for index in range(6):
             frequency = 900_000_000 + index * 1_000_000
@@ -390,7 +406,7 @@ def test_short_deterministic_capture_and_scan_soak(tmp_path: Path) -> None:
             catalog.wait_scan(scan_job.job_id)
             active_scan = controller._active_scan  # noqa: SLF001
             if active_scan is not None:
-                active_scan.thread.join(1)
+                active_scan.thread.join(_BACKGROUND_JOB_TIMEOUT_S)
                 assert not active_scan.thread.is_alive()
 
         assert len(catalog.list_artifacts()) == 24
