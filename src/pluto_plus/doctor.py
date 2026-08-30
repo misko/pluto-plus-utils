@@ -448,18 +448,34 @@ IIO_THROUGHPUT_TIMING_V1_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 29, 23, 51, 58, tzinfo=UTC),
 )
 
+# Exact RAM-only diagnostic candidate that retains timing v1 and pins iiOD plus
+# its inherited workers to CPU1, while the Ethernet IRQ remains on CPU0. The
+# packaged IIO context must advertise the selected CPU; no matching persistent
+# profile exists.
+IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="iio-throughput-affinity-v1-rc1-ram",
+    release_tag="iio-throughput-affinity-v1-rc1-bd1a386167c2",
+    device_firmware="v0.45-plutoplus-spf-iio-throughput-affinity-v1-rc1",
+    asset_name="plutoplus-spf-iio-throughput-affinity-v1-rc1-bd1a386167c2-pluto.dfu",
+    asset_sha256="a317aa690d045676a2af169cf0e7e04d210b2e3788e7cc23c3daf61718596417",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33283169834",
+    source_commit="bd1a386167c218869d8f8303ed04be10b5a08ff6",
+    fit_body_sha256="395fe83f506e8287d48c827b1b0bcc24014f8a0b05e94f2e63c183db7b0d9f3a",
+    fit_body_size=12_813_507,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 30, 0, 47, 0, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
 # completion, immediate ordinary-IIO recovery, and idle memory/DMA health on
 # the local AD9363A radio. The RAM-only identity above remains non-persistent.
-DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY = (
-    DDR_RING_PREFILL_V1_RELEASE_RAM_POLICY.model_copy(
-        update={
-            "profile_id": "ddr-ring-prefill-v1-release-persistent-promotion",
-            "hardware_qualified": True,
-        }
-    )
+DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY = DDR_RING_PREFILL_V1_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "ddr-ring-prefill-v1-release-persistent-promotion",
+        "hardware_qualified": True,
+    }
 )
 
 # Exact final-version-stamped DDR ring v1 image from protected main run
@@ -514,8 +530,7 @@ DDR_BURST_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
     asset_name="plutoplus-spf-ddr-burst-v1-a6b78df100f6-pluto.dfu",
     asset_sha256="47bb23ff1d498a5899c4503de33bc818aa908c567eab4e0fc535602ffa296877",
     release_url=(
-        "https://github.com/misko/plutosdr-fw/releases/tag/"
-        "v0.42-plutoplus-spf-ddr-burst-v1"
+        "https://github.com/misko/plutosdr-fw/releases/tag/v0.42-plutoplus-spf-ddr-burst-v1"
     ),
     source_commit="a6b78df100f67c1bcd2528e2fbc0c86b2a8ee2ba",
     fit_body_sha256="f40542a7b1a53f4f1b06a5733f068e7b69f1eddff7ab0eb46c0f37f9f37d295a",
