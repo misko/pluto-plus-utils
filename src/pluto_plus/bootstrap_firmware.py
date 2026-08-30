@@ -98,6 +98,7 @@ class StandaloneFlashProfile:
     ddr_ring_modes: str | None = None
     buffer_metadata_status: bool = False
     buffer_metadata_timing_log: bool = False
+    iiod_cpu_affinity: int | None = None
 
 
 STANDALONE_FLASH_PROFILES = {
@@ -661,8 +662,7 @@ def prepare_lan_ssh_host_key_enrollment(
     observed_phy = str(facts.get("ad9361-phy,model") or "").strip()
     if observed_phy not in SUPPORTED_AD936X_PHY_MODELS:
         raise BootstrapFirmwareError(
-            f"LAN IIOD PHY is {observed_phy!r}, expected one of "
-            f"{SUPPORTED_AD936X_PHY_MODELS!r}"
+            f"LAN IIOD PHY is {observed_phy!r}, expected one of {SUPPORTED_AD936X_PHY_MODELS!r}"
         )
     observed_metadata = str(facts.get("iio,buffer-metadata") or "").strip()
     if observed_metadata != str(expected_metadata_abi):
@@ -713,9 +713,7 @@ def execute_lan_ssh_host_key_enrollment(
     """Create one LAN-TOFU trust file using only the Pluto default password."""
 
     if confirmation != plan.confirmation_phrase:
-        raise BootstrapFirmwareError(
-            f"confirmation must be exactly {plan.confirmation_phrase!r}"
-    )
+        raise BootstrapFirmwareError(f"confirmation must be exactly {plan.confirmation_phrase!r}")
     if timeout_s <= 0 or timeout_s > 60:
         raise BootstrapFirmwareError(
             "LAN SSH enrollment timeout must be greater than 0 and at most 60 seconds"
@@ -761,8 +759,7 @@ def execute_lan_ssh_host_key_enrollment(
         if serial_lines != [fresh.serial]:
             observed = serial_lines[0] if len(serial_lines) == 1 else None
             raise BootstrapFirmwareError(
-                f"pinned LAN SSH endpoint attested serial {observed!r}, "
-                f"expected {fresh.serial!r}"
+                f"pinned LAN SSH endpoint attested serial {observed!r}, expected {fresh.serial!r}"
             )
         fingerprint = _run_output(
             ("ssh-keygen", "-lf", str(temporary), "-E", "sha256"), timeout_s=10
@@ -1190,9 +1187,7 @@ def execute_bootstrap_plan(
         # bound for disappearance as well as return; a fixed 30-second window
         # produced a false-unknown receipt on a healthy Pluto+ that disconnected
         # immediately after the old deadline and then reconciled successfully.
-        _wait_for_path(
-            Path(plan.usb_sysfs_path), present=False, timeout_s=return_timeout_s
-        )
+        _wait_for_path(Path(plan.usb_sysfs_path), present=False, timeout_s=return_timeout_s)
         phases.append("disappeared")
         _update_receipt(receipt_path, receipt, phases)
         _wait_for_path(Path(plan.usb_sysfs_path), present=True, timeout_s=return_timeout_s)
@@ -1368,9 +1363,7 @@ def execute_usb_flash_plan_ssh(
         phases.append("reboot_dispatched")
         _update_receipt(receipt_path, receipt, phases)
 
-        _wait_for_path(
-            Path(plan.usb_sysfs_path), present=False, timeout_s=return_timeout_s
-        )
+        _wait_for_path(Path(plan.usb_sysfs_path), present=False, timeout_s=return_timeout_s)
         phases.append("disappeared")
         _update_receipt(receipt_path, receipt, phases)
         _wait_for_path(Path(plan.usb_sysfs_path), present=True, timeout_s=return_timeout_s)
@@ -1504,9 +1497,7 @@ def reconcile_usb_flash_receipt(
         raise BootstrapFirmwareError("current IIOD serial does not match the receipt")
     if str(facts.get("fw_version") or "").strip() != plan.expected_firmware:
         raise BootstrapFirmwareError("current IIOD firmware does not match the receipt")
-    if str(facts.get("iio,buffer-metadata") or "").strip() != str(
-        plan.expected_metadata_abi
-    ):
+    if str(facts.get("iio,buffer-metadata") or "").strip() != str(plan.expected_metadata_abi):
         raise BootstrapFirmwareError("current metadata ABI does not match the receipt")
     raw_names = facts.get("device_names", ())
     device_names = (
