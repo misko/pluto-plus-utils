@@ -875,7 +875,106 @@ def test_data_plane_status_rejects_shared_usb_address(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 2
-    assert "unique LAN endpoint" in result.output
+    assert "shared USB SSH requires" in result.output
+
+
+def test_data_plane_status_binds_shared_usb_ssh_to_exact_local_radio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneRuntimeStatus, IiodThreadRuntime
+
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+    transports: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "pluto_plus.cli.BoundSshTransport",
+        lambda **kwargs: transports.append(kwargs) or SimpleNamespace(bound=kwargs),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.scan_local_usb_plutos",
+        lambda: (
+            SimpleNamespace(
+                serial="SERIAL_A",
+                usb_path="/sys/bus/usb/devices/5-2",
+                host_network_interfaces=(SimpleNamespace(name="enx001"),),
+            ),
+        ),
+    )
+    validations: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "pluto_plus.setup_helper.validate_bound_interface",
+        lambda interface, path: validations.append((interface, path)),
+    )
+    snapshot = DataPlaneRuntimeStatus(
+        serial="SERIAL_A",
+        iiod_pid=4371,
+        iiod_start_ticks=352201,
+        iiod_generation=2,
+        active_rx_buffers=0,
+        rx_buffer_length=65_536,
+        rx_data_available=0,
+        rx_device_path="/sys/devices/fpga-axi/iio:device1",
+        tandem_state=0,
+        tandem_fifo_level=0,
+        tandem_fault_flags=0,
+        tandem_overflow_count=0,
+        cma_total_bytes=64 * 1024 * 1024,
+        cma_free_bytes=63 * 1024 * 1024,
+        memory_total_bytes=492_560 * 1024,
+        memory_available_bytes=401_234 * 1024,
+        interrupt_total=1_234,
+        clock_ticks_per_second=100,
+        uptime_centiseconds=1_000,
+        iiod_threads=(
+            IiodThreadRuntime(
+                tid=4371,
+                start_ticks=352201,
+                user_ticks=10,
+                system_ticks=0,
+                cpu_allowed_list="0-1",
+                name="iiod",
+            ),
+        ),
+        fpga_devices=("7c400000.dma",),
+        dma_devices=("7c400000.dma",),
+        interrupt_lines=(),
+        kernel_events=(),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.inspect_data_plane_runtime",
+        lambda transport, serial: snapshot,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "data-plane-status",
+            "SERIAL_A",
+            "--ssh-host",
+            "192.168.2.1",
+            "--ssh-interface",
+            "enx001",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/5-2",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert validations == [("enx001", "/sys/bus/usb/devices/5-2")]
+    assert len(transports) == 1
+    assert transports[0]["host"] == "192.168.2.1"
+    assert transports[0]["interface"] == "enx001"
+    assert callable(transports[0]["route_preflight"])
+    transports[0]["route_preflight"]()
+    assert validations == [
+        ("enx001", "/sys/bus/usb/devices/5-2"),
+        ("enx001", "/sys/bus/usb/devices/5-2"),
+    ]
 
 
 @pytest.mark.parametrize(
