@@ -2434,11 +2434,19 @@ def radio_data_plane_status(
         "--probe",
         help="Bracket one bounded two-receiver LAN refill with runtime snapshots.",
     ),
+    sample_seconds: float | None = typer.Option(
+        None,
+        "--sample-seconds",
+        min=0.1,
+        max=120,
+        help="Measure read-only per-thread iiOD CPU usage over this interval.",
+    ),
 ) -> None:
-    """Read exact-radio IIOD, IIO-buffer, DMA, IRQ, and kernel runtime evidence."""
+    """Read exact-radio iiOD thread, IIO-buffer, DMA, IRQ, and kernel evidence."""
 
     from pluto_plus.data_plane import (
         DataPlaneRecoveryError,
+        compare_iiod_thread_cpu,
         inspect_data_plane_runtime,
         probe_iio_data_plane,
     )
@@ -2484,7 +2492,18 @@ def radio_data_plane_status(
         bounded_probe = (
             probe_iio_data_plane(f"ip:{ssh_host}", serial) if probe else None
         )
-        after = inspect_data_plane_runtime(transport, serial) if probe else None
+        if sample_seconds is not None:
+            time.sleep(sample_seconds)
+        after = (
+            inspect_data_plane_runtime(transport, serial)
+            if probe or sample_seconds is not None
+            else None
+        )
+        cpu_sample = (
+            compare_iiod_thread_cpu(before, after)
+            if sample_seconds is not None and after is not None
+            else None
+        )
     except (DataPlaneRecoveryError, SetupHelperError, OSError, ValueError) as error:
         _fail("data_plane_status_failed", str(error), 4)
     _emit(
@@ -2492,6 +2511,7 @@ def radio_data_plane_status(
             "before": before.model_dump(mode="json"),
             "probe": None if bounded_probe is None else bounded_probe.model_dump(mode="json"),
             "after": None if after is None else after.model_dump(mode="json"),
+            "cpu_sample": None if cpu_sample is None else cpu_sample.model_dump(mode="json"),
         }
     )
 

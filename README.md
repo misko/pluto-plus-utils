@@ -483,6 +483,25 @@ rejects a single RX allocation above 32 MiB: half of the supported firmware's 64
 CMA pool. Use repeated/streaming buffers for longer captures. This avoids relying on a
 nearly pristine contiguous CMA region even when `CmaFree` is high.
 
+For read-only bottleneck work on a unique physical-LAN endpoint, `data-plane-status`
+attests the exact gadget serial over pinned SSH and reports iiOD process generation,
+per-thread `/proc` CPU counters and CPU masks, RX-buffer/CMA state, DMA devices,
+interrupts, and bounded kernel evidence. `--sample-seconds` takes two snapshots and
+computes CPU percentages only for threads whose TID and start epoch both remain stable;
+thread churn and an iiOD generation change are reported or rejected rather than folded
+into misleading utilization:
+
+```bash
+uv run pluto radio data-plane-status EXACT_SERIAL \
+  --ssh-host 192.168.1.17 \
+  --ssh-known-hosts-file /private/EXACT_SERIAL.known_hosts \
+  --ssh-password-file /private/EXACT_SERIAL.password \
+  --sample-seconds 5
+```
+
+This command does not arm a buffer or change radio state. Add `--probe` only when one
+bounded two-receiver LAN refill is also intended.
+
 ### Persistent setup inspection and repair
 
 Without credentials doctor cannot reach the persistent U-Boot environment and
