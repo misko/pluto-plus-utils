@@ -78,6 +78,46 @@ class IiodRestartEvidence(ApiModel):
     cma_free_after_bytes: int = Field(ge=0)
 
 
+class IiodThreadRuntime(ApiModel):
+    """One read-only `/proc` accounting snapshot for an iiOD thread."""
+
+    tid: int = Field(gt=0)
+    start_ticks: int = Field(gt=0)
+    user_ticks: int = Field(ge=0)
+    system_ticks: int = Field(ge=0)
+    cpu_allowed_list: str = Field(min_length=1, max_length=128, pattern=r"^[0-9,-]+$")
+    name: str = Field(min_length=1, max_length=64)
+
+
+class IiodThreadCpuDelta(ApiModel):
+    """CPU consumed by one stable iiOD thread during a measured interval."""
+
+    tid: int = Field(gt=0)
+    start_ticks: int = Field(gt=0)
+    cpu_allowed_list: str = Field(min_length=1, max_length=128, pattern=r"^[0-9,-]+$")
+    name: str = Field(min_length=1, max_length=64)
+    user_delta_ticks: int = Field(ge=0)
+    system_delta_ticks: int = Field(ge=0)
+    cpu_seconds: float = Field(ge=0)
+    cpu_percent: float = Field(ge=0)
+
+
+class IiodCpuSample(ApiModel):
+    """Comparable per-thread iiOD CPU deltas from one stable process generation."""
+
+    serial: str = Field(min_length=1, max_length=128)
+    iiod_pid: int = Field(gt=0)
+    iiod_start_ticks: int = Field(gt=0)
+    iiod_generation: int = Field(gt=0)
+    elapsed_ms: float = Field(gt=0)
+    clock_ticks_per_second: int = Field(gt=0)
+    total_cpu_seconds: float = Field(ge=0)
+    total_cpu_percent: float = Field(ge=0)
+    threads: tuple[IiodThreadCpuDelta, ...] = Field(max_length=256)
+    new_thread_ids: tuple[int, ...] = Field(max_length=256)
+    disappeared_thread_ids: tuple[int, ...] = Field(max_length=256)
+
+
 class DataPlaneRuntimeStatus(ApiModel):
     """Read-only radio runtime evidence around one bounded RX probe."""
 
@@ -98,6 +138,9 @@ class DataPlaneRuntimeStatus(ApiModel):
     memory_total_bytes: int = Field(gt=0)
     memory_available_bytes: int = Field(ge=0)
     interrupt_total: int = Field(ge=0)
+    clock_ticks_per_second: int = Field(gt=0)
+    uptime_centiseconds: int = Field(ge=0)
+    iiod_threads: tuple[IiodThreadRuntime, ...] = Field(max_length=256)
     fpga_devices: tuple[str, ...] = Field(max_length=64)
     dma_devices: tuple[str, ...] = Field(max_length=32)
     interrupt_lines: tuple[str, ...] = Field(max_length=64)
@@ -344,6 +387,9 @@ def inspect_data_plane_runtime(
             memory_total_bytes=int(fields["memory_total_kib"]) * 1024,
             memory_available_bytes=int(fields["memory_available_kib"]) * 1024,
             interrupt_total=int(fields["interrupt_total"]),
+            clock_ticks_per_second=int(fields["clock_ticks_per_second"]),
+            uptime_centiseconds=int(fields["uptime_centiseconds"]),
+            iiod_threads=_parse_iiod_threads(fields),
             fpga_devices=_decode_hex_report_lines(fields, "fpga_devices_hex", maximum_bytes=8192),
             dma_devices=_decode_hex_report_lines(fields, "dma_devices_hex", maximum_bytes=4096),
             interrupt_lines=_decode_hex_report_lines(
@@ -357,6 +403,78 @@ def inspect_data_plane_runtime(
         raise DataPlaneRecoveryError(
             "data-plane runtime report is incomplete or invalid"
         ) from error
+
+
+def compare_iiod_thread_cpu(
+    before: DataPlaneRuntimeStatus,
+    after: DataPlaneRuntimeStatus,
+) -> IiodCpuSample:
+    """Calculate per-thread CPU usage across two stable iiOD runtime snapshots."""
+
+    before_identity = (
+        before.serial,
+        before.iiod_pid,
+        before.iiod_start_ticks,
+        before.iiod_generation,
+    )
+    after_identity = (
+        after.serial,
+        after.iiod_pid,
+        after.iiod_start_ticks,
+        after.iiod_generation,
+    )
+    if after_identity != before_identity:
+        raise DataPlaneRecoveryError("iiOD process identity changed during CPU sampling")
+    if after.clock_ticks_per_second != before.clock_ticks_per_second:
+        raise DataPlaneRecoveryError("iiOD CPU clock-tick frequency changed during sampling")
+    elapsed_centiseconds = after.uptime_centiseconds - before.uptime_centiseconds
+    if elapsed_centiseconds <= 0:
+        raise DataPlaneRecoveryError("iiOD CPU sample interval was not positive")
+
+    before_threads = {(thread.tid, thread.start_ticks): thread for thread in before.iiod_threads}
+    after_threads = {(thread.tid, thread.start_ticks): thread for thread in after.iiod_threads}
+    elapsed_seconds = elapsed_centiseconds / 100
+    clock_ticks = before.clock_ticks_per_second
+    deltas: list[IiodThreadCpuDelta] = []
+    total_ticks = 0
+    for identity in sorted(before_threads.keys() & after_threads.keys()):
+        earlier = before_threads[identity]
+        later = after_threads[identity]
+        user_delta = later.user_ticks - earlier.user_ticks
+        system_delta = later.system_ticks - earlier.system_ticks
+        if user_delta < 0 or system_delta < 0:
+            raise DataPlaneRecoveryError("iiOD thread CPU counters moved backwards")
+        consumed_ticks = user_delta + system_delta
+        total_ticks += consumed_ticks
+        cpu_seconds = consumed_ticks / clock_ticks
+        deltas.append(
+            IiodThreadCpuDelta(
+                tid=later.tid,
+                start_ticks=later.start_ticks,
+                cpu_allowed_list=later.cpu_allowed_list,
+                name=later.name,
+                user_delta_ticks=user_delta,
+                system_delta_ticks=system_delta,
+                cpu_seconds=cpu_seconds,
+                cpu_percent=100 * cpu_seconds / elapsed_seconds,
+            )
+        )
+    total_cpu_seconds = total_ticks / clock_ticks
+    new_threads = after_threads.keys() - before_threads.keys()
+    disappeared_threads = before_threads.keys() - after_threads.keys()
+    return IiodCpuSample(
+        serial=before.serial,
+        iiod_pid=before.iiod_pid,
+        iiod_start_ticks=before.iiod_start_ticks,
+        iiod_generation=before.iiod_generation,
+        elapsed_ms=elapsed_centiseconds * 10,
+        clock_ticks_per_second=clock_ticks,
+        total_cpu_seconds=total_cpu_seconds,
+        total_cpu_percent=100 * total_cpu_seconds / elapsed_seconds,
+        threads=tuple(deltas),
+        new_thread_ids=tuple(sorted(identity[0] for identity in new_threads)),
+        disappeared_thread_ids=tuple(sorted(identity[0] for identity in disappeared_threads)),
+    )
 
 
 def new_recovery_receipt_id() -> str:
@@ -431,6 +549,43 @@ def _decode_hex_report_lines(
     return tuple(line for line in text.splitlines() if line)
 
 
+def _decode_hex_report_text(value: str, *, field: str, maximum_bytes: int) -> str:
+    try:
+        decoded = bytes.fromhex(value)
+        text = decoded.decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise ValueError(f"remote report contained invalid {field}") from error
+    if not decoded or len(decoded) > maximum_bytes or "\x00" in text or "\n" in text:
+        raise ValueError(f"remote report contained invalid {field}")
+    return text
+
+
+def _parse_iiod_threads(fields: Mapping[str, str]) -> tuple[IiodThreadRuntime, ...]:
+    lines = _decode_hex_report_lines(fields, "iiod_threads_hex", maximum_bytes=32_768)
+    threads: list[IiodThreadRuntime] = []
+    identities: set[tuple[int, int]] = set()
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) != 6:
+            raise ValueError("remote report contained a malformed iiOD thread")
+        thread = IiodThreadRuntime(
+            tid=int(parts[0]),
+            start_ticks=int(parts[1]),
+            user_ticks=int(parts[2]),
+            system_ticks=int(parts[3]),
+            cpu_allowed_list=_decode_hex_report_text(
+                parts[4], field="iiOD thread CPU list", maximum_bytes=128
+            ),
+            name=_decode_hex_report_text(parts[5], field="iiOD thread name", maximum_bytes=64),
+        )
+        identity = (thread.tid, thread.start_ticks)
+        if identity in identities:
+            raise ValueError("remote report duplicated an iiOD thread identity")
+        identities.add(identity)
+        threads.append(thread)
+    return tuple(sorted(threads, key=lambda thread: thread.tid))
+
+
 _INSPECT_DATA_PLANE_SCRIPT = rb"""set -eu
 serial_expected="$1"
 serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
@@ -472,6 +627,29 @@ cma_free_kib=$(awk '$1 == "CmaFree:" {print $2; exit}' /proc/meminfo)
 memory_total_kib=$(awk '$1 == "MemTotal:" {print $2; exit}' /proc/meminfo)
 memory_available_kib=$(awk '$1 == "MemAvailable:" {print $2; exit}' /proc/meminfo)
 interrupt_total=$(awk '$1 == "intr" {print $2; exit}' /proc/stat)
+clock_ticks_per_second=$(od -An -tu4 -w8 /proc/self/auxv \
+  | awk '$1 == 17 {print $2; exit}')
+[ -n "$clock_ticks_per_second" ]
+uptime_centiseconds=$(awk '{printf "%.0f\n", $1 * 100}' /proc/uptime)
+iiod_threads=$(for task in "/proc/$iiod_pid/task/"[0-9]*; do
+  [ -r "$task/stat" ] || continue
+  tid=${task##*/}
+  stat_tail=$(sed 's/^.*) //' "$task/stat")
+  set -- $stat_tail
+  [ "$#" -ge 20 ]
+  user_ticks=${12}
+  system_ticks=${13}
+  start_ticks=${20}
+  cpu_allowed_list=$(awk -F: '$1 == "Cpus_allowed_list" {
+    sub(/^[[:space:]]+/, "", $2); print $2; exit
+  }' "$task/status")
+  thread_name=$(cat "$task/comm")
+  cpu_allowed_hex=$(printf '%s' "$cpu_allowed_list" | od -An -tx1 | tr -d ' \n')
+  thread_name_hex=$(printf '%s' "$thread_name" | od -An -tx1 | tr -d ' \n')
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$tid" "$start_ticks" "$user_ticks" "$system_ticks" \
+    "$cpu_allowed_hex" "$thread_name_hex"
+done)
 fpga_devices=$(for candidate in "$rx_bus_path"/*; do
   printf '%s\n' "$candidate"
 done)
@@ -501,6 +679,9 @@ emit cma_free_kib "$cma_free_kib"
 emit memory_total_kib "$memory_total_kib"
 emit memory_available_kib "$memory_available_kib"
 emit interrupt_total "$interrupt_total"
+emit clock_ticks_per_second "$clock_ticks_per_second"
+emit uptime_centiseconds "$uptime_centiseconds"
+emit_hex iiod_threads_hex "$iiod_threads"
 emit_hex fpga_devices_hex "$fpga_devices"
 emit_hex dma_devices_hex "$dma_devices"
 emit_hex interrupt_lines_hex "$interrupt_lines"

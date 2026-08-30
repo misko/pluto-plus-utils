@@ -9,6 +9,9 @@ from pluto_plus.data_plane import (
     MAX_SAFE_IIO_BUFFER_BYTES,
     DataPlaneProbe,
     DataPlaneRecoveryError,
+    DataPlaneRuntimeStatus,
+    IiodThreadRuntime,
+    compare_iiod_thread_cpu,
     iio_buffer_wire_bytes,
     inspect_data_plane_runtime,
     probe_iio_data_plane,
@@ -189,6 +192,10 @@ def _runtime_report(*, serial: str = "SERIAL_A") -> str:
     fpga_devices = encode("7c400000.dma\n79020000.cf-ad9361-lpc\n")
     interrupt_lines = encode("54: 9 0 dma0chan0\n")
     kernel_events = encode("axi-dmac initialized\n")
+    iiod_threads = encode(
+        "4371\t352201\t120\t30\t302d31\t69696f64\n"
+        "4380\t352250\t80\t20\t31\t69696f642d72772d776f726b6572\n"
+    )
     return "\n".join(
         (
             f"PPU\tserial\t{serial}",
@@ -208,6 +215,9 @@ def _runtime_report(*, serial: str = "SERIAL_A") -> str:
             "PPU\tmemory_total_kib\t492560",
             "PPU\tmemory_available_kib\t401234",
             "PPU\tinterrupt_total\t1234",
+            "PPU\tclock_ticks_per_second\t100",
+            "PPU\tuptime_centiseconds\t123456",
+            f"PPU\tiiod_threads_hex\t{iiod_threads}",
             f"PPU\tfpga_devices_hex\t{fpga_devices}",
             f"PPU\tdma_devices_hex\t{dma_devices}",
             f"PPU\tinterrupt_lines_hex\t{interrupt_lines}",
@@ -233,6 +243,14 @@ def test_inspect_data_plane_runtime_uses_read_only_fixed_script() -> None:
     assert status.memory_total_bytes == 492_560 * 1024
     assert status.memory_available_bytes == 401_234 * 1024
     assert status.interrupt_total == 1234
+    assert status.clock_ticks_per_second == 100
+    assert status.uptime_centiseconds == 123_456
+    assert [(thread.tid, thread.user_ticks) for thread in status.iiod_threads] == [
+        (4371, 120),
+        (4380, 80),
+    ]
+    assert status.iiod_threads[1].name == "iiod-rw-worker"
+    assert status.iiod_threads[1].cpu_allowed_list == "1"
     assert status.tandem_state == 0
     assert status.tandem_fifo_level == 0
     assert status.tandem_fault_flags == 0
@@ -240,6 +258,103 @@ def test_inspect_data_plane_runtime_uses_read_only_fixed_script() -> None:
     assert status.fpga_devices == ("7c400000.dma", "79020000.cf-ad9361-lpc")
     assert status.dma_devices == ("7c400000.dma",)
     assert status.interrupt_lines == ("54: 9 0 dma0chan0",)
+
+
+def _cpu_snapshot(
+    *,
+    uptime_centiseconds: int,
+    threads: tuple[IiodThreadRuntime, ...],
+    pid: int = 4371,
+) -> DataPlaneRuntimeStatus:
+    return DataPlaneRuntimeStatus(
+        serial="SERIAL_A",
+        iiod_pid=pid,
+        iiod_start_ticks=352201,
+        iiod_generation=2,
+        active_rx_buffers=0,
+        rx_buffer_length=65_536,
+        rx_data_available=0,
+        rx_device_path="/sys/devices/fpga-axi/iio:device1",
+        tandem_state=0,
+        tandem_fifo_level=0,
+        tandem_fault_flags=0,
+        tandem_overflow_count=0,
+        cma_total_bytes=64 * 1024 * 1024,
+        cma_free_bytes=63 * 1024 * 1024,
+        memory_total_bytes=492_560 * 1024,
+        memory_available_bytes=401_234 * 1024,
+        interrupt_total=1_234,
+        clock_ticks_per_second=100,
+        uptime_centiseconds=uptime_centiseconds,
+        iiod_threads=threads,
+        fpga_devices=("7c400000.dma",),
+        dma_devices=("7c400000.dma",),
+        interrupt_lines=(),
+        kernel_events=(),
+    )
+
+
+def _thread(
+    tid: int,
+    *,
+    start_ticks: int,
+    user_ticks: int,
+    system_ticks: int,
+) -> IiodThreadRuntime:
+    return IiodThreadRuntime(
+        tid=tid,
+        start_ticks=start_ticks,
+        user_ticks=user_ticks,
+        system_ticks=system_ticks,
+        cpu_allowed_list="1",
+        name="iiod",
+    )
+
+
+def test_compare_iiod_thread_cpu_reports_stable_threads_and_churn() -> None:
+    before = _cpu_snapshot(
+        uptime_centiseconds=1_000,
+        threads=(
+            _thread(4371, start_ticks=352201, user_ticks=100, system_ticks=20),
+            _thread(4380, start_ticks=352250, user_ticks=50, system_ticks=10),
+            _thread(4381, start_ticks=352260, user_ticks=20, system_ticks=5),
+        ),
+    )
+    after = _cpu_snapshot(
+        uptime_centiseconds=1_200,
+        threads=(
+            _thread(4371, start_ticks=352201, user_ticks=120, system_ticks=30),
+            _thread(4380, start_ticks=352250, user_ticks=130, system_ticks=20),
+            _thread(4382, start_ticks=352400, user_ticks=1, system_ticks=0),
+        ),
+    )
+
+    sample = compare_iiod_thread_cpu(before, after)
+
+    assert sample.elapsed_ms == 2_000
+    assert sample.total_cpu_seconds == pytest.approx(1.2)
+    assert sample.total_cpu_percent == pytest.approx(60)
+    assert [(thread.tid, thread.cpu_percent) for thread in sample.threads] == [
+        (4371, pytest.approx(15)),
+        (4380, pytest.approx(45)),
+    ]
+    assert sample.new_thread_ids == (4382,)
+    assert sample.disappeared_thread_ids == (4381,)
+
+
+def test_compare_iiod_thread_cpu_rejects_process_change_and_counter_regression() -> None:
+    thread = _thread(4371, start_ticks=352201, user_ticks=100, system_ticks=20)
+    before = _cpu_snapshot(uptime_centiseconds=1_000, threads=(thread,))
+    changed = _cpu_snapshot(uptime_centiseconds=1_200, threads=(thread,), pid=5000)
+    with pytest.raises(DataPlaneRecoveryError, match="identity changed"):
+        compare_iiod_thread_cpu(before, changed)
+
+    regressed = _cpu_snapshot(
+        uptime_centiseconds=1_200,
+        threads=(_thread(4371, start_ticks=352201, user_ticks=99, system_ticks=20),),
+    )
+    with pytest.raises(DataPlaneRecoveryError, match="moved backwards"):
+        compare_iiod_thread_cpu(before, regressed)
 
 
 def test_restart_attested_iiod_uses_fixed_script_and_records_generation() -> None:

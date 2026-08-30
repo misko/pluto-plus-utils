@@ -677,7 +677,7 @@ def test_data_plane_status_brackets_lan_probe_with_runtime_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pluto_plus.data_plane import DataPlaneProbe, DataPlaneRuntimeStatus
+    from pluto_plus.data_plane import DataPlaneProbe, DataPlaneRuntimeStatus, IiodThreadRuntime
 
     known_hosts, password = _network_bootstrap_credentials(tmp_path)
     transports: list[dict[str, Any]] = []
@@ -704,12 +704,24 @@ def test_data_plane_status_brackets_lan_probe_with_runtime_evidence(
             memory_total_bytes=492_560 * 1024,
             memory_available_bytes=401_234 * 1024,
             interrupt_total=1_234,
+            clock_ticks_per_second=100,
+            uptime_centiseconds=uptime_centiseconds,
+            iiod_threads=(
+                IiodThreadRuntime(
+                    tid=4371,
+                    start_ticks=352201,
+                    user_ticks=user_ticks,
+                    system_ticks=0,
+                    cpu_allowed_list="0-1",
+                    name="iiod",
+                ),
+            ),
             fpga_devices=("7c400000.dma", "79020000.cf-ad9361-lpc"),
             dma_devices=("7c400000.dma",),
             interrupt_lines=(f"54: {count} dma0chan0",),
             kernel_events=(),
         )
-        for count in (9, 9)
+        for count, uptime_centiseconds, user_ticks in ((9, 1_000, 10), (9, 1_200, 20))
     )
     monkeypatch.setattr(
         "pluto_plus.data_plane.inspect_data_plane_runtime",
@@ -760,6 +772,88 @@ def test_data_plane_status_brackets_lan_probe_with_runtime_evidence(
     assert payload["probe"]["uri"] == "ip:192.168.1.183"
     assert payload["probe"]["failure_kind"] == "timeout"
     assert payload["after"]["interrupt_lines"] == ["54: 9 dma0chan0"]
+    assert payload["cpu_sample"] is None
+
+
+def test_data_plane_status_samples_per_thread_cpu_without_a_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pluto_plus.data_plane import DataPlaneRuntimeStatus, IiodThreadRuntime
+
+    known_hosts, password = _network_bootstrap_credentials(tmp_path)
+    monkeypatch.setattr(
+        "pluto_plus.cli.BoundSshTransport", lambda **kwargs: SimpleNamespace(bound=kwargs)
+    )
+
+    def snapshot(uptime_centiseconds: int, user_ticks: int) -> DataPlaneRuntimeStatus:
+        return DataPlaneRuntimeStatus(
+            serial="SERIAL_A",
+            iiod_pid=4371,
+            iiod_start_ticks=352201,
+            iiod_generation=2,
+            active_rx_buffers=0,
+            rx_buffer_length=65_536,
+            rx_data_available=0,
+            rx_device_path="/sys/devices/fpga-axi/iio:device1",
+            tandem_state=0,
+            tandem_fifo_level=0,
+            tandem_fault_flags=0,
+            tandem_overflow_count=0,
+            cma_total_bytes=64 * 1024 * 1024,
+            cma_free_bytes=63 * 1024 * 1024,
+            memory_total_bytes=492_560 * 1024,
+            memory_available_bytes=401_234 * 1024,
+            interrupt_total=1_234,
+            clock_ticks_per_second=100,
+            uptime_centiseconds=uptime_centiseconds,
+            iiod_threads=(
+                IiodThreadRuntime(
+                    tid=4371,
+                    start_ticks=352201,
+                    user_ticks=user_ticks,
+                    system_ticks=0,
+                    cpu_allowed_list="1",
+                    name="iiod",
+                ),
+            ),
+            fpga_devices=("7c400000.dma",),
+            dma_devices=("7c400000.dma",),
+            interrupt_lines=(),
+            kernel_events=(),
+        )
+
+    snapshots = iter((snapshot(1_000, 10), snapshot(1_200, 80)))
+    monkeypatch.setattr(
+        "pluto_plus.data_plane.inspect_data_plane_runtime",
+        lambda transport, serial: next(snapshots),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr("pluto_plus.cli.time.sleep", sleeps.append)
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "data-plane-status",
+            "SERIAL_A",
+            "--ssh-host",
+            "192.168.1.183",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--sample-seconds",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert sleeps == [2]
+    assert payload["probe"] is None
+    assert payload["cpu_sample"]["elapsed_ms"] == 2_000
+    assert payload["cpu_sample"]["threads"][0]["cpu_percent"] == pytest.approx(35)
 
 
 def test_data_plane_status_rejects_shared_usb_address(tmp_path: Path) -> None:
