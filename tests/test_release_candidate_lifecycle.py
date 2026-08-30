@@ -15,6 +15,8 @@ from pluto_plus.firmware import (
     PLUTO_FRM_MAGIC,
 )
 from pluto_plus.release_candidate import (
+    PLUTO_REV_C_AD9363A_MODEL,
+    CanonicalHardwareSetup,
     CleanupReceipt,
     ContentIdentity,
     DfuIdentity,
@@ -111,18 +113,33 @@ def _safe() -> SafeState:
     )
 
 
-def _runtime(*, firmware: str, boot: str) -> RuntimeObservation:
+def _canonical_setup() -> CanonicalHardwareSetup:
+    return CanonicalHardwareSetup(
+        uboot_attr_name_absent=True,
+        uboot_attr_val_absent=True,
+        uboot_compatible="ad9361",
+        uboot_mode="2r2t",
+        phy_model="ad9363a",
+        rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
+        tandem_device=True,
+    )
+
+
+def _runtime(*, firmware: str, boot: str, model: str = MODEL) -> RuntimeObservation:
     return RuntimeObservation(
         serial=SERIAL,
         topology=TOPOLOGY,
         usb_uri="usb:3.29.5",
-        hardware_model=MODEL,
+        hardware_model=model,
         firmware_version=firmware,
         metadata_abi="frame-metadata-v5",
         capabilities=("tandem-agc",),
         boot_id=boot,
         qspi=QspiObservation(bytes=31_457_280, sha256="9" * 64),
         safe_state=_safe(),
+        canonical_hardware_setup=(
+            _canonical_setup() if model == PLUTO_REV_C_AD9363A_MODEL else None
+        ),
     )
 
 
@@ -384,6 +401,38 @@ def test_native_candidate_ram_success_uses_only_reviewed_vectors(tmp_path: Path)
         "attest-post",
         "release-route",
     ]
+
+
+def test_ad9361_candidate_never_admits_exact_ad9363a_runtime(tmp_path: Path) -> None:
+    class NativeRuntimeBackend(FakeBackend):
+        def attest_runtime(
+            self,
+            target: UsbInventoryTarget,
+            *,
+            expected_firmware: str,
+            password: PasswordFileIdentity,
+            route: HostRouteReceipt,
+        ) -> RuntimeObservation:
+            observed = super().attest_runtime(
+                target,
+                expected_firmware=expected_firmware,
+                password=password,
+                route=route,
+            )
+            return RuntimeObservation.model_validate(
+                observed.model_dump(mode="python")
+                | {
+                    "hardware_model": PLUTO_REV_C_AD9363A_MODEL,
+                    "canonical_hardware_setup": _canonical_setup().model_dump(mode="python"),
+                }
+            )
+
+    backend = NativeRuntimeBackend()
+
+    with pytest.raises(ReleaseCandidateLifecycleError, match="preboot runtime identity"):
+        _execute(tmp_path, backend)
+
+    assert "request" not in backend.calls
 
 
 @pytest.mark.parametrize(

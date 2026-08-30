@@ -12,6 +12,9 @@ import pytest
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.radio_lock import RadioLockError, acquire_radio_lock
 from pluto_plus.release_candidate import (
+    CANONICAL_RX_SCAN_CHANNELS,
+    PLUTO_REV_C_AD9363A_MODEL,
+    CanonicalHardwareSetup,
     HostRouteReceipt,
     QspiObservation,
     RuntimeObservation,
@@ -24,8 +27,10 @@ from pluto_plus.release_candidate_lifecycle import (
     validate_password_file,
 )
 from pluto_plus.release_candidate_linux import (
+    REMOTE_IDENTITY_SCRIPT,
     REMOTE_PERSISTENT_RESET_COMMAND,
     LinuxReleaseCandidateBackend,
+    _canonical_hardware_setup,
     attest_clean_tool_repository,
 )
 
@@ -82,6 +87,62 @@ def _runtime(*, boot_id: str) -> RuntimeObservation:
             fault_flags=0,
         ),
     )
+
+
+def _compatibility_facts() -> dict[str, object]:
+    return {
+        "phy_model": "ad9363a",
+        "rx_scan_channels": CANONICAL_RX_SCAN_CHANNELS,
+        "tandem_agc": True,
+    }
+
+
+def _compatibility_remote() -> dict[str, str]:
+    return {
+        "uboot_attr_name_absent": "1",
+        "uboot_attr_val_absent": "1",
+        "uboot_compatible": "ad9361",
+        "uboot_mode": "2r2t",
+    }
+
+
+def test_native_ad9363a_compatibility_is_typed_and_fail_closed() -> None:
+    setup = _canonical_hardware_setup(_compatibility_facts(), _compatibility_remote())
+    runtime = _runtime(boot_id="11111111-1111-4111-8111-111111111111").model_copy(
+        update={
+            "hardware_model": PLUTO_REV_C_AD9363A_MODEL,
+            "canonical_hardware_setup": setup,
+        }
+    )
+
+    assert isinstance(setup, CanonicalHardwareSetup)
+    assert setup.phy_model == "ad9363a"
+    assert setup.rx_scan_channels == CANONICAL_RX_SCAN_CHANNELS
+    assert RuntimeObservation.model_validate(runtime.model_dump(mode="python")) == runtime
+
+
+@pytest.mark.parametrize(
+    ("source", "field", "value"),
+    [
+        ("remote", "uboot_attr_name_absent", "0"),
+        ("remote", "uboot_attr_val_absent", "0"),
+        ("remote", "uboot_compatible", "ad9363a"),
+        ("remote", "uboot_mode", "1r1t"),
+        ("facts", "phy_model", "ad9364"),
+        ("facts", "rx_scan_channels", ("voltage0", "voltage1")),
+        ("facts", "tandem_agc", False),
+    ],
+)
+def test_native_ad9363a_compatibility_rejects_each_missing_proof(
+    source: str, field: str, value: object
+) -> None:
+    facts = _compatibility_facts()
+    remote = _compatibility_remote()
+    target: dict[str, object] = facts if source == "facts" else remote
+    target[field] = value
+
+    with pytest.raises(ReleaseCandidateLifecycleError, match="canonical Rev.C"):
+        _canonical_hardware_setup(facts, remote)
 
 
 class RouteRunner:
@@ -146,6 +207,41 @@ class RouteRunner:
         raise AssertionError(f"unexpected command {call}")
 
 
+class IdentityRunner(RouteRunner):
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_s: float,
+        pass_fds: Sequence[int] = (),
+        allowed_returncodes: Sequence[int] = (0,),
+    ) -> str:
+        call = tuple(argv)
+        if call and call[0] == "sshpass" and call[-1] == REMOTE_IDENTITY_SCRIPT:
+            self.calls.append(call)
+            return "\n".join(
+                (
+                    "boot_id=11111111-1111-4111-8111-111111111111",
+                    "firmware_version=candidate-version",
+                    "qspi_partition=/dev/mtdblock3",
+                    "qspi_mtd_name=qspi-linux",
+                    "qspi_bytes=31457280",
+                    f"qspi_sha256={'9' * 64}",
+                    "uboot_attr_name_absent=1",
+                    "uboot_attr_val_absent=1",
+                    "uboot_compatible=ad9361",
+                    "uboot_mode=2r2t",
+                    "",
+                )
+            )
+        return super().run(
+            argv,
+            timeout_s=timeout_s,
+            pass_fds=pass_fds,
+            allowed_returncodes=allowed_returncodes,
+        )
+
+
 def _backend(tmp_path: Path, runner: RouteRunner | None = None) -> LinuxReleaseCandidateBackend:
     return LinuxReleaseCandidateBackend(
         state_root=(tmp_path / "state").absolute(),
@@ -153,6 +249,25 @@ def _backend(tmp_path: Path, runner: RouteRunner | None = None) -> LinuxReleaseC
         scanner=lambda: (_local(),),
         command_runner=runner or RouteRunner(),
     )
+
+
+def test_remote_identity_attests_exact_canonical_uboot_tuple(tmp_path: Path) -> None:
+    runner = IdentityRunner()
+    backend = _backend(tmp_path, runner)
+    password_path = (tmp_path / "password").absolute()
+    password_path.write_text("analog\n")
+    password_path.chmod(0o600)
+    password = validate_password_file(password_path)
+
+    with backend.transaction_locks(_target(), "192.168.2.1"):
+        route = backend.acquire_host_route(_target(), "192.168.2.1")
+        remote = backend._remote_identity(_target(), password, route)
+        backend.release_host_route(route)
+
+    assert remote["uboot_attr_name_absent"] == "1"
+    assert remote["uboot_attr_val_absent"] == "1"
+    assert remote["uboot_compatible"] == "ad9361"
+    assert remote["uboot_mode"] == "2r2t"
 
 
 def test_exact_host_route_is_added_verified_and_removed_under_locks(tmp_path: Path) -> None:

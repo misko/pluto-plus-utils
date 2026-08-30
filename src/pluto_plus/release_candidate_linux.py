@@ -20,9 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from pydantic import ValidationError
+
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 from pluto_plus.radio_lock import RadioLockError, acquire_radio_lock, shared_radio_lock_root
 from pluto_plus.release_candidate import (
+    CanonicalHardwareSetup,
     CleanupReceipt,
     HostRouteReceipt,
     QspiObservation,
@@ -71,6 +74,12 @@ qspi_partition=/dev/mtdblock3
 qspi_mtd_name=$(cat /sys/class/mtd/mtd3/name)
 qspi_bytes=$(cat /sys/class/mtd/mtd3/size)
 qspi_sha256=$(sha256sum "$qspi_partition" | awk '{print $1}')
+uboot_attr_name_absent=0
+uboot_attr_val_absent=0
+if ! /usr/sbin/fw_printenv -n attr_name >/dev/null 2>&1; then uboot_attr_name_absent=1; fi
+if ! /usr/sbin/fw_printenv -n attr_val >/dev/null 2>&1; then uboot_attr_val_absent=1; fi
+uboot_compatible=$(/usr/sbin/fw_printenv -n compatible)
+uboot_mode=$(/usr/sbin/fw_printenv -n mode)
 [ -n "$boot_id" ]
 [ -n "$firmware_version" ]
 [ "$qspi_mtd_name" = qspi-linux ]
@@ -78,9 +87,13 @@ case "$qspi_bytes" in ''|*[!0-9]*) exit 1;; esac
 [ "$qspi_bytes" -gt 0 ]
 format='boot_id=%s\nfirmware_version=%s\nqspi_partition=%s\nqspi_mtd_name=%s\n'
 format="${format}qspi_bytes=%s\nqspi_sha256=%s\n"
+format="${format}uboot_attr_name_absent=%s\nuboot_attr_val_absent=%s\n"
+format="${format}uboot_compatible=%s\nuboot_mode=%s\n"
 printf "$format" \
   "$boot_id" "$firmware_version" "$qspi_partition" "$qspi_mtd_name" \
-  "$qspi_bytes" "$qspi_sha256"
+  "$qspi_bytes" "$qspi_sha256" \
+  "$uboot_attr_name_absent" "$uboot_attr_val_absent" \
+  "$uboot_compatible" "$uboot_mode"
 """
 
 
@@ -918,7 +931,8 @@ class LinuxReleaseCandidateBackend:
             faults = round(_first_float(_read_attr(tandem, "fault_flags")))
             from pluto_plus.hardware.iio import context_facts
 
-            metadata_value = context_facts(context).get("buffer_metadata_abi")
+            facts = context_facts(context)
+            metadata_value = facts.get("buffer_metadata_abi")
             if not isinstance(metadata_value, int):
                 raise ReleaseCandidateLifecycleError(
                     "runtime metadata ABI capability is absent, malformed, or inconsistent"
@@ -927,6 +941,7 @@ class LinuxReleaseCandidateBackend:
             remote = self._remote_identity(target, password, route)
             if remote["firmware_version"] != firmware:
                 raise ReleaseCandidateLifecycleError("SSH and USB-IIO firmware differ")
+            hardware_setup = _canonical_hardware_setup(facts, remote)
             return RuntimeObservation(
                 serial=serial,
                 topology=target.topology,
@@ -948,6 +963,7 @@ class LinuxReleaseCandidateBackend:
                         "fault_flags": faults,
                     }
                 ),
+                canonical_hardware_setup=hardware_setup,
             )
         finally:
             if context is not None:
@@ -990,6 +1006,10 @@ class LinuxReleaseCandidateBackend:
             "qspi_mtd_name",
             "qspi_bytes",
             "qspi_sha256",
+            "uboot_attr_name_absent",
+            "uboot_attr_val_absent",
+            "uboot_compatible",
+            "uboot_mode",
         }
         if set(fields) != expected:
             raise ReleaseCandidateLifecycleError("runtime identity field inventory is not exact")
@@ -1001,6 +1021,8 @@ class LinuxReleaseCandidateBackend:
             or int(fields["qspi_bytes"]) <= 0
             or _SHA256.fullmatch(fields["qspi_sha256"]) is None
             or not fields["firmware_version"]
+            or fields["uboot_attr_name_absent"] not in {"0", "1"}
+            or fields["uboot_attr_val_absent"] not in {"0", "1"}
         ):
             raise ReleaseCandidateLifecycleError("runtime boot/QSPI identity is invalid")
         return fields
@@ -1029,6 +1051,30 @@ class LinuxReleaseCandidateBackend:
     def _prepare_state_root(self) -> None:
         self.state_root.mkdir(parents=True, mode=0o700, exist_ok=True)
         _require_private_directory(self.state_root, label="candidate state root")
+
+
+def _canonical_hardware_setup(
+    facts: Mapping[str, object], remote: Mapping[str, str]
+) -> CanonicalHardwareSetup:
+    raw_scan_channels = facts.get("rx_scan_channels")
+    if not isinstance(raw_scan_channels, (tuple, list)):
+        raise ReleaseCandidateLifecycleError("runtime paired-RX scan layout is absent or malformed")
+    try:
+        return CanonicalHardwareSetup.model_validate(
+            {
+                "uboot_attr_name_absent": remote.get("uboot_attr_name_absent") == "1",
+                "uboot_attr_val_absent": remote.get("uboot_attr_val_absent") == "1",
+                "uboot_compatible": remote.get("uboot_compatible", ""),
+                "uboot_mode": remote.get("uboot_mode", ""),
+                "phy_model": facts.get("phy_model"),
+                "rx_scan_channels": tuple(str(item) for item in raw_scan_channels),
+                "tandem_device": facts.get("tandem_agc") is True,
+            }
+        )
+    except ValidationError as error:
+        raise ReleaseCandidateLifecycleError(
+            "runtime lacks canonical Rev.C AD9361/2R2T/tandem setup proof"
+        ) from error
 
 
 def attest_clean_tool_repository(
