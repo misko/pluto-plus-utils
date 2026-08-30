@@ -506,6 +506,27 @@ IIO_THROUGHPUT_SAMPLER_POLL_V3_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 30, 2, 27, 45, tzinfo=UTC),
 )
 
+# Exact RAM-only successor that retains selective per-device R/W-worker
+# affinity and timing v1 while fencing the SPI-backed gain/RSSI sampler to one
+# truthful observation per refill. AUTO gain transitions remain independent
+# FPGA event records. No matching persistent profile exists until hardware
+# qualification proves event preservation, CPU reduction, and clean recovery.
+IIO_THROUGHPUT_REFILL_SAMPLER_V4_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="iio-throughput-refill-sampler-v4-rc1-ram",
+    release_tag="iio-throughput-refill-sampler-v4-rc1-854a719f4d8a",
+    device_firmware="v0.45-plutoplus-spf-iio-throughput-refill-sampler-v4-rc1",
+    asset_name=(
+        "plutoplus-spf-iio-throughput-refill-sampler-v4-rc1-854a719f4d8a-pluto.dfu"
+    ),
+    asset_sha256="cc26011083192b3f83a105ba47d25e25ed2ce102948eb24ad12c23297ced73b6",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33289043863",
+    source_commit="854a719f4d8a39eb3a7da708eb6f56360971f917",
+    fit_body_sha256="f2c20aea76f8a3de6fc90d1fbe5213283494abb4c29debc58afa62c1c3fe481a",
+    fit_body_size=12_814_523,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 30, 3, 18, 59, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target

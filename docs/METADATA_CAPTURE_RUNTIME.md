@@ -231,5 +231,6 @@ caused by a slower transport; DDR-ring captures still additionally require a cle
 `target_complete` terminal state and a counter-proven contiguous admitted prefix.
 Each successful cell also records `tandem_metadata_frames`, the exact
 `gain_observation_interval_samples`, and aggregate gain-observation and overflow
-counts. These fields make sampler-cadence changes directly auditable from the
-canonical report without a separate capture parser.
+counts. It separately records aggregate FPGA gain-event and event-overflow counts,
+so sampler-cadence changes and AUTO transition preservation are directly auditable
+from the canonical report without a separate capture parser.
