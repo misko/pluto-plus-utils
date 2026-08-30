@@ -60,9 +60,9 @@ advertises `iio,buffer-ddr-ring=1`, the exact modes `finite,continuous`, and
 requires `iio,buffer-metadata-status-versions=1,2`, selecting status V2; ABI 3
 continues to use the V1 wire status. Ring and burst capture each require
 one selected receiver. Unlike a sealed burst, a ring producer and the
-ordinary IIO consumer run concurrently. Before it starts transport, iiOD fills
-the admitted ring completely (or captures the smaller finite target). That
-prefix is strict and contiguous. During a longer capture, unread ring frames are
+ordinary IIO consumer run concurrently. The first committed frame is eligible
+for transport immediately; iiOD has no startup prefill or low-water rebuffering
+phase. During a longer capture, unread ring frames are
 never overwritten; if finite DDR plus the kernel queue cannot absorb sustained
 source-versus-transport pressure, later IQ gaps are carried explicitly by ABI 3
 metadata instead of terminating the capture. Capacity is independent of capture
@@ -85,9 +85,10 @@ Set `ddr_ring_continuous=True` and leave `ddr_ring_frames=0` for a stream that
 runs until buffer close/cancel. A zero `ddr_ring_bytes` selects the unchanged
 ordinary IIO path. DDR ring and sealed DDR burst are mutually exclusive.
 `radio metadata-ladder --ddr-ring-bytes BYTES` exercises finite capture and
-requires clean target completion, exact producer/consumer closure, a full
-high-water mark, and a counter-proven contiguous admitted prefix. Its report
-separately records later gaps and delivery fraction. Transport qualification
+requires clean target completion, exact producer/consumer closure, a valid
+bounded high-water mark, first-frame latency, and a counter-proven initial
+contiguous span. Its report separately records later gaps and delivery
+fraction. Transport qualification
 uses tandem HOLD by default so gain transitions do not confound the data-path
 result; pass `--tandem-mode auto` to exercise both systems together.
 
@@ -239,7 +240,7 @@ returns nonzero when no rung covers at least 95% of the device timeline. The
 explicit `capture-completion` contract instead succeeds only when every requested
 host frame returns with exact FPGA-counter accounting. It permits accounted gaps
 caused by a slower transport; DDR-ring captures still additionally require a clean
-`target_complete` terminal state and a counter-proven contiguous admitted prefix.
+`target_complete` terminal state and a counter-proven initial contiguous span.
 Each successful cell also records `tandem_metadata_frames`, the exact
 `gain_observation_interval_samples`, and aggregate gain-observation and overflow
 counts. It separately records aggregate FPGA gain-event and event-overflow counts,

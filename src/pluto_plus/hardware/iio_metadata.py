@@ -186,7 +186,6 @@ def metadata_iio_context_timeout_ms(
     samples_per_channel: int,
     *,
     ddr_burst_frames: int = 0,
-    ddr_ring_prefill_frames: int = 0,
 ) -> int:
     """Return one bounded timeout with margin for the configured native-rate refill."""
 
@@ -196,18 +195,12 @@ def metadata_iio_context_timeout_ms(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
-    for name, value in (
-        ("ddr_burst_frames", ddr_burst_frames),
-        ("ddr_ring_prefill_frames", ddr_ring_prefill_frames),
-    ):
+    for name, value in (("ddr_burst_frames", ddr_burst_frames),):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
-    if ddr_burst_frames and ddr_ring_prefill_frames:
-        raise ValueError("DDR burst and ring timeout modes are mutually exclusive")
     frame_duration_ms = (samples_per_channel * 1_000 + sample_rate_hz - 1) // sample_rate_hz
-    buffered_frames = ddr_burst_frames or ddr_ring_prefill_frames
-    if buffered_frames:
-        capture_timeout_ms = frame_duration_ms * buffered_frames * 2 + IIO_CONTEXT_TIMEOUT_MS
+    if ddr_burst_frames:
+        capture_timeout_ms = frame_duration_ms * ddr_burst_frames * 2 + IIO_CONTEXT_TIMEOUT_MS
         return min(IIO_DDR_BURST_TIMEOUT_MAX_MS, capture_timeout_ms)
     return min(
         IIO_CONTEXT_TIMEOUT_MAX_MS,
