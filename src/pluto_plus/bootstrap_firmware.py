@@ -68,6 +68,7 @@ from pluto_plus.doctor import (
 )
 from pluto_plus.firmware import FirmwareImageError, generate_frm, validate_frm
 from pluto_plus.hardware.discovery import _facts_from_context_xml, _inspect_iio_context
+from pluto_plus.hardware.iio_metadata import require_metadata_abi_capability
 from pluto_plus.hardware.preflight import inspect_iio_environment
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 from pluto_plus.ip_firmware import (
@@ -784,11 +785,12 @@ def prepare_lan_ssh_host_key_enrollment(
         raise BootstrapFirmwareError(
             f"LAN IIOD PHY is {observed_phy!r}, expected one of {SUPPORTED_AD936X_PHY_MODELS!r}"
         )
-    observed_metadata = str(facts.get("iio,buffer-metadata") or "").strip()
-    if observed_metadata != str(expected_metadata_abi):
+    try:
+        require_metadata_abi_capability(facts, expected_metadata_abi)
+    except ValueError as error:
         raise BootstrapFirmwareError(
-            f"LAN IIOD metadata ABI is {observed_metadata!r}, expected {expected_metadata_abi}"
-        )
+            f"LAN IIOD metadata ABI does not provide expected ABI {expected_metadata_abi}"
+        ) from error
     raw_device_names = facts.get("device_names", ())
     device_names = (
         {str(value) for value in raw_device_names}
@@ -1617,8 +1619,10 @@ def reconcile_usb_flash_receipt(
         raise BootstrapFirmwareError("current IIOD serial does not match the receipt")
     if str(facts.get("fw_version") or "").strip() != plan.expected_firmware:
         raise BootstrapFirmwareError("current IIOD firmware does not match the receipt")
-    if str(facts.get("iio,buffer-metadata") or "").strip() != str(plan.expected_metadata_abi):
-        raise BootstrapFirmwareError("current metadata ABI does not match the receipt")
+    try:
+        require_metadata_abi_capability(facts, plan.expected_metadata_abi)
+    except ValueError as error:
+        raise BootstrapFirmwareError("current metadata ABI does not match the receipt") from error
     raw_names = facts.get("device_names", ())
     device_names = (
         {str(value) for value in raw_names}
@@ -1846,11 +1850,12 @@ def _attest_return(plan: BootstrapPlan) -> tuple[str | None, str, str]:
         raise BootstrapFirmwareError(
             f"returned firmware is {returned_firmware!r}, expected {plan.expected_firmware!r}"
         )
-    observed_metadata = str(facts.get("iio,buffer-metadata") or "").strip()
-    if observed_metadata != str(plan.expected_metadata_abi):
+    try:
+        require_metadata_abi_capability(facts, plan.expected_metadata_abi)
+    except ValueError as error:
         raise BootstrapFirmwareError(
-            f"returned metadata ABI is {observed_metadata!r}, expected {plan.expected_metadata_abi}"
-        )
+            f"returned metadata ABI does not provide expected ABI {plan.expected_metadata_abi}"
+        ) from error
     raw_device_names = facts.get("device_names", ())
     device_names = (
         {str(value) for value in raw_device_names}

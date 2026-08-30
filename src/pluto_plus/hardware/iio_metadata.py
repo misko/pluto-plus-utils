@@ -38,6 +38,7 @@ from pluto_plus.tandem import (
     RadioMetadataV5,
     RadioMetadataV6,
     RadioMetadataV7,
+    TandemEventDirection,
     TandemSessionRequestV1,
     pack_metadata_provider_request_v1,
 )
@@ -111,6 +112,41 @@ def parse_metadata_version_capabilities(value: object) -> tuple[int, ...]:
             raise ValueError("metadata version capability is not strictly increasing")
         versions.append(version)
     return tuple(versions)
+
+
+def require_metadata_abi_capability(
+    attrs: Mapping[str, object], expected_abi: int
+) -> int:
+    """Select one release-local metadata ABI from canonical context attributes.
+
+    ABI 4 is additive: firmware keeps the legacy scalar at ABI 3 for old hosts
+    and advertises ABI 4 in the explicit version set.  Earlier ABIs retain the
+    exact scalar admission rule so this helper cannot silently change their
+    compatibility behavior.
+    """
+
+    if isinstance(expected_abi, bool) or expected_abi not in SUPPORTED_METADATA_ABIS:
+        raise ValueError("expected metadata ABI is unsupported")
+    legacy_raw = attrs.get("iio,buffer-metadata")
+    if expected_abi < 4:
+        if legacy_raw != str(expected_abi):
+            raise ValueError(
+                f"metadata ABI scalar is {legacy_raw!r}, expected {expected_abi}"
+            )
+        return expected_abi
+
+    if legacy_raw != "3":
+        raise ValueError(
+            "metadata ABI 4 requires the compatibility-preserving legacy scalar '3'"
+        )
+    versions = parse_metadata_version_capabilities(
+        attrs.get("iio,buffer-metadata-abi-versions")
+    )
+    if 3 not in versions:
+        raise ValueError("metadata ABI version set is inconsistent with legacy scalar 3")
+    if expected_abi not in versions:
+        raise ValueError("metadata ABI version set does not advertise requested ABI 4")
+    return expected_abi
 
 
 def parse_metadata_layout_capabilities(value: object) -> tuple[MetadataLayoutCapability, ...]:
@@ -739,12 +775,40 @@ class IioMetadataCaptureSession:
         ) & 0xFFFFFFFF
         if metadata.event_sequence_start != expected_event_sequence:
             raise RuntimeError("ABI4 gain-ledger event sequence is discontinuous")
-        if (
+        boundary_events = tuple(
+            event
+            for event in metadata.gain_events
+            if event.sample_sequence == metadata.first_sample_sequence
+        )
+        previous_index = previous.rx1_gain_index
+        if boundary_events:
+            current_index = previous_index
+            for event in boundary_events:
+                if event.direction is TandemEventDirection.INCREASE:
+                    direction_matches = event.rx1_gain_index > current_index
+                else:
+                    direction_matches = event.rx1_gain_index < current_index
+                if not direction_matches:
+                    raise RuntimeError(
+                        "ABI4 frame-boundary gain event contradicts its direction"
+                    )
+                current_index = event.rx1_gain_index
+            if current_index != metadata.rx1_gain_index_start:
+                raise RuntimeError(
+                    "ABI4 frame-boundary gain events disagree with the start index"
+                )
+            index_delta = metadata.rx1_gain_index_start - previous_index
+            db_delta = metadata.rx1_gain_db_start - previous.rx1_gain_db_end
+            if (index_delta > 0) != (db_delta > 0) or (index_delta < 0) != (db_delta < 0):
+                raise RuntimeError(
+                    "ABI4 frame-boundary gain index and dB direction disagree"
+                )
+        elif (
             metadata.rx1_gain_index_start,
             metadata.rx2_gain_index_start,
         ) != (previous.rx1_gain_index, previous.rx2_gain_index):
             raise RuntimeError("ABI4 gain-ledger index endpoints are discontinuous")
-        if (
+        elif (
             metadata.rx1_gain_db_start,
             metadata.rx2_gain_db_start,
         ) != (previous.rx1_gain_db_end, previous.rx2_gain_db_end):

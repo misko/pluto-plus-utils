@@ -35,6 +35,7 @@ from pluto_plus.hardware.iio_metadata import (
     IIO_DDR_BURST_TIMEOUT_MAX_MS,
     metadata_iio_context_timeout_ms,
     parse_metadata_version_capabilities,
+    require_metadata_abi_capability,
 )
 from pluto_plus.tandem import (
     AD9361_TEMPERATURE_FEATURE,
@@ -100,6 +101,57 @@ def test_metadata_version_capability_parser_rejects_aliases_and_bad_sets(
 ) -> None:
     with pytest.raises(ValueError, match="metadata version capability"):
         parse_metadata_version_capabilities(raw)
+
+
+@pytest.mark.parametrize("abi", (1, 2, 3))
+def test_metadata_abi_capability_preserves_legacy_scalar_selection(abi: int) -> None:
+    assert require_metadata_abi_capability({"iio,buffer-metadata": str(abi)}, abi) == abi
+
+
+def test_metadata_abi_capability_selects_additive_abi4() -> None:
+    attrs = {
+        "iio,buffer-metadata": "3",
+        "iio,buffer-metadata-abi-versions": "1,2,3,4",
+    }
+    assert require_metadata_abi_capability(attrs, 4) == 4
+
+
+@pytest.mark.parametrize(
+    "attrs",
+    (
+        {"iio,buffer-metadata": "3"},
+        {
+            "iio,buffer-metadata": "3",
+            "iio,buffer-metadata-abi-versions": "1,2,3",
+        },
+        {
+            "iio,buffer-metadata": "3",
+            "iio,buffer-metadata-abi-versions": "1,2,4",
+        },
+        {
+            "iio,buffer-metadata": "3",
+            "iio,buffer-metadata-abi-versions": "1,2,3,04",
+        },
+        {
+            "iio,buffer-metadata": "4",
+            "iio,buffer-metadata-abi-versions": "1,2,3,4",
+        },
+    ),
+)
+def test_metadata_abi_capability_rejects_incomplete_or_incoherent_abi4(
+    attrs: dict[str, str],
+) -> None:
+    with pytest.raises(ValueError):
+        require_metadata_abi_capability(attrs, 4)
+
+
+def test_metadata_abi_capability_does_not_use_additive_set_for_legacy_selection() -> None:
+    attrs = {
+        "iio,buffer-metadata": "3",
+        "iio,buffer-metadata-abi-versions": "1,2,3,4",
+    }
+    with pytest.raises(ValueError, match="scalar"):
+        require_metadata_abi_capability(attrs, 2)
 
 
 def _metadata_v3(
@@ -315,6 +367,58 @@ def _v7_session_gap_frame() -> bytes:
     flags |= int(MetadataFlags.SAMPLE_GAP_BEFORE | MetadataFlags.DEVICE_IIO_OVERFLOW)
     struct.pack_into("<I", raw, 12, flags)
     struct.pack_into("<II", raw, 116, SAMPLE_COUNT, 0)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
+def _v7_session_auto_boundary_frame(
+    buffer_sequence: int,
+    first_sample_sequence: int,
+    *,
+    transition_count_start: int,
+    event_sequence_start: int,
+    previous_index: int,
+    events: tuple[tuple[int, int], ...] = (),
+    event_capacity: int | None = None,
+) -> bytes:
+    raw = bytearray(_v7_session_hold_frame(buffer_sequence, first_sample_sequence))
+    event_capacity = max(1, len(events)) if event_capacity is None else event_capacity
+    assert event_capacity >= max(1, len(events))
+    if event_capacity > 1:
+        raw[-4:-4] = bytes((event_capacity - 1) * 16)
+    start_index = events[-1][1] if events else previous_index
+    struct.pack_into("<H", raw, 6, len(raw))
+    struct.pack_into("<bbbb", raw, 55, start_index, start_index, start_index, start_index)
+    struct.pack_into(
+        "<II", raw, 68, 0 if events else 0xFFFFFFFF, 0 if events else 0xFFFFFFFF
+    )
+    struct.pack_into("<HH", raw, 102, len(events), event_capacity)
+    struct.pack_into("<I", raw, 128, int(TandemState.ARMED_AUTO))
+    struct.pack_into("<I", raw, 136, transition_count_start + len(events))
+    struct.pack_into("<BB", raw, 162, start_index, start_index)
+    struct.pack_into("<I", raw, 168, transition_count_start)
+    struct.pack_into("<BB", raw, 172, start_index, start_index)
+    struct.pack_into("<I", raw, 176, event_sequence_start)
+    flags = struct.unpack_from("<I", raw, 12)[0]
+    if events:
+        flags |= int(
+            MetadataFlags.FPGA_EVENTS_VALID
+            | MetadataFlags.RX1_CHANGED_IN_BUFFER
+            | MetadataFlags.RX2_CHANGED_IN_BUFFER
+        )
+    struct.pack_into("<I", raw, 12, flags)
+    for index, (event_flags, result_index) in enumerate(events):
+        struct.pack_into(
+            "<QIHBB",
+            raw,
+            HEADER_PREFIX_BYTES_V7 + 32 + index * 16,
+            first_sample_sequence,
+            (event_sequence_start + index) & 0xFFFFFFFF,
+            event_flags,
+            result_index,
+            result_index,
+        )
     raw[-4:] = bytes(4)
     raw[-4:] = struct.pack("<I", zlib.crc32(raw))
     return bytes(raw)
@@ -1102,6 +1206,130 @@ def test_abi4_session_accepts_one_contiguous_authoritative_gain_ledger() -> None
     try:
         capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
         assert [capture.read_block().buffer_sequence for _ in frames] == [0, 1]
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize(
+    "events",
+    (
+        ((0x13, 21),),
+        ((0x13, 21), (0x13, 22)),
+    ),
+)
+def test_abi4_session_accepts_deferred_events_at_the_next_frame_boundary(
+    events: tuple[tuple[int, int], ...],
+) -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+        event_capacity=len(events),
+    )
+    second = _v7_session_auto_boundary_frame(
+        1,
+        1_004,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+        events=events,
+        event_capacity=len(events),
+    )
+    assert RadioMetadataV7.unpack(second).rx1_first_change_sample == 0
+    radio, _adi, _factory = _open_radio([first, second], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        boundary = capture.read_block()
+        assert boundary.tandem_metadata is not None
+        assert boundary.tandem_metadata.rx1_gain_index_start == events[-1][1]
+    finally:
+        radio.close()
+
+
+def test_abi4_session_rejects_a_contradictory_deferred_boundary_direction() -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+    )
+    contradictory = _v7_session_auto_boundary_frame(
+        1,
+        1_004,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+        events=((0x23, 21),),
+    )
+    # A standalone frame lacks the prior endpoint needed for this validation.
+    RadioMetadataV7.unpack(contradictory)
+    radio, _adi, _factory = _open_radio([first, contradictory], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match="boundary gain event contradicts"):
+            capture.read_block()
+        assert not capture.is_open
+    finally:
+        radio.close()
+
+
+def test_abi4_rejects_boundary_event_result_that_disagrees_with_start() -> None:
+    raw = bytearray(
+        _v7_session_auto_boundary_frame(
+            1,
+            1_004,
+            transition_count_start=0,
+            event_sequence_start=0,
+            previous_index=20,
+            events=((0x13, 21),),
+        )
+    )
+    struct.pack_into("<bbbb", raw, 55, 22, 22, 22, 22)
+    struct.pack_into("<BB", raw, 162, 22, 22)
+    struct.pack_into("<BB", raw, 172, 22, 22)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+
+    with pytest.raises(ProtocolError, match="frame-start event result disagrees"):
+        RadioMetadataV7.unpack(bytes(raw))
+
+
+def test_abi4_session_rejects_boundary_start_db_with_opposite_direction() -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+    )
+    raw = bytearray(
+        _v7_session_auto_boundary_frame(
+            1,
+            1_004,
+            transition_count_start=0,
+            event_sequence_start=0,
+            previous_index=20,
+            events=((0x13, 21),),
+        )
+    )
+    struct.pack_into("<bbbb", raw, 55, 19, 19, 19, 19)
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    contradictory = bytes(raw)
+    RadioMetadataV7.unpack(contradictory)
+
+    radio, _adi, _factory = _open_radio([first, contradictory], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match="gain index and dB direction disagree"):
+            capture.read_block()
+        assert not capture.is_open
     finally:
         radio.close()
 

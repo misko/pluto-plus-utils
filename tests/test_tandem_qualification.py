@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -150,6 +151,49 @@ def test_qualification_profile_selection_is_exact_and_tandem_only(
             physical_attenuation_db=30,
             strong_tx_gain_db=0,
             weak_tx_gain_db=-60,
+        )
+
+
+def test_legacy_tandem_qualification_rejects_authoritative_abi4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "3-11"
+    target.mkdir()
+    monkeypatch.setattr(
+        qualification,
+        "scan_local_usb_plutos",
+        lambda: (_local(target),),
+    )
+    monkeypatch.setitem(
+        qualification.STANDALONE_FLASH_PROFILES,
+        "authoritative-abi4",
+        SimpleNamespace(tandem_agc=True, metadata_abi=4),
+    )
+    with pytest.raises(qualification.TandemQualificationError, match="ABI-2/3"):
+        qualification.prepare_tandem_qualification(
+            "SERIAL_A",
+            target,
+            physical_attenuation_db=30,
+            strong_tx_gain_db=0,
+            weak_tx_gain_db=-60,
+            profile_id="authoritative-abi4",
+        )
+    with pytest.raises(qualification.TandemQualificationError, match="only metadata ABI 2 or 3"):
+        qualification._MetadataReceiver(SimpleNamespace(), TandemMode.HOLD, 4)
+
+    legacy = qualification.prepare_tandem_qualification(
+        "SERIAL_A",
+        target,
+        physical_attenuation_db=30,
+        strong_tx_gain_db=0,
+        weak_tx_gain_db=-60,
+    )
+    abi4 = dataclasses.replace(legacy, expected_metadata_abi=4)
+    with pytest.raises(qualification.TandemQualificationError, match="only metadata ABI 2 or 3"):
+        qualification.execute_tandem_qualification(
+            abi4,
+            confirmation=abi4.confirmation_phrase,
+            report_path=tmp_path / "report.json",
         )
 
 

@@ -160,6 +160,31 @@ def test_prepare_soak_is_exact_profile_and_bounded() -> None:
         prepare_metadata_soak("192.168.1.15", SERIAL, slots=937)
 
 
+def test_legacy_soak_rejects_authoritative_abi4_before_hardware(
+    tmp_path: Path,
+) -> None:
+    plan = prepare_metadata_soak("192.168.1.15", SERIAL, slots=1).model_copy(
+        update={"expected_metadata_abi": 4}
+    )
+
+    class UnexpectedProbe:
+        def inspect(self) -> MetadataHealth:
+            raise AssertionError("ABI4 rejection must precede hardware health access")
+
+        def ensure_tx_safe(self) -> MetadataHealth:
+            raise AssertionError("ABI4 rejection must precede hardware cleanup")
+
+    with pytest.raises(MetadataSoakError, match="only metadata ABI 2 or 3"):
+        execute_metadata_soak(
+            plan,
+            report_path=tmp_path / "report.json",
+            health_probe=UnexpectedProbe(),
+            slot_runner=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("ABI4 rejection must precede capture")
+            ),
+        )
+
+
 def test_ssh_health_probe_uses_fixed_script_and_strict_parser() -> None:
     transport = FakeSshTransport(_health_output())
     probe = SshMetadataHealthProbe(transport, serial=SERIAL)

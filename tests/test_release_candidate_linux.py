@@ -431,6 +431,7 @@ def test_unknown_dfu_recovery_detaches_and_attests_unchanged_qspi(
     recovered = _runtime(boot_id="22222222-2222-4222-8222-222222222222")
     backend = RecoveryBackend(
         state_root=(tmp_path / "state").absolute(),
+        radio_lock_root=(tmp_path / "radio-locks").absolute(),
         sysfs_root=root,
         scanner=lambda: (),
         command_runner=runner,
@@ -466,6 +467,7 @@ def test_unknown_recovery_attests_already_returned_runtime_without_detach(
     recovered = _runtime(boot_id="22222222-2222-4222-8222-222222222222")
     backend = LinuxReleaseCandidateBackend(
         state_root=(tmp_path / "state").absolute(),
+        radio_lock_root=(tmp_path / "radio-locks").absolute(),
         scanner=lambda: (_local(),),
         command_runner=runner,
         runtime_attestor=lambda target, expected_firmware, password, route: recovered,
