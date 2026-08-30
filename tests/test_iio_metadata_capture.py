@@ -1156,6 +1156,30 @@ def test_abi4_session_rejects_cross_frame_gain_ledger_discontinuity(
         radio.close()
 
 
+def test_abi4_ledger_rejection_does_not_advance_either_session_cursor() -> None:
+    first = _v7_session_hold_frame(0, 1_000)
+    bad_second = _mutate_v7_session_contract(
+        _v7_session_hold_frame(1, 1_004), "event-sequence"
+    )
+    radio, _adi, _factory = _open_radio([first, bad_second], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture._read_block()  # noqa: SLF001 - inspect the pre-poison transaction boundary
+        committed_v7 = capture._previous_v7_metadata  # noqa: SLF001
+        assert committed_v7 is not None
+
+        with pytest.raises(RuntimeError, match="event sequence"):
+            capture._read_block()  # noqa: SLF001
+
+        assert capture._stream_id == STREAM  # noqa: SLF001
+        assert capture._previous_buffer_sequence == 0  # noqa: SLF001
+        assert capture._previous_sample_end == 1_004  # noqa: SLF001
+        assert capture._previous_v7_metadata is committed_v7  # noqa: SLF001
+        assert capture._previous_v7_metadata.buffer_sequence == 0  # noqa: SLF001
+    finally:
+        radio.close()
+
+
 @pytest.mark.parametrize(
     ("abi4_contract", "metadata_record", "metadata_features"),
     (

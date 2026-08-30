@@ -68,6 +68,14 @@ class MetadataLayoutCapability:
     sample_count_multiple: int
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingMetadataSequence:
+    stream_id: int
+    buffer_sequence: int
+    sample_end: int
+    missing_samples_before: int
+
+
 ABI3_METADATA_LAYOUTS = (
     MetadataLayoutCapability(0x03, 1, 4, 2),
     MetadataLayoutCapability(0x0C, 1, 4, 2),
@@ -580,10 +588,11 @@ class IioMetadataCaptureSession:
             if len(raw_metadata) != parsed_v7.header_bytes:
                 raise RuntimeError("metadata refill returned trailing bytes")
         self._validate_header(metadata)
-        missing = self._validate_sequence(metadata, declared_missing=declared_missing)
+        pending_sequence = self._validate_sequence(
+            metadata, declared_missing=declared_missing
+        )
         if parsed_v7 is not None:
             self._validate_v7_ledger(parsed_v7)
-            self._previous_v7_metadata = parsed_v7
         self._refresh_time_anchors(initial=False)
         timing = self._capture_time(metadata.first_sample_sequence)
         utc_ns = (
@@ -591,6 +600,7 @@ class IioMetadataCaptureSession:
             if timing is not None
             else (host_before_ns + host_after_ns) // 2
         )
+        self._commit_sequence(pending_sequence, v7_metadata=parsed_v7)
         return SampleBlockV2(
             utc_ns=int(utc_ns),
             samples=signal.astype(np.complex64, copy=False),
@@ -599,7 +609,7 @@ class IioMetadataCaptureSession:
             first_sample_sequence=int(metadata.first_sample_sequence),
             metadata_flags=int(metadata.flags),
             metadata_abi=self._metadata_abi,
-            missing_samples_before=missing,
+            missing_samples_before=pending_sequence.missing_samples_before,
             sample_time_realtime_start_ns=(
                 None if timing is None else timing["sample_time_realtime_start_ns"]
             ),
@@ -636,7 +646,9 @@ class IioMetadataCaptureSession:
         if not metadata.flags & MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID:
             raise RuntimeError("IIO metadata lacks a valid FPGA sample counter")
 
-    def _validate_sequence(self, metadata: Any, *, declared_missing: int | None) -> int:
+    def _validate_sequence(
+        self, metadata: Any, *, declared_missing: int | None
+    ) -> _PendingMetadataSequence:
         stream_id = int(metadata.stream_id)
         buffer_sequence = int(metadata.buffer_sequence)
         first_sample = int(metadata.first_sample_sequence)
@@ -648,10 +660,12 @@ class IioMetadataCaptureSession:
                 or metadata.flags & MetadataFlags.SAMPLE_GAP_BEFORE
             ):
                 raise RuntimeError("new metadata capture declared a preceding gap")
-            self._stream_id = stream_id
-            self._previous_buffer_sequence = buffer_sequence
-            self._previous_sample_end = first_sample + self._samples_per_channel
-            return 0
+            return _PendingMetadataSequence(
+                stream_id=stream_id,
+                buffer_sequence=buffer_sequence,
+                sample_end=first_sample + self._samples_per_channel,
+                missing_samples_before=0,
+            )
         if stream_id != self._stream_id:
             raise RuntimeError("metadata stream changed without a capture reset")
         assert self._previous_buffer_sequence is not None
@@ -674,9 +688,27 @@ class IioMetadataCaptureSession:
                 raise RuntimeError("ABI4 metadata capture is not contiguous")
         elif missing != skipped_buffers * self._samples_per_channel:
             raise RuntimeError("metadata buffer and FPGA sample sequences disagree")
-        self._previous_buffer_sequence = buffer_sequence
-        self._previous_sample_end = first_sample + self._samples_per_channel
-        return missing
+        return _PendingMetadataSequence(
+            stream_id=stream_id,
+            buffer_sequence=buffer_sequence,
+            sample_end=first_sample + self._samples_per_channel,
+            missing_samples_before=missing,
+        )
+
+    def _commit_sequence(
+        self,
+        pending: _PendingMetadataSequence,
+        *,
+        v7_metadata: RadioMetadataV7 | None,
+    ) -> None:
+        if self._metadata_abi == 4 and v7_metadata is None:  # pragma: no cover
+            raise RuntimeError("ABI4 sequence commit lacks V7 metadata")
+        self._stream_id = pending.stream_id
+        self._previous_buffer_sequence = pending.buffer_sequence
+        self._previous_sample_end = pending.sample_end
+        if self._metadata_abi == 4:
+            assert v7_metadata is not None
+            self._previous_v7_metadata = v7_metadata
 
     def _validate_v7_ledger(self, metadata: RadioMetadataV7) -> None:
         previous = self._previous_v7_metadata
