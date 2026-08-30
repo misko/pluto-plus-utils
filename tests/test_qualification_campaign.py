@@ -261,6 +261,7 @@ def _ladder(**kwargs: Any) -> MetadataContinuityLadderReport:
                 gap_count=0,
                 overflow_count=0,
                 iq_bytes=iq_bytes,
+                first_frame_latency_seconds=0.5,
                 elapsed_seconds=1.0,
                 achieved_payload_mbps=iq_bytes / 1_000_000,
                 achieved_payload_mibps=iq_bytes / (1024 * 1024),
@@ -294,6 +295,17 @@ def _ladder(**kwargs: Any) -> MetadataContinuityLadderReport:
         largest_passing_samples_per_channel=sample_ladder[0],
         original_settings_restored=True,
     )
+
+
+def _slow_first_frame_ladder(**kwargs: Any) -> MetadataContinuityLadderReport:
+    report = _ladder(**kwargs)
+    if not kwargs["ddr_ring_bytes"]:
+        return report
+    cells = tuple(
+        cell.model_copy(update={"first_frame_latency_seconds": 10.0})
+        for cell in report.cells
+    )
+    return report.model_copy(update={"cells": cells})
 
 
 def _plan(root: Path) -> tuple[Path, _Backend]:
@@ -431,6 +443,27 @@ def test_campaign_failure_is_receipted_after_verified_restore(tmp_path: Path) ->
     assert raised.value.report is not None
     assert raised.value.report.outcome == "failed"
     assert raised.value.report.persistent_qspi_unchanged
+    assert backend.events[-2:] == ["restore", f"radio-exit:{SERIAL}"]
+
+
+def test_campaign_rejects_a_ring_that_waits_to_prefill(tmp_path: Path) -> None:
+    plan_path, backend = _plan(tmp_path)
+    plan = GainTimelineQualificationPlan.model_validate_json(plan_path.read_bytes())
+
+    with pytest.raises(QualificationCampaignError) as raised:
+        execute_gain_timeline_qualification(
+            plan_path,
+            password_path=tmp_path / "password",
+            confirmation=plan.confirmation_phrase,
+            backend=backend,
+            ladder_runner=_slow_first_frame_ladder,
+            now=iter((NOW, NOW + timedelta(minutes=1))).__next__,
+        )
+
+    assert raised.value.report is not None
+    assert raised.value.report.outcome == "failed"
+    assert raised.value.report.cases[-1].case.buffering == "ring-200mb"
+    assert "not prompt" in raised.value.report.errors[0]
     assert backend.events[-2:] == ["restore", f"radio-exit:{SERIAL}"]
 
 

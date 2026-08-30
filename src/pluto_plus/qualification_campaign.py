@@ -707,6 +707,9 @@ def _validate_case_report(
     ):
         raise QualificationCampaignError("metadata ladder identity or closure is not exact")
     for expected_samples, cell in zip(case.samples_per_channel, report.cells, strict=True):
+        maximum_first_frame_latency_seconds = (
+            1.0 + 8.0 * expected_samples / case.sample_rate_hz
+        )
         if (
             cell.samples_per_channel != expected_samples
             or cell.requested_frames != case.frames
@@ -716,10 +719,12 @@ def _validate_case_report(
             or cell.missing_sample_count
             or cell.gap_count
             or cell.overflow_count
+            or cell.first_frame_latency_seconds
+            > maximum_first_frame_latency_seconds
             or not cell.passed
         ):
             raise QualificationCampaignError(
-                "metadata ladder is not gapless and authoritative"
+                "metadata ladder is not prompt, gapless, and authoritative"
             )
         if expected_ring and (
             cell.ddr_ring_status is None or cell.ddr_ring_status.version != 2

@@ -59,6 +59,7 @@ class MetadataContinuityCell(ApiModel):
     gap_count: int = Field(ge=0)
     overflow_count: int = Field(ge=0)
     iq_bytes: int = Field(gt=0)
+    first_frame_latency_seconds: float = Field(gt=0)
     elapsed_seconds: float = Field(gt=0)
     achieved_payload_mbps: float = Field(gt=0)
     achieved_payload_mibps: float = Field(gt=0)
@@ -102,6 +103,8 @@ class MetadataContinuityCell(ApiModel):
             raise ValueError("metadata ladder decimal payload rate does not close")
         if abs(self.achieved_payload_mibps - expected_mibps) > 1e-9:
             raise ValueError("metadata ladder binary payload rate does not close")
+        if self.first_frame_latency_seconds > self.elapsed_seconds:
+            raise ValueError("metadata ladder first-frame latency exceeds total elapsed time")
         expected_pass = (
             self.observed_fraction >= MINIMUM_OBSERVED_FRACTION and self.overflow_count == 0
         )
@@ -149,7 +152,7 @@ class MetadataContinuityCell(ApiModel):
                 or self.ddr_ring_prefix_iq_bytes < 1
                 or not self.ddr_ring_prefix_contiguous
             ):
-                raise ValueError("metadata ladder DDR ring prefix is not proven contiguous")
+                raise ValueError("metadata ladder DDR ring initial continuity is not proven")
         elif (
             self.ddr_ring_prefix_frames
             or self.ddr_ring_prefix_iq_bytes
@@ -251,14 +254,17 @@ class MetadataContinuityLadderReport(ApiModel):
             expected_admitted = (
                 self.ddr_ring_requested_iq_bytes // frame_iq_bytes
             ) * frame_iq_bytes
-            expected_prefix_frames = min(status.target_frames, capacity_frames)
             if (
                 remainder
                 or status.admitted_capacity_iq_bytes != expected_admitted
                 or capacity_frames < 1
-                or status.high_water_frames != expected_prefix_frames
-                or cell.ddr_ring_prefix_frames != expected_prefix_frames
-                or cell.ddr_ring_prefix_iq_bytes != expected_prefix_frames * frame_iq_bytes
+                or not 1 <= status.high_water_frames <= min(status.target_frames, capacity_frames)
+                or status.wrap_count != status.target_frames // capacity_frames
+                or status.producer_position != status.target_frames % capacity_frames
+                or status.consumer_position != status.target_frames % capacity_frames
+                or not 1 <= cell.ddr_ring_prefix_frames <= status.target_frames
+                or cell.ddr_ring_prefix_iq_bytes
+                != cell.ddr_ring_prefix_frames * frame_iq_bytes
             ):
                 raise ValueError("metadata ladder DDR ring capacity does not close")
         return self
@@ -492,6 +498,7 @@ def _run_cell(
     gain_observation_overflow_count = 0
     gain_event_count = 0
     gain_event_overflow_count = 0
+    first_frame_latency_seconds: float | None = None
     ddr_burst_bytes = samples_per_channel * receiver_count * 4 * frames if ddr_burst else 0
     frame_iq_bytes = samples_per_channel * receiver_count * 4
     expected_ring_admitted_bytes = (
@@ -535,6 +542,8 @@ def _run_cell(
                 raise RuntimeError("metadata ladder DDR ring admission readback is not exact")
             for _ in range(frames):
                 block = capture.read_block()
+                if first_frame_latency_seconds is None:
+                    first_frame_latency_seconds = (clock_ns() - started_ns) / 1_000_000_000
                 if block.samples.shape != (receiver_count, samples_per_channel):
                     raise RuntimeError("metadata ladder block shape is not the selected RX layout")
                 if first_sample_sequence is None:
@@ -584,6 +593,8 @@ def _run_cell(
         raise RuntimeError("metadata ladder clock did not advance")
     if first_sample_sequence is None or last_sample_sequence_exclusive is None:
         raise RuntimeError("metadata ladder returned no frames")
+    if first_frame_latency_seconds is None or first_frame_latency_seconds <= 0:
+        raise RuntimeError("metadata ladder first-frame clock did not advance")
     observed = observed_frames * samples_per_channel
     span = last_sample_sequence_exclusive - first_sample_sequence
     if span != observed + missing:
@@ -594,20 +605,26 @@ def _run_cell(
     ring_prefix_iq_bytes = 0
     ring_prefix_contiguous = False
     if ring_status is not None:
-        ring_prefix_frames = min(frames, expected_ring_admitted_bytes // frame_iq_bytes)
+        prefix_end = (
+            last_sample_sequence_exclusive
+            if ring_status.first_unavailable_sample_sequence is None
+            else ring_status.first_unavailable_sample_sequence
+        )
+        prefix_samples = prefix_end - first_sample_sequence
+        if (
+            prefix_samples <= 0
+            or prefix_samples % samples_per_channel
+            or prefix_samples // samples_per_channel > frames
+        ):
+            raise RuntimeError("DDR ring reported a non-canonical contiguous boundary")
+        ring_prefix_frames = prefix_samples // samples_per_channel
         ring_prefix_iq_bytes = ring_prefix_frames * frame_iq_bytes
-        prefix_end = first_sample_sequence + ring_prefix_frames * samples_per_channel
         ring_prefix_contiguous = (
-            ring_status.high_water_frames >= ring_prefix_frames
-            and ring_status.last_contiguous_sample_sequence is not None
-            and ring_status.last_contiguous_sample_sequence >= prefix_end
-            and (
-                ring_status.first_unavailable_sample_sequence is None
-                or ring_status.first_unavailable_sample_sequence >= prefix_end
-            )
+            ring_status.last_contiguous_sample_sequence == prefix_end
+            and ring_status.high_water_frames >= 1
         )
         if not ring_prefix_contiguous:
-            raise RuntimeError("DDR ring did not preserve its admitted contiguous prefix")
+            raise RuntimeError("DDR ring did not preserve its initial contiguous stream")
         if ring_status.first_unavailable_sample_sequence is None:
             if ring_status.last_contiguous_sample_sequence != last_sample_sequence_exclusive:
                 raise RuntimeError("DDR ring final contiguous boundary disagrees with metadata")
@@ -628,6 +645,7 @@ def _run_cell(
         gap_count=gap_count,
         overflow_count=overflow_count,
         iq_bytes=iq_bytes,
+        first_frame_latency_seconds=first_frame_latency_seconds,
         elapsed_seconds=elapsed_seconds,
         achieved_payload_mbps=iq_bytes / elapsed_seconds / 1_000_000,
         achieved_payload_mibps=iq_bytes / elapsed_seconds / (1024 * 1024),

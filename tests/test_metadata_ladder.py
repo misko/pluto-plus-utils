@@ -70,7 +70,7 @@ class _Capture:
             "target_frames": target,
             "produced_frames": target,
             "consumed_frames": target,
-            "high_water_frames": min(target, capacity),
+            "high_water_frames": 1,
             "wrap_count": target // capacity,
             "producer_position": target % capacity,
             "consumer_position": target % capacity,
@@ -229,7 +229,7 @@ def test_metadata_ladder_selects_largest_counter_continuous_refill_and_restores(
             262_144: (0, 1, 2, 3, 4, 5),
         }
     )
-    ticks = iter((0, 1_000_000_000, 2_000_000_000, 3_000_000_000))
+    ticks = iter((0, 500_000_000, 1_000_000_000, 2_000_000_000, 2_500_000_000, 3_000_000_000))
     report = run_metadata_continuity_ladder(
         uri="ip:192.0.2.1",
         serial="SERIAL_A",
@@ -264,7 +264,7 @@ def test_metadata_ladder_reports_tandem_sampler_observability() -> None:
         tandem_events=2,
         tandem_event_overflow=3,
     )
-    ticks = iter((0, 1_000_000_000))
+    ticks = iter((0, 500_000_000, 1_000_000_000))
 
     report = run_metadata_continuity_ladder(
         uri="ip:192.0.2.1",
@@ -339,7 +339,7 @@ def test_metadata_ladder_releases_iq_frames_while_accounting() -> None:
         frames=16,
         kernel_buffers=4,
         radio_factory=lambda _uri, _serial, _abi: radio,
-        clock_ns=iter((0, 1_000_000_000)).__next__,
+        clock_ns=iter((0, 500_000_000, 1_000_000_000)).__next__,
     )
 
     assert report.cells[0].observed_frames == 16
@@ -365,7 +365,7 @@ def test_metadata_ladder_requires_native_bandwidth_and_four_kernel_buffers() -> 
 @pytest.mark.parametrize("channels", ((0,), (1,), (0, 1)))
 def test_metadata_ladder_supports_every_abi3_layout(channels: tuple[int, ...]) -> None:
     radio = _Radio({262_144: (0, 1)})
-    ticks = iter((0, 1_000_000_000))
+    ticks = iter((0, 500_000_000, 1_000_000_000))
     report = run_metadata_continuity_ladder(
         uri="ip:192.0.2.1",
         serial="SERIAL_A",
@@ -460,7 +460,7 @@ def test_metadata_ladder_accepts_gaps_only_after_exact_ddr_prefix() -> None:
         ddr_ring_bytes=2 * frame_bytes,
         acceptance_mode="capture-completion",
         radio_factory=lambda _uri, _serial, _abi: radio,
-        clock_ns=iter((0, 1_000_000_000)).__next__,
+        clock_ns=iter((0, 500_000_000, 1_000_000_000)).__next__,
     )
 
     cell = report.cells[0]
@@ -492,7 +492,7 @@ def test_metadata_ladder_rejects_single_rx_before_abi3_and_odd_abi3_counts() -> 
 
 def test_metadata_ladder_qualifies_exact_single_rx_ddr_burst() -> None:
     radio = _Radio({300_000: (0, 1, 2, 3)})
-    ticks = iter((0, 1_000_000_000))
+    ticks = iter((0, 500_000_000, 1_000_000_000))
     report = run_metadata_continuity_ladder(
         uri="ip:192.0.2.1",
         serial="SERIAL_A",
@@ -517,7 +517,7 @@ def test_metadata_ladder_qualifies_exact_single_rx_ddr_burst() -> None:
 
 def test_metadata_ladder_rejects_short_ddr_frames_before_capture() -> None:
     radio = _Radio({300_000: (0, 1), 299_998: (0, 1), 250_000: (0, 1)})
-    ticks = iter((0, 1_000_000_000))
+    ticks = iter((0, 500_000_000, 1_000_000_000))
 
     report = run_metadata_continuity_ladder(
         uri="ip:192.0.2.1",
@@ -547,7 +547,7 @@ def test_metadata_ladder_rejects_short_ddr_frames_before_capture() -> None:
 
 def test_metadata_ladder_allows_short_frames_without_ddr_burst() -> None:
     radio = _Radio({125_000: (0, 1)})
-    ticks = iter((0, 1_000_000_000))
+    ticks = iter((0, 500_000_000, 1_000_000_000))
 
     report = run_metadata_continuity_ladder(
         uri="ip:192.0.2.1",
@@ -573,7 +573,7 @@ def test_metadata_ladder_qualifies_exact_200_mb_release_burst_geometry() -> None
     samples = 1_000_000
     release_frames = 50
     radio = _Radio({samples: tuple(range(release_frames))})
-    ticks = iter((0, 1_000_000_000))
+    ticks = iter((0, 500_000_000, 1_000_000_000))
 
     report = run_metadata_continuity_ladder(
         uri="ip:192.0.2.1",
@@ -633,7 +633,7 @@ def test_metadata_ladder_qualifies_finite_ddr_ring_with_exact_status() -> None:
     frame_bytes = samples * len(channels) * 4
     requested_ring_bytes = frame_bytes * 2 + 1
     radio = _Radio({samples: tuple(range(frames))})
-    ticks = iter((0, 1_000_000_000))
+    ticks = iter((0, 500_000_000, 1_000_000_000))
 
     report = run_metadata_continuity_ladder(
         uri="ip:192.0.2.1",
@@ -655,7 +655,8 @@ def test_metadata_ladder_qualifies_finite_ddr_ring_with_exact_status() -> None:
     assert status is not None
     assert status.admitted_capacity_iq_bytes == frame_bytes * 2
     assert status.produced_frames == status.consumed_frames == frames
-    assert status.high_water_frames == 2
+    assert status.high_water_frames == 1
+    assert report.cells[0].first_frame_latency_seconds == 0.5
     assert report.cells[0].passed
 
 

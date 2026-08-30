@@ -1523,8 +1523,8 @@ def radio_metadata_ladder(
         help=(
             "Success contract: continuity requires a >=95% gap-free rung; "
             "capture-completion accepts exact accounted gaps after all requested "
-            "frames return (a DDR ring still requires its contiguous prefix and "
-            "clean target-complete status)."
+            "frames return (a DDR ring still requires prompt first-frame delivery, "
+            "an observed initial contiguous stream, and clean target-complete status)."
         ),
     ),
     report_path: Path | None = typer.Option(  # noqa: B008

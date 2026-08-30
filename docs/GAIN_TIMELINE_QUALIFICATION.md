@@ -34,7 +34,8 @@ one lifecycle with a separate open/close capture at every rung.
 
 Every case must return all frames with no counter gap or overflow, a complete
 authoritative V7 gain timeline for every frame, exact settings restoration, and,
-for ring cases, clean status V2 plus its admitted contiguous prefix. The first
+for ring cases, clean status V2, bounded first-frame latency, exact FIFO
+positions, and its observed initial contiguous span. The first
 failure stops further capture cases so cleanup can run immediately.
 
 Candidate admission also proves the compatibility-preserving negotiation:
