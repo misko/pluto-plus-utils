@@ -285,6 +285,18 @@ IIO_THROUGHPUT_REFILL_SAMPLER_V4_RC1_PROFILE = DiagnosticProfile(
     release_rank=27,
 )
 
+IIO_THROUGHPUT_SAMPLER_WAKE_V5_RC1_PROFILE = DiagnosticProfile(
+    profile_id="iio-throughput-sampler-wake-v5-rc1",
+    firmware_version="v0.45-plutoplus-spf-iio-throughput-sampler-wake-v5-rc1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status=(
+        "RAM-only interruptible metadata-sampler wait diagnostic; never "
+        "persistence-qualified"
+    ),
+    release_rank=28,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -313,6 +325,7 @@ DIAGNOSTIC_PROFILES = (
     IIO_THROUGHPUT_RW_AFFINITY_V2_RC1_PROFILE,
     IIO_THROUGHPUT_SAMPLER_POLL_V3_RC1_PROFILE,
     IIO_THROUGHPUT_REFILL_SAMPLER_V4_RC1_PROFILE,
+    IIO_THROUGHPUT_SAMPLER_WAKE_V5_RC1_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
