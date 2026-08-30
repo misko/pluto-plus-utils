@@ -547,6 +547,26 @@ IIO_THROUGHPUT_SAMPLER_WAKE_V5_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 30, 4, 9, 46, tzinfo=UTC),
 )
 
+# Exact RAM-only successor that retains v5's interruptible waits while renewing
+# bounded sampler credit for the complete in-flight DMA queue. No matching
+# persistent profile exists until repeated long-ring hardware qualification
+# proves metadata closure, CPU behavior, and recovery on the spare radio.
+IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="iio-throughput-coverage-window-v6-rc1-ram",
+    release_tag="iio-throughput-coverage-window-v6-rc1-1cbc115b2ea7",
+    device_firmware="v0.45-plutoplus-spf-iio-throughput-coverage-window-v6-rc1",
+    asset_name=(
+        "plutoplus-spf-iio-throughput-coverage-window-v6-rc1-1cbc115b2ea7-pluto.dfu"
+    ),
+    asset_sha256="7bad93cc3411b30d15c4c93472cd82a5fb5e10481f246062fae7f60f1a21207a",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33293657116",
+    source_commit="1cbc115b2ea7aa7d1678ae1ca329ceed1af6a07c",
+    fit_body_sha256="299ea1db5ffb2f16c52ec22e8078c1f64a09fd49cad544477ca08d21547676ca",
+    fit_body_size=12_817_103,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 30, 5, 23, 5, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
