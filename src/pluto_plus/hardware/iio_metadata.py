@@ -11,7 +11,9 @@ from types import TracebackType
 from typing import Any
 
 import numpy as np
+from pydantic import ValidationError
 
+from pluto_plus.ddr_ring import DdrRingStatusSnapshot
 from pluto_plus.direct_radio.usb import (
     MetadataFlags,
     RadioMetadataV3,
@@ -357,7 +359,11 @@ class IioMetadataCaptureSession:
         result = status()
         if not isinstance(result, Mapping):
             raise RuntimeError("pylibiio returned malformed DDR ring status")
-        return dict(result)
+        try:
+            typed = DdrRingStatusSnapshot.model_validate(result)
+        except ValidationError as error:
+            raise RuntimeError("pylibiio returned malformed DDR ring status") from error
+        return typed.model_dump(mode="python")
 
     def _cache_failed_ddr_ring_status(self) -> None:
         if not self.ddr_ring_enabled or self._buffer is None:

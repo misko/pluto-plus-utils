@@ -8,6 +8,7 @@ from typing import Literal, Protocol, cast
 
 from pydantic import Field, model_validator
 
+from pluto_plus.ddr_ring import DdrRingFinalStatus, DdrRingStatusSnapshot
 from pluto_plus.hardware.base import (
     MetadataCapture,
     RadioDevice,
@@ -42,41 +43,6 @@ METADATA_CHANNEL_SELECTIONS: dict[MetadataChannels, tuple[int, ...]] = {
     "rx1": (1,),
     "dual": (0, 1),
 }
-
-
-class DdrRingStatusSnapshot(ApiModel):
-    state: str
-    terminal_reason: str
-    error_code: int
-    requested_capacity_iq_bytes: int = Field(gt=0)
-    admitted_capacity_iq_bytes: int = Field(gt=0)
-    target_frames: int = Field(gt=0)
-    produced_frames: int = Field(ge=0)
-    consumed_frames: int = Field(ge=0)
-    high_water_frames: int = Field(ge=0)
-    wrap_count: int = Field(ge=0)
-    producer_position: int = Field(ge=0)
-    consumer_position: int = Field(ge=0)
-    last_contiguous_sample_sequence: int | None = Field(default=None, ge=0)
-    first_unavailable_sample_sequence: int | None = Field(default=None, ge=0)
-
-
-class DdrRingFinalStatus(DdrRingStatusSnapshot):
-    """A terminal ring status that proves every requested host frame arrived."""
-
-    @model_validator(mode="after")
-    def validate_complete_capture(self) -> DdrRingFinalStatus:
-        if (
-            self.state != "complete"
-            or self.terminal_reason != "target_complete"
-            or self.error_code != 0
-        ):
-            raise ValueError("DDR ring did not reach a clean target-complete state")
-        if not (self.produced_frames == self.consumed_frames == self.target_frames):
-            raise ValueError("DDR ring producer/consumer frame counts do not close")
-        if self.high_water_frames < 1:
-            raise ValueError("DDR ring did not report occupied storage")
-        return self
 
 
 class MetadataContinuityCell(ApiModel):

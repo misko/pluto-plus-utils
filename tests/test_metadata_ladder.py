@@ -61,6 +61,7 @@ class _Capture:
         target = self.ddr_ring_capture_frames
         capacity = self.ddr_ring_capacity_frames
         return {
+            "version": 1,
             "state": "complete",
             "terminal_reason": "target_complete",
             "error_code": 0,
@@ -77,6 +78,8 @@ class _Capture:
                 1_000 + (self.previous_sequence + 1) * self.samples
             ),
             "first_unavailable_sample_sequence": None,
+            "failure_frame_index": None,
+            "failure_sample_sequence": None,
         }
 
     def read_block(self) -> SampleBlockV2:
@@ -394,6 +397,7 @@ def test_metadata_ladder_accepts_gaps_only_after_exact_ddr_prefix() -> None:
         def ddr_ring_status(self) -> dict[str, object]:
             prefix_end = 1_000 + 2 * self.samples
             return {
+                "version": 1,
                 "state": "complete",
                 "terminal_reason": "target_complete",
                 "error_code": 0,
@@ -408,6 +412,8 @@ def test_metadata_ladder_accepts_gaps_only_after_exact_ddr_prefix() -> None:
                 "consumer_position": 0,
                 "last_contiguous_sample_sequence": prefix_end,
                 "first_unavailable_sample_sequence": prefix_end,
+                "failure_frame_index": None,
+                "failure_sample_sequence": None,
             }
 
     class _PostPrefixGapRadio(_Radio):
@@ -666,6 +672,7 @@ def test_metadata_ladder_preserves_failed_ring_status_before_close() -> None:
 
         def ddr_ring_status(self) -> dict[str, object]:
             return {
+                "version": 2,
                 "state": "failed",
                 "terminal_reason": "counter_gap",
                 "error_code": -75,
@@ -680,6 +687,8 @@ def test_metadata_ladder_preserves_failed_ring_status_before_close() -> None:
                 "consumer_position": 2,
                 "last_contiguous_sample_sequence": 1_000 + 3 * self.samples,
                 "first_unavailable_sample_sequence": 1_000 + 4 * self.samples,
+                "failure_frame_index": 3,
+                "failure_sample_sequence": 1_000 + 4 * self.samples,
             }
 
     class _FailedRingRadio(_Radio):
@@ -734,6 +743,9 @@ def test_metadata_ladder_preserves_failed_ring_status_before_close() -> None:
     assert failure.ddr_ring_status.produced_frames == 3
     assert failure.ddr_ring_status.consumed_frames == 2
     assert failure.ddr_ring_status.first_unavailable_sample_sequence is not None
+    assert failure.ddr_ring_status.version == 2
+    assert failure.ddr_ring_status.failure_frame_index == 3
+    assert failure.ddr_ring_status.failure_sample_sequence == 1_000 + 4 * samples
     assert failure.ddr_ring_status_error is None
     assert radio.settings == radio.original
 

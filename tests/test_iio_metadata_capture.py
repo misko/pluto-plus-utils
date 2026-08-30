@@ -273,6 +273,12 @@ class FakeMetadataBuffer:
         frame_bytes = samples * 4
         capacity = requested // frame_bytes
         return {
+            "version": (
+                2
+                if isinstance(self.signature[1], bytes)
+                and self.signature[1][:4] == b"SMR1"
+                else 1
+            ),
             "state": "complete",
             "terminal_reason": "target_complete",
             "error_code": 0,
@@ -287,6 +293,8 @@ class FakeMetadataBuffer:
             "consumer_position": target % capacity,
             "last_contiguous_sample_sequence": 1_000 + target * samples,
             "first_unavailable_sample_sequence": None,
+            "failure_frame_index": None,
+            "failure_sample_sequence": None,
         }
 
 
@@ -316,6 +324,7 @@ class FakeAd9361:
         abi4_contract: bool = True,
         metadata_record: str = "7",
         metadata_features: str | None = None,
+        metadata_status: str | None = None,
     ) -> None:
         self.uri = uri
         self.events: list[str] = []
@@ -353,7 +362,13 @@ class FakeAd9361:
                     "iio,buffer-ddr-ring": "1",
                     "iio,buffer-ddr-ring-max-iq-bytes": "200000000",
                     "iio,buffer-ddr-ring-modes": "finite,continuous",
-                    "iio,buffer-metadata-status": "1",
+                    "iio,buffer-metadata-status": (
+                        metadata_status
+                        if metadata_status is not None
+                        else "2"
+                        if metadata_abi == 4
+                        else "1"
+                    ),
                 }
             )
         channels = tuple(
@@ -434,6 +449,7 @@ class FakeAdi:
         abi4_contract: bool = True,
         metadata_record: str = "7",
         metadata_features: str | None = None,
+        metadata_status: str | None = None,
     ) -> None:
         self.headers = headers
         self.metadata_abi = metadata_abi
@@ -450,6 +466,7 @@ class FakeAdi:
         self.abi4_contract = abi4_contract
         self.metadata_record = metadata_record
         self.metadata_features = metadata_features
+        self.metadata_status = metadata_status
         self.device: FakeAd9361 | None = None
 
     def ad9361(self, uri: str) -> FakeAd9361:
@@ -464,6 +481,7 @@ class FakeAdi:
             abi4_contract=self.abi4_contract,
             metadata_record=self.metadata_record,
             metadata_features=self.metadata_features,
+            metadata_status=self.metadata_status,
         )
         return self.device
 
@@ -482,6 +500,7 @@ def _open_radio(
     abi4_contract: bool = True,
     metadata_record: str = "7",
     metadata_features: str | None = None,
+    metadata_status: str | None = None,
 ) -> tuple[IioRadioDevice, FakeAdi, FakeMetadataBufferFactory]:
     adi = FakeAdi(
         headers,
@@ -493,6 +512,7 @@ def _open_radio(
         abi4_contract=abi4_contract,
         metadata_record=metadata_record,
         metadata_features=metadata_features,
+        metadata_status=metadata_status,
     )
     factory = FakeMetadataBufferFactory()
     iio = SimpleNamespace(MetadataBuffer=factory) if include_metadata_buffer else SimpleNamespace()
@@ -1184,6 +1204,90 @@ def test_abi3_ddr_ring_supports_explicit_continuous_mode_and_cancel() -> None:
         capture.cancel()
         assert factory.instances[0].cancelled
         assert factory.instances[0].closed
+    finally:
+        radio.close()
+
+
+def test_ddr_ring_status_capability_is_versioned_without_breaking_abi3() -> None:
+    abi3, adi3, _factory3 = _open_radio(
+        [],
+        metadata_abi=3,
+        channels=(0,),
+        ddr_ring=True,
+        metadata_status="2",
+    )
+    assert adi3.device is not None
+    abi3_facts = iio_adapter.context_facts(adi3.device.ctx)
+    assert abi3_facts["buffer_metadata_status"] is True
+    assert abi3_facts["buffer_metadata_status_raw"] == "2"
+    assert abi3_facts["buffer_metadata_status_max_version"] == 2
+    try:
+        capture = abi3.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_ring_bytes=SAMPLE_COUNT * 4,
+            ddr_ring_frames=1,
+        )
+        capture.cancel()
+    finally:
+        abi3.close()
+
+    abi4, _adi4, _factory4 = _open_radio(
+        [],
+        metadata_abi=4,
+        channels=(0,),
+        ddr_ring=True,
+        metadata_status="1",
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="requires metadata status v2"):
+            abi4.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=1,
+            )
+    finally:
+        abi4.close()
+
+    abi4_v2, _adi4_v2, _factory4_v2 = _open_radio(
+        [],
+        metadata_abi=4,
+        channels=(0,),
+        ddr_ring=True,
+    )
+    try:
+        capture_v2 = abi4_v2.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_ring_bytes=SAMPLE_COUNT * 4,
+            ddr_ring_frames=1,
+        )
+        assert capture_v2.ddr_ring_status()["version"] == 2
+        capture_v2.cancel()
+    finally:
+        abi4_v2.close()
+
+
+@pytest.mark.parametrize("metadata_status", ("0", "02", "3", "garbage"))
+def test_ddr_ring_rejects_unknown_metadata_status_capability(
+    metadata_status: str,
+) -> None:
+    radio, _adi, _factory = _open_radio(
+        [],
+        metadata_abi=3,
+        channels=(0,),
+        ddr_ring=True,
+        metadata_status=metadata_status,
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="cannot report DDR ring status"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=1,
+            )
     finally:
         radio.close()
 

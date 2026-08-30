@@ -651,6 +651,7 @@ class RadioMetadataV7:
             MetadataFlags.START_VALID
             | MetadataFlags.END_VALID
             | MetadataFlags.SAMPLE_SEQUENCE_VALID
+            | MetadataFlags.GAIN_FULL_TABLE_MODE
             | MetadataFlags.GAIN_DB_VALUES
             | MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID
             | MetadataFlags(TANDEM_METADATA_VALID_FLAG)
@@ -660,6 +661,8 @@ class RadioMetadataV7:
             raise ProtocolError("protocol v7 lacks required frame/timeline validity flags")
         if flags & MetadataFlags.DUMMY_GAINS:
             raise ProtocolError("protocol v7 cannot use dummy gains")
+        if flags & (MetadataFlags.RX1_LOCKED_AT_END | MetadataFlags.RX2_LOCKED_AT_END):
+            raise ProtocolError("protocol v7 cannot claim legacy endpoint lock flags")
 
         scratch = bytearray(raw)
         received_crc = struct.unpack_from("<I", scratch, header_bytes - 4)[0]
@@ -731,6 +734,8 @@ class RadioMetadataV7:
         missing_samples_before = missing_low | (missing_high << 32)
         if bool(flags & MetadataFlags.SAMPLE_GAP_BEFORE) != bool(missing_samples_before):
             raise ProtocolError("protocol v7 gap flag and exact count disagree")
+        if bool(flags & MetadataFlags.DEVICE_IIO_OVERFLOW) != bool(missing_samples_before):
+            raise ProtocolError("protocol v7 overflow flag and exact gap count disagree")
         if bool(flags & MetadataFlags.GAIN_OBSERVATION_OVERFLOW) != bool(
             observation_overflow_count
         ):
@@ -814,6 +819,8 @@ class RadioMetadataV7:
         gain_read_failed = bool(flags & MetadataFlags.GAIN_READ_FAILED)
         if bool(observations) != observations_valid or gain_read_failed == observations_valid:
             raise ProtocolError("protocol v7 SPI-observation availability flags disagree")
+        if not observations_valid and (prefix[18] or prefix[19]):
+            raise ProtocolError("protocol v7 unavailable SPI observations have read durations")
         frame_end = prefix[7] + samples_per_channel
         previous_observation = -1
         for observation in observations:

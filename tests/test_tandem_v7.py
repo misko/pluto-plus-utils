@@ -291,6 +291,13 @@ def test_v7_available_spi_observation_must_be_fully_valid() -> None:
         RadioMetadataV7.unpack(_recrc(incomplete))
 
 
+def test_v7_unavailable_spi_observation_has_zero_endpoint_read_durations() -> None:
+    raw = bytearray(_metadata_v7())
+    struct.pack_into("<I", raw, 60, 1)
+    with pytest.raises(ProtocolError, match="unavailable SPI observations"):
+        RadioMetadataV7.unpack(_recrc(raw))
+
+
 def test_v7_optional_rssi_telemetry_is_strict_when_present() -> None:
     raw = bytearray(_metadata_v7())
     flags = struct.unpack_from("<I", raw, 12)[0]
@@ -375,6 +382,40 @@ def test_v7_rejects_event_at_frame_end_and_wrong_first_change_offset() -> None:
         (8, "<I", 0x0FFF, "feature set"),
         (12, "<I", 0, "validity flags"),
         (59, "<B", 1, "identity or length"),
+        (
+            12,
+            "<I",
+            int(
+                MetadataFlags.START_VALID
+                | MetadataFlags.END_VALID
+                | MetadataFlags.SAMPLE_SEQUENCE_VALID
+                | MetadataFlags.GAIN_DB_VALUES
+                | MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID
+                | MetadataFlags.GAIN_READ_FAILED
+                | MetadataFlags.RSSI_READ_FAILED
+                | MetadataFlags(TANDEM_METADATA_VALID_FLAG)
+                | MetadataFlags(FPGA_GAIN_TIMELINE_VALID_FLAG)
+            ),
+            "validity flags",
+        ),
+        (
+            12,
+            "<I",
+            int(
+                MetadataFlags.START_VALID
+                | MetadataFlags.END_VALID
+                | MetadataFlags.SAMPLE_SEQUENCE_VALID
+                | MetadataFlags.GAIN_FULL_TABLE_MODE
+                | MetadataFlags.GAIN_DB_VALUES
+                | MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID
+                | MetadataFlags.GAIN_READ_FAILED
+                | MetadataFlags.RSSI_READ_FAILED
+                | MetadataFlags.RX1_LOCKED_AT_END
+                | MetadataFlags(TANDEM_METADATA_VALID_FLAG)
+                | MetadataFlags(FPGA_GAIN_TIMELINE_VALID_FLAG)
+            ),
+            "endpoint lock flags",
+        ),
         (132, "<I", 1, "lease"),
         (136, "<I", 9, "transition-count"),
         (173, "<B", 19, "gain endpoints"),
@@ -394,6 +435,37 @@ def test_v7_fault_mutations_fail_closed(
 
     with pytest.raises(ProtocolError, match=message):
         RadioMetadataV7.unpack(_recrc(raw))
+
+
+@pytest.mark.parametrize(
+    ("missing_samples", "extra_flag", "message"),
+    (
+        (1, MetadataFlags.SAMPLE_GAP_BEFORE, "overflow flag"),
+        (0, MetadataFlags.DEVICE_IIO_OVERFLOW, "overflow flag"),
+    ),
+)
+def test_v7_gap_requires_both_canonical_gap_flags(
+    missing_samples: int,
+    extra_flag: MetadataFlags,
+    message: str,
+) -> None:
+    raw = bytearray(_metadata_v7())
+    flags = struct.unpack_from("<I", raw, 12)[0]
+    struct.pack_into("<I", raw, 12, flags | int(extra_flag))
+    struct.pack_into("<I", raw, 116, missing_samples)
+
+    with pytest.raises(ProtocolError, match=message):
+        RadioMetadataV7.unpack(_recrc(raw))
+
+
+def test_v7_exact_gap_with_both_canonical_flags_is_valid() -> None:
+    raw = bytearray(_metadata_v7())
+    flags = struct.unpack_from("<I", raw, 12)[0]
+    flags |= int(MetadataFlags.SAMPLE_GAP_BEFORE | MetadataFlags.DEVICE_IIO_OVERFLOW)
+    struct.pack_into("<I", raw, 12, flags)
+    struct.pack_into("<I", raw, 116, 1)
+
+    assert RadioMetadataV7.unpack(_recrc(raw)).missing_samples_before == 1
 
 
 def test_v7_parser_does_not_relax_legacy_v6_identity() -> None:

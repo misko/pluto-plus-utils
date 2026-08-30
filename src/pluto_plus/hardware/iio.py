@@ -792,6 +792,11 @@ class IioRadioDevice:
                 raise RadioConfigurationError("IIO DDR ring mode capability is not canonical")
             if facts.get("buffer_metadata_status") is not True:
                 raise RadioConfigurationError("IIO context cannot report DDR ring status")
+            status_max_version = facts.get("buffer_metadata_status_max_version")
+            if metadata_abi == 4 and status_max_version != 2:
+                raise RadioConfigurationError(
+                    "metadata ABI 4 DDR ring requires metadata status v2"
+                )
             maximum_ring_bytes = facts.get("buffer_ddr_ring_max_iq_bytes")
             if not isinstance(maximum_ring_bytes, int) or maximum_ring_bytes <= 0:
                 raise RadioConfigurationError("IIO DDR ring byte limit is invalid")
@@ -984,6 +989,9 @@ def context_facts(context: Any) -> dict[str, object]:
         ddr_ring_max_iq_bytes = None
     ddr_ring_modes_raw = attrs.get("iio,buffer-ddr-ring-modes")
     metadata_status_raw = attrs.get("iio,buffer-metadata-status")
+    metadata_status_max_version = (
+        1 if metadata_status_raw == "1" else 2 if metadata_status_raw == "2" else None
+    )
     metadata_record_raw = attrs.get("iio,buffer-metadata-record")
     try:
         metadata_record = int(str(metadata_record_raw))
@@ -1013,8 +1021,9 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_ddr_ring_raw": ddr_ring_raw,
         "buffer_ddr_ring_max_iq_bytes": ddr_ring_max_iq_bytes,
         "buffer_ddr_ring_modes_raw": ddr_ring_modes_raw,
-        "buffer_metadata_status": metadata_status_raw == "1",
+        "buffer_metadata_status": metadata_status_max_version is not None,
         "buffer_metadata_status_raw": metadata_status_raw,
+        "buffer_metadata_status_max_version": metadata_status_max_version,
         "buffer_metadata_record": metadata_record,
         "buffer_metadata_record_raw": metadata_record_raw,
         "buffer_metadata_features_raw": metadata_features_raw,
