@@ -604,7 +604,7 @@ def test_metadata_ladder_frame_bound_covers_twenty_seconds_at_30_msps() -> None:
 
 def test_metadata_ladder_rejects_ddr_burst_outside_abi3_single_rx() -> None:
     radio = _Radio({262_144: (0, 1)})
-    with pytest.raises(ValueError, match="ABI 3 and one receiver"):
+    with pytest.raises(ValueError, match="ABI 3/4 and one receiver"):
         run_metadata_continuity_ladder(
             uri="ip:192.0.2.1",
             serial="SERIAL_A",

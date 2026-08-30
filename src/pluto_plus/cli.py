@@ -1459,7 +1459,7 @@ def radio_metadata_ladder(
         1,
         "--metadata-abi",
         min=1,
-        max=3,
+        max=4,
         help="Exact release-local and radio metadata ABI to attest.",
     ),
     channels: str = typer.Option(
@@ -1646,8 +1646,8 @@ def radio_metadata_ladder(
     except ValueError as error:
         _fail("metadata_ladder_failed", str(error), 5)
     normalized_channels = channels.strip().lower()
-    if metadata_abi not in {1, 2, 3}:
-        _fail("metadata_ladder_failed", "metadata ABI must be 1, 2, or 3", 5)
+    if metadata_abi not in {1, 2, 3, 4}:
+        _fail("metadata_ladder_failed", "metadata ABI must be 1, 2, 3, or 4", 5)
     if normalized_channels not in METADATA_CHANNEL_SELECTIONS:
         _fail("metadata_ladder_failed", "channels must be rx0, rx1, or dual", 5)
     normalized_iq_decoder = iq_decoder.strip().lower()
@@ -1659,10 +1659,10 @@ def radio_metadata_ladder(
             "--ddr-burst and --ddr-ring-bytes are mutually exclusive",
             2,
         )
-    if (ddr_burst or ddr_ring_bytes) and metadata_abi != 3:
+    if (ddr_burst or ddr_ring_bytes) and metadata_abi not in {3, 4}:
         _fail(
             "metadata_ladder_ddr_requires_abi3",
-            "DDR burst and ring modes require --metadata-abi 3",
+            "DDR burst and ring modes require --metadata-abi 3 or 4",
             2,
         )
     if (ddr_burst or ddr_ring_bytes) and normalized_channels == "dual":

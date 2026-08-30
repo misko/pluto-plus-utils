@@ -32,9 +32,12 @@ from pluto_plus.hardware.sample_clock import (
     fit_sample_clock,
 )
 from pluto_plus.tandem import (
+    MetadataTransportKind,
     RadioMetadataV5,
     RadioMetadataV6,
+    RadioMetadataV7,
     TandemSessionRequestV1,
+    pack_metadata_provider_request_v1,
 )
 
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
@@ -69,6 +72,14 @@ ABI3_METADATA_LAYOUTS = (
     MetadataLayoutCapability(0x0F, 2, 8, 1),
 )
 ABI3_METADATA_LAYOUTS_TEXT = "00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1"
+# ABI 4 changes metadata authority and request negotiation, not the canonical
+# RX scan layouts inherited from ABI 3.
+ABI4_METADATA_LAYOUTS = ABI3_METADATA_LAYOUTS
+ABI4_METADATA_LAYOUTS_TEXT = ABI3_METADATA_LAYOUTS_TEXT
+ABI4_METADATA_RECORD = 7
+ABI4_METADATA_FEATURES_TEXT = (
+    "fpga-gain-timeline,exact-event-sequence,optional-rssi-telemetry,typed-capture-errors"
+)
 
 
 def parse_metadata_layout_capabilities(value: object) -> tuple[MetadataLayoutCapability, ...]:
@@ -205,8 +216,8 @@ class IioMetadataCaptureSession:
             raise ValueError("samples_per_channel must be positive")
         if kernel_buffers <= 0:
             raise ValueError("kernel_buffers must be positive")
-        if metadata_abi not in {1, 2, 3}:
-            raise ValueError("metadata_abi must be one of the supported ABIs 1, 2, or 3")
+        if metadata_abi not in {1, 2, 3, 4}:
+            raise ValueError("metadata_abi must be one of the supported ABIs 1, 2, 3, or 4")
         if metadata_capacity <= 0:
             raise ValueError("metadata_capacity must be positive")
         if isinstance(ddr_burst_bytes, bool) or not isinstance(ddr_burst_bytes, int):
@@ -243,19 +254,20 @@ class IioMetadataCaptureSession:
         self._ddr_ring_capture_frames = ddr_ring_frames
         self._ddr_ring_continuous = ddr_ring_continuous
         self._tandem_request = tandem_request or TandemSessionRequestV1.auto_for_sample_count(
-            samples_per_channel
+            samples_per_channel,
+            retention_frames=(kernel_buffers + 1 if metadata_abi == 4 else 2),
         )
         self._channels = tuple(int(item) for item in sdr.rx_enabled_channels)
         if self._channels not in {(0,), (1,), (0, 1)}:
             raise ValueError("metadata capture receiver selection is not canonical")
         if metadata_abi in {1, 2} and self._channels != (0, 1):
             raise ValueError("metadata ABI 1 and 2 require paired RX channels")
-        if metadata_abi == 3 and len(self._channels) == 1 and samples_per_channel & 1:
-            raise ValueError("metadata ABI 3 single-RX sample count must be even")
-        if ddr_burst_bytes and (metadata_abi != 3 or len(self._channels) != 1):
-            raise ValueError("device DDR burst v1 requires metadata ABI 3 and one receiver")
-        if ddr_ring_bytes and metadata_abi != 3:
-            raise ValueError("device DDR ring v1 requires metadata ABI 3")
+        if metadata_abi in {3, 4} and len(self._channels) == 1 and samples_per_channel & 1:
+            raise ValueError("metadata ABI 3/4 single-RX sample count must be even")
+        if ddr_burst_bytes and (metadata_abi not in {3, 4} or len(self._channels) != 1):
+            raise ValueError("device DDR burst v1 requires metadata ABI 3/4 and one receiver")
+        if ddr_ring_bytes and metadata_abi not in {3, 4}:
+            raise ValueError("device DDR ring v1 requires metadata ABI 3/4")
         frame_iq_bytes = samples_per_channel * len(self._channels) * 4
         self._ddr_burst_frames = 0 if not ddr_burst_bytes else ddr_burst_bytes // frame_iq_bytes
         self._ddr_burst_admitted_bytes = self._ddr_burst_frames * frame_iq_bytes
@@ -407,11 +419,25 @@ class IioMetadataCaptureSession:
             )
 
     def _open_metadata_buffer(self) -> Any:
-        request = (
-            None
-            if self._metadata_abi == 1
-            else self._tandem_request.pack(self._samples_per_channel)
-        )
+        request: bytes | None
+        if self._metadata_abi == 1:
+            request = None
+        elif self._metadata_abi in {2, 3}:
+            request = self._tandem_request.pack(self._samples_per_channel)
+        else:
+            transport_kind = (
+                MetadataTransportKind.DDR_BURST
+                if self.ddr_burst_enabled
+                else MetadataTransportKind.DDR_RING
+                if self.ddr_ring_enabled
+                else MetadataTransportKind.ORDINARY
+            )
+            request = pack_metadata_provider_request_v1(
+                self._tandem_request,
+                self._samples_per_channel,
+                transport_kind=transport_kind,
+                retention_frames=self._kernel_buffers + 1,
+            )
         for attempt in range(1, _OPEN_MAX_ATTEMPTS + 1):
             try:
                 if self._metadata_abi == 1:
@@ -500,7 +526,8 @@ class IioMetadataCaptureSession:
         if raw_metadata is None:
             raise RuntimeError("metadata buffer refill returned no metadata header")
         declared_missing: int | None = None
-        tandem_metadata: RadioMetadataV5 | None = None
+        tandem_metadata: RadioMetadataV5 | RadioMetadataV7 | None = None
+        metadata: Any
         if self._metadata_abi == 1:
             metadata = RadioMetadataV3.unpack(raw_metadata)
         elif self._metadata_abi == 2:
@@ -509,12 +536,19 @@ class IioMetadataCaptureSession:
             tandem_metadata = parsed
             if len(raw_metadata) != parsed.header_bytes:
                 raise RuntimeError("metadata refill returned trailing bytes")
-        else:
+        elif self._metadata_abi == 3:
             parsed_v6 = RadioMetadataV6.unpack(raw_metadata)
             metadata = parsed_v6.base
             tandem_metadata = parsed_v6.tandem
             declared_missing = parsed_v6.missing_samples_before
             if len(raw_metadata) != parsed_v6.header_bytes:
+                raise RuntimeError("metadata refill returned trailing bytes")
+        else:
+            parsed_v7 = RadioMetadataV7.unpack(raw_metadata)
+            metadata = parsed_v7
+            tandem_metadata = parsed_v7
+            declared_missing = parsed_v7.missing_samples_before
+            if len(raw_metadata) != parsed_v7.header_bytes:
                 raise RuntimeError("metadata refill returned trailing bytes")
         self._validate_header(metadata)
         missing = self._validate_sequence(metadata, declared_missing=declared_missing)
@@ -597,7 +631,7 @@ class IioMetadataCaptureSession:
         if missing < 0:
             raise RuntimeError("FPGA sample counter repeated or regressed")
         skipped_buffers = buffer_delta - 1
-        if self._metadata_abi == 3:
+        if self._metadata_abi in {3, 4}:
             if declared_missing != missing:
                 raise RuntimeError("metadata exact gap count disagrees with the FPGA counter")
             if bool(metadata.flags & MetadataFlags.SAMPLE_GAP_BEFORE) != bool(missing):
