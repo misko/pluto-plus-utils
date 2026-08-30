@@ -487,6 +487,25 @@ IIO_THROUGHPUT_RW_AFFINITY_V2_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 30, 1, 42, 46, tzinfo=UTC),
 )
 
+# Exact RAM-only successor that retains per-device R/W-worker affinity while
+# adapting the metadata sampler's counter polling to the live sample cadence.
+# This candidate is intended to reduce CPU contention between metadata,
+# transport, and the independently scheduled DDR-ring producer. No matching
+# persistent profile exists until hardware qualification proves the behavior.
+IIO_THROUGHPUT_SAMPLER_POLL_V3_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="iio-throughput-sampler-poll-v3-rc1-ram",
+    release_tag="iio-throughput-sampler-poll-v3-rc1-ce48c010c02e",
+    device_firmware="v0.45-plutoplus-spf-iio-throughput-sampler-poll-v3-rc1",
+    asset_name=("plutoplus-spf-iio-throughput-sampler-poll-v3-rc1-ce48c010c02e-pluto.dfu"),
+    asset_sha256="023c4acb3288321749c001be74b8d081938efbdc62f44198e543cc43eb8290e0",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33287090585",
+    source_commit="ce48c010c02efee1c02019d13cd424e996554f68",
+    fit_body_sha256="4b883008ed030255de98fa35ca0162159136758f972e2498881687976d5f2e23",
+    fit_body_size=12_814_463,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 30, 2, 27, 45, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
