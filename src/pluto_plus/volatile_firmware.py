@@ -67,6 +67,7 @@ class VolatileFirmwarePlan:
     expected_ddr_ring_modes: str | None = None
     expected_buffer_metadata_status: bool = False
     expected_buffer_metadata_timing_log: bool = False
+    expected_iiod_cpu_affinity: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +253,7 @@ def prepare_ram_boot_plan(
         expected_ddr_ring_modes=profile.ddr_ring_modes,
         expected_buffer_metadata_status=profile.buffer_metadata_status,
         expected_buffer_metadata_timing_log=profile.buffer_metadata_timing_log,
+        expected_iiod_cpu_affinity=profile.iiod_cpu_affinity,
     )
 
 
@@ -313,6 +315,7 @@ def execute_ram_boot_plan(
         "expected_ddr_ring_modes",
         "expected_buffer_metadata_status",
         "expected_buffer_metadata_timing_log",
+        "expected_iiod_cpu_affinity",
     ):
         if getattr(fresh, field) != getattr(plan, field):
             raise VolatileFirmwareError(f"RAM-boot precondition changed: {field}")
@@ -721,6 +724,7 @@ def _revalidate_plan_image(plan: VolatileFirmwarePlan) -> None:
         or plan.expected_ddr_ring_modes != profile.ddr_ring_modes
         or plan.expected_buffer_metadata_status is not profile.buffer_metadata_status
         or plan.expected_buffer_metadata_timing_log is not profile.buffer_metadata_timing_log
+        or plan.expected_iiod_cpu_affinity != profile.iiod_cpu_affinity
     ):
         raise VolatileFirmwareError("receipt image no longer matches its immutable profile")
 
@@ -774,12 +778,8 @@ def _attest_ram_return(
             if ("tandem-agc" in device_names) is not plan.expected_tandem_agc:
                 raise VolatileFirmwareError("returned RAM image tandem capability is wrong")
             observed_burst = str(facts.get("iio,buffer-ddr-burst") or "").strip()
-            observed_max = str(
-                facts.get("iio,buffer-ddr-burst-max-iq-bytes") or ""
-            ).strip()
-            observed_reserve = str(
-                facts.get("iio,buffer-ddr-burst-reserve-bytes") or ""
-            ).strip()
+            observed_max = str(facts.get("iio,buffer-ddr-burst-max-iq-bytes") or "").strip()
+            observed_reserve = str(facts.get("iio,buffer-ddr-burst-reserve-bytes") or "").strip()
             if plan.expected_ddr_burst_max_iq_bytes is None:
                 if observed_burst or observed_max or observed_reserve:
                     raise VolatileFirmwareError(
@@ -790,19 +790,11 @@ def _attest_ram_return(
                 or observed_max != str(plan.expected_ddr_burst_max_iq_bytes)
                 or observed_reserve != str(plan.expected_ddr_burst_reserve_bytes)
             ):
-                raise VolatileFirmwareError(
-                    "returned RAM image DDR burst capability is wrong"
-                )
+                raise VolatileFirmwareError("returned RAM image DDR burst capability is wrong")
             observed_ring = str(facts.get("iio,buffer-ddr-ring") or "").strip()
-            observed_ring_max = str(
-                facts.get("iio,buffer-ddr-ring-max-iq-bytes") or ""
-            ).strip()
-            observed_ring_modes = str(
-                facts.get("iio,buffer-ddr-ring-modes") or ""
-            ).strip()
-            observed_metadata_status = str(
-                facts.get("iio,buffer-metadata-status") or ""
-            ).strip()
+            observed_ring_max = str(facts.get("iio,buffer-ddr-ring-max-iq-bytes") or "").strip()
+            observed_ring_modes = str(facts.get("iio,buffer-ddr-ring-modes") or "").strip()
+            observed_metadata_status = str(facts.get("iio,buffer-metadata-status") or "").strip()
             if plan.expected_ddr_ring_max_iq_bytes is None:
                 if (
                     observed_ring
@@ -817,19 +809,24 @@ def _attest_ram_return(
                 observed_ring != "1"
                 or observed_ring_max != str(plan.expected_ddr_ring_max_iq_bytes)
                 or observed_ring_modes != plan.expected_ddr_ring_modes
-                or (observed_metadata_status == "1")
-                is not plan.expected_buffer_metadata_status
+                or (observed_metadata_status == "1") is not plan.expected_buffer_metadata_status
             ):
-                raise VolatileFirmwareError(
-                    "returned RAM image DDR ring capability is wrong"
-                )
-            observed_timing_log = str(
-                facts.get("iio,buffer-metadata-timing-log") or ""
-            ).strip()
+                raise VolatileFirmwareError("returned RAM image DDR ring capability is wrong")
+            observed_timing_log = str(facts.get("iio,buffer-metadata-timing-log") or "").strip()
             expected_timing_log = "1" if plan.expected_buffer_metadata_timing_log else ""
             if observed_timing_log != expected_timing_log:
                 raise VolatileFirmwareError(
                     "returned RAM image metadata timing-log capability is wrong"
+                )
+            observed_cpu_affinity = str(facts.get("iio,iiod-cpu-affinity") or "").strip()
+            expected_cpu_affinity = (
+                ""
+                if plan.expected_iiod_cpu_affinity is None
+                else str(plan.expected_iiod_cpu_affinity)
+            )
+            if observed_cpu_affinity != expected_cpu_affinity:
+                raise VolatileFirmwareError(
+                    "returned RAM image iiOD CPU-affinity capability is wrong"
                 )
             mute_returned_radio_at_path(plan.serial, Path(plan.usb_sysfs_path))
             return serial, firmware, phy

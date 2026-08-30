@@ -245,6 +245,15 @@ IIO_THROUGHPUT_TIMING_V1_RC1_PROFILE = DiagnosticProfile(
     release_rank=23,
 )
 
+IIO_THROUGHPUT_AFFINITY_V1_RC1_PROFILE = DiagnosticProfile(
+    profile_id="iio-throughput-affinity-v1-rc1",
+    firmware_version="v0.45-plutoplus-spf-iio-throughput-affinity-v1-rc1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="RAM-only iiOD CPU-isolation diagnostic; never persistence-qualified",
+    release_rank=24,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -269,6 +278,7 @@ DIAGNOSTIC_PROFILES = (
     IIO_THROUGHPUT_HOLD_V1_RC1_PROFILE,
     IIO_THROUGHPUT_HOLD_V2_RC1_PROFILE,
     IIO_THROUGHPUT_TIMING_V1_RC1_PROFILE,
+    IIO_THROUGHPUT_AFFINITY_V1_RC1_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 

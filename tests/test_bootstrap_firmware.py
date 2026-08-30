@@ -534,9 +534,7 @@ def test_selected_forward_profile_is_exact_and_blank_recovery_stays_canonical(
 
 
 def test_latch_clear_persistence_requires_distinct_promotion_profile() -> None:
-    ram = bootstrap.STANDALONE_FLASH_PROFILES[
-        "libiio-metadata-v6-tandem-latch-clear-ram"
-    ]
+    ram = bootstrap.STANDALONE_FLASH_PROFILES["libiio-metadata-v6-tandem-latch-clear-ram"]
     promotion = bootstrap.STANDALONE_FLASH_PROFILES[
         "libiio-metadata-v6-tandem-latch-clear-persistent-promotion"
     ]
@@ -554,9 +552,7 @@ def test_latch_clear_persistence_requires_distinct_promotion_profile() -> None:
 def test_tandem_v7_ram_profile_remains_distinct_from_persistent_promotion() -> None:
     policy = bootstrap.TANDEM_AGC_V7_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
-    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
-        "tandem-agc-v7-release-persistent-promotion"
-    ]
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES["tandem-agc-v7-release-persistent-promotion"]
 
     assert policy.release_tag == "v0.40-plutoplus-spf-tandem-agc-v7"
     assert policy.device_firmware == policy.release_tag
@@ -791,9 +787,7 @@ def test_ddr_burst_v2_rc3_profile_is_exactly_bound_and_ram_only() -> None:
 def test_ddr_burst_v2_release_requires_distinct_persistent_promotion() -> None:
     policy = bootstrap.DDR_BURST_V2_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
-    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
-        "ddr-burst-v2-release-persistent-promotion"
-    ]
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES["ddr-burst-v2-release-persistent-promotion"]
 
     assert policy.release_tag == "v0.42-plutoplus-spf-ddr-burst-v2"
     assert policy.device_firmware == "v0.42-plutoplus-spf-ddr-burst-v2"
@@ -831,9 +825,7 @@ def test_ddr_capacity_test_rc1_profile_is_exactly_bound_and_ram_only() -> None:
     assert policy.release_tag == "ddr-capacity-test-rc1-84f05685a590"
     assert policy.device_firmware == "v0.42-plutoplus-spf-ddr-capacity-test-rc1"
     assert policy.source_commit == "84f05685a59007a01448628bf0f2be258594ee87"
-    assert policy.asset_name == (
-        "plutoplus-spf-ddr-capacity-test-rc1-84f05685a590-pluto.dfu"
-    )
+    assert policy.asset_name == ("plutoplus-spf-ddr-capacity-test-rc1-84f05685a590-pluto.dfu")
     assert policy.asset_sha256 == (
         "eab63fd6003751ee007230cdaafab341a93bbe830e71747166cac5be777f11ce"
     )
@@ -920,10 +912,7 @@ def test_ddr_ring_prefill_v1_rc1_profile_is_exactly_bound_and_ram_only() -> None
     assert policy.release_tag == "ddr-ring-prefill-v1-rc1-ac100b76ec75"
     assert policy.device_firmware == "v0.44-plutoplus-spf-ddr-ring-prefill-v1-rc1"
     assert policy.source_commit == "ac100b76ec7577f74df92bdca678ef6a4ccc664b"
-    assert (
-        policy.asset_name
-        == "plutoplus-spf-ddr-ring-prefill-v1-rc1-ac100b76ec75-pluto.dfu"
-    )
+    assert policy.asset_name == "plutoplus-spf-ddr-ring-prefill-v1-rc1-ac100b76ec75-pluto.dfu"
     assert policy.asset_sha256 == (
         "0107fb1d57be2ade703bc6950ff64a20c9cf6efb06f3eb4ea71dabecbb4343fa"
     )
@@ -956,10 +945,7 @@ def test_ddr_ring_prefill_v1_release_requires_distinct_persistent_promotion() ->
     assert policy.release_tag == "v0.44-plutoplus-spf-ddr-ring-prefill-v1"
     assert policy.device_firmware == "v0.44-plutoplus-spf-ddr-ring-prefill-v1"
     assert policy.source_commit == "0c49d6837847cefba9b139106dcffb1942f0ee22"
-    assert (
-        policy.asset_name
-        == "plutoplus-spf-ddr-ring-prefill-v1-0c49d6837847-pluto.dfu"
-    )
+    assert policy.asset_name == "plutoplus-spf-ddr-ring-prefill-v1-0c49d6837847-pluto.dfu"
     assert policy.asset_sha256 == (
         "eb7d39f2f456d79f005239ddcff204166c9c607cd3647f1dd90464f99f439925"
     )
@@ -999,10 +985,7 @@ def test_iio_throughput_hold_v1_rc1_profile_is_exactly_bound_and_ram_only() -> N
     assert policy.release_tag == "iio-throughput-hold-v1-rc1-425b20b352cc"
     assert policy.device_firmware == "v0.45-plutoplus-spf-iio-throughput-hold-v1-rc1"
     assert policy.source_commit == "425b20b352ccaba697cb90b5d95db00635f80118"
-    assert (
-        policy.asset_name
-        == "plutoplus-spf-iio-throughput-hold-v1-rc1-425b20b352cc-pluto.dfu"
-    )
+    assert policy.asset_name == "plutoplus-spf-iio-throughput-hold-v1-rc1-425b20b352cc-pluto.dfu"
     assert policy.asset_sha256 == (
         "c10dbf365099f718cb0134b1be8a01fca24db7028e55a98d9340813d3c9f35e4"
     )
@@ -1032,10 +1015,7 @@ def test_iio_throughput_hold_v2_rc1_profile_is_exactly_bound_and_ram_only() -> N
     assert policy.release_tag == "iio-throughput-hold-v2-rc1-843744ac9ac5"
     assert policy.device_firmware == "v0.45-plutoplus-spf-iio-throughput-hold-v2-rc1"
     assert policy.source_commit == "843744ac9ac5223b197173c6375c92f29f3bab8c"
-    assert (
-        policy.asset_name
-        == "plutoplus-spf-iio-throughput-hold-v2-rc1-843744ac9ac5-pluto.dfu"
-    )
+    assert policy.asset_name == "plutoplus-spf-iio-throughput-hold-v2-rc1-843744ac9ac5-pluto.dfu"
     assert policy.asset_sha256 == (
         "f8b81c5f21cf471d1b9e6ef150a0360e84d0e42138f7c934e7e5a99aa30d353f"
     )
@@ -1065,10 +1045,7 @@ def test_iio_throughput_timing_v1_rc1_profile_is_exactly_bound_and_ram_only() ->
     assert policy.release_tag == "iio-throughput-timing-v1-rc1-c29689931b6d"
     assert policy.device_firmware == "v0.45-plutoplus-spf-iio-throughput-timing-v1-rc1"
     assert policy.source_commit == "c29689931b6dc7f400c5f404130920e1392b2f27"
-    assert (
-        policy.asset_name
-        == "plutoplus-spf-iio-throughput-timing-v1-rc1-c29689931b6d-pluto.dfu"
-    )
+    assert policy.asset_name == "plutoplus-spf-iio-throughput-timing-v1-rc1-c29689931b6d-pluto.dfu"
     assert policy.asset_sha256 == (
         "e6098cb32d399a04c9e02737026e17594e4f2860bcf4df7c0b41fac80c9d09b2"
     )
@@ -1086,6 +1063,41 @@ def test_iio_throughput_timing_v1_rc1_profile_is_exactly_bound_and_ram_only() ->
     assert profile.ddr_ring_modes == "finite,continuous"
     assert profile.buffer_metadata_status is True
     assert profile.buffer_metadata_timing_log is True
+    assert profile.iiod_cpu_affinity is None
+    assert not any(
+        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
+        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
+    )
+
+
+def test_iio_throughput_affinity_v1_rc1_profile_is_exactly_bound_and_ram_only() -> None:
+    policy = bootstrap.IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "iio-throughput-affinity-v1-rc1-bd1a386167c2"
+    assert policy.device_firmware == "v0.45-plutoplus-spf-iio-throughput-affinity-v1-rc1"
+    assert policy.source_commit == "bd1a386167c218869d8f8303ed04be10b5a08ff6"
+    assert (
+        policy.asset_name == "plutoplus-spf-iio-throughput-affinity-v1-rc1-bd1a386167c2-pluto.dfu"
+    )
+    assert policy.asset_sha256 == (
+        "a317aa690d045676a2af169cf0e7e04d210b2e3788e7cc23c3daf61718596417"
+    )
+    assert policy.fit_body_sha256 == (
+        "395fe83f506e8287d48c827b1b0bcc24014f8a0b05e94f2e63c183db7b0d9f3a"
+    )
+    assert policy.fit_body_size == 12_813_507
+    assert policy.hardware_qualified is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert profile.ddr_burst_max_iq_bytes == 200_000_000
+    assert profile.ddr_burst_reserve_bytes == 128 * 1024 * 1024
+    assert profile.ddr_ring_max_iq_bytes == 200_000_000
+    assert profile.ddr_ring_modes == "finite,continuous"
+    assert profile.buffer_metadata_status is True
+    assert profile.buffer_metadata_timing_log is True
+    assert profile.iiod_cpu_affinity == 1
     assert not any(
         candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
         for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
@@ -1095,9 +1107,7 @@ def test_iio_throughput_timing_v1_rc1_profile_is_exactly_bound_and_ram_only() ->
 def test_ddr_ring_v1_release_requires_distinct_persistent_promotion() -> None:
     policy = bootstrap.DDR_RING_V1_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
-    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
-        "ddr-ring-v1-release-persistent-promotion"
-    ]
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES["ddr-ring-v1-release-persistent-promotion"]
 
     assert policy.release_tag == "v0.43-plutoplus-spf-ddr-ring-v1"
     assert policy.device_firmware == "v0.43-plutoplus-spf-ddr-ring-v1"
@@ -1138,9 +1148,7 @@ def test_ddr_ring_v1_release_requires_distinct_persistent_promotion() -> None:
 def test_ddr_burst_v1_release_requires_distinct_persistent_promotion() -> None:
     policy = bootstrap.DDR_BURST_V1_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
-    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
-        "ddr-burst-v1-release-persistent-promotion"
-    ]
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES["ddr-burst-v1-release-persistent-promotion"]
 
     assert policy.release_tag == "v0.42-plutoplus-spf-ddr-burst-v1"
     assert policy.device_firmware == "v0.42-plutoplus-spf-ddr-burst-v1"
@@ -1371,9 +1379,7 @@ def test_scsi_eject_uses_drive_api_and_proves_lun_removal(
     size.write_text("4096\n")
     monkeypatch.setattr(bootstrap, "_BLOCK_ROOT", block_root)
     calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(
-        bootstrap, "_run", lambda argv, timeout_s: calls.append(tuple(argv))
-    )
+    monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: calls.append(tuple(argv)))
 
     def media_removed(duration: float) -> None:
         del duration
@@ -1915,9 +1921,7 @@ def test_standalone_reconciliation_is_read_only_and_verifies_exact_fit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
-        planned, tmp_path, monkeypatch
-    )
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(planned, tmp_path, monkeypatch)
     transport = ReadOnlyReconciliationTransport(plan)
 
     result = bootstrap.reconcile_usb_flash_receipt(
@@ -1947,9 +1951,7 @@ def test_standalone_reconciliation_accepts_proven_post_eject_mass_storage_receip
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
-        planned, tmp_path, monkeypatch
-    )
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(planned, tmp_path, monkeypatch)
     receipt_path = receipt_directory / f"{receipt_id}.json"
     receipt = json.loads(receipt_path.read_text())
     receipt.pop("transport")
@@ -1981,9 +1983,7 @@ def test_standalone_reconciliation_reverifies_successful_mass_storage_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
-        planned, tmp_path, monkeypatch
-    )
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(planned, tmp_path, monkeypatch)
     receipt_path = receipt_directory / f"{receipt_id}.json"
     receipt = json.loads(receipt_path.read_text())
     receipt.pop("transport")
@@ -2026,9 +2026,7 @@ def test_standalone_reconciliation_rejects_ambiguous_mass_storage_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
-        planned, tmp_path, monkeypatch
-    )
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(planned, tmp_path, monkeypatch)
     receipt_path = receipt_directory / f"{receipt_id}.json"
     receipt = json.loads(receipt_path.read_text())
     receipt.pop("transport")
@@ -2053,9 +2051,7 @@ def test_standalone_reconciliation_rejects_profile_mismatch_before_remote_access
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
-        planned, tmp_path, monkeypatch
-    )
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(planned, tmp_path, monkeypatch)
     transport = ReadOnlyReconciliationTransport(plan)
 
     with pytest.raises(bootstrap.BootstrapFirmwareError, match="profile does not match"):
@@ -2075,9 +2071,7 @@ def test_standalone_reconciliation_rejects_untrusted_receipt_serial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
-        planned, tmp_path, monkeypatch
-    )
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(planned, tmp_path, monkeypatch)
     receipt_path = receipt_directory / f"{receipt_id}.json"
     receipt = json.loads(receipt_path.read_text())
     receipt["plan"]["target_serial"] = "SERIAL_A;reboot"
