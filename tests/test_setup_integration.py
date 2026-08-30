@@ -64,6 +64,9 @@ class RepairableFakeRadio(FakeRadioDevice):
             "phy_model": "ad9361" if self._canonical else "ad9363a",
             "buffer_metadata": True,
             "rx_scan_channels": ("voltage0", "voltage1", "voltage2", "voltage3"),
+            "rx_lo_5g8_accepted": self._canonical,
+            "rx_lo_5g8_readback_hz": 5_800_000_000 if self._canonical else None,
+            "rx_lo_restored": self._canonical,
             "uboot": CANONICAL_UBOOT
             if self._canonical
             else {
@@ -146,6 +149,9 @@ class SetupBackend:
                 else ("voltage0", "voltage1")
             ),
             tx_safe=True,
+            rx_lo_5g8_accepted=canonical,
+            rx_lo_5g8_readback_hz=5_800_000_000 if canonical else None,
+            rx_lo_restored=canonical,
         )
 
     def inspect(self, identity: SetupIdentity) -> SetupObservation:

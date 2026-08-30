@@ -16,6 +16,7 @@ from pluto_plus.models import (
     RadioState,
     Transport,
 )
+from pluto_plus.setup_profiles import SET_ATTR_PROFILE
 
 
 def _snapshot(
@@ -55,6 +56,9 @@ def test_doctor_passes_only_with_complete_persistent_evidence() -> None:
             "phy_model": "ad9361",
             "buffer_metadata": True,
             "rx_scan_channels": ("voltage0", "voltage1", "voltage2", "voltage3"),
+            "rx_lo_5g8_accepted": True,
+            "rx_lo_5g8_readback_hz": 5_800_000_000,
+            "rx_lo_restored": True,
             "uboot": CANONICAL_UBOOT,
             "boot_provenance": "qspi_cold_boot_verified",
         },
@@ -88,6 +92,28 @@ def test_doctor_does_not_infer_persistence_from_active_firmware_or_channels() ->
     assert findings["identity.usb_path"].status is DoctorStatus.WARN
     assert findings["firmware.helper"].status is DoctorStatus.WARN
     assert findings["rf.phy_model"].remediation is None
+
+
+def test_doctor_accepts_set_attr_profile_only_with_live_5g8_probe() -> None:
+    report = diagnose_radio(
+        _snapshot(),
+        {
+            "phy_model": "ad9361",
+            "buffer_metadata": True,
+            "rx_scan_channels": ("voltage0", "voltage1", "voltage2", "voltage3"),
+            "rx_lo_5g8_accepted": True,
+            "rx_lo_5g8_readback_hz": 5_800_000_000,
+            "rx_lo_restored": True,
+            "uboot": SET_ATTR_PROFILE.uboot,
+            "boot_provenance": "qspi_cold_boot_verified",
+        },
+        firmware_helper_available=True,
+    )
+    findings = {finding.code: finding for finding in report.findings}
+
+    assert report.healthy
+    assert findings["setup.uboot_2r2t"].status is DoctorStatus.PASS
+    assert findings["rf.rx_lo_5g8"].status is DoctorStatus.PASS
 
 
 def test_old_firmware_recommends_only_guarded_profile_aware_flash() -> None:

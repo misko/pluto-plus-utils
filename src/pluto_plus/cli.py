@@ -3193,10 +3193,10 @@ def _build_setup_probe(
     usb_sysfs_path: Path | None,
     repair: bool,
 ) -> Callable[[Any, str | None], Any] | None:
-    """Build the credentialed persistent-tuple probe, or None to stay read-only.
+    """Build the credentialed environment/LO probe, or None to stay passive.
 
     Without an enrolled known_hosts file there is no attested way to reach the
-    radio, so doctor keeps its existing read-only behaviour and cannot mutate.
+    radio, so doctor cannot inspect persistence or run the restored 5.8 GHz probe.
     """
 
     if known_hosts_file is None:
@@ -3285,7 +3285,8 @@ def doctor(
         "--setup-known-hosts-file",
         help=(
             "Enrolled private known_hosts pinned to this exact radio. Supplying it lets "
-            "doctor read the persistent U-Boot tuple instead of reporting it unknown."
+            "doctor read the persistent U-Boot tuple and temporarily probe the 5.8 GHz "
+            "RX LO, restoring the exact prior LO before returning."
         ),
     ),
     setup_password_file: Path | None = typer.Option(  # noqa: B008
@@ -3326,8 +3327,8 @@ def doctor(
         True,
         "--fix/--no-fix",
         help=(
-            "Repair a non-canonical persistent U-Boot tuple through the guarded setup "
-            "transaction. Requires --setup-known-hosts-file; --no-fix reports only."
+            "Qualify the bounded persistent U-Boot profiles through the guarded setup "
+            "transaction. Requires --setup-known-hosts-file; --no-fix probes only."
         ),
     ),
 ) -> None:

@@ -69,6 +69,9 @@ class FakeSetupBackend:
             uboot=CANONICAL_UBOOT,
             environment_sha256="3" * 64,
             boot_provenance="qspi_reboot_verified",
+            rx_lo_5g8_accepted=True,
+            rx_lo_5g8_readback_hz=5_800_000_000,
+            rx_lo_restored=True,
         )
         return SetupExecutionResult(
             observation=self.current,
@@ -115,6 +118,11 @@ def test_setup_plan_accepts_only_exact_shipped_persistent_policy(tmp_path: Path)
 
     assert planned.plan.profile_id == policy.profile_id
     assert planned.plan.identity.observed_firmware == policy.device_firmware
+    assert planned.plan.changes == {
+        "attr_name": "compatible",
+        "attr_val": "ad9361",
+        "compatible": "ad9361",
+    }
 
     unshipped = policy.model_copy(update={"fit_body_sha256": "f" * 64})
     with pytest.raises(ValueError, match="exact shipped hardware-qualified"):

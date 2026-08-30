@@ -174,7 +174,7 @@ class PlutoService:
             raise RadioNotFoundError(f"unknown radio: {radio_id}") from error
 
     def doctor(self, radio_id: str | None = None) -> list[DoctorReport] | DoctorReport:
-        """Run fresh, read-only canonical setup checks for one or all managed radios."""
+        """Run fresh checks, including a restored RX-LO probe when setup is enrolled."""
 
         def report(controller: RadioController) -> DoctorReport:
             snapshot = controller.snapshot()
@@ -201,6 +201,9 @@ class PlutoService:
                                 "boot_provenance": observation.boot_provenance,
                                 "phy_model": observation.live_phy_model,
                                 "rx_scan_channels": observation.rx_scan_channels,
+                                "rx_lo_5g8_accepted": observation.rx_lo_5g8_accepted,
+                                "rx_lo_5g8_readback_hz": observation.rx_lo_5g8_readback_hz,
+                                "rx_lo_restored": observation.rx_lo_restored,
                             }
                         )
             return diagnose_radio(

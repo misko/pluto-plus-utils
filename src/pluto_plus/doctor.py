@@ -27,9 +27,15 @@ from pluto_plus.models import (
     FirmwarePolicy,
     RadioSnapshot,
 )
+from pluto_plus.setup_profiles import (
+    CLEAR_ATTR_PROFILE,
+    RX_LO_5G8_HZ,
+    SETUP_ENVIRONMENT_PROFILES,
+    environment_profile_for_uboot,
+)
 
-# attr_name/attr_val must stay unset.  The AD936x boot script on these boards guards
-# its AD9364 branch with a malformed condition:
+# Older AD936x boot scripts on these boards require attr_name/attr_val to stay
+# unset.  One branch is guarded by the malformed condition:
 #
 #     test ${compatible} = ad9364 || test -n ${attr_val} = ad9364
 #
@@ -37,14 +43,13 @@ from pluto_plus.models import (
 # at the trailing "= ad9364" and returns true unconditionally (u-boot cmd/test.c).  Any
 # non-empty attr_val therefore fires that branch on every boot, stripping
 # adi,2rx-2tx-mode-enable and running "setenv mode 1r1t; saveenv" -- reverting a 2R2T
-# radio to 1R1T and persisting the revert.  compatible=ad9361 drives the AD9361
-# override on its own through a separate, correctly formed branch.
-CANONICAL_UBOOT: dict[str, str | None] = {
-    "attr_name": None,
-    "attr_val": None,
-    "compatible": "ad9361",
-    "mode": "2r2t",
-}
+# radio to 1R1T and persisting the revert.  Newer observed firmware instead
+# needs attr_name=compatible and attr_val=ad9361.  Both bounded tuples live in
+# setup_profiles; post-reboot 2R2T and 5.8 GHz LO behaviour select the winner.
+# Compatibility export for callers that still refer to the original cleared
+# tuple.  Setup and Doctor accept either named environment profile and qualify
+# the selected tuple by live 2R2T plus the restored 5.8 GHz RX-LO probe.
+CANONICAL_UBOOT: dict[str, str | None] = CLEAR_ATTR_PROFILE.uboot
 
 CANONICAL_POLICY = FirmwarePolicy(
     profile_id="libiio-continuous-metadata",
@@ -845,6 +850,41 @@ def diagnose_radio(
         )
     )
 
+    lo_5g8_accepted = observed.get("rx_lo_5g8_accepted")
+    lo_probe_known = isinstance(lo_5g8_accepted, bool)
+    lo_probe_passed = (
+        lo_5g8_accepted is True
+        and observed.get("rx_lo_5g8_readback_hz") == RX_LO_5G8_HZ
+        and observed.get("rx_lo_restored") is True
+    )
+    findings.append(
+        _comparison(
+            "rf.rx_lo_5g8",
+            lo_probe_passed,
+            (
+                "RX LO accepted 5.8 GHz and the previous LO was restored"
+                if lo_probe_passed
+                else "RX LO did not accept 5.8 GHz or restoration was not proven"
+            ),
+            {
+                "target_hz": RX_LO_5G8_HZ,
+                "readback_hz": observed.get("rx_lo_5g8_readback_hz"),
+                "restored": observed.get("rx_lo_restored"),
+            },
+            {
+                "target_hz": RX_LO_5G8_HZ,
+                "accepted": True,
+                "restored": True,
+            },
+            (
+                "bounded RX-only sysfs write/readback; the exact previous RX LO is "
+                "restored before the probe returns"
+            ),
+            remediation=_setup_remediation(),
+            unknown=not lo_probe_known,
+        )
+    )
+
     metadata_value = (
         observed.get("buffer_metadata_abi")
         if "buffer_metadata_abi" in observed
@@ -897,12 +937,12 @@ def diagnose_radio(
     uboot = observed.get("uboot")
     if isinstance(uboot, Mapping):
         actual_uboot = {key: uboot.get(key) for key in CANONICAL_UBOOT}
-        uboot_matches = actual_uboot == CANONICAL_UBOOT
-        status = DoctorStatus.PASS if uboot_matches else DoctorStatus.FAIL
+        environment_profile = environment_profile_for_uboot(actual_uboot)
+        status = DoctorStatus.PASS if environment_profile is not None else DoctorStatus.FAIL
         summary = (
-            "Persistent AD9361/2R2T U-Boot tuple is canonical"
-            if uboot_matches
-            else "Persistent AD9361/2R2T U-Boot tuple is not canonical"
+            f"Persistent AD9361/2R2T U-Boot tuple matches {environment_profile.profile_id}"
+            if environment_profile is not None
+            else "Persistent AD9361/2R2T U-Boot tuple matches no supported profile"
         )
     else:
         actual_uboot = None
@@ -914,10 +954,10 @@ def diagnose_radio(
             status=status,
             summary=summary,
             actual=actual_uboot,
-            expected=CANONICAL_UBOOT,
+            expected={profile.profile_id: profile.uboot for profile in SETUP_ENVIRONMENT_PROFILES},
             evidence=(
-                "all four values must be read after a reboot; functional channels alone "
-                "are insufficient"
+                "all four values are read after reboot; this tuple finding is combined with "
+                "the live dual-RX and restored 5.8 GHz LO findings"
             ),
             remediation=None if status is DoctorStatus.PASS else _setup_remediation(),
         )
@@ -1032,10 +1072,11 @@ def _firmware_remediation() -> DoctorRemediation:
 def _setup_remediation() -> DoctorRemediation:
     return DoctorRemediation(
         remediation_id="provision_ad9361_2r2t",
-        title="Provision the persistent AD9361/2R2T tuple",
+        title="Qualify the persistent AD9361/2R2T environment",
         description=(
-            "Back up the complete U-Boot environment, write only the four canonical values, "
-            "reboot, re-attest the exact USB serial/path, reread all values, and prove voltage0..3."
+            "Back up the complete U-Boot environment, try the firmware-preferred bounded "
+            "profile, reboot, and prove voltage0..3 plus a restored 5.8 GHz RX-LO probe. "
+            "If that profile fails, try the other bounded profile once."
         ),
         automatable=True,
         mutation=True,

@@ -1,11 +1,12 @@
 """Credentialed persistent-setup inspection and guarded repair for the local doctor.
 
 The standalone doctor reads USB topology and live IIOD facts, and neither can reach
-the persistent U-Boot environment.  Given exact-radio SSH credentials this module
-reads the real tuple, and unless repair is disabled it drives the existing guarded
-setup transaction -- environment backup, fail-closed TX mute, environment-digest
-binding, reboot, re-attestation, and a durable receipt -- to restore the canonical
-values.  It never invents a mutation path of its own.
+the persistent U-Boot environment. Given exact-radio SSH credentials this module
+reads the real tuple, actively probes and restores the RX LO, and unless repair is
+disabled drives the existing guarded setup transaction -- environment backup,
+fail-closed TX mute, environment-digest binding, reboot, re-attestation, and a
+durable receipt -- to select one of two bounded profiles. It never invents a
+mutation path of its own.
 """
 
 from __future__ import annotations
@@ -24,19 +25,22 @@ from pluto_plus.models import FirmwarePolicy
 from pluto_plus.setup import (
     CanonicalSetupManager,
     SetupError,
+    SetupExecutionError,
     SetupIdentity,
     SetupPreconditionError,
+    observation_functionally_qualified,
 )
 from pluto_plus.setup_helper import (
     BoundSshTransport,
     FixedSshSetupExecutor,
     SetupHelperError,
 )
+from pluto_plus.setup_profiles import environment_profile_for_uboot
 
 ProbeStatus = Literal["pass", "fail", "unknown"]
 ManagerFactory = Callable[[SetupIdentity], CanonicalSetupManager]
 
-_ALREADY_CANONICAL = "radio setup is already canonical"
+_ALREADY_QUALIFIED = "radio setup is already functionally qualified"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +75,9 @@ class SetupProbeOutcome:
     actual: tuple[tuple[str, str | None], ...] | None
     summary: str
     repair: SetupRepairRecord | None = None
+    rx_lo_5g8_accepted: bool | None = None
+    rx_lo_5g8_readback_hz: int | None = None
+    rx_lo_restored: bool | None = None
 
 
 def ssh_manager_factory(
@@ -145,17 +152,30 @@ def probe_and_repair(
         )
 
     actual = tuple((key, observation.uboot.get(key)) for key in CANONICAL_UBOOT)
-    if dict(actual) == CANONICAL_UBOOT:
+    profile = environment_profile_for_uboot(observation.uboot)
+    if profile is not None and observation_functionally_qualified(observation):
         return SetupProbeOutcome(
             status="pass",
             actual=actual,
-            summary="Persistent AD9361/2R2T U-Boot tuple is canonical",
+            summary=(
+                f"Persistent environment {profile.profile_id} is live-qualified for "
+                "AD9361/2R2T and 5.8 GHz"
+            ),
+            rx_lo_5g8_accepted=observation.rx_lo_5g8_accepted,
+            rx_lo_5g8_readback_hz=observation.rx_lo_5g8_readback_hz,
+            rx_lo_restored=observation.rx_lo_restored,
         )
     if not repair:
         return SetupProbeOutcome(
             status="fail",
             actual=actual,
-            summary="Persistent AD9361/2R2T U-Boot tuple is not canonical; repair is disabled",
+            summary=(
+                "Persistent AD9361/2R2T environment is not functionally qualified; "
+                "repair is disabled"
+            ),
+            rx_lo_5g8_accepted=observation.rx_lo_5g8_accepted,
+            rx_lo_5g8_readback_hz=observation.rx_lo_5g8_readback_hz,
+            rx_lo_restored=observation.rx_lo_restored,
         )
     return _repair(manager, identity, actual)
 
@@ -168,11 +188,11 @@ def _repair(
     try:
         planned = manager.create_plan(identity)
     except SetupPreconditionError as error:
-        if str(error) == _ALREADY_CANONICAL:
+        if str(error) == _ALREADY_QUALIFIED:
             return SetupProbeOutcome(
                 status="pass",
                 actual=actual,
-                summary="Persistent AD9361/2R2T U-Boot tuple is canonical",
+                summary="Persistent AD9361/2R2T environment is functionally qualified",
             )
         return _repair_failed(actual, (), str(error))
     except (SetupError, SetupHelperError, OSError, ValueError) as error:
@@ -181,27 +201,57 @@ def _repair(
     changes = planned.plan.changes_items
     try:
         receipt = manager.execute(planned.plan, planned.confirmation_token)
+    except SetupExecutionError as error:
+        receipt = error.receipt
+        after = receipt.after
+        last_actual = (
+            actual
+            if after is None
+            else tuple((key, after.uboot.get(key)) for key in CANONICAL_UBOOT)
+        )
+        return SetupProbeOutcome(
+            status="fail",
+            actual=last_actual,
+            summary=f"Persistent AD9361/2R2T environment qualification failed: {error}",
+            repair=SetupRepairRecord(
+                attempted=True,
+                succeeded=False,
+                changes=changes,
+                receipt_id=receipt.receipt_id,
+                backup_path=receipt.backup_path,
+                error=str(error),
+            ),
+            rx_lo_5g8_accepted=None if after is None else after.rx_lo_5g8_accepted,
+            rx_lo_5g8_readback_hz=None if after is None else after.rx_lo_5g8_readback_hz,
+            rx_lo_restored=None if after is None else after.rx_lo_restored,
+        )
     except (SetupError, SetupHelperError, OSError, ValueError) as error:
         return _repair_failed(actual, changes, str(error))
 
     if not receipt.success or receipt.after is None:
         return _repair_failed(actual, changes, receipt.error or receipt.outcome)
     repaired = tuple((key, receipt.after.uboot.get(key)) for key in CANONICAL_UBOOT)
+    repaired_profile = environment_profile_for_uboot(receipt.after.uboot)
+    qualified = repaired_profile is not None and observation_functionally_qualified(receipt.after)
     return SetupProbeOutcome(
-        status="pass" if dict(repaired) == CANONICAL_UBOOT else "fail",
+        status="pass" if qualified else "fail",
         actual=repaired,
         summary=(
-            "Persistent AD9361/2R2T U-Boot tuple was repaired and re-attested after reboot"
-            if dict(repaired) == CANONICAL_UBOOT
-            else "Repair completed but the re-attested tuple is still not canonical"
+            f"Persistent environment {repaired_profile.profile_id} was selected and "
+            "live-qualified after reboot"
+            if qualified and repaired_profile is not None
+            else "Repair completed but the environment is still not functionally qualified"
         ),
         repair=SetupRepairRecord(
             attempted=True,
-            succeeded=dict(repaired) == CANONICAL_UBOOT,
+            succeeded=qualified,
             changes=changes,
             receipt_id=receipt.receipt_id,
             backup_path=receipt.backup_path,
         ),
+        rx_lo_5g8_accepted=receipt.after.rx_lo_5g8_accepted,
+        rx_lo_5g8_readback_hz=receipt.after.rx_lo_5g8_readback_hz,
+        rx_lo_restored=receipt.after.rx_lo_restored,
     )
 
 

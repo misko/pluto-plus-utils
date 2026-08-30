@@ -1,4 +1,4 @@
-"""Daemon-independent, read-only diagnostics for locally attached Pluto radios."""
+"""Daemon-independent diagnostics for locally attached Pluto radios."""
 
 from __future__ import annotations
 
@@ -23,9 +23,9 @@ from pluto_plus.diagnostic_profiles import (
     select_diagnostic_profile,
     upgrade_target_for,
 )
-from pluto_plus.doctor import CANONICAL_UBOOT
 from pluto_plus.hardware.preflight import IioEnvironmentReport, inspect_iio_environment
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
+from pluto_plus.setup_profiles import RX_LO_5G8_HZ, SETUP_ENVIRONMENT_PROFILES
 from pluto_plus.setup_repair import SetupProbeOutcome, SetupRepairRecord
 
 CheckStatus = Literal["pass", "fail", "unknown"]
@@ -36,8 +36,15 @@ DataPlaneProbeRunner = Callable[[LocalUsbPluto], DataPlaneProbe]
 LOCAL_POLICY = BOOTSTRAP_POLICY
 # Rendered from the single canonical definition so the advertised tuple cannot drift
 # away from the one the provisioner actually writes.
-CANONICAL_UBOOT_SUMMARY = ", ".join(
-    f"{key} unset" if value is None else f"{key}={value}" for key, value in CANONICAL_UBOOT.items()
+CANONICAL_UBOOT_SUMMARY = tuple(
+    (
+        profile.profile_id,
+        ", ".join(
+            f"{key} unset" if value is None else f"{key}={value}"
+            for key, value in profile.uboot.items()
+        ),
+    )
+    for profile in SETUP_ENVIRONMENT_PROFILES
 )
 
 
@@ -346,6 +353,42 @@ def _diagnose_radio(
         if probed is None
         else probed.summary,
     )
+    _check(
+        checks,
+        "rf.rx_lo_5g8",
+        (
+            "unknown"
+            if probed is None or probed.rx_lo_5g8_accepted is None
+            else "pass"
+            if (
+                probed.rx_lo_5g8_accepted
+                and probed.rx_lo_5g8_readback_hz == RX_LO_5G8_HZ
+                and probed.rx_lo_restored
+            )
+            else "fail"
+        ),
+        (
+            None
+            if probed is None
+            else {
+                "target_hz": RX_LO_5G8_HZ,
+                "readback_hz": probed.rx_lo_5g8_readback_hz,
+                "restored": probed.rx_lo_restored,
+            }
+        ),
+        {"target_hz": RX_LO_5G8_HZ, "accepted": True, "restored": True},
+        (
+            "5.8 GHz RX-LO probe requires the authenticated setup inspector"
+            if probed is None
+            else "RX LO probe set 5.8 GHz and restored the exact previous LO"
+            if (
+                probed.rx_lo_5g8_accepted
+                and probed.rx_lo_5g8_readback_hz == RX_LO_5G8_HZ
+                and probed.rx_lo_restored
+            )
+            else "RX LO probe did not accept 5.8 GHz or restoration was not proven"
+        ),
+    )
     return _radio_result(
         device,
         usb_bus_device,
@@ -379,6 +422,7 @@ def _unknown_facts(checks: list[LocalDoctorCheck]) -> None:
         ("transport.tandem_agc", "capability selected by a known profile"),
         ("firmware.qspi_boot_provenance", "fresh trusted persistent-boot evidence"),
         ("setup.uboot_ad9361_2r2t", "canonical persistent U-Boot tuple"),
+        ("rf.rx_lo_5g8", f"accepted and restored {RX_LO_5G8_HZ} Hz RX LO"),
     ):
         _check(checks, code, "unknown", None, expected, "Fresh fact is unavailable")
 

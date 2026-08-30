@@ -20,6 +20,11 @@ from pydantic import Field, field_validator
 from pluto_plus.diagnostic_profiles import SUPPORTED_AD936X_PHY_MODELS
 from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT, require_setup_repair_policy
 from pluto_plus.models import ApiModel, FirmwarePolicy
+from pluto_plus.setup_profiles import (
+    RX_LO_5G8_HZ,
+    environment_profile_for_uboot,
+    environment_profiles_for_firmware,
+)
 
 
 class SetupError(RuntimeError):
@@ -94,6 +99,9 @@ class SetupObservation(ApiModel):
     boot_provenance: str = Field(min_length=1, max_length=64)
     rx_scan_channels: tuple[str, ...]
     tx_safe: bool
+    rx_lo_5g8_accepted: bool | None = None
+    rx_lo_5g8_readback_hz: int | None = Field(default=None, ge=1)
+    rx_lo_restored: bool | None = None
 
     @field_validator("uboot")
     @classmethod
@@ -181,6 +189,20 @@ class SetupExecutor(Protocol):
     def provision(self, plan: SetupPlan) -> SetupExecutionResult: ...
 
 
+def observation_functionally_qualified(observation: SetupObservation) -> bool:
+    """Require live 2R2T, safe TX, and an exact restored 5.8 GHz RX-LO probe."""
+
+    required = {"voltage0", "voltage1", "voltage2", "voltage3"}
+    return (
+        observation.live_phy_model in SUPPORTED_AD936X_PHY_MODELS
+        and required.issubset(observation.rx_scan_channels)
+        and observation.tx_safe
+        and observation.rx_lo_5g8_accepted is True
+        and observation.rx_lo_5g8_readback_hz == RX_LO_5G8_HZ
+        and observation.rx_lo_restored is True
+    )
+
+
 @dataclass(slots=True)
 class _TokenRecord:
     digest: bytes
@@ -236,13 +258,20 @@ class CanonicalSetupManager:
 
     def create_plan(self, identity: SetupIdentity) -> PlannedSetup:
         before = self.inspect_qualified(identity)
+        active_profile = environment_profile_for_uboot(before.uboot)
+        if active_profile is not None and observation_functionally_qualified(before):
+            raise SetupPreconditionError("radio setup is already functionally qualified")
+        candidates = environment_profiles_for_firmware(identity.observed_firmware)
+        target = next((candidate for candidate in candidates if candidate != active_profile), None)
+        if target is None:
+            raise SetupPreconditionError("no alternate bounded setup profile is available")
         changes = tuple(
             (key, expected)
-            for key, expected in CANONICAL_UBOOT.items()
+            for key, expected in target.uboot.items()
             if before.uboot.get(key) != expected
         )
         if not changes:
-            raise SetupPreconditionError("radio setup is already canonical")
+            raise SetupPreconditionError("setup profile produced no persistent changes")
         now = self._now()
         plan = SetupPlan(
             plan_id=uuid.uuid4().hex,
@@ -445,13 +474,12 @@ class CanonicalSetupManager:
 
     def _validate_success(self, identity: SetupIdentity, observation: SetupObservation) -> None:
         self._validate_identity(identity, observation)
-        if observation.uboot != CANONICAL_UBOOT:
-            raise SetupPreconditionError("canonical U-Boot tuple did not persist")
-        if observation.live_phy_model not in SUPPORTED_AD936X_PHY_MODELS:
-            raise SetupPreconditionError("live PHY did not return as a supported AD936x")
-        required = {"voltage0", "voltage1", "voltage2", "voltage3"}
-        if not required.issubset(observation.rx_scan_channels):
-            raise SetupPreconditionError("dual receiver scan channels did not return")
+        if environment_profile_for_uboot(observation.uboot) is None:
+            raise SetupPreconditionError("no supported U-Boot environment profile persisted")
+        if not observation_functionally_qualified(observation):
+            raise SetupPreconditionError(
+                f"setup did not return as 2R2T with restored {RX_LO_5G8_HZ} Hz RX LO"
+            )
         if observation.boot_provenance not in {
             "qspi_reboot_verified",
             "qspi_cold_boot_verified",

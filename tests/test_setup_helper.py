@@ -20,6 +20,7 @@ from pluto_plus.setup_helper import (
     SetupSshHostKeyChangedError,
     SetupTransport,
 )
+from pluto_plus.setup_profiles import RX_LO_5G8_HZ, SET_ATTR_PROFILE
 
 
 def test_bound_ssh_transport_supports_private_lan_without_usb_bind(
@@ -390,6 +391,9 @@ def _observation(*, canonical: bool, tx_safe: bool) -> SetupObservation:
         boot_provenance=("qspi_reboot_verified" if canonical else "qspi_image_verified"),
         rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
         tx_safe=tx_safe,
+        rx_lo_5g8_accepted=canonical,
+        rx_lo_5g8_readback_hz=5_800_000_000 if canonical else None,
+        rx_lo_restored=canonical,
     )
 
 
@@ -489,6 +493,15 @@ def test_executor_has_no_arbitrary_command_or_value_surface(tmp_path: Path) -> N
         executor.canonical_batch({"attr_name": "$(reboot)"})
 
 
+def test_inspector_gates_5g8_probe_and_requires_exact_lo_restoration() -> None:
+    from pluto_plus.setup_helper import _INSPECT_SCRIPT
+
+    script = _INSPECT_SCRIPT.decode()
+    assert f"lo_target={RX_LO_5G8_HZ}" in script
+    assert '[ "$rx_buffer_active" = 0 ] && [ "$tx_safe_for_lo" = 1 ]' in script
+    assert '[ "$restored" = 1 ]' in script
+
+
 def test_provision_orders_backup_mute_exact_batch_reboot_and_verification(
     tmp_path: Path,
 ) -> None:
@@ -512,6 +525,40 @@ def test_provision_orders_backup_mute_exact_batch_reboot_and_verification(
     assert stdin == b"attr_name\nattr_val\nmode 2r2t\n"
     assert result.observation.live_phy_model == "ad9361"
     assert result.backup_path == "/private/backup.json"
+
+
+def test_provision_tries_the_second_bounded_profile_after_failed_5g8_probe(
+    tmp_path: Path,
+) -> None:
+    before = _observation(canonical=False, tx_safe=True)
+    clear_but_unqualified = _observation(canonical=True, tx_safe=True).model_copy(
+        update={
+            "rx_lo_5g8_accepted": False,
+            "rx_lo_5g8_readback_hz": None,
+            "rx_lo_restored": True,
+        }
+    )
+    set_and_qualified = _observation(canonical=True, tx_safe=True).model_copy(
+        update={
+            "uboot": SET_ATTR_PROFILE.uboot,
+            "environment_sha256": "5" * 64,
+        }
+    )
+    executor = ScriptedExecutor(
+        tmp_path,
+        [before, clear_but_unqualified, set_and_qualified],
+    )
+    executor.recording_transport.responses.append("")
+
+    result = executor.provision(_plan(before))
+
+    assert result.observation.uboot == SET_ATTR_PROFILE.uboot
+    assert executor.events.count("reenumerate") == 2
+    assert [stdin for _command, stdin in executor.recording_transport.commands] == [
+        b"attr_name\nattr_val\nmode 2r2t\n",
+        b"attr_name compatible\nattr_val ad9361\n",
+    ]
+    assert any(phase.startswith("functional_probe_failed:") for phase in result.completed_phases)
 
 
 def test_provision_reenrolls_expected_rotated_key_only_after_reenumeration(
@@ -577,10 +624,10 @@ def test_provision_reenrolls_expected_rotated_key_only_after_reenumeration(
         "preflight",
         "backup",
         "tx_safe",
-        "mutation_dispatched",
-        "reboot_observed",
+        "mutation_dispatched:ad9361-2r2t-clear-attr-pair",
+        "reboot_observed:ad9361-2r2t-clear-attr-pair",
         "ssh_host_key_reenrolled",
-        "post_reboot_attestation",
+        "post_reboot_attestation:ad9361-2r2t-clear-attr-pair",
     )
 
 

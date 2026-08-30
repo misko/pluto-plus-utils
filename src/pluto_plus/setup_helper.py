@@ -34,6 +34,14 @@ from pluto_plus.setup import (
     SetupObservation,
     SetupPlan,
     SetupUnavailableError,
+    observation_functionally_qualified,
+)
+from pluto_plus.setup_profiles import (
+    RX_LO_5G8_HZ,
+    SETUP_ENVIRONMENT_PROFILES,
+    SetupEnvironmentProfile,
+    environment_profile_for_uboot,
+    environment_profiles_for_firmware,
 )
 
 _SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -359,16 +367,24 @@ class FixedSshSetupExecutor:
         self._poll_interval_s = poll_interval_s
 
     def canonical_batch(self, changes: Mapping[str, str | None]) -> bytes:
+        """Encode a subset of exactly one shipped environment profile."""
+
         if not changes:
-            raise SetupHelperError("canonical setup has no changes")
+            raise SetupHelperError("setup environment profile has no changes")
         if not set(changes).issubset(CANONICAL_UBOOT):
             raise SetupHelperError("setup requested an unsupported U-Boot key")
+        matching_profiles = tuple(
+            profile
+            for profile in SETUP_ENVIRONMENT_PROFILES
+            if all(profile.uboot[key] == expected for key, expected in changes.items())
+        )
+        if not matching_profiles:
+            raise SetupHelperError("setup requested values outside the bounded profiles")
         ordered: list[str] = []
         for key, expected in CANONICAL_UBOOT.items():
             if key not in changes:
                 continue
-            if changes[key] != expected:
-                raise SetupHelperError("setup requested a non-canonical U-Boot value")
+            expected = changes[key]
             # fw_setenv --script deletes a variable when the line carries no value.
             ordered.append(f"{key}\n" if expected is None else f"{key} {expected}\n")
         return "".join(ordered).encode()
@@ -409,6 +425,9 @@ class FixedSshSetupExecutor:
             boot_provenance=provenance,
             rx_scan_channels=scan_channels,
             tx_safe=tx_safe,
+            rx_lo_5g8_accepted=_optional_bool(fields.get("rx_lo_5g8_accepted")),
+            rx_lo_5g8_readback_hz=_optional_int(fields.get("rx_lo_5g8_readback_hz")),
+            rx_lo_restored=_optional_bool(fields.get("rx_lo_restored")),
         )
 
     def provision(self, plan: SetupPlan) -> SetupExecutionResult:
@@ -424,7 +443,9 @@ class FixedSshSetupExecutor:
         failure_phase = "tx_safety"
         mutation_attempted = False
         host_key_rotation: SetupHostKeyRotation | None = None
+        last_observation: SetupObservation | None = before
         try:
+            current = before
             if not before.tx_safe:
                 self._mute_transmit()
                 muted = self.inspect(plan.identity)
@@ -432,65 +453,95 @@ class FixedSshSetupExecutor:
                     raise SetupHelperError("transmit path did not reach fail-closed state")
                 if muted.environment_sha256 != plan.environment_sha256:
                     raise SetupHelperError("persistent environment changed while muting transmit")
+                current = muted
             completed_phases.append("tx_safe")
-            batch = self.canonical_batch(plan.changes)
-            command = (
-                "set -eu; "
-                f'test "$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/'
-                f'serialnumber)" = "{self.identity.serial}"; '
-                "current=$(/usr/sbin/fw_printenv 2>/dev/null | LC_ALL=C sort | "
-                "sha256sum | awk '{print $1}'); "
-                f'test "$current" = "{plan.environment_sha256}"; '
-                "/usr/sbin/fw_setenv --script -; /bin/sync; "
-                "/usr/sbin/device_reboot reset"
-            )
-            failure_phase = "environment_write"
-            mutation_attempted = True
-            self.transport.run(command, stdin=batch, timeout_s=20)
-            completed_phases.append("mutation_dispatched")
-            failure_phase = "reboot_reenumeration"
-            self._wait_for_reenumeration()
-            completed_phases.append("reboot_observed")
-            failure_phase = "post_reboot_attestation"
-            deadline = time.monotonic() + self._reenumeration_timeout_s
-            last_error: BaseException | None = None
-            while time.monotonic() < deadline:
-                try:
-                    after = self.inspect(plan.identity)
-                    after = after.model_copy(update={"boot_provenance": "qspi_reboot_verified"})
-                    if not after.tx_safe:
-                        self._mute_transmit()
+            candidates = self._environment_candidates(plan)
+            for attempt, profile in enumerate(candidates, start=1):
+                changes = {
+                    key: expected
+                    for key, expected in profile.uboot.items()
+                    if current.uboot.get(key) != expected
+                }
+                if attempt == 1 and changes != plan.changes:
+                    raise SetupHelperError("setup plan does not match its primary profile")
+                if not changes:
+                    continue
+                batch = self.canonical_batch(changes)
+                command = (
+                    "set -eu; "
+                    f'test "$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/'
+                    f'serialnumber)" = "{self.identity.serial}"; '
+                    "current=$(/usr/sbin/fw_printenv 2>/dev/null | LC_ALL=C sort | "
+                    "sha256sum | awk '{print $1}'); "
+                    f'test "$current" = "{current.environment_sha256}"; '
+                    "/usr/sbin/fw_setenv --script -; /bin/sync; "
+                    "/usr/sbin/device_reboot reset"
+                )
+                failure_phase = f"environment_write:{profile.profile_id}"
+                mutation_attempted = True
+                self.transport.run(command, stdin=batch, timeout_s=20)
+                completed_phases.append(f"mutation_dispatched:{profile.profile_id}")
+                failure_phase = f"reboot_reenumeration:{profile.profile_id}"
+                self._wait_for_reenumeration()
+                completed_phases.append(f"reboot_observed:{profile.profile_id}")
+                failure_phase = f"post_reboot_attestation:{profile.profile_id}"
+                deadline = time.monotonic() + self._reenumeration_timeout_s
+                last_error: BaseException | None = None
+                after: SetupObservation | None = None
+                while time.monotonic() < deadline:
+                    try:
                         after = self.inspect(plan.identity).model_copy(
                             update={"boot_provenance": "qspi_reboot_verified"}
                         )
+                        if not after.tx_safe:
+                            self._mute_transmit()
+                            after = self.inspect(plan.identity).model_copy(
+                                update={"boot_provenance": "qspi_reboot_verified"}
+                            )
+                        break
+                    except SetupSshHostKeyChangedError as error:
+                        last_error = error
+                        if host_key_rotation is not None:
+                            break
+                        reenroll = getattr(
+                            self.transport,
+                            "reenroll_after_attested_usb_reboot",
+                            None,
+                        )
+                        if not callable(reenroll):
+                            break
+                        host_key_rotation = reenroll(
+                            serial=self.identity.serial,
+                            usb_sysfs_path=Path(self.identity.usb_sysfs_path),
+                            timeout_s=self._reenumeration_timeout_s,
+                        )
+                        completed_phases.append("ssh_host_key_reenrolled")
+                    except BaseException as error:
+                        last_error = error
+                        time.sleep(self._poll_interval_s)
+                if after is None:
+                    raise SetupHelperError(
+                        f"radio did not become ready after reboot: {last_error}"
+                    )
+                current = after
+                last_observation = after
+                completed_phases.append(f"post_reboot_attestation:{profile.profile_id}")
+                if (
+                    environment_profile_for_uboot(after.uboot) is not None
+                    and observation_functionally_qualified(after)
+                ):
                     return SetupExecutionResult(
                         observation=after,
                         backup_path=str(backup_path),
                         backup_sha256=backup_digest,
-                        completed_phases=(*completed_phases, "post_reboot_attestation"),
+                        completed_phases=tuple(completed_phases),
                         host_key_rotation=host_key_rotation,
                     )
-                except SetupSshHostKeyChangedError as error:
-                    last_error = error
-                    if host_key_rotation is not None:
-                        break
-                    reenroll = getattr(
-                        self.transport,
-                        "reenroll_after_attested_usb_reboot",
-                        None,
-                    )
-                    if not callable(reenroll):
-                        break
-                    host_key_rotation = reenroll(
-                        serial=self.identity.serial,
-                        usb_sysfs_path=Path(self.identity.usb_sysfs_path),
-                        timeout_s=self._reenumeration_timeout_s,
-                    )
-                    completed_phases.append("ssh_host_key_reenrolled")
-                except BaseException as error:
-                    last_error = error
-                    time.sleep(self._poll_interval_s)
-            raise SetupHelperError(f"radio did not become ready after reboot: {last_error}")
+                completed_phases.append(f"functional_probe_failed:{profile.profile_id}")
+            raise SetupHelperError(
+                "neither bounded U-Boot profile returned dual RX with an accepted and "
+                f"restored {RX_LO_5G8_HZ} Hz RX LO"
+            )
         except BaseException as error:
             raise SetupExecutorFailure(
                 str(error),
@@ -500,7 +551,21 @@ class FixedSshSetupExecutor:
                 completed_phases=tuple(completed_phases),
                 reconciliation_required=mutation_attempted,
                 host_key_rotation=host_key_rotation,
+                after=last_observation,
             ) from error
+
+    @staticmethod
+    def _environment_candidates(
+        plan: SetupPlan,
+    ) -> tuple[SetupEnvironmentProfile, SetupEnvironmentProfile]:
+        primary_values = dict(plan.before.uboot)
+        primary_values.update(plan.changes)
+        primary = environment_profile_for_uboot(primary_values)
+        if primary is None:
+            raise SetupHelperError("setup plan does not produce a bounded environment profile")
+        ordered = environment_profiles_for_firmware(plan.identity.observed_firmware)
+        secondary = next(profile for profile in ordered if profile != primary)
+        return primary, secondary
 
     def _mute_transmit(self) -> None:
         command = f"sh -s -- {self.identity.serial}"
@@ -606,6 +671,26 @@ def _required_hex(fields: Mapping[str, str], key: str, *, maximum_bytes: int) ->
 
 def _nullable(value: str | None) -> str | None:
     return value or None
+
+
+def _optional_bool(value: str | None) -> bool | None:
+    if value in {None, ""}:
+        return None
+    if value not in {"0", "1"}:
+        raise SetupHelperError("helper report contained an invalid boolean")
+    return value == "1"
+
+
+def _optional_int(value: str | None) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise SetupHelperError("helper report contained an invalid integer") from error
+    if parsed <= 0:
+        raise SetupHelperError("helper report contained a non-positive integer")
+    return parsed
 
 
 def _csv_numbers(value: str) -> tuple[float, ...]:
@@ -740,16 +825,75 @@ emit qspi_sha256 "${qspi_sha%% *}"
 compatible_path=/proc/device-tree/amba/spi@e0006000/ad9361-phy@0/compatible
 compatible=$(tr '\000' '\n' <"$compatible_path" 2>/dev/null | head -n1 || true)
 emit phy_model "${compatible#adi,}"
-rx=''
+phy=''; rx=''; rx_buffer_active=0
 for d in /sys/bus/iio/devices/iio:device*; do
-  [ "$(cat "$d/name" 2>/dev/null || true)" = cf-ad9361-lpc ] || continue
-  for f in "$d"/scan_elements/in_voltage[0-3]_en; do
-    [ -e "$f" ] || continue
-    channel=$(basename "$f" | sed -n 's/^in_\(voltage[0-3]\)_en$/\1/p')
-    case ",$rx," in *,$channel,*) ;; *) rx="${rx}${rx:+,}$channel";; esac
-  done
+  case "$(cat "$d/name" 2>/dev/null || true)" in
+    ad9361-phy) phy="$d" ;;
+    cf-ad9361-lpc)
+      [ "$(cat "$d/buffer/enable" 2>/dev/null || printf 1)" = 0 ] || rx_buffer_active=1
+      for f in "$d"/scan_elements/in_voltage[0-3]_en; do
+        [ -e "$f" ] || continue
+        channel=$(basename "$f" | sed -n 's/^in_\(voltage[0-3]\)_en$/\1/p')
+        case ",$rx," in *,$channel,*) ;; *) rx="${rx}${rx:+,}$channel";; esac
+      done
+      ;;
+  esac
 done
 emit rx_scan_channels "$rx"
+lo_target=5800000000
+lo_readback=''; lo_accepted=''; lo_restored=''
+tx_safe_for_lo=1; gain_count=0; dds_count=0
+if [ -n "$phy" ]; then
+  for f in "$phy"/out_voltage[0-9]_hardwaregain; do
+    [ -e "$f" ] || continue
+    gain_count=$((gain_count + 1))
+    awk -v value="$(cat "$f")" 'BEGIN { exit !(value <= -80) }' || tx_safe_for_lo=0
+  done
+else
+  tx_safe_for_lo=0
+fi
+for d in /sys/bus/iio/devices/iio:device*; do
+  [ "$(cat "$d/name" 2>/dev/null || true)" = cf-ad9361-dds-core-lpc ] || continue
+  dds_count=$((dds_count + 1))
+  [ "$(cat "$d/buffer/enable" 2>/dev/null || printf 1)" = 0 ] || tx_safe_for_lo=0
+  for f in "$d"/out_altvoltage*_raw "$d"/out_altvoltage*_scale \
+      "$d"/scan_elements/out_voltage[0-3]_en; do
+    [ -e "$f" ] || continue
+    awk -v value="$(cat "$f")" 'BEGIN { exit !(value == 0) }' || tx_safe_for_lo=0
+  done
+done
+[ "$gain_count" -gt 0 ] || tx_safe_for_lo=0
+[ "$dds_count" -gt 0 ] || tx_safe_for_lo=0
+if [ "$rx_buffer_active" = 0 ] && [ "$tx_safe_for_lo" = 1 ] && [ -n "$phy" ]; then
+  lo_path="$phy/out_altvoltage0_RX_LO_frequency"
+  if [ -e "$lo_path" ]; then
+    lo_original=$(cat "$lo_path")
+    lo_accepted=0
+    if printf '%s\n' "$lo_target" >"$lo_path" 2>/dev/null; then
+      lo_readback=$(cat "$lo_path")
+      [ "$lo_readback" = "$lo_target" ] && lo_accepted=1
+    fi
+    delta=0; restored=0
+    while [ "$delta" -le 32 ] && [ "$restored" = 0 ]; do
+      if [ "$delta" = 0 ]; then
+        candidates="$lo_original"
+      else
+        candidates="$((lo_original + delta)) $((lo_original - delta))"
+      fi
+      for candidate in $candidates; do
+        printf '%s\n' "$candidate" >"$lo_path" 2>/dev/null || continue
+        if [ "$(cat "$lo_path")" = "$lo_original" ]; then restored=1; break; fi
+      done
+      delta=$((delta + 1))
+    done
+    [ "$restored" = 1 ]
+    lo_restored=1
+  fi
+fi
+emit rx_lo_5g8_target_hz "$lo_target"
+emit rx_lo_5g8_readback_hz "$lo_readback"
+emit rx_lo_5g8_accepted "$lo_accepted"
+emit rx_lo_restored "$lo_restored"
 dds=''; scales=''; buffers=''; available=''; scans=''
 for d in /sys/bus/iio/devices/iio:device*; do
   [ "$(cat "$d/name" 2>/dev/null || true)" = cf-ad9361-dds-core-lpc ] || continue

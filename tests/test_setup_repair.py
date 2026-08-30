@@ -14,10 +14,12 @@ from pluto_plus.doctor import (
 from pluto_plus.setup import (
     CanonicalSetupManager,
     SetupExecutionResult,
+    SetupExecutorFailure,
     SetupIdentity,
     SetupObservation,
 )
 from pluto_plus.setup_helper import SetupHelperError
+from pluto_plus.setup_profiles import SET_ATTR_PROFILE
 from pluto_plus.setup_repair import probe_and_repair
 
 # The state a radio lands in when attr_val fires the malformed AD9364 branch.
@@ -69,6 +71,9 @@ class FakeBackend:
             environment_sha256="3" * 64,
             boot_provenance="qspi_reboot_verified",
             rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
+            rx_lo_5g8_accepted=True,
+            rx_lo_5g8_readback_hz=5_800_000_000,
+            rx_lo_restored=True,
         )
         return SetupExecutionResult(
             observation=self.current,
@@ -139,7 +144,15 @@ def test_probe_reports_without_mutating_when_repair_is_disabled(tmp_path: Path) 
 
 
 def test_probe_passes_and_never_mutates_a_canonical_radio(tmp_path: Path) -> None:
-    backend = FakeBackend(_observation(uboot=dict(CANONICAL_UBOOT)))
+    backend = FakeBackend(
+        _observation(
+            uboot=dict(CANONICAL_UBOOT),
+            rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
+            rx_lo_5g8_accepted=True,
+            rx_lo_5g8_readback_hz=5_800_000_000,
+            rx_lo_restored=True,
+        )
+    )
 
     outcome = _probe(backend, tmp_path)
 
@@ -211,3 +224,34 @@ def test_repair_failure_is_reported_and_never_claims_success(tmp_path: Path) -> 
     assert outcome.repair.attempted and not outcome.repair.succeeded
     assert outcome.repair.error is not None
     assert dict(outcome.actual or ()) == REVERTED_UBOOT
+
+
+def test_repair_failure_reports_the_last_rebooted_profile(tmp_path: Path) -> None:
+    after = _observation(
+        uboot=SET_ATTR_PROFILE.uboot,
+        environment_sha256="8" * 64,
+        boot_provenance="qspi_reboot_verified",
+        rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
+        rx_lo_5g8_accepted=False,
+        rx_lo_restored=True,
+    )
+
+    class FailingAfterRebootBackend(FakeBackend):
+        def provision(self, plan: object) -> SetupExecutionResult:
+            del plan
+            raise SetupExecutorFailure(
+                "neither bounded profile accepted 5.8 GHz",
+                backup_path="/private/SERIAL_A-before.json",
+                backup_sha256="4" * 64,
+                after=after,
+                completed_phases=("reboot_observed:ad9361-2r2t-set-attr-pair",),
+            )
+
+    outcome = _probe(FailingAfterRebootBackend(_observation()), tmp_path)
+
+    assert outcome.status == "fail"
+    assert dict(outcome.actual or ()) == SET_ATTR_PROFILE.uboot
+    assert outcome.rx_lo_5g8_accepted is False
+    assert outcome.repair is not None
+    assert outcome.repair.receipt_id is not None
+    assert outcome.repair.backup_path == "/private/SERIAL_A-before.json"
