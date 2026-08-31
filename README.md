@@ -369,6 +369,23 @@ report distinguishes achieved wire-format MB/s, counter-proven gaps inside
 each direct segment, DMA-overflow flags, RAM spill/drain/high-water counts, and
 samples skipped while a new bounded segment is armed.
 
+When several locally attached Pluto gadgets share `192.168.2.1`, keep IP/TCP
+transport and bind the full matrix to one exact serial and physical USB path:
+
+```bash
+uv run pluto radio direct-async-ladder 192.168.2.1 \
+  --transport ip --expect-serial EXACT_SERIAL \
+  --usb-sysfs-path /sys/bus/usb/devices/EXACT_PATH \
+  --isolate-usb-route \
+  --isolation-confirm 'ISOLATE USB SSH EXACT_INTERFACE'
+```
+
+The utility temporarily removes only the competing Pluto routes/interfaces,
+runs the entire matrix as one bounded action, restores the host network in a
+`finally` path, and writes a durable isolation receipt. This tests the same TCP
+path as a physical-IP run; selecting `--transport usb` is a different transport
+and does not substitute for the release TCP measurement.
+
 One direct wire request is limited to 64 frames. A longer duration cell is
 therefore divided into the minimum number of finite direct captures. The
 throughput timer covers each `read_block()` loop and the report makes the

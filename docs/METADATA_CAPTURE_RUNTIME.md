@@ -169,6 +169,11 @@ uv run pluto radio direct-async-ladder 192.168.1.15 \
 ```
 
 Add `--ram-ring-slots 13 --kernel-buffers 10` for the RAM-extension matrix.
+For a local gadget among several radios that all use `192.168.2.1`, add the
+exact `--usb-sysfs-path`, `--isolate-usb-route`, and
+`--isolation-confirm 'ISOLATE USB SSH INTERFACE'`. Route isolation covers the
+whole matrix, restores every peer interface afterward, and emits a durable
+receipt; the ladder remains IP/TCP rather than silently switching to USB bulk.
 Cells needing more than the direct protocol's 64-frame limit are split into
 bounded captures. The report proves counter continuity inside each segment and
 reports the re-arm interval separately; it does not call several bounded
@@ -176,8 +181,10 @@ captures one uninterrupted RF capture. Counter-observed gaps are evidence in a
 completed speed cell, while protocol, readback, cleanup, or capture failures
 make the command exit nonzero.
 
-The immutable source ref is not published yet and no version-stamped firmware
-image exists. Until both are published, the installer below must fail closed
+The immutable `iq-direct-async-ring-v1-rc1-source/libiio-v1` ref and the
+version-stamped RAM-only RC1 candidate image are published. Persistent firmware
+installation remains unavailable until final-byte hardware qualification and
+an explicit promotion profile; the installer below must fail closed
 and the feature is not an end-user installation. Firmware source requirements,
 submodule commits, binary evidence hashes, publication order, and rollback are
 recorded in `IIO_DIRECT_ASYNC_INSTALL.md` on firmware branch

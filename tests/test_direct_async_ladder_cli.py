@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -215,6 +216,102 @@ def test_direct_ram_ladder_forwards_extension_slots(
 
     assert result.exit_code == 5
     assert "slots=13" in result.output
+
+
+def test_direct_ladder_route_isolation_requires_exact_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_radio = SimpleNamespace(
+        serial="SERIAL_A",
+        usb_path="/sys/bus/usb/devices/3-8",
+        host_network_interfaces=(SimpleNamespace(name="enx001"),),
+    )
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (local_radio,))
+    monkeypatch.setattr(
+        "pluto_plus.host_isolation.prepare_usb_ssh_isolation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            confirmation_phrase="ISOLATE USB SSH enx001"
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "direct-async-ladder",
+            "192.168.2.1",
+            "--expect-serial",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--isolate-usb-route",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "host_isolation_confirmation_required" in result.output
+    assert "ISOLATE USB SSH enx001" in result.output
+
+
+def test_direct_ladder_runs_inside_exact_usb_route_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_radio = SimpleNamespace(
+        serial="SERIAL_A",
+        usb_path="/sys/bus/usb/devices/3-8",
+        host_network_interfaces=(SimpleNamespace(name="enx001"),),
+    )
+    plan = SimpleNamespace(confirmation_phrase="ISOLATE USB SSH enx001")
+    receipt = SimpleNamespace(receipt_path="/private/isolation.json")
+    prepared: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    executed: list[dict[str, object]] = []
+
+    def prepare(*args: object, **kwargs: object) -> object:
+        prepared.append((args, kwargs))
+        return plan
+
+    def execute(_plan: object, **kwargs: object) -> tuple[DirectAsyncLadderReport, object]:
+        executed.append(kwargs)
+        action = kwargs["action"]
+        assert callable(action)
+        return action(), receipt
+
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (local_radio,))
+    monkeypatch.setattr("pluto_plus.host_isolation.prepare_usb_ssh_isolation", prepare)
+    monkeypatch.setattr("pluto_plus.host_isolation.execute_usb_ssh_isolated", execute)
+    monkeypatch.setattr("pluto_plus.cli.run_direct_async_ladder", _report)
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "direct-async-ladder",
+            "192.168.2.1",
+            "--ip-port",
+            "30431",
+            "--expect-serial",
+            "SERIAL_A",
+            "--rates",
+            "5M",
+            "--durations",
+            "3",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--isolate-usb-route",
+            "--isolation-confirm",
+            "ISOLATE USB SSH enx001",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert prepared == [
+        (
+            ("enx001", "192.168.2.1"),
+            {"pluto_interfaces": ("enx001",)},
+        )
+    ]
+    assert executed[0]["confirmation"] == "ISOLATE USB SSH enx001"
+    assert "Host isolation receipt: /private/isolation.json" in result.stdout
 
 
 def test_direct_ladder_requires_exact_ip_identity() -> None:

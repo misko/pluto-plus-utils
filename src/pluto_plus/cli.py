@@ -1583,12 +1583,33 @@ def radio_direct_async_ladder(
         "--report",
         help="Absent-only private canonical JSON report path beneath an owned mode-0700 parent.",
     ),
+    usb_sysfs_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--usb-sysfs-path",
+        help="Exact local USB sysfs node anchoring an isolated IP transport.",
+    ),
+    isolate_usb_route: bool = typer.Option(
+        False,
+        "--isolate-usb-route",
+        help="Temporarily isolate competing Pluto NICs/routes around the direct ladder.",
+    ),
+    isolation_confirmation: str | None = typer.Option(
+        None,
+        "--isolation-confirm",
+        help="Exact phrase ISOLATE USB SSH <interface> for temporary route isolation.",
+    ),
+    isolation_receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_HOST_ISOLATION_RECEIPTS,
+        "--isolation-receipt-directory",
+        help="Private directory for durable host-isolation receipts.",
+    ),
 ) -> None:
     """Test the finite direct-async rate/duration matrix with counter evidence."""
 
     normalized_transport = transport.strip().lower()
     uri: str
     serial: str
+    isolation_endpoint: str | None = None
     if normalized_transport == "usb":
         if ip_port != 30_431:
             _fail(
@@ -1628,12 +1649,53 @@ def radio_direct_async_ladder(
             )
         uri = f"ip:{address}" if ip_port == 30_431 else f"ip:{address}:{ip_port}"
         serial = expect_serial
+        isolation_endpoint = str(address)
     else:
         _fail(
             "invalid_direct_ladder_transport",
             "direct ladder transport must be usb or ip",
             2,
         )
+    isolation_plan = None
+    pluto_interfaces: tuple[str, ...] = ()
+    if isolate_usb_route:
+        if (
+            normalized_transport != "ip"
+            or usb_sysfs_path is None
+            or isolation_endpoint is None
+        ):
+            _fail(
+                "host_isolation_target_required",
+                "direct ladder route isolation requires IP transport and --usb-sysfs-path",
+                2,
+            )
+        from pluto_plus.host_isolation import HostIsolationError, prepare_usb_ssh_isolation
+
+        local_devices = scan_local_usb_plutos()
+        selected = [
+            item
+            for item in local_devices
+            if item.serial == serial and item.usb_path == str(usb_sysfs_path)
+        ]
+        if len(selected) != 1 or len(selected[0].host_network_interfaces) != 1:
+            _fail("host_isolation_identity_unavailable", "selected USB radio is ambiguous", 4)
+        pluto_interfaces = tuple(
+            interface.name for item in local_devices for interface in item.host_network_interfaces
+        )
+        try:
+            isolation_plan = prepare_usb_ssh_isolation(
+                selected[0].host_network_interfaces[0].name,
+                isolation_endpoint,
+                pluto_interfaces=pluto_interfaces,
+            )
+        except HostIsolationError as error:
+            _fail("host_isolation_preflight_failed", str(error), 4)
+        if isolation_confirmation != isolation_plan.confirmation_phrase:
+            _fail(
+                "host_isolation_confirmation_required",
+                f"--isolation-confirm must be exactly {isolation_plan.confirmation_phrase!r}",
+                2,
+            )
     normalized_channels = channels.strip().lower()
     direct_channels = {"rx0": (0,), "rx1": (1,)}
     if normalized_channels not in direct_channels:
@@ -1659,8 +1721,9 @@ def radio_direct_async_ladder(
     environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
     if not environment.healthy:
         _fail(environment.status.value, environment.actionable_message, 5)
-    try:
-        report = run_direct_async_ladder(
+
+    def ladder_action() -> DirectAsyncLadderReport:
+        return run_direct_async_ladder(
             uri=uri,
             serial=serial,
             rates_hz=parsed_rates,
@@ -1672,6 +1735,31 @@ def radio_direct_async_ladder(
             tandem_mode=cast(Any, normalized_tandem),
             iq_decoder=cast(Any, normalized_decoder),
         )
+
+    try:
+        isolation_receipt = None
+        if isolation_plan is None:
+            report = ladder_action()
+        else:
+            from pluto_plus.host_isolation import (
+                HostIsolationError,
+                HostIsolationExecutionError,
+                execute_usb_ssh_isolated,
+            )
+
+            try:
+                report, isolation_receipt = execute_usb_ssh_isolated(
+                    isolation_plan,
+                    confirmation=isolation_confirmation or "",
+                    receipt_directory=isolation_receipt_directory.expanduser().resolve(),
+                    action=ladder_action,
+                    pluto_interfaces=pluto_interfaces,
+                )
+            except HostIsolationExecutionError as error:
+                _emit({"host_isolation": asdict(error.receipt)})
+                raise typer.Exit(5) from error
+            except HostIsolationError as error:
+                _fail("host_isolation_failed", str(error), 4)
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         _fail("direct_ladder_failed", str(error), 5)
     if report_path is not None:
@@ -1685,9 +1773,16 @@ def radio_direct_async_ladder(
         except (OSError, ReleaseCandidateContractError) as error:
             _fail("direct_ladder_report_failed", str(error), 5)
     if normalized_format == "json":
-        _emit(report.model_dump(mode="json"))
+        payload = report.model_dump(mode="json")
+        _emit(
+            payload
+            if isolation_receipt is None
+            else {"host_isolation": asdict(isolation_receipt), "result": payload}
+        )
     else:
         typer.echo(_direct_async_ladder_table(report))
+        if isolation_receipt is not None:
+            typer.echo(f"Host isolation receipt: {isolation_receipt.receipt_path}")
         if report_path is not None:
             typer.echo(f"Report: {report_path.expanduser().absolute()}")
     if report.failures:
