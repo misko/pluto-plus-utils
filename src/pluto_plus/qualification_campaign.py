@@ -660,6 +660,9 @@ def _run_cases(
 ) -> bool:
     for case in cases:
         try:
+            acceptance_mode = (
+                "capture-completion" if case.profile == "matrix" else "continuity"
+            )
             report = runner(
                 uri="usb:" if case.transport == "usb" else f"ip:{plan.physical_ip}",
                 serial=plan.serial,
@@ -674,7 +677,7 @@ def _run_cases(
                     plan.ddr_ring_iq_bytes if case.buffering == "ring-200mb" else 0
                 ),
                 tandem_mode=case.tandem_mode,
-                acceptance_mode="continuity",
+                acceptance_mode=acceptance_mode,
             )
             _validate_case_report(case, report, plan)
             results.append(GainTimelineQualificationCaseResult(case=case, report=report))
@@ -692,6 +695,9 @@ def _validate_case_report(
     plan: GainTimelineQualificationPlan,
 ) -> None:
     expected_ring = plan.ddr_ring_iq_bytes if case.buffering == "ring-200mb" else 0
+    expected_acceptance = (
+        "capture-completion" if case.profile == "matrix" else "continuity"
+    )
     if (
         report.serial != plan.serial
         or report.metadata_abi != 4
@@ -700,6 +706,7 @@ def _validate_case_report(
         or report.channels != ((0,) if case.layout == "single-rx0" else (0, 1))
         or report.kernel_buffers != case.kernel_buffers
         or report.tandem_mode != case.tandem_mode
+        or report.acceptance_mode != expected_acceptance
         or report.ddr_ring_requested_iq_bytes != expected_ring
         or report.failures
         or not report.original_settings_restored
@@ -716,15 +723,30 @@ def _validate_case_report(
             or cell.observed_frames != case.frames
             or cell.tandem_metadata_frames != case.frames
             or cell.authoritative_gain_timeline_frames != case.frames
-            or cell.missing_sample_count
-            or cell.gap_count
-            or cell.overflow_count
+            or cell.gain_observation_overflow_count
+            or cell.gain_event_overflow_count
             or cell.first_frame_latency_seconds
             > maximum_first_frame_latency_seconds
-            or not cell.passed
         ):
             raise QualificationCampaignError(
-                "metadata ladder is not prompt, gapless, and authoritative"
+                "metadata ladder is not prompt, complete, and authoritative"
+            )
+        if expected_acceptance == "continuity":
+            if (
+                cell.missing_sample_count
+                or cell.gap_count
+                or cell.overflow_count
+                or not cell.passed
+            ):
+                raise QualificationCampaignError(
+                    "continuity qualification contains a sample gap"
+                )
+        elif (
+            bool(cell.missing_sample_count) != bool(cell.gap_count)
+            or cell.overflow_count != cell.gap_count
+        ):
+            raise QualificationCampaignError(
+                "capture-completion gap accounting is not exact"
             )
         if expected_ring and (
             cell.ddr_ring_status is None or cell.ddr_ring_status.version != 2

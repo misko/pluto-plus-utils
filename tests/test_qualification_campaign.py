@@ -18,6 +18,7 @@ from pluto_plus.qualification_campaign import (
     GainTimelineQualificationCase,
     GainTimelineQualificationPlan,
     QualificationCampaignError,
+    _validate_case_report,
     execute_gain_timeline_qualification,
     prepare_gain_timeline_qualification,
     qualification_cases,
@@ -417,10 +418,66 @@ def test_campaign_runs_usb_then_locked_ip_and_restores_persistent_qspi(
     assert report.outcome == "pass"
     assert len(report.cases) == 187
     assert all(result.report is not None for result in report.cases)
+    assert all(
+        result.report is not None
+        and result.report.acceptance_mode
+        == ("capture-completion" if result.case.profile == "matrix" else "continuity")
+        for result in report.cases
+    )
     assert backend.events[:2] == [f"radio-enter:{SERIAL}", "boot"]
     assert backend.events[-2:] == ["restore", f"radio-exit:{SERIAL}"]
     assert backend.events.count("lan-enter") == backend.events.count("lan-exit") == 1
     assert backend.events.index("lan-enter") < backend.events.index("lan-exit")
+
+
+def test_matrix_qualification_accepts_an_exactly_accounted_transport_gap(
+    tmp_path: Path,
+) -> None:
+    plan_path, _backend = _plan(tmp_path)
+    plan = GainTimelineQualificationPlan.model_validate_json(plan_path.read_bytes())
+    case = next(
+        item
+        for item in qualification_cases()
+        if item.profile == "matrix" and item.buffering == "ordinary"
+    )
+    report = _ladder(
+        uri="usb:",
+        serial=plan.serial,
+        sample_rate_hz=case.sample_rate_hz,
+        rf_bandwidth_hz=case.rf_bandwidth_hz,
+        channels=(0,) if case.layout == "single-rx0" else (0, 1),
+        kernel_buffers=case.kernel_buffers,
+        tandem_mode=case.tandem_mode,
+        acceptance_mode="capture-completion",
+        ddr_ring_bytes=0,
+        samples_per_channel=case.samples_per_channel,
+        frames=case.frames,
+    )
+    cell = report.cells[0]
+    missing = cell.samples_per_channel
+    updated_cell = MetadataContinuityCell.model_validate(
+        cell.model_dump()
+        | {
+            "device_span_sample_count": cell.observed_sample_count + missing,
+            "last_sample_sequence_exclusive": (
+                cell.last_sample_sequence_exclusive + missing
+            ),
+            "missing_sample_count": missing,
+            "gap_count": 1,
+            "overflow_count": 1,
+            "observed_fraction": (
+                cell.observed_sample_count
+                / (cell.observed_sample_count + missing)
+            ),
+            "passed": False,
+        }
+    )
+    updated_report = MetadataContinuityLadderReport.model_validate(
+        report.model_dump()
+        | {"cells": (updated_cell,), "largest_passing_samples_per_channel": None}
+    )
+
+    _validate_case_report(case, updated_report, plan)
 
 
 def test_campaign_failure_is_receipted_after_verified_restore(tmp_path: Path) -> None:

@@ -57,6 +57,10 @@ INITIAL_TIME_ANCHOR_COUNT = 8
 MAX_TIME_ANCHORS = 32
 TIME_ANCHOR_WINDOW_NS = 10_000_000_000
 MAX_STARTUP_FRAME_DISCARDS = 64
+# The ABI-4 provider extends an 8-bit FPGA transition counter into the
+# per-capture ledger and admits at most one complete 64-entry FIFO window
+# between committed frames.  This bound makes modular deltas unambiguous.
+ABI4_MAX_HIDDEN_GAIN_EVENTS = 64
 _OPEN_MAX_ATTEMPTS = 3
 _OPEN_RETRY_DELAY_SECONDS = 0.05
 
@@ -713,8 +717,6 @@ class IioMetadataCaptureSession:
                 raise RuntimeError("metadata gap flag disagrees with the FPGA counter")
             if skipped_buffers != missing // self._samples_per_channel:
                 raise RuntimeError("metadata buffer and FPGA sample sequences disagree")
-            if self._metadata_abi == 4 and missing:
-                raise RuntimeError("ABI4 metadata capture is not contiguous")
         elif missing != skipped_buffers * self._samples_per_channel:
             raise RuntimeError("metadata buffer and FPGA sample sequences disagree")
         return _PendingMetadataSequence(
@@ -761,13 +763,38 @@ class IioMetadataCaptureSession:
         )
         if any(getattr(metadata, name) != getattr(previous, name) for name in stable_contract):
             raise RuntimeError("ABI4 gain-ledger contract changed within one capture")
-        if metadata.tandem_transition_count_start != previous.tandem_transition_count:
-            raise RuntimeError("ABI4 gain-ledger transition sequence is discontinuous")
         expected_event_sequence = (
             previous.event_sequence_start + len(previous.gain_events)
         ) & 0xFFFFFFFF
-        if metadata.event_sequence_start != expected_event_sequence:
-            raise RuntimeError("ABI4 gain-ledger event sequence is discontinuous")
+        if not metadata.missing_samples_before:
+            if metadata.tandem_transition_count_start != previous.tandem_transition_count:
+                raise RuntimeError("ABI4 gain-ledger transition sequence is discontinuous")
+            if metadata.event_sequence_start != expected_event_sequence:
+                raise RuntimeError("ABI4 gain-ledger event sequence is discontinuous")
+            hidden_transition_count = 0
+        else:
+            hidden_transition_count = (
+                metadata.tandem_transition_count_start
+                - previous.tandem_transition_count
+            ) & 0xFFFFFFFF
+            hidden_event_count = (
+                metadata.event_sequence_start - expected_event_sequence
+            ) & 0xFFFFFFFF
+            if hidden_transition_count > ABI4_MAX_HIDDEN_GAIN_EVENTS:
+                raise RuntimeError(
+                    "ABI4 gain-ledger transition sequence exceeds the provider window"
+                )
+            if hidden_event_count != hidden_transition_count:
+                raise RuntimeError(
+                    "ABI4 gain-ledger event sequence does not account for hidden transitions"
+                )
+        # With no hidden transition, the preceding endpoint is still the
+        # authoritative baseline even across an IQ gap.  If transitions did
+        # occur in the missing IQ interval, their exact count and event ledger
+        # are proven above, while this frame's parser independently proves the
+        # new authoritative start and every visible in-frame transition.
+        if hidden_transition_count:
+            return
         boundary_events = tuple(
             event
             for event in metadata.gain_events

@@ -372,6 +372,23 @@ def _v7_session_gap_frame() -> bytes:
     return bytes(raw)
 
 
+def _mark_v7_gap(frame: bytes, missing_samples_before: int = SAMPLE_COUNT) -> bytes:
+    raw = bytearray(frame)
+    flags = struct.unpack_from("<I", raw, 12)[0]
+    flags |= int(MetadataFlags.SAMPLE_GAP_BEFORE | MetadataFlags.DEVICE_IIO_OVERFLOW)
+    struct.pack_into("<I", raw, 12, flags)
+    struct.pack_into(
+        "<II",
+        raw,
+        116,
+        missing_samples_before & 0xFFFFFFFF,
+        missing_samples_before >> 32,
+    )
+    raw[-4:] = bytes(4)
+    raw[-4:] = struct.pack("<I", zlib.crc32(raw))
+    return bytes(raw)
+
+
 def _v7_session_auto_boundary_frame(
     buffer_sequence: int,
     first_sample_sequence: int,
@@ -1369,7 +1386,7 @@ def test_abi4_session_accepts_boundary_index_move_on_a_gain_db_plateau(
         radio.close()
 
 
-def test_abi4_session_rejects_a_standalone_valid_dma_gap() -> None:
+def test_abi4_session_accepts_an_exact_dma_gap_without_gain_transitions() -> None:
     first = _v7_session_hold_frame(0, 1_000)
     gap = _v7_session_gap_frame()
     assert RadioMetadataV7.unpack(gap).missing_samples_before == SAMPLE_COUNT
@@ -1377,7 +1394,77 @@ def test_abi4_session_rejects_a_standalone_valid_dma_gap() -> None:
     try:
         capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
         capture.read_block()
-        with pytest.raises(RuntimeError, match="ABI4 metadata capture is not contiguous"):
+        block = capture.read_block()
+        assert block.missing_samples_before == SAMPLE_COUNT
+        assert block.overflow_observed
+        assert capture.is_open
+    finally:
+        radio.close()
+
+
+def test_abi4_session_accepts_exactly_ledgered_transitions_inside_a_dma_gap() -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+    )
+    gap = _mark_v7_gap(
+        _v7_session_auto_boundary_frame(
+            2,
+            1_008,
+            transition_count_start=2,
+            event_sequence_start=2,
+            previous_index=22,
+        )
+    )
+    radio, _adi, _factory = _open_radio([first, gap], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        block = capture.read_block()
+        assert block.missing_samples_before == SAMPLE_COUNT
+        assert block.tandem_metadata is not None
+        assert block.tandem_metadata.rx1_gain_index_start == 22
+        assert capture.is_open
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize(
+    ("transition_count_start", "event_sequence_start", "message"),
+    (
+        (1, 2, "event sequence"),
+        (65, 65, "transition sequence exceeds"),
+    ),
+)
+def test_abi4_session_rejects_an_unprovable_gain_ledger_across_a_dma_gap(
+    transition_count_start: int,
+    event_sequence_start: int,
+    message: str,
+) -> None:
+    first = _v7_session_auto_boundary_frame(
+        0,
+        1_000,
+        transition_count_start=0,
+        event_sequence_start=0,
+        previous_index=20,
+    )
+    gap = _mark_v7_gap(
+        _v7_session_auto_boundary_frame(
+            2,
+            1_008,
+            transition_count_start=transition_count_start,
+            event_sequence_start=event_sequence_start,
+            previous_index=22,
+        )
+    )
+    radio, _adi, _factory = _open_radio([first, gap], metadata_abi=4)
+    try:
+        capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=4)
+        capture.read_block()
+        with pytest.raises(RuntimeError, match=message):
             capture.read_block()
         assert not capture.is_open
     finally:
