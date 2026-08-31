@@ -13,10 +13,10 @@ automatic upgrade or downgrade decision.
 | Consumer | Selected profile | Persistent release |
 | --- | --- | --- |
 | Pluto+ Utils standard libiio USB/IP | `libiio-continuous-metadata` | `v0.39-plutoplus-spf-libiio-metadata-v6` |
+| Pluto+ Utils direct-async ABI 3 | `iq-direct-async-v2-release` | `v0.47-plutoplus-spf-iq-direct-async-v2` |
 | Rover direct-USB V7 production | Rover YAML policy | currently RC16; do not use this as Pluto+ Utils' latest |
 
-The Pluto+ Utils canonical release was published on 2026-08-17 and is the current
-non-prerelease GitHub release as of this policy review:
+The standard metadata profile remains pinned to the release published on 2026-08-17:
 
 - DFU: `plutoplus-spf-libiio-metadata-v6-e3700cc72681-pluto.dfu`
 - SHA-256: `8ffbb0bf0912285636ddbcf0b00e12deaca0f55612faf7d29efa067b22e61352`
@@ -28,6 +28,14 @@ The release manifest says the exact bytes were persistently tested on four radio
 survived QSPI reboot. The radio advertises `iio,buffer-metadata=1`; consuming the new
 metadata records also requires one of the separately patched host libiio builds.
 Ordinary IQ reads remain compatible.
+
+The direct-async ABI-3 profile is a separate, full release published on
+2026-08-31. It requires matched libiio 0.25 commit
+`8f66f353c9a70a5524988ceb588b0e9271c2390d` on the radio and host, supports a
+single DMA session of up to 4,096 frames, and optionally extends the same queue
+with 200 MB of RAM. Its release assets, checksums, exact component pins, and
+installation guide are in
+[`v0.47-plutoplus-spf-iq-direct-async-v2`](https://github.com/misko/plutosdr-fw/releases/tag/v0.47-plutoplus-spf-iq-direct-async-v2).
 
 ## What `doctor` checks
 
@@ -412,9 +420,9 @@ identity: the daemon requires one private enrollment binding the literal endpoin
 the exact managed IIO serial and an out-of-band verified SSH host key. Only key-based
 root SSH is accepted. Discovery does not enroll a radio.
 
-The selected persistent-upgrade policy is
-`ddr-burst-v1-release-persistent-promotion`, which binds the published
-`v0.42-plutoplus-spf-ddr-burst-v1` DFU/FIT bytes. This is deliberately separate
+The selected persistent-upgrade policy for the current direct-async release is
+`iq-direct-async-v2-release-persistent-promotion`, which binds the published
+`v0.47-plutoplus-spf-iq-direct-async-v2` DFU/FIT bytes. This is deliberately separate
 from the older canonical setup-repair policy: repairing the U-Boot tuple must not
 silently choose a firmware upgrade, and selecting the current release must not
 weaken the setup transaction.
