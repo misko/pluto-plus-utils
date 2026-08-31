@@ -194,8 +194,27 @@ def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
     assert result.pylibiio_path == str(binding)
 
 
-def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("abi", "source_ref", "source_commit"),
+    (
+        (
+            3,
+            "ddr-ring-v1-rc2-source/libiio-v1",
+            "1e5002702f3033f5bc741da315dfe5d5558ef394",
+        ),
+        (
+            4,
+            "iio-gain-timeline-v8-rc1-source/libiio-v3",
+            "b48b25542681e3796ce61358237bb6ecbada5152",
+        ),
+    ),
+)
+def test_metadata_runtime_gate_accepts_exact_ring_request_constructor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    abi: int,
+    source_ref: str,
+    source_commit: str,
 ) -> None:
     prefix = tmp_path / "release/.venv"
     native = prefix / "lib/libiio.so.0.25"
@@ -204,15 +223,15 @@ def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
     native.parent.mkdir(parents=True)
     binding.parent.mkdir(parents=True)
     receipt.parent.mkdir(parents=True)
-    native.write_bytes(b"exact ABI3 native build")
-    binding.write_text("# exact ABI3 binding\n")
+    native.write_bytes(f"exact ABI{abi} native build".encode())
+    binding.write_text(f"# exact ABI{abi} binding\n")
     receipt.write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "metadata_abi": 3,
-                "source_ref": "ddr-ring-v1-rc2-source/libiio-v1",
-                "source_commit": "1e5002702f3033f5bc741da315dfe5d5558ef394",
+                "metadata_abi": abi,
+                "source_ref": source_ref,
+                "source_commit": source_commit,
                 "native_libiio_path": str(native),
                 "native_libiio_sha256": _sha256(native),
                 "pylibiio_path": str(binding),
@@ -263,10 +282,10 @@ def test_metadata_runtime_gate_accepts_exact_abi3_request_constructor(
         ),
     )
 
-    result = verify_metadata_runtime(expected_abi=3)
+    result = verify_metadata_runtime(expected_abi=abi)
 
-    assert result.metadata_abi == 3
-    assert result.source_commit == "1e5002702f3033f5bc741da315dfe5d5558ef394"
+    assert result.metadata_abi == abi
+    assert result.source_commit == source_commit
 
 
 def test_metadata_runtime_gate_rejects_missing_receipt_and_changed_file(

@@ -16,7 +16,7 @@ source_commit=""
 usage() {
     cat <<EOF
 Usage: scripts/install_native_libiio.sh --uv-bin ABSOLUTE_PATH
-       [--python PATH] [--prefix PATH] [--jobs N] [--metadata-abi 1|2|3]
+       [--python PATH] [--prefix PATH] [--jobs N] [--metadata-abi 1|2|3|4]
 
 Builds the exact host libiio matched to the selected firmware metadata ABI with
 USB support. The default ABI is 1 for the currently deployed production radios.
@@ -50,8 +50,12 @@ case "$metadata_abi" in
     source_ref="ddr-ring-v1-rc2-source/libiio-v1"
     source_commit="1e5002702f3033f5bc741da315dfe5d5558ef394"
     ;;
+4)
+    source_ref="iio-gain-timeline-v8-rc1-source/libiio-v3"
+    source_commit="b48b25542681e3796ce61358237bb6ecbada5152"
+    ;;
 *)
-    printf 'ERROR: --metadata-abi must be 1, 2, or 3\n' >&2
+    printf 'ERROR: --metadata-abi must be 1, 2, 3, or 4\n' >&2
     exit 2
     ;;
 esac
@@ -161,7 +165,7 @@ expected = (
                 "ddr_ring_frames",
                 "ddr_ring_continuous",
             )
-            if abi == 3
+            if abi in {3, 4}
             else ()
         ),
     )

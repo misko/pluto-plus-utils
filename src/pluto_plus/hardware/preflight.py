@@ -25,22 +25,25 @@ METADATA_RUNTIME_SOURCE_COMMITS = {
     1: "c26258bfa33098c2b215e19cf85d448e89499b1a",
     2: "6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7",
     3: "1e5002702f3033f5bc741da315dfe5d5558ef394",
+    4: "b48b25542681e3796ce61358237bb6ecbada5152",
 }
+_RING_METADATA_BUFFER_PARAMETERS = (
+    "self",
+    "device",
+    "samples_count",
+    "request",
+    "metadata_capacity",
+    "batch_frames",
+    "ddr_burst_bytes",
+    "ddr_ring_bytes",
+    "ddr_ring_frames",
+    "ddr_ring_continuous",
+)
 METADATA_BUFFER_PARAMETERS = {
     1: ("self", "device", "samples_count", "metadata_capacity"),
     2: ("self", "device", "samples_count", "request", "metadata_capacity"),
-    3: (
-        "self",
-        "device",
-        "samples_count",
-        "request",
-        "metadata_capacity",
-        "batch_frames",
-        "ddr_burst_bytes",
-        "ddr_ring_bytes",
-        "ddr_ring_frames",
-        "ddr_ring_continuous",
-    ),
+    3: _RING_METADATA_BUFFER_PARAMETERS,
+    4: _RING_METADATA_BUFFER_PARAMETERS,
 }
 
 
@@ -105,7 +108,7 @@ def verify_metadata_runtime(expected_abi: int = 1) -> MetadataRuntimeVerificatio
     """
 
     if expected_abi not in METADATA_RUNTIME_SOURCE_COMMITS:
-        raise ValueError("expected metadata ABI must be 1, 2, or 3")
+        raise ValueError("expected metadata ABI must be 1, 2, 3, or 4")
     prefix = Path(sys.prefix).resolve(strict=True)
     try:
         receipt_path = (prefix / METADATA_RUNTIME_RECEIPT).resolve(strict=True)
