@@ -616,6 +616,25 @@ IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 30, 16, 21, 47, tzinfo=UTC),
 )
 
+# Exact trusted-build bytes for the direct-async IQ queue with optional RAM
+# extension. This profile authorizes only volatile DFU. A persistent profile
+# must be a separate reviewed object after final-byte hardware qualification.
+IQ_DIRECT_ASYNC_RING_V1_RC1_RAM_POLICY = FirmwarePolicy(
+    profile_id="iq-direct-async-ring-v1-rc1-ram",
+    release_tag="iq-direct-async-ring-v1-rc1-4af2ab74605a",
+    device_firmware="v0.46-plutoplus-spf-iq-direct-async-ring-v1-rc1",
+    asset_name=(
+        "plutoplus-spf-iq-direct-async-ring-v1-rc1-4af2ab74605a-pluto.dfu"
+    ),
+    asset_sha256="6b29618d186d82c6b8fa02f74073853029b7d081196cb8643b92550e09162391",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33360776546",
+    source_commit="4af2ab74605a62832f7f38a0eefe3b3bc1d492cf",
+    fit_body_sha256="47e850f4dabb5be58203991f9b4f5fefc45305335d9594210a661791ac0189e9",
+    fit_body_size=12_821_279,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 31, 5, 49, 2, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target

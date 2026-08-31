@@ -332,6 +332,17 @@ IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_PROFILE = DiagnosticProfile(
     release_rank=31,
 )
 
+IQ_DIRECT_ASYNC_RING_V1_RC1_PROFILE = DiagnosticProfile(
+    profile_id="iq-direct-async-ring-v1-rc1",
+    firmware_version="v0.46-plutoplus-spf-iq-direct-async-ring-v1-rc1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status=(
+        "RAM-only direct-async IQ queue candidate; never persistence-qualified"
+    ),
+    release_rank=32,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -364,6 +375,7 @@ DIAGNOSTIC_PROFILES = (
     IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_PROFILE,
     IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RELEASE_PROFILE,
     IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_PROFILE,
+    IQ_DIRECT_ASYNC_RING_V1_RC1_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
