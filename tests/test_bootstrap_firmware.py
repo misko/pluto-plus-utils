@@ -1399,6 +1399,41 @@ def test_iq_direct_async_ring_v1_rc1_profile_is_exactly_bound_and_ram_only() -> 
     )
 
 
+def test_iq_direct_async_ring_v1_release_profile_is_exactly_bound_and_ram_only() -> None:
+    policy = bootstrap.IQ_DIRECT_ASYNC_RING_V1_RELEASE_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "v0.46-plutoplus-spf-iq-direct-async-ring-v1"
+    assert policy.device_firmware == "v0.46-plutoplus-spf-iq-direct-async-ring-v1"
+    assert policy.source_commit == "f182a8fa0811d2e70186b8f75d06ff4d5d896140"
+    assert policy.asset_name == (
+        "plutoplus-spf-iq-direct-async-ring-v1-f182a8fa0811-pluto.dfu"
+    )
+    assert policy.asset_sha256 == (
+        "ac51893dac8a914621aa8eb6f5c65d324ae8f09812033aa4880dc1dad8e6d739"
+    )
+    assert policy.fit_body_sha256 == (
+        "8dc973cd808a49392d26e69336c3b5c32dbece6903f69b30698873caa1bf79c5"
+    )
+    assert policy.fit_body_size == 12_821_527
+    assert policy.hardware_qualified is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.persistent_allowed is False
+    assert profile.ddr_burst_max_iq_bytes == 200_000_000
+    assert profile.ddr_burst_reserve_bytes == 128 * 1024 * 1024
+    assert profile.ddr_ring_max_iq_bytes == 200_000_000
+    assert profile.ddr_ring_modes == "finite,continuous"
+    assert profile.buffer_metadata_status is True
+    assert profile.buffer_metadata_timing_log is True
+    assert profile.iiod_cpu_affinity is None
+    assert profile.iiod_rw_cpu_affinity == 1
+    assert not any(
+        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
+        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
+    )
+
+
 def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:
     policy = bootstrap.IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY
 
