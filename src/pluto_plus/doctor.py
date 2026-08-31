@@ -653,6 +653,23 @@ IQ_DIRECT_ASYNC_RING_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 8, 31, 15, 46, 10, tzinfo=UTC),
 )
 
+# The exact final direct-async DFU/FIT receives a distinct QSPI authorization
+# only after its RAM-booted bytes passed the physical-1-GbE speed ladder, three
+# gapless 70 MB/s+ direct runs, real DMA-to-RAM spill/drain, standalone finite
+# ring, abrupt-client recovery, RF restoration, and idle/TX-safe postflight.
+IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY = (
+    IQ_DIRECT_ASYNC_RING_V1_RELEASE_RAM_POLICY.model_copy(
+        update={
+            "profile_id": "iq-direct-async-ring-v1-release-persistent-promotion",
+            "release_url": (
+                "https://github.com/misko/plutosdr-fw/releases/tag/"
+                "v0.46-plutoplus-spf-iq-direct-async-ring-v1"
+            ),
+            "hardware_qualified": True,
+        }
+    )
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
@@ -741,7 +758,7 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 # repair. USB and enrolled-network upgrades select the newest release that has
 # completed the persistent hardware gate; setup keeps the immutable U-Boot
 # tuple but accepts only an exact QSPI image in the allowlist below.
-PERSISTENT_UPGRADE_POLICY = DDR_RING_V1_RELEASE_PERSISTENT_POLICY
+PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY
 
 # Canonical U-Boot repair may run only while one of these exact, reviewed,
 # hardware-qualified QSPI images is active. The tuple itself remains fixed;
@@ -750,8 +767,9 @@ SETUP_REPAIR_POLICIES = (
     CANONICAL_POLICY,
     DDR_BURST_V1_RELEASE_PERSISTENT_POLICY,
     DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
-    PERSISTENT_UPGRADE_POLICY,
+    DDR_RING_V1_RELEASE_PERSISTENT_POLICY,
     DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,
+    PERSISTENT_UPGRADE_POLICY,
 )
 
 

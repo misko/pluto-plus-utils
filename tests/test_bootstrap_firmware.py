@@ -1399,7 +1399,7 @@ def test_iq_direct_async_ring_v1_rc1_profile_is_exactly_bound_and_ram_only() -> 
     )
 
 
-def test_iq_direct_async_ring_v1_release_profile_is_exactly_bound_and_ram_only() -> None:
+def test_iq_direct_async_ring_v1_release_requires_distinct_persistent_promotion() -> None:
     policy = bootstrap.IQ_DIRECT_ASYNC_RING_V1_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
@@ -1428,10 +1428,25 @@ def test_iq_direct_async_ring_v1_release_profile_is_exactly_bound_and_ram_only()
     assert profile.buffer_metadata_timing_log is True
     assert profile.iiod_cpu_affinity is None
     assert profile.iiod_rw_cpu_affinity == 1
-    assert not any(
-        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
-        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
-    )
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "iq-direct-async-ring-v1-release-persistent-promotion"
+    ]
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.profile_id != policy.profile_id
+    assert promotion.policy.asset_sha256 == policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == policy.fit_body_sha256
+    assert promotion.policy.fit_body_size == policy.fit_body_size
+    assert promotion.policy.source_commit == policy.source_commit
+    assert promotion.policy.hardware_qualified is True
+    assert promotion.metadata_abi == profile.metadata_abi == 3
+    assert promotion.tandem_agc is profile.tandem_agc is True
+    assert promotion.ddr_burst_max_iq_bytes == profile.ddr_burst_max_iq_bytes
+    assert promotion.ddr_burst_reserve_bytes == profile.ddr_burst_reserve_bytes
+    assert promotion.ddr_ring_max_iq_bytes == profile.ddr_ring_max_iq_bytes
+    assert promotion.ddr_ring_modes == profile.ddr_ring_modes == "finite,continuous"
+    assert promotion.buffer_metadata_status is profile.buffer_metadata_status is True
+    assert promotion.buffer_metadata_timing_log is profile.buffer_metadata_timing_log is True
+    assert promotion.iiod_rw_cpu_affinity == profile.iiod_rw_cpu_affinity == 1
 
 
 def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:

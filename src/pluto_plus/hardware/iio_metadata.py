@@ -63,6 +63,12 @@ MAX_STARTUP_FRAME_DISCARDS = 64
 ABI4_MAX_HIDDEN_GAIN_EVENTS = 64
 _OPEN_MAX_ATTEMPTS = 3
 _OPEN_RETRY_DELAY_SECONDS = 0.05
+# The ordinary pyadi read establishes the scan layout that MetadataBuffer must
+# inherit.  It only needs a minimal producer/consumer queue.  Priming with the
+# final, potentially CMA-sized queue and immediately reopening that same queue
+# can transiently require twice the requested contiguous DMA memory while the
+# kernel's deferred block-release work completes.
+_PRIME_KERNEL_BUFFERS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,6 +491,9 @@ class IioMetadataCaptureSession:
     def _prime_ordinary_rx(self) -> None:
         self._sdr.rx_destroy_buffer()
         self._sdr.rx_buffer_size = self._samples_per_channel
+        prime_kernel_buffers = min(self._kernel_buffers, _PRIME_KERNEL_BUFFERS)
+        if prime_kernel_buffers != self._kernel_buffers:
+            self._set_kernel_buffers_exact(prime_kernel_buffers)
         ordinary_buffer = None
         try:
             if tuple(int(item) for item in self._sdr.rx_enabled_channels) != self._channels:
@@ -505,6 +514,25 @@ class IioMetadataCaptureSession:
             finally:
                 del ordinary_buffer
                 gc.collect()
+                if prime_kernel_buffers != self._kernel_buffers:
+                    self._set_kernel_buffers_exact(self._kernel_buffers)
+
+    def _set_kernel_buffers_exact(self, count: int) -> None:
+        setter = getattr(self._sdr._rxadc, "set_kernel_buffers_count", None)
+        if not callable(setter):
+            raise RuntimeError("RX kernel-buffer count does not support configuration")
+        result = setter(count)
+        if isinstance(result, int) and result < 0:
+            raise RuntimeError(
+                f"libiio rejected RX kernel-buffer count {count}: error {result}"
+            )
+        actual = getattr(self._sdr._rxadc, "kernel_buffers_count", None)
+        if actual is None:
+            raise RuntimeError("RX kernel-buffer count does not support readback")
+        if int(actual) != count:
+            raise RuntimeError(
+                f"RX kernel-buffer readback is {actual}, expected {count}"
+            )
 
     def _verify_kernel_buffers(self) -> None:
         actual = getattr(self._sdr._rxadc, "kernel_buffers_count", None)

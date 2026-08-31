@@ -445,10 +445,12 @@ class FakeRxAdc:
     def __init__(self, headers: list[bytes], *, preserve_readback: bool = True) -> None:
         self.headers = deque(headers)
         self.kernel_buffers_count = 4
+        self.kernel_buffer_history: list[int] = []
         self.preserve_readback = preserve_readback
         self.reg_read_count = 0
 
     def set_kernel_buffers_count(self, count: int) -> int:
+        self.kernel_buffer_history.append(count)
         if self.preserve_readback:
             self.kernel_buffers_count = count
         return 0
@@ -974,6 +976,33 @@ def test_context_timeout_precedes_reads_and_read_timeout_allows_cleanup() -> Non
     assert factory.instances[0].closed
     radio.close()
     assert device.context_close_count == 1
+
+
+def test_metadata_prime_uses_a_small_dma_queue_then_restores_requested_count() -> None:
+    radio, adi, _factory = _open_radio([])
+    assert adi.device is not None
+    device = adi.device
+
+    capture = radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=15)
+
+    assert capture.kernel_buffers == 15
+    assert device._rxadc.kernel_buffer_history == [15, 2, 15]
+    assert device._rxadc.kernel_buffers_count == 15
+    radio.close()
+
+
+def test_metadata_prime_restores_requested_dma_queue_after_read_failure() -> None:
+    radio, adi, _factory = _open_radio([])
+    assert adi.device is not None
+    device = adi.device
+    device.rx_failure = OSError(errno.EIO, "ordinary prime failed")
+
+    with pytest.raises(OSError, match="ordinary prime failed"):
+        radio.begin_metadata_capture(SAMPLE_COUNT, kernel_buffers=15)
+
+    assert device._rxadc.kernel_buffer_history == [15, 2, 15]
+    assert device._rxadc.kernel_buffers_count == 15
+    radio.close()
 
 
 @pytest.mark.parametrize(
