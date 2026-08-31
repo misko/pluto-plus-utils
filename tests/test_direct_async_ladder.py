@@ -38,6 +38,7 @@ class _Capture:
         self.kernel_buffers = kernel_buffers
         self.direct_async_frames = direct_frames
         self.direct_async_ring_extension = bool(ring_bytes)
+        self.drop_backlog_on_overrun = True
         self.ddr_burst_enabled = False
         self.ddr_burst_requested_bytes = 0
         self.ddr_burst_admitted_bytes = 0
@@ -70,6 +71,7 @@ class _Capture:
 
     def ddr_ring_status(self) -> dict[str, object]:
         produced = min(self.reads, self.ddr_ring_capacity_frames)
+        dropped = min(produced, self.radio.ring_dropped_frames)
         return {
             "version": 1,
             "state": "complete",
@@ -79,7 +81,7 @@ class _Capture:
             "admitted_capacity_iq_bytes": self.ddr_ring_admitted_bytes,
             "target_frames": 0,
             "produced_frames": produced,
-            "consumed_frames": produced,
+            "consumed_frames": produced - dropped,
             "high_water_frames": produced,
             "wrap_count": 0,
             "producer_position": 0,
@@ -112,6 +114,7 @@ class _Radio:
         *,
         gap_at_sequence: int = -1,
         rejected_rate: int | None = None,
+        ring_dropped_frames: int = 0,
     ) -> None:
         self.identity = RadioIdentity(
             radio_id="SERIAL_A",
@@ -133,6 +136,7 @@ class _Radio:
         self.first_sample = 1_000
         self.gap_at_sequence = gap_at_sequence
         self.rejected_rate = rejected_rate
+        self.ring_dropped_frames = ring_dropped_frames
         self.opened = False
         self.closed = False
         self.capture_targets: list[int] = []
@@ -162,18 +166,21 @@ class _Radio:
         ddr_ring_frames: int = 0,
         ddr_ring_continuous: bool = False,
         direct_async_frames: int = 0,
+        drop_backlog_on_overrun: bool = True,
         tandem_request: TandemSessionRequestV1 | None = None,
     ) -> MetadataCapture:
         del ddr_burst_bytes, ddr_ring_frames, ddr_ring_continuous, tandem_request
         self.capture_targets.append(direct_async_frames)
         self.stream_id += 1
-        return _Capture(
+        capture = _Capture(
             self,
             samples=sample_count,
             kernel_buffers=kernel_buffers,
             ring_bytes=ddr_ring_bytes,
             direct_frames=direct_async_frames,
         )
+        capture.drop_backlog_on_overrun = drop_backlog_on_overrun
+        return capture
 
     def read_block(self, sample_count: int) -> SampleBlock:
         raise AssertionError(sample_count)
@@ -237,7 +244,28 @@ def test_direct_ram_ladder_requires_and_accounts_real_spill_status() -> None:
     assert report.ram_ring_slots == 2
     assert report.cells[0].ram_spilled_frames == 2
     assert report.cells[0].ram_drained_frames == 2
+    assert report.cells[0].ram_dropped_frames == 0
     assert report.cells[0].ram_high_water_frames == 2
+
+
+def test_direct_ram_ladder_accounts_dropped_ring_backlog() -> None:
+    radio = _Radio(ring_dropped_frames=1)
+    report = run_direct_async_ladder(
+        uri="ip:192.168.1.15",
+        serial="SERIAL_A",
+        rates_hz=(1_000_000,),
+        durations_seconds=(0.05,),
+        channels=(0,),
+        samples_per_frame=16_384,
+        kernel_buffers=3,
+        ram_ring_slots=2,
+        radio_factory=lambda _uri, _serial, _decoder: radio,
+        clock_ns=_Clock(),
+    )
+
+    assert report.cells[0].ram_spilled_frames == 2
+    assert report.cells[0].ram_drained_frames == 1
+    assert report.cells[0].ram_dropped_frames == 1
 
 
 def test_direct_ladder_reports_counter_proven_gap_without_aborting_matrix() -> None:
@@ -259,6 +287,25 @@ def test_direct_ladder_reports_counter_proven_gap_without_aborting_matrix() -> N
     assert cell.gap_frames == 1
     assert cell.missing_sample_count == 16_384
     assert cell.overflow_frames == 1
+    assert report.failures == ()
+
+
+def test_direct_ladder_preserve_backlog_policy_is_explicit_and_attested() -> None:
+    radio = _Radio()
+    report = run_direct_async_ladder(
+        uri="ip:192.168.1.15",
+        serial="SERIAL_A",
+        rates_hz=(1_000_000,),
+        durations_seconds=(0.05,),
+        channels=(0,),
+        samples_per_frame=16_384,
+        kernel_buffers=4,
+        drop_backlog_on_overrun=False,
+        radio_factory=lambda _uri, _serial, _decoder: radio,
+        clock_ns=_Clock(),
+    )
+
+    assert report.drop_backlog_on_overrun is False
     assert report.failures == ()
 
 

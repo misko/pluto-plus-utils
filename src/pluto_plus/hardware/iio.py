@@ -702,6 +702,7 @@ class IioRadioDevice:
         ddr_ring_frames: int = 0,
         ddr_ring_continuous: bool = False,
         direct_async_frames: int = 0,
+        drop_backlog_on_overrun: bool = True,
     ) -> IioMetadataCaptureSession:
         """Reset and arm one fail-closed FPGA-metadata capture generation."""
 
@@ -727,6 +728,8 @@ class IioRadioDevice:
             raise ValueError(
                 f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]"
             )
+        if not isinstance(drop_backlog_on_overrun, bool):
+            raise TypeError("drop_backlog_on_overrun must be a bool")
         if direct_async_frames and kernel_buffers < 2:
             raise ValueError("direct async capture requires at least two kernel buffers")
         if direct_async_frames and ddr_ring_bytes and kernel_buffers < 3:
@@ -866,6 +869,15 @@ class IioRadioDevice:
                 raise RadioConfigurationError(
                     "IIO context does not advertise direct async RAM queue extension"
                 )
+            policies = facts.get("buffer_direct_async_overrun_policies")
+            requested_policy = (
+                "drop-backlog" if drop_backlog_on_overrun else "preserve-backlog"
+            )
+            if not isinstance(policies, tuple) or requested_policy not in policies:
+                raise RadioConfigurationError(
+                    f"IIO context does not advertise {requested_policy} direct async "
+                    "overrun handling"
+                )
         if not (
             self._capabilities.supports_device_sample_counter
             and self._capabilities.supports_continuity_sequence
@@ -906,6 +918,7 @@ class IioRadioDevice:
             ddr_ring_frames=ddr_ring_frames,
             ddr_ring_continuous=ddr_ring_continuous,
             direct_async_frames=direct_async_frames,
+            drop_backlog_on_overrun=drop_backlog_on_overrun,
             iq_decoder=self._iq_decoder,
         )
         try:
@@ -1101,6 +1114,17 @@ def context_facts(context: Any) -> dict[str, object]:
     ddr_ring_modes_raw = attrs.get("iio,buffer-ddr-ring-modes")
     direct_async_raw = attrs.get("iio,buffer-direct-async")
     direct_async_ring_raw = attrs.get("iio,buffer-direct-async-ring")
+    direct_async_overrun_policies_raw = attrs.get(
+        "iio,buffer-direct-async-overrun-policies"
+    )
+    direct_async_overrun_policies = tuple(
+        item
+        for item in str(direct_async_overrun_policies_raw or "").split(",")
+        if item
+    )
+    direct_async_default_overrun_policy = attrs.get(
+        "iio,buffer-direct-async-default-overrun-policy"
+    )
     metadata_status_raw = attrs.get("iio,buffer-metadata-status")
     legacy_metadata_status_version = (
         1 if metadata_status_raw == "1" else 2 if metadata_status_raw == "2" else None
@@ -1152,6 +1176,13 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_direct_async_raw": direct_async_raw,
         "buffer_direct_async_ring": direct_async_ring_raw == "1",
         "buffer_direct_async_ring_raw": direct_async_ring_raw,
+        "buffer_direct_async_overrun_policies_raw": (
+            direct_async_overrun_policies_raw
+        ),
+        "buffer_direct_async_overrun_policies": direct_async_overrun_policies,
+        "buffer_direct_async_default_overrun_policy": (
+            direct_async_default_overrun_policy
+        ),
         "buffer_metadata_status": metadata_status_max_version is not None,
         "buffer_metadata_status_raw": metadata_status_raw,
         "buffer_metadata_status_legacy_version": legacy_metadata_status_version,

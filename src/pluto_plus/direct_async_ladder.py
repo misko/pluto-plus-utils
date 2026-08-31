@@ -60,6 +60,7 @@ class DirectAsyncLadderCell(ApiModel):
     inter_segment_skipped_samples: int = Field(ge=0)
     ram_spilled_frames: int = Field(ge=0)
     ram_drained_frames: int = Field(ge=0)
+    ram_dropped_frames: int = Field(ge=0)
     ram_high_water_frames: int = Field(ge=0)
     passed: bool
 
@@ -85,8 +86,8 @@ class DirectAsyncLadderCell(ApiModel):
             raise ValueError("direct ladder decimal payload rate does not close")
         if abs(self.achieved_payload_mibps - expected_mibps) > 1e-9:
             raise ValueError("direct ladder binary payload rate does not close")
-        if self.ram_spilled_frames != self.ram_drained_frames:
-            raise ValueError("direct ladder RAM spill/drain counts do not close")
+        if self.ram_spilled_frames != self.ram_drained_frames + self.ram_dropped_frames:
+            raise ValueError("direct ladder RAM spill/drain/drop counts do not close")
         expected_pass = (
             self.gap_frames == 0 and self.missing_sample_count == 0 and self.overflow_frames == 0
         )
@@ -120,6 +121,7 @@ class DirectAsyncLadderReport(ApiModel):
     )
     kernel_buffers: int = Field(ge=2, le=64)
     ram_ring_slots: int = Field(ge=0)
+    drop_backlog_on_overrun: bool = True
     tandem_mode: DirectAsyncTandemMode
     iq_decoder: IioIqDecoder
     cells: tuple[DirectAsyncLadderCell, ...]
@@ -163,6 +165,7 @@ class DirectAsyncLadderRadio(RadioDevice, Protocol):
         ddr_ring_frames: int = 0,
         ddr_ring_continuous: bool = False,
         direct_async_frames: int = 0,
+        drop_backlog_on_overrun: bool = True,
         tandem_request: TandemSessionRequestV1 | None = None,
     ) -> MetadataCapture: ...
 
@@ -199,6 +202,7 @@ def run_direct_async_ladder(
     samples_per_frame: int = 1_048_576,
     kernel_buffers: int = 15,
     ram_ring_slots: int = 0,
+    drop_backlog_on_overrun: bool = True,
     tandem_mode: DirectAsyncTandemMode = "hold",
     iq_decoder: IioIqDecoder = "pyadi",
     radio_factory: (Callable[[str, str, IioIqDecoder], DirectAsyncLadderRadio] | None) = None,
@@ -222,6 +226,8 @@ def run_direct_async_ladder(
         ram_ring_slots=ram_ring_slots,
         tandem_mode=tandem_mode,
     )
+    if not isinstance(drop_backlog_on_overrun, bool):
+        raise TypeError("drop_backlog_on_overrun must be a bool")
     radio = (
         radio_factory(uri, serial, iq_decoder)
         if radio_factory is not None
@@ -278,6 +284,7 @@ def run_direct_async_ladder(
                             samples_per_frame=samples_per_frame,
                             kernel_buffers=kernel_buffers,
                             ram_ring_slots=ram_ring_slots,
+                            drop_backlog_on_overrun=drop_backlog_on_overrun,
                             tandem_mode=tandem_mode,
                             clock_ns=clock_ns,
                         )
@@ -325,6 +332,7 @@ def run_direct_async_ladder(
         samples_per_frame=samples_per_frame,
         kernel_buffers=kernel_buffers,
         ram_ring_slots=ram_ring_slots,
+        drop_backlog_on_overrun=drop_backlog_on_overrun,
         tandem_mode=tandem_mode,
         iq_decoder=iq_decoder,
         cells=tuple(cells),
@@ -352,6 +360,7 @@ def _run_cell(
     samples_per_frame: int,
     kernel_buffers: int,
     ram_ring_slots: int,
+    drop_backlog_on_overrun: bool,
     tandem_mode: DirectAsyncTandemMode,
     clock_ns: Callable[[], int],
 ) -> DirectAsyncLadderCell:
@@ -365,6 +374,7 @@ def _run_cell(
     inter_segment_skipped_samples = 0
     ram_spilled_frames = 0
     ram_drained_frames = 0
+    ram_dropped_frames = 0
     ram_high_water_frames = 0
     previous_segment_end: int | None = None
     last_ring_status: DdrRingStatusSnapshot | None = None
@@ -380,6 +390,7 @@ def _run_cell(
                 ddr_ring_frames=0,
                 ddr_ring_continuous=False,
                 direct_async_frames=segment_frames,
+                drop_backlog_on_overrun=drop_backlog_on_overrun,
                 tandem_request=(
                     TandemSessionRequestV1(mode=TandemMode.HOLD)
                     if tandem_mode == "hold"
@@ -395,6 +406,8 @@ def _run_cell(
                     raise RuntimeError("direct ladder finite target readback is not exact")
                 if capture.direct_async_ring_extension is not bool(ram_ring_slots):
                     raise RuntimeError("direct ladder RAM-extension admission is not exact")
+                if capture.drop_backlog_on_overrun is not drop_backlog_on_overrun:
+                    raise RuntimeError("direct ladder overrun policy readback is not exact")
                 if (
                     capture.ddr_ring_requested_bytes != ring_bytes
                     or capture.ddr_ring_admitted_bytes != ring_bytes
@@ -444,12 +457,22 @@ def _run_cell(
                         or last_ring_status.requested_capacity_iq_bytes != ring_bytes
                         or last_ring_status.admitted_capacity_iq_bytes != ring_bytes
                         or last_ring_status.target_frames
-                        or last_ring_status.produced_frames != last_ring_status.consumed_frames
+                        or last_ring_status.consumed_frames
+                        > last_ring_status.produced_frames
+                        or (
+                            not drop_backlog_on_overrun
+                            and last_ring_status.produced_frames
+                            != last_ring_status.consumed_frames
+                        )
                         or last_ring_status.high_water_frames > ram_ring_slots
                     ):
                         raise RuntimeError("direct ladder RAM extension did not close cleanly")
                     ram_spilled_frames += last_ring_status.produced_frames
                     ram_drained_frames += last_ring_status.consumed_frames
+                    ram_dropped_frames += (
+                        last_ring_status.produced_frames
+                        - last_ring_status.consumed_frames
+                    )
                     ram_high_water_frames = max(
                         ram_high_water_frames,
                         last_ring_status.high_water_frames,
@@ -480,6 +503,7 @@ def _run_cell(
         inter_segment_skipped_samples=inter_segment_skipped_samples,
         ram_spilled_frames=ram_spilled_frames,
         ram_drained_frames=ram_drained_frames,
+        ram_dropped_frames=ram_dropped_frames,
         ram_high_water_frames=ram_high_water_frames,
         passed=not (gap_frames or missing_samples or overflow_frames),
     )

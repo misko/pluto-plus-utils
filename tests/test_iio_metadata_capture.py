@@ -532,7 +532,15 @@ class FakeMetadataBufferFactory:
 def test_direct_async_capture_is_explicit_finite_and_ringless() -> None:
     radio, adi, factory = _open_radio([], metadata_abi=3, channels=(0,))
     assert adi.device is not None
-    adi.device.ctx.attrs["iio,buffer-direct-async"] = "1"
+    adi.device.ctx.attrs.update(
+        {
+            "iio,buffer-direct-async": "1",
+            "iio,buffer-direct-async-overrun-policies": (
+                "drop-backlog,preserve-backlog"
+            ),
+            "iio,buffer-direct-async-default-overrun-policy": "drop-backlog",
+        }
+    )
     try:
         capture = radio.begin_metadata_capture(
             SAMPLE_COUNT,
@@ -540,12 +548,14 @@ def test_direct_async_capture_is_explicit_finite_and_ringless() -> None:
             direct_async_frames=250,
         )
         assert capture.direct_async_frames == 250
+        assert capture.drop_backlog_on_overrun
         assert not capture.direct_async_ring_extension
         assert not capture.ddr_burst_enabled
         assert not capture.ddr_ring_enabled
         assert factory.instances[0].keywords == {
             "batch_frames": 1,
             "direct_async_frames": 250,
+            "drop_backlog_on_overrun": True,
         }
         capture.close()
     finally:
@@ -611,6 +621,10 @@ def test_direct_async_ram_ring_extends_the_existing_dma_queue() -> None:
         {
             "iio,buffer-direct-async": "1",
             "iio,buffer-direct-async-ring": "1",
+            "iio,buffer-direct-async-overrun-policies": (
+                "drop-backlog,preserve-backlog"
+            ),
+            "iio,buffer-direct-async-default-overrun-policy": "drop-backlog",
         }
     )
     requested_bytes = SAMPLE_COUNT * 4 * 2 + 1
@@ -640,6 +654,7 @@ def test_direct_async_ram_ring_extends_the_existing_dma_queue() -> None:
             "ddr_ring_frames": 0,
             "ddr_ring_continuous": False,
             "direct_async_frames": 3,
+            "drop_backlog_on_overrun": True,
         }
         capture.close()
     finally:
