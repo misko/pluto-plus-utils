@@ -674,8 +674,8 @@ IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY = (
 # 33440908273. V2 adds the explicit drop-backlog/preserve-backlog overrun policy
 # and makes drop-backlog the default, including when RAM extends the same FIFO.
 # This reviewed identity authorizes volatile DFU only until these exact bytes
-# pass the physical-1-GbE, RAM-ring, recovery, RF, and cold-boot promotion gates.
-# There is intentionally no matching persistent-write profile yet.
+# pass the physical-1-GbE, RAM-ring, recovery, and RF promotion gates. A cold
+# boot from QSPI remains a mandatory post-write release gate.
 IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY = FirmwarePolicy(
     profile_id="iq-direct-async-v2-release-ram",
     release_tag="v0.47-plutoplus-spf-iq-direct-async-v2",
@@ -688,6 +688,22 @@ IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY = FirmwarePolicy(
     fit_body_size=12_826_107,
     hardware_qualified=False,
     published_at=datetime(2026, 8, 31, 22, 5, 24, tzinfo=UTC),
+)
+
+# The same final v0.47 DFU/FIT receives a separate QSPI authorization after its
+# RAM-loaded bytes passed the sustained speed ladder, matched 25 MS/s baseline
+# and 200 MB FIFO tests, continuous-session overrun comparison, RF restoration,
+# abrupt-client recovery, and ordinary dual-RX postflight. Keeping both policy
+# objects prevents RAM qualification from implicitly authorizing a write.
+IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "iq-direct-async-v2-release-persistent-promotion",
+        "release_url": (
+            "https://github.com/misko/plutosdr-fw/releases/tag/"
+            "v0.47-plutoplus-spf-iq-direct-async-v2"
+        ),
+        "hardware_qualified": True,
+    }
 )
 
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
@@ -778,7 +794,7 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 # repair. USB and enrolled-network upgrades select the newest release that has
 # completed the persistent hardware gate; setup keeps the immutable U-Boot
 # tuple but accepts only an exact QSPI image in the allowlist below.
-PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY
+PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY
 
 # Canonical U-Boot repair may run only while one of these exact, reviewed,
 # hardware-qualified QSPI images is active. The tuple itself remains fixed;
@@ -847,6 +863,17 @@ def setup_repair_policy_for_firmware(firmware_version: str) -> FirmwarePolicy:
 
 def setup_inspection_policy_for_firmware(firmware_version: str) -> FirmwarePolicy:
     """Select read-only setup inspection authority by exact active firmware."""
+
+    # A promoted release deliberately has two byte-identical policy objects:
+    # its original RAM-only inspection authority and its later persistent
+    # repair authority. Prefer the latter for active-firmware selection while
+    # still allowing callers holding the exact RAM policy to request read-only
+    # inspection through require_setup_inspection_policy().
+    repair_matches = tuple(
+        policy for policy in SETUP_REPAIR_POLICIES if policy.device_firmware == firmware_version
+    )
+    if len(repair_matches) == 1:
+        return repair_matches[0]
 
     matches = tuple(
         policy for policy in SETUP_INSPECTION_POLICIES if policy.device_firmware == firmware_version

@@ -1449,7 +1449,7 @@ def test_iq_direct_async_ring_v1_release_requires_distinct_persistent_promotion(
     assert promotion.iiod_rw_cpu_affinity == profile.iiod_rw_cpu_affinity == 1
 
 
-def test_iq_direct_async_v2_release_is_exact_ram_only_policy() -> None:
+def test_iq_direct_async_v2_release_requires_distinct_persistent_promotion() -> None:
     policy = bootstrap.IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
@@ -1478,10 +1478,46 @@ def test_iq_direct_async_v2_release_is_exact_ram_only_policy() -> None:
     assert profile.buffer_metadata_timing_log is True
     assert profile.iiod_cpu_affinity is None
     assert profile.iiod_rw_cpu_affinity == 1
-    assert not any(
-        candidate.policy.source_commit == policy.source_commit and candidate.persistent_allowed
-        for candidate in bootstrap.STANDALONE_FLASH_PROFILES.values()
+    assert profile.required_iio_capabilities == (
+        ("iio,buffer-direct-async", "1"),
+        ("iio,buffer-direct-async-ring", "1"),
+        ("iio,buffer-direct-async-overrun-policies", "drop-backlog,preserve-backlog"),
+        ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
     )
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "iq-direct-async-v2-release-persistent-promotion"
+    ]
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.profile_id != policy.profile_id
+    assert promotion.policy.asset_sha256 == policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == policy.fit_body_sha256
+    assert promotion.policy.fit_body_size == policy.fit_body_size
+    assert promotion.policy.source_commit == policy.source_commit
+    assert promotion.policy.hardware_qualified is True
+    assert promotion.metadata_abi == profile.metadata_abi == 3
+    assert promotion.tandem_agc is profile.tandem_agc is True
+    assert promotion.ddr_burst_max_iq_bytes == profile.ddr_burst_max_iq_bytes
+    assert promotion.ddr_burst_reserve_bytes == profile.ddr_burst_reserve_bytes
+    assert promotion.ddr_ring_max_iq_bytes == profile.ddr_ring_max_iq_bytes
+    assert promotion.ddr_ring_modes == profile.ddr_ring_modes == "finite,continuous"
+    assert promotion.buffer_metadata_status is profile.buffer_metadata_status is True
+    assert promotion.buffer_metadata_timing_log is profile.buffer_metadata_timing_log is True
+    assert promotion.iiod_rw_cpu_affinity == profile.iiod_rw_cpu_affinity == 1
+    assert promotion.required_iio_capabilities == profile.required_iio_capabilities
+
+
+def test_v2_return_capabilities_require_both_modes_and_drop_default() -> None:
+    profile = bootstrap.STANDALONE_FLASH_PROFILES["iq-direct-async-v2-release-persistent-promotion"]
+    facts = dict(profile.required_iio_capabilities)
+
+    bootstrap._require_profile_iio_capabilities(facts, profile, transport="USB")
+
+    facts["iio,buffer-direct-async-default-overrun-policy"] = "preserve-backlog"
+    with pytest.raises(
+        bootstrap.BootstrapFirmwareError,
+        match="default-overrun-policy.*preserve-backlog.*drop-backlog",
+    ):
+        bootstrap._require_profile_iio_capabilities(facts, profile, transport="USB")
 
 
 def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:
@@ -1503,6 +1539,13 @@ def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:
             True,
             persistent_allowed=False,
             iiod_rw_cpu_affinity=-1,
+        )
+    with pytest.raises(ValueError, match="non-empty and unique"):
+        bootstrap.StandaloneFlashProfile(
+            policy,
+            3,
+            True,
+            required_iio_capabilities=(("duplicate", "1"), ("duplicate", "2")),
         )
 
 
