@@ -14,11 +14,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol, overload
 
 from pluto_plus.doctor import (
     CANONICAL_UBOOT,
+    require_setup_inspection_policy,
     require_setup_repair_policy,
+    setup_inspection_policy_for_firmware,
     setup_repair_policy_for_firmware,
 )
 from pluto_plus.models import FirmwarePolicy
@@ -27,6 +29,7 @@ from pluto_plus.setup import (
     SetupError,
     SetupExecutionError,
     SetupIdentity,
+    SetupObservation,
     SetupPreconditionError,
     observation_functionally_qualified,
 )
@@ -38,9 +41,30 @@ from pluto_plus.setup_helper import (
 from pluto_plus.setup_profiles import environment_profile_for_uboot
 
 ProbeStatus = Literal["pass", "fail", "unknown"]
-ManagerFactory = Callable[[SetupIdentity], CanonicalSetupManager]
+
+
+class SetupInspector(Protocol):
+    """Minimum read-only interface consumed by the credentialed doctor."""
+
+    def inspect_qualified(self, identity: SetupIdentity) -> SetupObservation: ...
+
+
+ManagerFactory = Callable[[SetupIdentity], SetupInspector]
 
 _ALREADY_QUALIFIED = "radio setup is already functionally qualified"
+
+
+class _ReadOnlySetupInspector:
+    """Inspect an exact RAM-booted identity without granting mutation authority."""
+
+    def __init__(self, executor: FixedSshSetupExecutor) -> None:
+        self._executor = executor
+
+    def inspect_qualified(self, identity: SetupIdentity) -> SetupObservation:
+        observation = self._executor.inspect(identity)
+        if observation.identity != identity:
+            raise SetupHelperError("setup inspector returned a different radio identity")
+        return observation
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,19 +104,54 @@ class SetupProbeOutcome:
     rx_lo_restored: bool | None = None
 
 
+@overload
 def ssh_manager_factory(
     credentials: SetupCredentials,
     *,
     policy: FirmwarePolicy | None = None,
+    allow_repair: Literal[True] = True,
+) -> Callable[[SetupIdentity], CanonicalSetupManager]: ...
+
+
+@overload
+def ssh_manager_factory(
+    credentials: SetupCredentials,
+    *,
+    policy: FirmwarePolicy | None = None,
+    allow_repair: Literal[False],
+) -> ManagerFactory: ...
+
+
+@overload
+def ssh_manager_factory(
+    credentials: SetupCredentials,
+    *,
+    policy: FirmwarePolicy | None = None,
+    allow_repair: bool,
+) -> ManagerFactory: ...
+
+
+def ssh_manager_factory(
+    credentials: SetupCredentials,
+    *,
+    policy: FirmwarePolicy | None = None,
+    allow_repair: bool = True,
 ) -> ManagerFactory:
     """Build the real SSH-backed manager factory for one radio's credentials."""
 
-    def build(identity: SetupIdentity) -> CanonicalSetupManager:
-        selected_policy = (
-            setup_repair_policy_for_firmware(identity.observed_firmware)
-            if policy is None
-            else require_setup_repair_policy(policy)
-        )
+    def build(identity: SetupIdentity) -> SetupInspector:
+        if policy is None:
+            selected_policy = (
+                setup_repair_policy_for_firmware(identity.observed_firmware)
+                if allow_repair
+                else setup_inspection_policy_for_firmware(identity.observed_firmware)
+            )
+        else:
+            selected_policy = (
+                require_setup_repair_policy(policy)
+                if allow_repair
+                else require_setup_inspection_policy(policy)
+            )
         transport = BoundSshTransport(
             host=credentials.host,
             interface=credentials.interface,
@@ -104,7 +163,10 @@ def ssh_manager_factory(
             transport=transport,
             state_root=credentials.state_root,
             policy=selected_policy,
+            mutation_allowed=allow_repair,
         )
+        if not allow_repair:
+            return _ReadOnlySetupInspector(executor)
         return CanonicalSetupManager(
             receipt_directory=credentials.receipt_directory,
             inspector=executor.inspect,
@@ -190,6 +252,8 @@ def probe_and_repair(
             rx_lo_5g8_readback_hz=observation.rx_lo_5g8_readback_hz,
             rx_lo_restored=observation.rx_lo_restored,
         )
+    if not isinstance(manager, CanonicalSetupManager):
+        return _repair_failed(actual, (), "read-only setup inspector cannot repair")
     return _repair(manager, identity, actual)
 
 

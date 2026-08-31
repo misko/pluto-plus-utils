@@ -3625,7 +3625,8 @@ def _build_setup_probe(
                         if host == "192.168.2.1" and len(interfaces) == 1
                         else None
                     ),
-                )
+                ),
+                allow_repair=repair,
             ),
             repair=repair,
         )

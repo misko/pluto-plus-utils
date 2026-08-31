@@ -20,7 +20,12 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol, cast
 
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT, require_setup_repair_policy
+from pluto_plus.doctor import (
+    CANONICAL_POLICY,
+    CANONICAL_UBOOT,
+    require_setup_inspection_policy,
+    require_setup_repair_policy,
+)
 from pluto_plus.ip_firmware import (
     UsbSshRouteAmbiguous,
     require_unambiguous_usb_ssh_route,
@@ -353,6 +358,7 @@ class FixedSshSetupExecutor:
         transport: SetupTransport,
         state_root: Path,
         policy: FirmwarePolicy = CANONICAL_POLICY,
+        mutation_allowed: bool = True,
         reenumeration_timeout_s: float = 45,
         poll_interval_s: float = 0.25,
     ) -> None:
@@ -363,7 +369,12 @@ class FixedSshSetupExecutor:
         self.identity = identity
         self.transport = transport
         self.state_root = state_root
-        self._policy = require_setup_repair_policy(policy)
+        self._policy = (
+            require_setup_repair_policy(policy)
+            if mutation_allowed
+            else require_setup_inspection_policy(policy)
+        )
+        self._mutation_allowed = mutation_allowed
         self._reenumeration_timeout_s = reenumeration_timeout_s
         self._poll_interval_s = poll_interval_s
 
@@ -443,6 +454,8 @@ class FixedSshSetupExecutor:
         )
 
     def provision(self, plan: SetupPlan) -> SetupExecutionResult:
+        if not self._mutation_allowed:
+            raise SetupHelperError("read-only setup inspection cannot provision U-Boot")
         if plan.identity != self.identity:
             raise SetupHelperError("setup plan is bound to a different radio")
         if plan.profile_id != self._policy.profile_id:

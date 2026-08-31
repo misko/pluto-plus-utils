@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT
+from pluto_plus.doctor import (
+    CANONICAL_POLICY,
+    CANONICAL_UBOOT,
+    IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
+)
 from pluto_plus.setup import (
     SetupExecutorFailure,
     SetupHostKeyRotation,
@@ -492,6 +496,24 @@ def test_executor_has_no_arbitrary_command_or_value_surface(tmp_path: Path) -> N
     )
     with pytest.raises(SetupHelperError):
         executor.canonical_batch({"attr_name": "$(reboot)"})
+
+
+def test_ram_only_inspection_executor_cannot_provision(tmp_path: Path) -> None:
+    policy = IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY
+    executor = FixedSshSetupExecutor(
+        identity=SetupIdentity(
+            serial="SERIAL_A",
+            usb_sysfs_path="/sys/bus/usb/devices/3-8",
+            observed_firmware=policy.device_firmware,
+        ),
+        transport=RecordingTransport(),
+        state_root=tmp_path,
+        policy=policy,
+        mutation_allowed=False,
+    )
+
+    with pytest.raises(SetupHelperError, match="read-only setup inspection"):
+        executor.provision(_plan(_observation(canonical=False, tx_safe=True)))
 
 
 def test_inspector_gates_5g8_probe_and_requires_exact_lo_restoration() -> None:
