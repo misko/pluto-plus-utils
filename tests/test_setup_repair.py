@@ -11,6 +11,8 @@ from pluto_plus.doctor import (
     DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
     DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,
     DDR_RING_V1_RELEASE_PERSISTENT_POLICY,
+    IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
+    setup_inspection_policy_for_firmware,
     setup_repair_policy_for_firmware,
 )
 from pluto_plus.setup import (
@@ -118,6 +120,14 @@ def test_setup_repair_policy_is_selected_only_by_exact_firmware() -> None:
         assert setup_repair_policy_for_firmware(policy.device_firmware) is policy
     with pytest.raises(ValueError, match="no exact shipped setup repair policy"):
         setup_repair_policy_for_firmware("v0.42-plutoplus-spf-ddr-burst-v2-rc3")
+
+
+def test_ram_only_release_allows_inspection_but_not_setup_repair() -> None:
+    policy = IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY
+
+    assert setup_inspection_policy_for_firmware(policy.device_firmware) is policy
+    with pytest.raises(ValueError, match="no exact shipped setup repair policy"):
+        setup_repair_policy_for_firmware(policy.device_firmware)
 
 
 def test_probe_repairs_a_reverted_tuple_and_reports_the_deletions(tmp_path: Path) -> None:

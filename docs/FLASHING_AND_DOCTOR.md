@@ -282,6 +282,13 @@ TX-safe readback.
 Power cycling returns to the unchanged QSPI image. Persistent promotion always
 requires a separate profile whose manifest is hardware-qualified.
 
+A recognized RAM-only profile may also be supplied to credentialed standalone
+`doctor --no-fix`. That path uses a separate exact inspection allowlist: it may
+read the persistent U-Boot tuple, hash QSPI, and perform the TX-safe 5.8 GHz
+RX-LO tune-and-restore probe, but it does not construct a setup mutation manager.
+`--fix` continues to require an exact hardware-qualified setup-repair policy and
+therefore rejects an unpromoted RAM profile.
+
 For a host with several Pluto USB gadget NICs, `ram-boot` also accepts
 `--isolate-usb-route` plus the exact generated isolation confirmation. The
 isolation receipt is returned alongside the RAM-boot receipt and all host

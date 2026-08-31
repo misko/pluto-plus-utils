@@ -792,6 +792,15 @@ SETUP_REPAIR_POLICIES = (
     PERSISTENT_UPGRADE_POLICY,
 )
 
+# Read-only inspection is a strictly weaker authority than setup repair. A
+# recognized volatile image may inspect the persistent tuple, exercise the
+# TX-safe 5.8 GHz tune-and-restore probe, and hash QSPI without gaining any
+# permission to alter U-Boot or firmware. Keep this list explicit and exact.
+SETUP_INSPECTION_POLICIES = (
+    *SETUP_REPAIR_POLICIES,
+    IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
+)
+
 
 def require_setup_repair_policy(policy: FirmwarePolicy) -> FirmwarePolicy:
     """Return the shipped exact policy or reject caller-constructed authority."""
@@ -809,6 +818,22 @@ def require_setup_repair_policy(policy: FirmwarePolicy) -> FirmwarePolicy:
     return selected
 
 
+def require_setup_inspection_policy(policy: FirmwarePolicy) -> FirmwarePolicy:
+    """Return an exact shipped policy authorized for read-only setup inspection."""
+
+    selected = next(
+        (
+            candidate
+            for candidate in SETUP_INSPECTION_POLICIES
+            if candidate.profile_id == policy.profile_id
+        ),
+        None,
+    )
+    if selected is None or selected != policy:
+        raise ValueError("setup inspection policy is not an exact shipped policy")
+    return selected
+
+
 def setup_repair_policy_for_firmware(firmware_version: str) -> FirmwarePolicy:
     """Select setup authority by exact active firmware; never by lexical rank."""
 
@@ -817,6 +842,17 @@ def setup_repair_policy_for_firmware(firmware_version: str) -> FirmwarePolicy:
     )
     if len(matches) != 1:
         raise ValueError("active firmware has no exact shipped setup repair policy")
+    return matches[0]
+
+
+def setup_inspection_policy_for_firmware(firmware_version: str) -> FirmwarePolicy:
+    """Select read-only setup inspection authority by exact active firmware."""
+
+    matches = tuple(
+        policy for policy in SETUP_INSPECTION_POLICIES if policy.device_firmware == firmware_version
+    )
+    if len(matches) != 1:
+        raise ValueError("active firmware has no exact shipped setup inspection policy")
     return matches[0]
 
 
