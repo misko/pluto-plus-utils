@@ -355,6 +355,18 @@ IQ_DIRECT_ASYNC_RING_V1_RELEASE_PROFILE = DiagnosticProfile(
     release_rank=33,
 )
 
+IQ_DIRECT_ASYNC_V2_RELEASE_PROFILE = DiagnosticProfile(
+    profile_id="iq-direct-async-v2-release",
+    firmware_version="v0.47-plutoplus-spf-iq-direct-async-v2",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status=(
+        "final-version direct-async v2 image undergoing exact-byte hardware "
+        "qualification; RAM boot only until persistent promotion"
+    ),
+    release_rank=34,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -389,6 +401,7 @@ DIAGNOSTIC_PROFILES = (
     IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_PROFILE,
     IQ_DIRECT_ASYNC_RING_V1_RC1_PROFILE,
     IQ_DIRECT_ASYNC_RING_V1_RELEASE_PROFILE,
+    IQ_DIRECT_ASYNC_V2_RELEASE_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
