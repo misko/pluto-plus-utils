@@ -114,12 +114,12 @@ must be installed with the Python binding from the same source commit. ABI 1
 uses SPF libiio 0.25 tag `spf-frame-metadata-source/v0.25-final-v3` at
 `c26258bfa33098c2b215e19cf85d448e89499b1a`. The direct-async/RAM-extension
 ABI-3 candidate requires libiio 0.25 commit
-`f31a200ed6a884f054e513ce0707a342ee8bd679` and tag
-`iq-direct-async-long-session-v1-source/libiio-v1`. This revision keeps as many
-as 4,096 frames in one finite direct-async session; ordinary metadata batching
-remains limited to 64. A persistent firmware image containing this revision is
-not published yet. The installer must fail rather than use an older ABI-3
-build. See
+`8f66f353c9a70a5524988ceb588b0e9271c2390d` and tag
+`iq-direct-async-v2-source/libiio-v1`. This revision keeps as many as 4,096
+frames in one finite direct-async session and adds the explicit
+`drop_backlog_on_overrun` policy; ordinary metadata batching remains limited
+to 64. A persistent firmware image containing this revision is not published
+yet. The installer must fail rather than use an older ABI-3 build. See
 [`docs/METADATA_CAPTURE_RUNTIME.md`](docs/METADATA_CAPTURE_RUNTIME.md) for the
 complete matrix and status.
 
@@ -362,14 +362,22 @@ uv run pluto radio direct-async-ladder 192.168.1.15 \
 The rate and duration flags may be omitted because those values are the command
 defaults. For a qualification daemon on a nondefault port, add
 `--ip-port PORT`. The matched radio and host libiio must be ABI 3 commit
-`f31a200`, and the measured performance profile requires the radio iiOD to run
+`8f66f35`, and the measured performance profile requires the radio iiOD to run
 with `-r 1`.
 
 Set `--ram-ring-slots 13 --kernel-buffers 10` to run the same matrix with RAM
 extending the direct DMA FIFO. Zero slots is the default ringless mode. The
 report distinguishes achieved wire-format MB/s, counter-proven gaps inside
-each direct session, DMA-overflow flags, RAM spill/drain/high-water counts, and
-samples skipped between sessions if a future request exceeds one session.
+each direct session, DMA-overflow flags, RAM spill/drain/drop/high-water counts,
+and samples skipped between sessions if a future request exceeds one session.
+
+The default `--drop-backlog-on-overrun` policy keeps the frame already entering
+TCP, immediately retires every older queued-but-unsent frame after a source
+overrun, and refills the same queue until the exact host frame target is met.
+This minimizes stale-data latency and the number of separate discontinuities;
+it does not promise fewer missing samples when the source continuously outruns
+the link. Use `--preserve-backlog-on-overrun` when retaining every already
+queued frame is more important than returning quickly to current RF time.
 
 When several locally attached Pluto gadgets share `192.168.2.1`, keep IP/TCP
 transport and bind the full matrix to one exact serial and physical USB path:

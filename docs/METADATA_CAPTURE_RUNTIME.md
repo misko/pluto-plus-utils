@@ -11,7 +11,7 @@ not make continuity observable and must not be accepted as a fallback.
 | --- | --- | --- | --- |
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
-| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `iq-direct-async-long-session-v1-source/libiio-v1` | `f31a200ed6a884f054e513ce0707a342ee8bd679` |
+| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `iq-direct-async-v2-source/libiio-v1` | `8f66f353c9a70a5524988ceb588b0e9271c2390d` |
 | `iio,buffer-metadata=3` plus `iio,buffer-metadata-abi-versions=1,2,3,4` | strict `RadioMetadataV7` selected as ABI 4 | gain-timeline v8 release source | frozen by the release candidate plan |
 
 The currently deployed `.20` and `.21` radios advertise ABI 1. ABI 2 is a
@@ -94,21 +94,21 @@ result; pass `--tandem-mode auto` to exercise both systems together.
 
 ### ABI-3 direct async and RAM queue extension
 
-The `iq-direct-async-long-session-v1-source` runtime adds one finite direct
-mode to ABI 3 and allows its target to span as many as 4,096 frames without
-re-arming. The hardware-test package set is:
+The `iq-direct-async-v2-source` runtime adds one finite direct mode to ABI 3,
+allows its target to span as many as 4,096 frames without re-arming, and makes
+radio-side overrun handling explicit. The hardware-test package set is:
 
 | Component | Version | Minimum qualified implementation commit |
 | --- | --- | --- |
 | volatile firmware base | `v0.46-plutoplus-spf-iq-coherent-200m-prototype-v1` | `3141573a2cd0ce9009dadd2ffba6c24d4668541e` |
 | firmware Buildroot/rootfs base | `iq-direct-async-ring-v1-rc1-source/buildroot-v2` | `a929267288a80a31407a3af06345c088979bcc2e` |
 | firmware Linux / CMA geometry | `ddr-burst-v1-rc3-source/linux-v1-1-gd7c78e1` | `d7c78e122adccb6836e374463d3930730335bc36` |
-| volatile radio iiOD and host libiio | 0.25 | `f31a200ed6a884f054e513ce0707a342ee8bd679` |
+| volatile radio iiOD and host libiio | 0.25 | `8f66f353c9a70a5524988ceb588b0e9271c2390d` |
 | radio metadata provider | ABI 3 / `RadioMetadataV6` | `3294365ff44da26b261be4a2ccb241b7896d23ad` |
-| Pluto Plus Utils | 0.1.0, Python 3.11+ | `5d0ba26262f7702ebad159b60d53b49c15ea1717` |
+| Pluto Plus Utils | 0.1.0, Python 3.11+ | `e1fddf624f6e627d8b831d4180f5b5fe53eab889` |
 
 Both the native host library and Python binding must be generated from the
-same `f31a200` tree. The ABI-3 runtime receipt deliberately rejects older
+same `8f66f35` tree. The ABI-3 runtime receipt deliberately rejects older
 ABI-3 libiio commits, upstream libiio, and a PyPI-only binding.
 
 Ringless direct mode requires `iio,buffer-direct-async=1`. The producer leases
@@ -121,6 +121,7 @@ with radio.begin_metadata_capture(
     kernel_buffers=15,
     direct_async_frames=250,
     ddr_ring_bytes=0,
+    drop_backlog_on_overrun=True,
 ) as capture:
     blocks = [capture.read_block() for _ in range(250)]
 ```
@@ -139,28 +140,54 @@ with radio.begin_metadata_capture(
     ddr_ring_bytes=13 * 4_194_304,
     ddr_ring_frames=0,
     ddr_ring_continuous=False,
+    drop_backlog_on_overrun=True,
 ) as capture:
     assert capture.direct_async_ring_extension
     blocks = [capture.read_block() for _ in range(23)]
     status = capture.ddr_ring_status()
     assert status["state"] == "complete"
-    assert status["produced_frames"] == status["consumed_frames"]
+    ram_dropped_frames = status["produced_frames"] - status["consumed_frames"]
+    assert ram_dropped_frames >= 0
 ```
 
-Combined ring status counts actual RAM spills and drains; it does not count
-DMA-backed frames, and its target is zero because direct mode owns completion.
+Combined ring status counts actual RAM spills and network drains; it does not
+count DMA-backed frames, and its target is zero because direct mode owns
+completion. With backlog dropping enabled, `produced_frames - consumed_frames`
+is the number of RAM-backed frames evicted before transport. The ladder exposes
+that value directly as `ram_dropped_frames` and requires
+`ram_spilled_frames == ram_drained_frames + ram_dropped_frames`.
 At least three kernel buffers are required. With five or more, iiOD reserves
 three DMA periods as ingestion headroom while a 4 MiB RAM copy is in progress.
 DDR burst and direct mode are mutually exclusive, and direct mode supports
 exactly one selected receiver.
 
-The long-session hardware comparison used `iiod -r 1`, single-RX 25 MS/s,
-1,000,000-sample frames, and one 250-frame request. A 15-buffer/60 MB DMA queue
-delivered 73.27 MB/s, first overflowed at source time 2.08 s, and lost 72
-million samples. A 50-buffer/200 MB DMA queue delivered 72.88 MB/s, first
-overflowed at source time 7.28 s, and lost 26 million samples. Both returned
-all 250 requested frames into exact 1.000 GB files; no RAM ring and no request
-re-arm were involved.
+The v2 hardware comparison used `iiod -r 1`, single-RX 25 MS/s,
+1,000,000-sample frames, and one 250-frame request. Every row returned all 250
+requested frames into an exact 1.000 GB file; there was no host request re-arm:
+
+| Queue and policy | Payload | Gap events | Missing samples | Source coverage |
+| --- | ---: | ---: | ---: | ---: |
+| 12 DMA, preserve | 73.83 MB/s | 74 | 74,000,000 | 77.16% |
+| 12 DMA, drop backlog | 73.02 MB/s | 8 | 80,000,000 | 75.76% |
+| 12 DMA + 200 MB RAM, preserve | 65.69 MB/s | 66 | 66,000,000 | 79.11% |
+| 12 DMA + 200 MB RAM, drop backlog | 61.40 MB/s | 4 | 132,000,000 | 65.45% |
+
+The final 200 MB drop run recorded 169 RAM spills, 74 network drains, 95 RAM
+evictions, high-water 26, and clean `target_complete`. A separate 15-DMA pair
+measured 72.87 MB/s with 74 one-frame gaps in preserve mode and 73.62 MB/s with
+six 13-frame gaps in drop mode. These results define the policy honestly:
+dropping minimizes the number of discontinuity events and stale-data latency,
+not missing-sample count or source-time coverage. RAM copies also consume Zynq
+CPU and are not the maximum-throughput configuration.
+
+The radio advertises both supported values through
+`iio,buffer-direct-async-overrun-policies=drop-backlog,preserve-backlog` and
+advertises `drop-backlog` as its default. The Python API and CLI default to
+`drop_backlog_on_overrun=True`. Set it to `False`, or pass
+`--preserve-backlog-on-overrun`, to deliver every already queued frame. In both
+modes the frame currently entering TCP is never freed, exact V6 gap metadata is
+rebased against the last delivered frame, and replacement frames are acquired
+until the original host target is satisfied.
 
 Run the release speed matrix with one Pluto Plus Utils command:
 
@@ -173,6 +200,8 @@ uv run pluto radio direct-async-ladder 192.168.1.15 \
 ```
 
 Add `--ram-ring-slots 13 --kernel-buffers 10` for the RAM-extension matrix.
+The command defaults to `--drop-backlog-on-overrun`; use
+`--preserve-backlog-on-overrun` for the control policy.
 For a local gadget among several radios that all use `192.168.2.1`, add the
 exact `--usb-sysfs-path`, `--isolate-usb-route`, and
 `--isolation-confirm 'ISOLATE USB SSH INTERFACE'`. Route isolation covers the
@@ -184,10 +213,10 @@ until the target completes, and there is no periodic request re-arm.
 Counter-observed gaps remain evidence in a completed speed cell, while
 protocol, readback, cleanup, or capture failures make the command exit nonzero.
 
-The immutable `iq-direct-async-long-session-v1-source/libiio-v1` ref supplies
+The immutable `iq-direct-async-v2-source/libiio-v1` ref supplies
 the matched host runtime. The comparison used a volatile iiOD/library overlay
 on the version-stamped CMA prototype; no QSPI bytes were changed. A persistent
-firmware image containing `f31a200` remains unavailable until the firmware
+firmware image containing `8f66f35` remains unavailable until the firmware
 integration is rebuilt and qualified. Firmware source requirements, submodule
 commits, binary evidence hashes, publication order, and rollback are recorded
 in `IIO_DIRECT_ASYNC_INSTALL.md` in the firmware repository.
