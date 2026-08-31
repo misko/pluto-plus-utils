@@ -279,6 +279,7 @@ class IioMetadataCaptureSession:
         ddr_ring_frames: int = 0,
         ddr_ring_continuous: bool = False,
         direct_async_frames: int = 0,
+        drop_backlog_on_overrun: bool = True,
         iq_decoder: IioIqDecoder = "pyadi",
     ) -> None:
         validate_iq_decoder(iq_decoder)
@@ -310,6 +311,8 @@ class IioMetadataCaptureSession:
             raise ValueError(
                 f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]"
             )
+        if not isinstance(drop_backlog_on_overrun, bool):
+            raise TypeError("drop_backlog_on_overrun must be a bool")
         if direct_async_frames and kernel_buffers < 2:
             raise ValueError("direct async capture requires at least two kernel buffers")
         if direct_async_frames and ddr_ring_bytes and kernel_buffers < 3:
@@ -346,6 +349,9 @@ class IioMetadataCaptureSession:
         self._ddr_ring_capture_frames = ddr_ring_frames
         self._ddr_ring_continuous = ddr_ring_continuous
         self._direct_async_frames = direct_async_frames
+        self._drop_backlog_on_overrun = bool(
+            direct_async_frames and drop_backlog_on_overrun
+        )
         self._tandem_request = tandem_request or TandemSessionRequestV1.auto_for_sample_count(
             samples_per_channel,
             retention_frames=(kernel_buffers + 1 if metadata_abi == 4 else 2),
@@ -393,6 +399,10 @@ class IioMetadataCaptureSession:
     @property
     def direct_async_ring_extension(self) -> bool:
         return bool(self._direct_async_frames and self._ddr_ring_capacity_frames)
+
+    @property
+    def drop_backlog_on_overrun(self) -> bool:
+        return self._drop_backlog_on_overrun
 
     @property
     def is_open(self) -> bool:
@@ -595,6 +605,7 @@ class IioMetadataCaptureSession:
                             ddr_ring_frames=self._ddr_ring_capture_frames,
                             ddr_ring_continuous=self._ddr_ring_continuous,
                             direct_async_frames=self._direct_async_frames,
+                            drop_backlog_on_overrun=self._drop_backlog_on_overrun,
                         )
                     return self._metadata_buffer_type(
                         self._sdr._rxadc,
@@ -614,6 +625,7 @@ class IioMetadataCaptureSession:
                         self._metadata_capacity,
                         batch_frames=1,
                         direct_async_frames=self._direct_async_frames,
+                        drop_backlog_on_overrun=self._drop_backlog_on_overrun,
                     )
                 return self._metadata_buffer_type(
                     self._sdr._rxadc,

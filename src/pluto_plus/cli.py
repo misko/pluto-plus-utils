@@ -548,7 +548,8 @@ def _direct_async_ladder_table(report: DirectAsyncLadderReport) -> str:
                 "disabled"
                 if report.mode == "direct"
                 else (
-                    f"{cell.ram_spilled_frames}/{cell.ram_drained_frames} "
+                    f"{cell.ram_spilled_frames}/{cell.ram_drained_frames}/"
+                    f"{cell.ram_dropped_frames} "
                     f"hw={cell.ram_high_water_frames}"
                 )
             ),
@@ -579,7 +580,8 @@ def _direct_async_ladder_table(report: DirectAsyncLadderReport) -> str:
         f"Radio {report.serial} · {report.uri} · {report.model} · "
         f"firmware {report.firmware_version or 'unknown'} · mode {report.mode} · "
         f"IQ decoder {report.iq_decoder} · kernel buffers {report.kernel_buffers} · "
-        f"RAM slots {report.ram_ring_slots}"
+        f"RAM slots {report.ram_ring_slots} · overrun policy "
+        f"{'drop-backlog' if report.drop_backlog_on_overrun else 'preserve-backlog'}"
     )
     restore = "Original RX settings restored: yes"
     return "\n".join((identity, header, separator, *body, restore, report.continuity_claim))
@@ -1565,6 +1567,14 @@ def radio_direct_async_ladder(
         max=50,
         help="RAM slots extending the direct FIFO; zero selects ringless direct mode.",
     ),
+    drop_backlog_on_overrun: bool = typer.Option(
+        True,
+        "--drop-backlog-on-overrun/--preserve-backlog-on-overrun",
+        help=(
+            "After a radio-side source overrun, evict queued stale frames and refill; "
+            "the inverse keeps every queued frame."
+        ),
+    ),
     tandem_mode: str = typer.Option(
         "hold",
         "--tandem-mode",
@@ -1732,6 +1742,7 @@ def radio_direct_async_ladder(
             samples_per_frame=samples,
             kernel_buffers=kernel_buffers,
             ram_ring_slots=ram_ring_slots,
+            drop_backlog_on_overrun=drop_backlog_on_overrun,
             tandem_mode=cast(Any, normalized_tandem),
             iq_decoder=cast(Any, normalized_decoder),
         )

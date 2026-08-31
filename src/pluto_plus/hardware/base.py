@@ -179,6 +179,9 @@ class MetadataCapture(Protocol):
     def direct_async_ring_extension(self) -> bool: ...
 
     @property
+    def drop_backlog_on_overrun(self) -> bool: ...
+
+    @property
     def ddr_burst_enabled(self) -> bool: ...
 
     @property
@@ -380,4 +383,5 @@ class MetadataRadioDevice(RadioDevice, Protocol):
         kernel_buffers: int,
         ddr_burst_bytes: int = 0,
         direct_async_frames: int = 0,
+        drop_backlog_on_overrun: bool = True,
     ) -> MetadataCapture: ...

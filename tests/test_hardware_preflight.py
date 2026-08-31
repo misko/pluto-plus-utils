@@ -199,8 +199,8 @@ def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
     (
         (
             3,
-            "iq-direct-async-long-session-v1-source/libiio-v1",
-            "f31a200ed6a884f054e513ce0707a342ee8bd679",
+            "iq-direct-async-v2-source/libiio-v1",
+            "8f66f353c9a70a5524988ceb588b0e9271c2390d",
         ),
         (
             4,
@@ -248,6 +248,7 @@ def test_metadata_runtime_gate_accepts_exact_ring_request_constructor(
                     "ddr_ring_frames",
                     "ddr_ring_continuous",
                     *(["direct_async_frames"] if abi == 3 else []),
+                    *(["drop_backlog_on_overrun"] if abi == 3 else []),
                 ],
             }
         )
@@ -268,7 +269,8 @@ def test_metadata_runtime_gate_accepts_exact_ring_request_constructor(
                 ddr_ring_frames: int = 0,
                 ddr_ring_continuous: bool = False,
                 direct_async_frames: int = 0,
-            ) -> None:
+                drop_backlog_on_overrun: bool = True,
+                ) -> None:
                 pass
 
     else:

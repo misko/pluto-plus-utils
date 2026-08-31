@@ -63,8 +63,8 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     assert "import setuptools" in text
     assert '"$uv_bin" pip install' in text
     assert "--no-build-isolation" in text
-    assert "iq-direct-async-long-session-v1-source/libiio-v1" in text
-    assert "f31a200ed6a884f054e513ce0707a342ee8bd679" in text
+    assert "iq-direct-async-v2-source/libiio-v1" in text
+    assert "8f66f353c9a70a5524988ceb588b0e9271c2390d" in text
     assert "iio-gain-timeline-v8-rc1-source/libiio-v4" in text
     assert "98a5e6139459a01a5a42ca7cd3e98d807156b6b0" in text
 

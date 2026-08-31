@@ -57,6 +57,7 @@ def _report(**kwargs: Any) -> DirectAsyncLadderReport:
             inter_segment_skipped_samples=0,
             ram_spilled_frames=0,
             ram_drained_frames=0,
+            ram_dropped_frames=0,
             ram_high_water_frames=0,
             passed=True,
         )
@@ -132,6 +133,7 @@ def test_direct_ladder_one_command_forwards_exact_requested_matrix(
             "samples_per_frame": 1_048_576,
             "kernel_buffers": 15,
             "ram_ring_slots": 0,
+            "drop_backlog_on_overrun": True,
             "tandem_mode": "hold",
             "iq_decoder": "pyadi",
         }
@@ -168,6 +170,36 @@ def test_direct_ladder_defaults_are_the_requested_release_matrix(
     assert result.exit_code == 0, result.output
     assert calls[0]["rates_hz"] == (5_000_000, 10_000_000, 15_000_000, 25_000_000)
     assert calls[0]["durations_seconds"] == (3.0, 10.0)
+
+
+def test_direct_ladder_can_select_preserve_backlog(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def run(**kwargs: Any) -> DirectAsyncLadderReport:
+        calls.append(kwargs)
+        return _report(**kwargs)
+
+    monkeypatch.setattr("pluto_plus.cli.run_direct_async_ladder", run)
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "direct-async-ladder",
+            "192.168.1.15",
+            "--expect-serial",
+            "SERIAL_A",
+            "--rates",
+            "5M",
+            "--durations",
+            "3",
+            "--preserve-backlog-on-overrun",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["drop_backlog_on_overrun"] is False
 
 
 def test_direct_ladder_table_names_segment_and_rearm_evidence(
