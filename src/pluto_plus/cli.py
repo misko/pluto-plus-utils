@@ -4645,6 +4645,135 @@ def firmware_flash_usb(
     )
 
 
+@firmware_app.command("flash-lan")
+def firmware_flash_lan(
+    image: Path = typer.Argument(...),  # noqa: B008
+    serial: str = typer.Option(..., "--serial", help="Exact serial expected at the LAN endpoint."),
+    host: str = typer.Option(..., "--host", help="Exact private LAN IPv4 endpoint."),
+    profile: str = typer.Option(
+        ...,
+        "--profile",
+        help="Exact hardware-qualified persistent profile; never inferred from the image.",
+    ),
+    ssh_known_hosts_file: Path = typer.Option(  # noqa: B008
+        ...,
+        "--ssh-known-hosts-file",
+        help="Current serial/address-specific private known_hosts file.",
+    ),
+    ssh_password_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--ssh-password-file",
+        help="Optional private radio password file; otherwise prompt on execution.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Perform the planned QSPI write; omission is a read-only dry run.",
+    ),
+    confirmation: str | None = typer.Option(
+        None,
+        "--confirm",
+        help="With --execute, exact phrase FLASH LAN <serial> <host>.",
+    ),
+    receipt_directory: Path = typer.Option(  # noqa: B008
+        DEFAULT_BOOTSTRAP_RECEIPTS,
+        "--receipt-directory",
+        help="Private directory for durable LAN flash receipts.",
+    ),
+    return_timeout_s: float = typer.Option(
+        180,
+        "--return-timeout",
+        min=30,
+        max=1800,
+        help="Seconds to observe IIOD disappear, return, and pass exact attestation.",
+    ),
+) -> None:
+    """Flash one network-only Pluto and rotate its ephemeral SSH key after return."""
+
+    from pluto_plus.bootstrap_firmware import (
+        BootstrapFirmwareError,
+        BoundSshBootstrapTransport,
+        execute_lan_flash_plan,
+        prepare_lan_flash_plan,
+        rotate_lan_ssh_host_key_after_attested_return,
+    )
+
+    try:
+        plan, frm = prepare_lan_flash_plan(
+            image,
+            serial=serial,
+            host=host,
+            mutation_profile_id=profile,
+        )
+        if not execute:
+            _emit(
+                {
+                    "mode": "dry_run",
+                    "will_write": False,
+                    "will_rotate_ephemeral_ssh_key": False,
+                    "plan": asdict(plan),
+                    "next_command": (
+                        "repeat with --execute and "
+                        f"--confirm {json.dumps(plan.confirmation_phrase)}"
+                    ),
+                }
+            )
+            return
+        if confirmation != plan.confirmation_phrase:
+            _fail(
+                "lan_flash_confirmation_required",
+                f"--execute requires --confirm {plan.confirmation_phrase!r}",
+                2,
+            )
+        if ssh_password_file is None:
+            password = typer.prompt("Radio SSH password", hide_input=True)
+        else:
+            try:
+                password = (
+                    _read_private_file_bytes(
+                        ssh_password_file,
+                        label="radio SSH password",
+                        maximum_bytes=4096,
+                    )
+                    .decode("utf-8")
+                    .strip()
+                )
+            except UnicodeDecodeError:
+                _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
+        resolved_known_hosts = ssh_known_hosts_file.expanduser().resolve()
+        transport = BoundSshBootstrapTransport(
+            interface=None,
+            password=password,
+            known_hosts_file=resolved_known_hosts,
+            host=plan.host,
+        )
+
+        def rotate_host_key() -> dict[str, str]:
+            return rotate_lan_ssh_host_key_after_attested_return(
+                serial=plan.target_serial,
+                host=plan.host,
+                expected_firmware=plan.expected_firmware,
+                expected_metadata_abi=plan.expected_metadata_abi,
+                password=password,
+                known_hosts_file=resolved_known_hosts,
+            )
+
+        result = execute_lan_flash_plan(
+            plan,
+            frm,
+            confirmation=confirmation,
+            receipt_directory=receipt_directory.expanduser().resolve(),
+            transport=transport,
+            host_key_rotator=rotate_host_key,
+            return_timeout_s=return_timeout_s,
+        )
+    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        _fail("lan_flash_failed", str(error), 4)
+    _emit(asdict(result))
+    if result.outcome != "success":
+        raise typer.Exit(5)
+
+
 @environment_survey_app.command("plan")
 def environment_survey_plan(
     serial: str = typer.Option(..., "--serial", help="Exact local runtime USB serial."),

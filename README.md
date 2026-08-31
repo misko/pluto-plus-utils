@@ -1025,7 +1025,62 @@ available. Enrollment accepts the first key only into a new mode-0600 temporary
 file, disables user and global SSH trust, reconnects with strict checking to run
 only the fixed gadget-serial read, and publishes atomically without overwriting.
 It never writes `~/.ssh/known_hosts` or a global known-hosts file. Key rotation
-requires a separately reviewed new destination path.
+outside the guarded firmware workflow requires a separately reviewed new destination
+path.
+
+### Guarded persistent flash over LAN
+
+For a network-only radio whose key was enrolled as above, `firmware flash-lan`
+provides a standalone, receipt-bound persistent update. It accepts only a literal
+private IPv4 address, one exact serial, and an immutable hardware-qualified
+persistent profile. The current full direct-async/RAM-ring release uses profile
+`iq-direct-async-ring-v1-release-persistent-promotion`.
+
+Create a read-only plan first:
+
+```bash
+uv run pluto firmware flash-lan /absolute/path/to/qualified-pluto.dfu \
+  --serial EXACT_SERIAL \
+  --host 192.168.1.20 \
+  --profile iq-direct-async-ring-v1-release-persistent-promotion \
+  --ssh-known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts
+```
+
+Review the serial, current/target versions, DFU/FRM/FIT hashes, and confirmation
+phrase. Then execute with the same inputs and a private password file (or omit that
+option for a hidden prompt):
+
+```bash
+uv run pluto firmware flash-lan /absolute/path/to/qualified-pluto.dfu \
+  --serial EXACT_SERIAL \
+  --host 192.168.1.20 \
+  --profile iq-direct-async-ring-v1-release-persistent-promotion \
+  --ssh-known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts \
+  --ssh-password-file /private/radio.password \
+  --receipt-directory /private/lan-flash-receipts \
+  --return-timeout 420 \
+  --execute --confirm 'FLASH LAN EXACT_SERIAL 192.168.1.20'
+```
+
+The pinned pre-reboot SSH key authorizes only the mutation. Before staging, the
+command independently re-attests the radio serial, current firmware, updater, idle
+buffers, muted TX gains, disabled TX scan elements, and zeroed DDS state. It hashes
+the staged FRM and the exact FIT bytes read back from `mtd3` before reset.
+
+Pluto's generated SSH host key is ephemeral and normally changes at reboot. The
+command therefore does not wait for old-key SSH to recover. It first observes IIOD
+disappear and return, then requires the exact serial, target firmware, metadata ABI,
+paired-RX/tandem layout, direct-async and RAM-ring capabilities, and TX-safe readback.
+Only after that independent attestation does it accept one replacement key, verify
+the same serial through the new SSH session, archive the old known-hosts bytes, and
+atomically replace the active mode-0600 file. Both key hashes and fingerprints are
+stored in the durable receipt. A failure after updater dispatch is `unknown` and must
+not be retried without read-only reconciliation.
+
+A firmware-provisioned persistent host key would remove routine rotation, but it must
+be generated per device and stored in protected persistent storage. Reusing one key
+across images or radios would weaken identity. Until that is a separately qualified
+firmware feature, post-return identity-first rotation is the supported solution.
 
 ### Experimental pinned-SSH radio administration
 

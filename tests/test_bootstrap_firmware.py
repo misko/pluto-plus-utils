@@ -2118,6 +2118,334 @@ class FakeSshTransport:
         return ""
 
 
+@pytest.fixture
+def lan_planned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[bootstrap.LanFlashPlan, bytes, Path]:
+    image = tmp_path / "lan-qualified.dfu"
+    image.write_bytes(_dfu())
+    fit = _fit()
+    profile_id = "test-lan-persistent"
+    base_profile = bootstrap.STANDALONE_FLASH_PROFILES[
+        bootstrap.IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY.profile_id
+    ]
+    policy = base_profile.policy.model_copy(
+        update={
+            "profile_id": profile_id,
+            "asset_sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+            "fit_body_sha256": hashlib.sha256(fit).hexdigest(),
+            "fit_body_size": len(fit),
+            "device_firmware": "v-test-lan-target",
+            "hardware_qualified": True,
+        }
+    )
+    profiles = dict(bootstrap.STANDALONE_FLASH_PROFILES)
+    profiles[profile_id] = replace(base_profile, policy=policy)
+    monkeypatch.setattr(bootstrap, "STANDALONE_FLASH_PROFILES", profiles)
+    monkeypatch.setattr(
+        bootstrap,
+        "_inspect_iio_context",
+        lambda host: {
+            **_lan_iio_facts(serial="SERIAL_LAN"),
+            "fw_version": "v-before-lan",
+            "iio,buffer-metadata": "3",
+            "device_names": ("ad9361-phy", "cf-ad9361-lpc", "tandem-agc"),
+        },
+    )
+    plan, frm = bootstrap.prepare_lan_flash_plan(
+        image,
+        serial="SERIAL_LAN",
+        host="192.168.1.20",
+        mutation_profile_id=profile_id,
+    )
+    return plan, frm, image
+
+
+class FakeLanSshTransport:
+    def __init__(
+        self,
+        plan: bootstrap.LanFlashPlan,
+        *,
+        updater_output: str = "Done\n",
+        tx_gain: str = "-80,-80",
+    ) -> None:
+        self.plan = plan
+        self.updater_output = updater_output
+        self.tx_gain = tx_gain
+        self.calls: list[tuple[str, bytes | None]] = []
+
+    def upload_frm(self, data: bytes, *, timeout_s: float = 120) -> None:
+        del timeout_s
+        self.calls.append(("upload_frm", data))
+
+    def run(
+        self,
+        command: str,
+        *,
+        stdin: bytes | None = None,
+        timeout_s: float = 15,
+    ) -> str:
+        del timeout_s
+        self.calls.append((command, stdin))
+        if command == bootstrap._REMOTE_ATTEST_COMMAND:
+            return (
+                f"serial={self.plan.target_serial}\n"
+                f"model={self.plan.before_model}\n"
+                f"firmware={self.plan.before_firmware}\n"
+                "updater=/sbin/update_frm.sh\n"
+            )
+        if stdin == bootstrap._REMOTE_RECONCILE_SCRIPT:
+            return (
+                f"PPU\tserial\t{self.plan.target_serial}\n"
+                f"PPU\tfirmware\t{self.plan.before_firmware}\n"
+                f"PPU\tfit_sha256\t{'0' * 64}\n"
+                "PPU\tall_buffer_enable\t0,0\n"
+                f"PPU\ttx_hardwaregain_db\t{self.tx_gain}\n"
+                "PPU\ttx_buffer_enable\t0\n"
+                "PPU\ttx_scan_enable\t0,0,0,0\n"
+                "PPU\ttx_dds_raw\t0,0,0,0,0,0,0,0\n"
+                "PPU\ttx_dds_scale\t0,0,0,0,0,0,0,0\n"
+            )
+        if command == bootstrap._REMOTE_STAGE_HASH_COMMAND:
+            return f"{self.plan.frm_sha256}  /tmp/pluto-plus-utils/pluto.frm\n"
+        if command == bootstrap._REMOTE_UPDATE_COMMAND:
+            return self.updater_output
+        if command.startswith("head -c "):
+            return f"{self.plan.fit_sha256}  -\n"
+        return ""
+
+
+def test_prepare_lan_flash_is_exact_serial_profile_and_read_only(
+    lan_planned: tuple[bootstrap.LanFlashPlan, bytes, Path],
+) -> None:
+    plan, frm, image = lan_planned
+
+    assert plan.host == "192.168.1.20"
+    assert plan.target_serial == "SERIAL_LAN"
+    assert plan.image_path == str(image.resolve())
+    assert plan.trust_model == "explicit_lan_tofu"
+    assert plan.confirmation_phrase == "FLASH LAN SERIAL_LAN 192.168.1.20"
+    assert hashlib.sha256(frm).hexdigest() == plan.frm_sha256
+
+
+def test_prepare_lan_flash_rejects_wrong_endpoint_serial(
+    lan_planned: tuple[bootstrap.LanFlashPlan, bytes, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, _, image = lan_planned
+    monkeypatch.setattr(
+        bootstrap,
+        "_inspect_iio_context",
+        lambda host: {**_lan_iio_facts(serial="SERIAL_OTHER"), "iio,buffer-metadata": "3"},
+    )
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="attested serial"):
+        bootstrap.prepare_lan_flash_plan(
+            image,
+            serial=plan.target_serial,
+            host=plan.host,
+            mutation_profile_id=plan.mutation_profile_id,
+        )
+
+
+def test_execute_lan_flash_orders_attestation_rotation_and_receipt(
+    lan_planned: tuple[bootstrap.LanFlashPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, frm, _ = lan_planned
+    transport = FakeLanSshTransport(plan)
+    lifecycle: list[str] = []
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_lan_flash_plan",
+        lambda *args, **kwargs: (plan, frm),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_wait_for_lan_iio_state",
+        lambda host, available, timeout_s: lifecycle.append(
+            "iio-returned" if available else "iio-disappeared"
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_attest_lan_return_when_ready",
+        lambda *args, **kwargs: lifecycle.append("return-attested")
+        or (plan.target_serial, plan.expected_firmware, "ad9361"),
+    )
+
+    def rotate() -> dict[str, str]:
+        lifecycle.append("key-rotated")
+        return {
+            "previous_known_hosts_sha256": "1" * 64,
+            "replacement_known_hosts_sha256": "2" * 64,
+        }
+
+    result = bootstrap.execute_lan_flash_plan(
+        plan,
+        frm,
+        confirmation=plan.confirmation_phrase,
+        receipt_directory=tmp_path / "receipts",
+        transport=transport,
+        host_key_rotator=rotate,
+        return_timeout_s=75,
+    )
+
+    assert result.outcome == "success"
+    assert lifecycle == [
+        "iio-disappeared",
+        "iio-returned",
+        "return-attested",
+        "key-rotated",
+    ]
+    assert "remote_tx_safe_read_only_attested" in result.phases
+    assert "mtd3_fit_verified" in result.phases
+    assert result.phases[-1] == "lan_ssh_host_key_rotated"
+    safe_call = next(
+        call for call in transport.calls if call[1] == bootstrap._REMOTE_RECONCILE_SCRIPT
+    )
+    upload_call = next(call for call in transport.calls if call[0] == "upload_frm")
+    assert transport.calls.index(safe_call) < transport.calls.index(upload_call)
+    receipt = json.loads(Path(result.receipt_path).read_text())
+    assert receipt["outcome"] == "success"
+    assert receipt["host_key_rotation"]["replacement_known_hosts_sha256"] == "2" * 64
+
+
+def test_execute_lan_flash_refuses_unsafe_tx_before_staging(
+    lan_planned: tuple[bootstrap.LanFlashPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, frm, _ = lan_planned
+    transport = FakeLanSshTransport(plan, tx_gain="-10,-80")
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_lan_flash_plan",
+        lambda *args, **kwargs: (plan, frm),
+    )
+
+    result = bootstrap.execute_lan_flash_plan(
+        plan,
+        frm,
+        confirmation=plan.confirmation_phrase,
+        receipt_directory=tmp_path / "receipts",
+        transport=transport,
+        host_key_rotator=lambda: pytest.fail("key rotation must not run"),
+    )
+
+    assert result.outcome == "failed"
+    assert result.retryable is True
+    assert result.failure_classification == "qspi_write_not_started"
+    assert not any(call[0] == "upload_frm" for call in transport.calls)
+
+
+def test_execute_lan_flash_marks_ambiguous_updater_unknown_without_key_rotation(
+    lan_planned: tuple[bootstrap.LanFlashPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, frm, _ = lan_planned
+    transport = FakeLanSshTransport(plan, updater_output="Failed\nDone\n")
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_lan_flash_plan",
+        lambda *args, **kwargs: (plan, frm),
+    )
+
+    result = bootstrap.execute_lan_flash_plan(
+        plan,
+        frm,
+        confirmation=plan.confirmation_phrase,
+        receipt_directory=tmp_path / "receipts",
+        transport=transport,
+        host_key_rotator=lambda: pytest.fail("key rotation must not run"),
+    )
+
+    assert result.outcome == "unknown"
+    assert result.retryable is False
+    assert result.failure_classification == "post_updater_uncertain"
+    assert "unambiguous Done" in (result.error or "")
+
+
+def test_rotate_lan_ssh_key_archives_old_key_after_exact_iio_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    known_hosts = parent / "SERIAL_LAN.known_hosts"
+    old_key = b"192.168.1.20 ssh-ed25519 AAAAOLDKEY\n"
+    new_key = b"192.168.1.20 ssh-ed25519 AAAANEWKEY\n"
+    known_hosts.write_bytes(old_key)
+    known_hosts.chmod(0o600)
+    monkeypatch.setattr(
+        bootstrap,
+        "_inspect_iio_context",
+        lambda host: {
+            "hw_serial": "SERIAL_LAN",
+            "fw_version": "v-new",
+            "iio,buffer-metadata": "3",
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_run_output",
+        lambda argv, timeout_s: f"fingerprint:{Path(argv[2]).name}\n",
+    )
+
+    class SuccessfulChild:
+        exitstatus = 0
+        signalstatus = None
+
+        def __init__(self) -> None:
+            self.before = b""
+            self.calls = 0
+
+        def expect(self, patterns: object) -> int:
+            del patterns
+            self.calls += 1
+            if self.calls == 1:
+                return 0
+            self.before = b"serial=SERIAL_LAN\n"
+            return 1
+
+        def sendline(self, value: bytes) -> None:
+            assert value == b"radio-password"
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    def spawn(binary: str, arguments: list[str], **kwargs: object) -> SuccessfulChild:
+        del kwargs
+        assert binary == "ssh"
+        destination = next(
+            item.partition("=")[2]
+            for item in arguments
+            if item.startswith("UserKnownHostsFile=")
+        )
+        Path(destination).write_bytes(new_key)
+        return SuccessfulChild()
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", spawn)
+
+    evidence = bootstrap.rotate_lan_ssh_host_key_after_attested_return(
+        serial="SERIAL_LAN",
+        host="192.168.1.20",
+        expected_firmware="v-new",
+        expected_metadata_abi=3,
+        password="radio-password",
+        known_hosts_file=known_hosts,
+    )
+
+    backup = Path(evidence["previous_known_hosts_backup"])
+    assert known_hosts.read_bytes() == new_key
+    assert backup.read_bytes() == old_key
+    assert evidence["previous_known_hosts_sha256"] == hashlib.sha256(old_key).hexdigest()
+    assert evidence["replacement_known_hosts_sha256"] == hashlib.sha256(new_key).hexdigest()
+
+
 def test_bound_ssh_force_flash_verifies_stage_mtd3_and_return(
     planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
     tmp_path: Path,
@@ -2216,6 +2544,7 @@ class ReadOnlyReconciliationTransport:
             f"PPU\tserial\t{self.plan.target_serial}\n"
             f"PPU\tfirmware\t{self.plan.expected_firmware}\n"
             f"PPU\tfit_sha256\t{self.plan.fit_sha256}\n"
+            "PPU\tall_buffer_enable\t0,0\n"
             "PPU\ttx_hardwaregain_db\t-80,-80\n"
             "PPU\ttx_buffer_enable\t0\n"
             "PPU\ttx_scan_enable\t0,0,0,0\n"

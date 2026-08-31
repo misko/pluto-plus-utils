@@ -430,11 +430,40 @@ phases. Failures before updater dispatch are known failures. Failures after disp
 are unknown until the read-only receipt reconciliation succeeds. A consumed plan is
 never retried.
 
-Pluto SSH host keys can change after reboot. A replacement key is not accepted from
-the network automatically. The receipt retains the verified pre-reset QSPI evidence,
-but the enrollment remains locked until an operator verifies the new fingerprint
-through an independent trusted path, updates the private known-hosts enrollment, and
-runs `pluto firmware reconcile RECEIPT_ID` after restarting the daemon.
+In the daemon-managed `ssh_frm` path, Pluto SSH host keys can change after reboot.
+A replacement key is not accepted from the network automatically. The receipt retains
+the verified pre-reset QSPI evidence, but the enrollment remains locked until an
+operator verifies the new fingerprint through an independent trusted path, updates
+the private known-hosts enrollment, and runs `pluto firmware reconcile RECEIPT_ID`
+after restarting the daemon.
+
+The standalone `pluto firmware flash-lan` command provides a narrower guarded path
+for a network-only radio with an already enrolled password-authenticated key. It is
+not discovery-driven and does not accept arbitrary images. A dry run binds a literal
+private address, exact serial, current IIOD identity, hardware-qualified persistent
+profile, and exact DFU/FRM/FIT hashes. Execution requires the printed
+`FLASH LAN <serial> <host>` phrase and a private pinned known-hosts file.
+
+Before upload, the command revalidates IIOD and pinned-SSH identity and performs a
+read-only TX-safe check: all radio buffers are idle, both TX gains are at or below
+-80 dB, TX scan elements are disabled, and DDS raw/scale controls are zero. It then
+uses only the fixed staging path and updater, verifies the staged FRM, hashes the
+exact FIT length from `mtd3`, cleans the stage, and reboots.
+
+The on-radio SSH key is generated at boot and is not expected to persist. After
+reboot, `flash-lan` uses IIOD—not the new SSH key—as the first identity anchor. It
+requires the exact serial, target firmware, metadata ABI, PHY, paired-RX/tandem
+layout, profile-specific DDR/RAM-ring attributes, direct-async attributes, and
+TX-safe readback. Only then may one `accept-new` SSH session capture the replacement
+key and read the exact gadget serial. The old known-hosts file is archived by digest;
+the replacement is published atomically; both fingerprints and hashes are written
+to the flash receipt. Thus an ordinary ephemeral key does not strand a successful
+update or silently broaden trust.
+
+Long-term persistent SSH identity is a firmware/storage feature, not a host-side
+workaround. It should use a unique per-radio private key in protected persistent
+storage and be qualified as part of a future image. A shared baked-in key is not an
+acceptable substitute.
 
 ## Checkpoints and tests
 

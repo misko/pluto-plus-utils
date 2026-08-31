@@ -349,8 +349,8 @@ IQ_DIRECT_ASYNC_RING_V1_RELEASE_PROFILE = DiagnosticProfile(
     metadata_abis=(3,),
     tandem_agc_required=True,
     release_status=(
-        "exact final direct-async IQ queue bytes under RAM qualification; "
-        "persistence not yet authorized"
+        "full hardware-qualified direct-async IQ and RAM-ring release; "
+        "persistent QSPI installation authorized"
     ),
     release_rank=33,
 )
