@@ -200,7 +200,7 @@ def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
         (
             3,
             "iq-direct-async-ring-v1-rc1-source/libiio-v1",
-            "8233d4e2437f524a8ec91adcb852c5a43eebac4f",
+            "b7303fded264e10473bbbb084afade8f1b1373d1",
         ),
         (
             4,
