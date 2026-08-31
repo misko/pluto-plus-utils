@@ -24,6 +24,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -1341,6 +1342,7 @@ class StandaloneReconciliationResult:
     returned_firmware: str
     fit_sha256: str
     tx_safe: bool
+    reconciled_at: str
 
 
 def prepare_bootstrap_plan(
@@ -2099,10 +2101,18 @@ def reconcile_usb_flash_receipt(
     receipt = _read_receipt(receipt_path)
     if receipt.get("schema_version") != 1 or receipt.get("receipt_id") != receipt_id:
         raise BootstrapFirmwareError("standalone receipt identity or schema is invalid")
-    original_outcome = receipt.get("outcome")
-    if original_outcome not in {"unknown", "success"}:
+    current_outcome = receipt.get("outcome")
+    original_outcome = (
+        receipt.get("original_outcome")
+        if current_outcome == "reconciled_verified"
+        else current_outcome
+    )
+    if current_outcome not in {"unknown", "success", "reconciled_verified"} or (
+        original_outcome not in {"unknown", "success"}
+    ):
         raise BootstrapFirmwareError(
-            "only an unknown or successful standalone flash may be re-attested"
+            "only an unknown, successful, or previously reconciled standalone flash "
+            "may be re-attested"
         )
     receipt_transport = receipt.get("transport")
     receipt_phases = receipt.get("phases")
@@ -2218,10 +2228,24 @@ def reconcile_usb_flash_receipt(
         returned_firmware=plan.expected_firmware,
         fit_sha256=remote_fit,
         tx_safe=True,
+        reconciled_at=datetime.now(UTC).isoformat(),
     )
     receipt["original_outcome"] = original_outcome
     receipt["outcome"] = result.outcome
-    receipt["reconciliation"] = asdict(result)
+    serialized_result = asdict(result)
+    raw_history = receipt.get("reconciliations")
+    if isinstance(raw_history, list):
+        history = raw_history
+    else:
+        previous = receipt.get("reconciliation")
+        history = (
+            [previous]
+            if current_outcome == "reconciled_verified" and isinstance(previous, dict)
+            else []
+        )
+    history.append(serialized_result)
+    receipt["reconciliations"] = history
+    receipt["reconciliation"] = serialized_result
     _write_receipt(receipt_path, receipt)
     return result
 
