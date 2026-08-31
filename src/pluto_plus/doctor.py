@@ -673,9 +673,9 @@ IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY = (
 # Exact final-version-stamped direct-async v2 bytes from protected main run
 # 33440908273. V2 adds the explicit drop-backlog/preserve-backlog overrun policy
 # and makes drop-backlog the default, including when RAM extends the same FIFO.
-# This reviewed identity authorizes volatile DFU only until these exact bytes
-# pass the physical-1-GbE, RAM-ring, recovery, and RF promotion gates. A cold
-# boot from QSPI remains a mandatory post-write release gate.
+# This reviewed identity remains the volatile-only policy for the exact release
+# bytes. Persistent writes require the separately qualified promotion policy
+# below, so choosing the RAM policy can never imply QSPI authority.
 IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY = FirmwarePolicy(
     profile_id="iq-direct-async-v2-release-ram",
     release_tag="v0.47-plutoplus-spf-iq-direct-async-v2",
@@ -694,7 +694,9 @@ IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY = FirmwarePolicy(
 # RAM-loaded bytes passed the sustained speed ladder, matched 25 MS/s baseline
 # and 200 MB FIFO tests, continuous-session overrun comparison, RF restoration,
 # abrupt-client recovery, and ordinary dual-RX postflight. Keeping both policy
-# objects prevents RAM qualification from implicitly authorizing a write.
+# objects prevents RAM qualification from implicitly authorizing a write. The
+# exact persistent bytes subsequently passed QSPI readback and an all-power-
+# removed cold boot with RF restoration and TX-safe postflight.
 IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY.model_copy(
     update={
         "profile_id": "iq-direct-async-v2-release-persistent-promotion",

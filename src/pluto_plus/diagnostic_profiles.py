@@ -361,8 +361,8 @@ IQ_DIRECT_ASYNC_V2_RELEASE_PROFILE = DiagnosticProfile(
     metadata_abis=(3,),
     tandem_agc_required=True,
     release_status=(
-        "final-version direct-async v2 image undergoing exact-byte hardware "
-        "qualification; RAM boot only until persistent promotion"
+        "full hardware-qualified direct-async v2 IQ and RAM-extension release; "
+        "persistent QSPI installation authorized"
     ),
     release_rank=34,
 )
