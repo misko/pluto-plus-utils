@@ -30,6 +30,13 @@ from pluto_plus.ddr_recovery import (
     run_live_ddr_recovery_cycle,
 )
 from pluto_plus.ddr_recovery import MAX_CYCLES as MAX_DDR_RECOVERY_CYCLES
+from pluto_plus.direct_async_ladder import (
+    DEFAULT_DIRECT_ASYNC_DURATIONS,
+    DEFAULT_DIRECT_ASYNC_RATES,
+    DirectAsyncLadderReport,
+    parse_duration_ladder,
+    run_direct_async_ladder,
+)
 from pluto_plus.fastlock import (
     DEFAULT_DWELL_US,
     DEFAULT_HOPS_PER_MODE,
@@ -497,6 +504,70 @@ def _ladder_table(report: LadderReport) -> str:
         for line in (identity, duration, header, separator, *body, restore, report.continuity_claim)
         if line
     )
+
+
+def _direct_async_ladder_table(report: DirectAsyncLadderReport) -> str:
+    columns = (
+        ("RATE", "rate"),
+        ("DURATION", "duration"),
+        ("FRAMES", "frames"),
+        ("SEGMENTS", "segments"),
+        ("OFFERED", "offered"),
+        ("ACHIEVED", "achieved"),
+        ("GAPS", "gaps"),
+        ("REARM SKIP", "rearm"),
+        ("RAM", "ram"),
+        ("RESULT", "result"),
+    )
+    rows = [
+        {
+            "rate": f"{cell.sample_rate_hz / 1_000_000:g} MS/s",
+            "duration": f"{cell.requested_duration_seconds:g} s",
+            "frames": str(cell.requested_frames),
+            "segments": str(cell.capture_segments),
+            "offered": f"{cell.offered_payload_mbps:.2f} MB/s",
+            "achieved": f"{cell.achieved_payload_mbps:.2f} MB/s",
+            "gaps": f"{cell.gap_frames} / {cell.missing_sample_count}",
+            "rearm": str(cell.inter_segment_skipped_samples),
+            "ram": (
+                "disabled"
+                if report.mode == "direct"
+                else (
+                    f"{cell.ram_spilled_frames}/{cell.ram_drained_frames} "
+                    f"hw={cell.ram_high_water_frames}"
+                )
+            ),
+            "result": "segments gapless" if cell.passed else "segment gaps",
+        }
+        for cell in report.cells
+    ]
+    rows.extend(
+        {
+            "rate": f"{failure.sample_rate_hz / 1_000_000:g} MS/s",
+            "duration": f"{failure.requested_duration_seconds:g} s",
+            "frames": "—",
+            "segments": "—",
+            "offered": "—",
+            "achieved": "—",
+            "gaps": "—",
+            "rearm": "—",
+            "ram": "—",
+            "result": f"ERROR: {failure.message}",
+        }
+        for failure in report.failures
+    )
+    widths = {key: max(len(title), *(len(row[key]) for row in rows)) for title, key in columns}
+    header = "  ".join(title.ljust(widths[key]) for title, key in columns)
+    separator = "  ".join("-" * widths[key] for _title, key in columns)
+    body = ["  ".join(row[key].ljust(widths[key]) for _title, key in columns) for row in rows]
+    identity = (
+        f"Radio {report.serial} · {report.uri} · {report.model} · "
+        f"firmware {report.firmware_version or 'unknown'} · mode {report.mode} · "
+        f"IQ decoder {report.iq_decoder} · kernel buffers {report.kernel_buffers} · "
+        f"RAM slots {report.ram_ring_slots}"
+    )
+    restore = "Original RX settings restored: yes"
+    return "\n".join((identity, header, separator, *body, restore, report.continuity_claim))
 
 
 def _fastlock_table(report: FastLockProbeReport, report_path: Path) -> str:
@@ -1416,6 +1487,192 @@ def radio_ladder(
         typer.echo(_ladder_table(report))
         if isolation_receipt is not None:
             typer.echo(f"Host isolation receipt: {isolation_receipt.receipt_path}")
+        if report_path is not None:
+            typer.echo(f"Report: {report_path.expanduser().absolute()}")
+    if report.failures:
+        raise typer.Exit(5)
+
+
+@radio_app.command("direct-async-ladder")
+def radio_direct_async_ladder(
+    target: str = typer.Argument(
+        ...,
+        help="USB serial when --transport=usb, or a literal IPv4 address when using IP.",
+    ),
+    transport: str = typer.Option(
+        "ip", "--transport", "-t", help="Metadata libiio transport: usb or ip."
+    ),
+    expect_serial: str | None = typer.Option(
+        None,
+        "--expect-serial",
+        help="Require this exact radio serial (required for IP).",
+    ),
+    ip_port: int = typer.Option(
+        30_431,
+        "--ip-port",
+        min=1,
+        max=65_535,
+        help="IIO network port; accepted only with --transport=ip.",
+    ),
+    rates: str = typer.Option(
+        DEFAULT_DIRECT_ASYNC_RATES,
+        "--rates",
+        help="Strictly increasing comma-separated Hz/K/M/G sample-rate rungs.",
+    ),
+    durations: str = typer.Option(
+        DEFAULT_DIRECT_ASYNC_DURATIONS,
+        "--durations",
+        help="Strictly increasing comma-separated nominal sample-time durations.",
+    ),
+    channels: str = typer.Option(
+        "rx0",
+        "--channels",
+        help="Single receive channel: rx0 or rx1.",
+    ),
+    samples: int = typer.Option(
+        1_048_576,
+        "--samples",
+        min=16_384,
+        max=4_194_304,
+        help="Even samples per direct-async frame.",
+    ),
+    kernel_buffers: int = typer.Option(
+        15,
+        "--kernel-buffers",
+        min=2,
+        max=64,
+        help="Direct DMA queue depth; combined RAM mode requires at least three.",
+    ),
+    ram_ring_slots: int = typer.Option(
+        0,
+        "--ram-ring-slots",
+        min=0,
+        max=50,
+        help="RAM slots extending the direct FIFO; zero selects ringless direct mode.",
+    ),
+    tandem_mode: str = typer.Option(
+        "hold",
+        "--tandem-mode",
+        help="Tandem AGC mode during qualification: hold or auto.",
+    ),
+    iq_decoder: str = typer.Option(
+        "pyadi",
+        "--iq-decoder",
+        help="Host IQ decoder: pyadi or layout-validated raw-complex64.",
+    ),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table or json."
+    ),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--report",
+        help="Absent-only private canonical JSON report path beneath an owned mode-0700 parent.",
+    ),
+) -> None:
+    """Test the finite direct-async rate/duration matrix with counter evidence."""
+
+    normalized_transport = transport.strip().lower()
+    uri: str
+    serial: str
+    if normalized_transport == "usb":
+        if ip_port != 30_431:
+            _fail(
+                "invalid_direct_ladder_port",
+                "--ip-port is accepted only with --transport=ip",
+                2,
+            )
+        if expect_serial is not None and expect_serial != target:
+            _fail(
+                "radio_identity_mismatch",
+                "for USB, TARGET is the serial and must equal --expect-serial",
+                2,
+            )
+        uri = "usb:"
+        serial = target
+    elif normalized_transport == "ip":
+        candidate = target.removeprefix("ip:")
+        try:
+            address = ip_address(candidate)
+        except ValueError:
+            _fail(
+                "invalid_radio_target",
+                "IP direct ladder target must be a literal IP address",
+                2,
+            )
+        if address.version != 4:
+            _fail(
+                "invalid_radio_target",
+                "IP direct ladder currently supports IPv4 targets",
+                2,
+            )
+        if expect_serial is None:
+            _fail(
+                "missing_radio_identity",
+                "IP direct ladder requires --expect-serial",
+                2,
+            )
+        uri = f"ip:{address}" if ip_port == 30_431 else f"ip:{address}:{ip_port}"
+        serial = expect_serial
+    else:
+        _fail(
+            "invalid_direct_ladder_transport",
+            "direct ladder transport must be usb or ip",
+            2,
+        )
+    normalized_channels = channels.strip().lower()
+    direct_channels = {"rx0": (0,), "rx1": (1,)}
+    if normalized_channels not in direct_channels:
+        _fail("direct_ladder_failed", "--channels must be rx0 or rx1", 2)
+    normalized_tandem = tandem_mode.strip().lower()
+    if normalized_tandem not in {"hold", "auto"}:
+        _fail("direct_ladder_failed", "--tandem-mode must be hold or auto", 2)
+    normalized_decoder = iq_decoder.strip().lower()
+    if normalized_decoder not in {"pyadi", "raw-complex64"}:
+        _fail(
+            "direct_ladder_failed",
+            "--iq-decoder must be pyadi or raw-complex64",
+            2,
+        )
+    normalized_format = output_format.strip().lower()
+    if normalized_format not in {"table", "json"}:
+        _fail("direct_ladder_failed", "--format must be table or json", 2)
+    try:
+        parsed_rates = parse_rate_ladder(rates)
+        parsed_durations = parse_duration_ladder(durations)
+    except ValueError as error:
+        _fail("direct_ladder_failed", str(error), 2)
+    environment = inspect_iio_environment(require_usb=normalized_transport == "usb")
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        report = run_direct_async_ladder(
+            uri=uri,
+            serial=serial,
+            rates_hz=parsed_rates,
+            durations_seconds=parsed_durations,
+            channels=direct_channels[normalized_channels],
+            samples_per_frame=samples,
+            kernel_buffers=kernel_buffers,
+            ram_ring_slots=ram_ring_slots,
+            tandem_mode=cast(Any, normalized_tandem),
+            iq_decoder=cast(Any, normalized_decoder),
+        )
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("direct_ladder_failed", str(error), 5)
+    if report_path is not None:
+        from pluto_plus.release_candidate import (
+            ReleaseCandidateContractError,
+            write_private_contract,
+        )
+
+        try:
+            write_private_contract(report_path.expanduser().absolute(), report)
+        except (OSError, ReleaseCandidateContractError) as error:
+            _fail("direct_ladder_report_failed", str(error), 5)
+    if normalized_format == "json":
+        _emit(report.model_dump(mode="json"))
+    else:
+        typer.echo(_direct_async_ladder_table(report))
         if report_path is not None:
             typer.echo(f"Report: {report_path.expanduser().absolute()}")
     if report.failures:

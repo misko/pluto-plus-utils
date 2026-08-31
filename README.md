@@ -342,6 +342,44 @@ back. The report records the selected decoder so their results cannot be mixed.
 ordinary-buffer ladder measures host transport performance; it does not claim a
 gapless FPGA timeline. Use `radio metadata-ladder` for counter-proven continuity.
 
+### Direct-async rate/duration ladder
+
+The ABI-3 direct firmware has a dedicated one-command matrix. Its defaults are
+the release qualification request: single RX0 at 5, 10, 15, and 25 MS/s for
+nominal source durations of 3 and 10 seconds, using 1,048,576-sample frames and
+15 DMA buffers:
+
+```bash
+uv run pluto radio direct-async-ladder 192.168.1.15 \
+  --transport ip --expect-serial EXACT_SERIAL \
+  --rates 5M,10M,15M,25M --durations 3,10 \
+  --samples 1048576 --kernel-buffers 15 \
+  --format json --report /ABSOLUTE/PRIVATE/PATH/direct-matrix.json
+```
+
+The rate and duration flags may be omitted because those values are the command
+defaults. For a qualification daemon on a nondefault port, add
+`--ip-port PORT`. The matched radio and host libiio must be ABI 3 commit
+`b7303fd`, and the measured performance profile requires the radio iiOD to run
+with `-r 1`.
+
+Set `--ram-ring-slots 13 --kernel-buffers 10` to run the same matrix with RAM
+extending the direct DMA FIFO. Zero slots is the default ringless mode. The
+report distinguishes achieved wire-format MB/s, counter-proven gaps inside
+each direct segment, DMA-overflow flags, RAM spill/drain/high-water counts, and
+samples skipped while a new bounded segment is armed.
+
+One direct wire request is limited to 64 frames. A longer duration cell is
+therefore divided into the minimum number of finite direct captures. The
+throughput timer covers each `read_block()` loop and the report makes the
+segment count explicit. Gaplessness is proven within each segment; the command
+does not misrepresent the unavoidable re-arm interval as continuous RF
+coverage. Every matrix run snapshots and exactly restores the original RX
+settings, and a capture failure makes the command exit nonzero after preserving
+the other completed cells in its report. Counter-observed gaps remain measured
+results rather than command failures: this lets a speed matrix report the
+link-limited 25 MS/s cells without pretending they kept pace with the source.
+
 The ladder runs the same passive environment preflight before opening its exact
 target. Missing Python hardware packages, missing native libiio, an incompatible
 native/Python ABI, and a missing USB backend have distinct JSON error codes and

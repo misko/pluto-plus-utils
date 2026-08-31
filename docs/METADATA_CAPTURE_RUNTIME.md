@@ -158,6 +158,24 @@ The hardware-qualified performance command used `iiod -r 1`. The 30.72 MS/s,
 10-DMA/13-RAM profile is a continuity/capacity profile and is not expected to
 reach 70 MB/s because Zynq performs explicit RAM copies.
 
+Run the release speed matrix with one Pluto Plus Utils command:
+
+```bash
+uv run pluto radio direct-async-ladder 192.168.1.15 \
+  --transport ip --expect-serial EXACT_SERIAL \
+  --rates 5M,10M,15M,25M --durations 3,10 \
+  --samples 1048576 --kernel-buffers 15 \
+  --format json --report /ABSOLUTE/PRIVATE/PATH/direct-matrix.json
+```
+
+Add `--ram-ring-slots 13 --kernel-buffers 10` for the RAM-extension matrix.
+Cells needing more than the direct protocol's 64-frame limit are split into
+bounded captures. The report proves counter continuity inside each segment and
+reports the re-arm interval separately; it does not call several bounded
+captures one uninterrupted RF capture. Counter-observed gaps are evidence in a
+completed speed cell, while protocol, readback, cleanup, or capture failures
+make the command exit nonzero.
+
 The immutable source ref is not published yet and no version-stamped firmware
 image exists. Until both are published, the installer below must fail closed
 and the feature is not an end-user installation. Firmware source requirements,
