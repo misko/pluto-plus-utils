@@ -186,7 +186,7 @@ def test_duration_ladder_parser_accepts_matrix_and_rejects_ambiguity() -> None:
             parse_duration_ladder(invalid)
 
 
-def test_direct_ladder_runs_rate_duration_matrix_in_bounded_segments() -> None:
+def test_direct_ladder_runs_rate_duration_matrix_in_single_sessions() -> None:
     radio = _Radio()
     report = run_direct_async_ladder(
         uri="ip:192.168.1.15",
@@ -214,8 +214,8 @@ def test_direct_ladder_runs_rate_duration_matrix_in_bounded_segments() -> None:
     ]
     assert all(cell.passed for cell in report.cells)
     assert all(cell.observed_frames == cell.requested_frames for cell in report.cells)
-    assert any(cell.capture_segments > 1 for cell in report.cells)
-    assert max(radio.capture_targets) == 64
+    assert all(cell.capture_segments == 1 for cell in report.cells)
+    assert max(radio.capture_targets) == 66
 
 
 def test_direct_ram_ladder_requires_and_accounts_real_spill_status() -> None:

@@ -27,6 +27,7 @@ from pluto_plus.hardware.iio_metadata import (
     ABI4_METADATA_FEATURES_TEXT,
     ABI4_METADATA_LAYOUTS,
     ABI4_METADATA_RECORD,
+    DIRECT_ASYNC_FRAME_TARGET_MAX,
     SUPPORTED_METADATA_ABIS,
     SUPPORTED_METADATA_STATUS_VERSIONS,
     IioMetadataCaptureSession,
@@ -722,8 +723,10 @@ class IioRadioDevice:
             direct_async_frames, int
         ):
             raise TypeError("direct_async_frames must be an integer")
-        if not 0 <= direct_async_frames <= 64:
-            raise ValueError("direct_async_frames must be in [0, 64]")
+        if not 0 <= direct_async_frames <= DIRECT_ASYNC_FRAME_TARGET_MAX:
+            raise ValueError(
+                f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]"
+            )
         if direct_async_frames and kernel_buffers < 2:
             raise ValueError("direct async capture requires at least two kernel buffers")
         if direct_async_frames and ddr_ring_bytes and kernel_buffers < 3:

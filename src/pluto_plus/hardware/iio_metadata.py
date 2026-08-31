@@ -45,6 +45,7 @@ from pluto_plus.tandem import (
 
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
 DEFAULT_METADATA_CAPACITY = 64 * 1024
+DIRECT_ASYNC_FRAME_TARGET_MAX = 4_096
 # A 262,144-sample dual-RX refill spans about 105 ms at 2.5 MS/s. Five
 # seconds leaves more than 47 refill intervals for transport jitter. Larger
 # safe buffers receive eight native frame intervals, capped at 30 seconds, so
@@ -305,8 +306,10 @@ class IioMetadataCaptureSession:
             direct_async_frames, int
         ):
             raise TypeError("direct_async_frames must be an integer")
-        if not 0 <= direct_async_frames <= 64:
-            raise ValueError("direct_async_frames must be in [0, 64]")
+        if not 0 <= direct_async_frames <= DIRECT_ASYNC_FRAME_TARGET_MAX:
+            raise ValueError(
+                f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]"
+            )
         if direct_async_frames and kernel_buffers < 2:
             raise ValueError("direct async capture requires at least two kernel buffers")
         if direct_async_frames and ddr_ring_bytes and kernel_buffers < 3:

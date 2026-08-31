@@ -537,15 +537,15 @@ def test_direct_async_capture_is_explicit_finite_and_ringless() -> None:
         capture = radio.begin_metadata_capture(
             SAMPLE_COUNT,
             kernel_buffers=4,
-            direct_async_frames=3,
+            direct_async_frames=250,
         )
-        assert capture.direct_async_frames == 3
+        assert capture.direct_async_frames == 250
         assert not capture.direct_async_ring_extension
         assert not capture.ddr_burst_enabled
         assert not capture.ddr_ring_enabled
         assert factory.instances[0].keywords == {
             "batch_frames": 1,
-            "direct_async_frames": 3,
+            "direct_async_frames": 250,
         }
         capture.close()
     finally:
@@ -563,6 +563,12 @@ def test_direct_async_capture_fails_closed_outside_qualified_contract() -> None:
                 direct_async_frames=3,
             )
         adi.device.ctx.attrs["iio,buffer-direct-async"] = "1"
+        with pytest.raises(ValueError, match=r"\[0, 4096\]"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                direct_async_frames=4097,
+            )
         with pytest.raises(ValueError, match="at least two"):
             radio.begin_metadata_capture(
                 SAMPLE_COUNT,

@@ -14,6 +14,7 @@ from pluto_plus.ddr_ring import DdrRingStatusSnapshot
 from pluto_plus.hardware.base import MetadataCapture, RadioDevice, restore_settings_exact
 from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.hardware.iio_iq_decode import IioIqDecoder, validate_iq_decoder
+from pluto_plus.hardware.iio_metadata import DIRECT_ASYNC_FRAME_TARGET_MAX
 from pluto_plus.ladder import (
     MAX_RATE_RUNGS,
     MAX_SAMPLES_PER_CHANNEL,
@@ -28,7 +29,7 @@ DEFAULT_DIRECT_ASYNC_DURATIONS = "3,10"
 MAX_DURATION_RUNGS = 8
 MAX_DURATION_SECONDS = 60.0
 MAX_TOTAL_FRAMES_PER_CELL = 4_096
-MAX_DIRECT_ASYNC_FRAMES = 64
+MAX_DIRECT_ASYNC_FRAMES = DIRECT_ASYNC_FRAME_TARGET_MAX
 MAX_DIRECT_DMA_BYTES = 64 * 1024 * 1024
 MAX_DIRECT_RAM_BYTES = 200_000_000
 WIRE_BYTES_PER_COMPLEX_SAMPLE = 4
@@ -125,8 +126,8 @@ class DirectAsyncLadderReport(ApiModel):
     failures: tuple[DirectAsyncLadderFailure, ...]
     original_settings_restored: bool
     continuity_claim: str = (
-        "gap and missing-sample counts are counter-proven within each bounded "
-        "direct-async segment; inter-segment source samples are reported separately"
+        "gap and missing-sample counts are counter-proven within each finite "
+        "direct-async session; inter-session source samples are reported separately"
     )
 
     @model_validator(mode="after")
