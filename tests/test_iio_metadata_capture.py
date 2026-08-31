@@ -536,6 +536,7 @@ def test_direct_async_capture_is_explicit_finite_and_ringless() -> None:
             direct_async_frames=3,
         )
         assert capture.direct_async_frames == 3
+        assert not capture.direct_async_ring_extension
         assert not capture.ddr_burst_enabled
         assert not capture.ddr_ring_enabled
         assert factory.instances[0].keywords == {
@@ -564,14 +565,66 @@ def test_direct_async_capture_fails_closed_outside_qualified_contract() -> None:
                 kernel_buffers=1,
                 direct_async_frames=3,
             )
-        with pytest.raises(ValueError, match="storage off"):
+        adi.device.ctx.attrs.update(
+            {
+                "iio,buffer-ddr-ring": "1",
+                "iio,buffer-ddr-ring-max-iq-bytes": "200000000",
+                "iio,buffer-ddr-ring-modes": "finite,continuous",
+                "iio,buffer-metadata-status": "1",
+            }
+        )
+        with pytest.raises(RadioConfigurationError, match="RAM queue extension"):
             radio.begin_metadata_capture(
                 SAMPLE_COUNT,
                 kernel_buffers=4,
                 ddr_ring_bytes=SAMPLE_COUNT * 4,
-                ddr_ring_frames=1,
                 direct_async_frames=3,
             )
+        with pytest.raises(ValueError, match="owns the finite frame target"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=3,
+                direct_async_frames=3,
+            )
+    finally:
+        radio.close()
+
+
+def test_direct_async_ram_ring_extends_the_existing_dma_queue() -> None:
+    radio, adi, factory = _open_radio(
+        [], metadata_abi=3, channels=(0,), ddr_ring=True
+    )
+    assert adi.device is not None
+    adi.device.ctx.attrs.update(
+        {
+            "iio,buffer-direct-async": "1",
+            "iio,buffer-direct-async-ring": "1",
+        }
+    )
+    requested_bytes = SAMPLE_COUNT * 4 * 2 + 1
+    try:
+        capture = radio.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            ddr_ring_bytes=requested_bytes,
+            direct_async_frames=3,
+        )
+        assert capture.direct_async_frames == 3
+        assert capture.direct_async_ring_extension
+        assert capture.ddr_ring_enabled
+        assert capture.ddr_ring_capacity_frames == 2
+        assert capture.ddr_ring_capture_frames == 0
+        assert not capture.ddr_ring_continuous
+        assert factory.instances[0].keywords == {
+            "batch_frames": 1,
+            "ddr_ring_bytes": requested_bytes,
+            "ddr_ring_frames": 0,
+            "ddr_ring_continuous": False,
+            "direct_async_frames": 3,
+        }
+        capture.close()
     finally:
         radio.close()
 

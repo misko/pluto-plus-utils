@@ -176,6 +176,9 @@ class MetadataCapture(Protocol):
     def direct_async_frames(self) -> int: ...
 
     @property
+    def direct_async_ring_extension(self) -> bool: ...
+
+    @property
     def ddr_burst_enabled(self) -> bool: ...
 
     @property

@@ -730,12 +730,16 @@ class IioRadioDevice:
             raise ValueError("DDR ring values must not be negative")
         if ddr_burst_bytes and ddr_ring_bytes:
             raise ValueError("device DDR burst and DDR ring are mutually exclusive")
-        if direct_async_frames and (ddr_burst_bytes or ddr_ring_bytes):
-            raise ValueError("direct async capture requires DDR burst/ring storage off")
+        if direct_async_frames and ddr_burst_bytes:
+            raise ValueError("direct async capture cannot use the sealed DDR burst")
         if ddr_ring_bytes:
+            if direct_async_frames and (ddr_ring_frames or ddr_ring_continuous):
+                raise ValueError(
+                    "direct async RAM extension owns the finite frame target"
+                )
             if ddr_ring_continuous and ddr_ring_frames:
                 raise ValueError("continuous DDR ring must not specify a frame target")
-            if not ddr_ring_continuous and not ddr_ring_frames:
+            if not direct_async_frames and not ddr_ring_continuous and not ddr_ring_frames:
                 raise ValueError("finite DDR ring requires a positive frame target")
         elif ddr_ring_frames or ddr_ring_continuous:
             raise ValueError("DDR ring mode requires a positive byte budget")
@@ -850,6 +854,10 @@ class IioRadioDevice:
             if facts.get("buffer_direct_async") is not True:
                 raise RadioConfigurationError(
                     "IIO context does not advertise direct async DMA-to-network capture"
+                )
+            if ddr_ring_bytes and facts.get("buffer_direct_async_ring") is not True:
+                raise RadioConfigurationError(
+                    "IIO context does not advertise direct async RAM queue extension"
                 )
         if not (
             self._capabilities.supports_device_sample_counter
@@ -1085,6 +1093,7 @@ def context_facts(context: Any) -> dict[str, object]:
         ddr_ring_max_iq_bytes = None
     ddr_ring_modes_raw = attrs.get("iio,buffer-ddr-ring-modes")
     direct_async_raw = attrs.get("iio,buffer-direct-async")
+    direct_async_ring_raw = attrs.get("iio,buffer-direct-async-ring")
     metadata_status_raw = attrs.get("iio,buffer-metadata-status")
     legacy_metadata_status_version = (
         1 if metadata_status_raw == "1" else 2 if metadata_status_raw == "2" else None
@@ -1134,6 +1143,8 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_ddr_ring_modes_raw": ddr_ring_modes_raw,
         "buffer_direct_async": direct_async_raw == "1",
         "buffer_direct_async_raw": direct_async_raw,
+        "buffer_direct_async_ring": direct_async_ring_raw == "1",
+        "buffer_direct_async_ring_raw": direct_async_ring_raw,
         "buffer_metadata_status": metadata_status_max_version is not None,
         "buffer_metadata_status_raw": metadata_status_raw,
         "buffer_metadata_status_legacy_version": legacy_metadata_status_version,
