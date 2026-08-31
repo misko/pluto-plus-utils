@@ -162,6 +162,29 @@ def test_setup_plan_deletes_attr_name_and_attr_val_that_revert_2r2t(
     }
 
 
+def test_setup_plan_never_changes_a_bounded_2r2t_tuple_when_lo_probe_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    backend = FakeSetupBackend(
+        _observation(
+            uboot=CANONICAL_UBOOT,
+            rx_lo_5g8_accepted=None,
+            rx_lo_5g8_readback_hz=None,
+            rx_lo_restored=None,
+        )
+    )
+    manager = CanonicalSetupManager(
+        receipt_directory=tmp_path / "receipts",
+        inspector=backend.inspect,
+        executor=backend,
+    )
+
+    with pytest.raises(SetupPreconditionError, match="idle RX data plane"):
+        manager.create_plan(_identity())
+
+    assert backend.plans == []
+
+
 def test_setup_plan_explicitly_includes_required_fail_closed_tx_mute(
     tmp_path: Path,
 ) -> None:

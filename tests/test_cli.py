@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1918,6 +1919,8 @@ def test_setup_reconcile_local_emits_the_verified_receipt(
         receipt_id: str
         outcome: str
         success: bool
+        observation: NetworkConfigObservation
+        finished_at: datetime
 
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("placeholder\n")
@@ -1932,7 +1935,13 @@ def test_setup_reconcile_local_emits_the_verified_receipt(
 
     class Manager:
         def reconcile(self, receipt_id: str) -> ReconciledReceipt:
-            return ReconciledReceipt(receipt_id, "reconciled_verified", True)
+            return ReconciledReceipt(
+                receipt_id,
+                "reconciled_verified",
+                True,
+                _network_observation(ethernet_address="192.168.1.186"),
+                datetime(2026, 8, 31, tzinfo=UTC),
+            )
 
     monkeypatch.setattr(
         "pluto_plus.setup_repair.ssh_manager_factory",
@@ -1961,7 +1970,12 @@ def test_setup_reconcile_local_emits_the_verified_receipt(
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == {
+    payload = json.loads(result.output)
+    assert payload == {
+        "finished_at": "2026-08-31T00:00:00+00:00",
+        "observation": _network_observation(
+            ethernet_address="192.168.1.186"
+        ).model_dump(mode="json"),
         "outcome": "reconciled_verified",
         "receipt_id": "receipt-a",
         "success": True,

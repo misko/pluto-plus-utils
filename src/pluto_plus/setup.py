@@ -99,9 +99,16 @@ class SetupObservation(ApiModel):
     boot_provenance: str = Field(min_length=1, max_length=64)
     rx_scan_channels: tuple[str, ...]
     tx_safe: bool
+    tx_hardwaregain_db: tuple[float, ...] = ()
     rx_lo_5g8_accepted: bool | None = None
     rx_lo_5g8_readback_hz: int | None = Field(default=None, ge=1)
     rx_lo_restored: bool | None = None
+    rx_buffer_active: bool | None = None
+    rx_lo_probe_tx_safe: bool | None = None
+    rx_lo_probe_gain_count: int | None = Field(default=None, ge=0)
+    rx_lo_probe_dds_count: int | None = Field(default=None, ge=0)
+    rx_lo_probe_gains_safe: bool | None = None
+    rx_lo_probe_dds_safe: bool | None = None
 
     @field_validator("uboot")
     @classmethod
@@ -203,6 +210,15 @@ def observation_functionally_qualified(observation: SetupObservation) -> bool:
     )
 
 
+def observation_functional_probe_available(observation: SetupObservation) -> bool:
+    """Distinguish a definitive 5.8 GHz result from a probe that could not run."""
+
+    return (
+        observation.rx_lo_5g8_accepted is not None
+        and observation.rx_lo_restored is not None
+    )
+
+
 @dataclass(slots=True)
 class _TokenRecord:
     digest: bytes
@@ -261,6 +277,16 @@ class CanonicalSetupManager:
         active_profile = environment_profile_for_uboot(before.uboot)
         if active_profile is not None and observation_functionally_qualified(before):
             raise SetupPreconditionError("radio setup is already functionally qualified")
+        required_scan = {"voltage0", "voltage1", "voltage2", "voltage3"}
+        if (
+            active_profile is not None
+            and required_scan.issubset(before.rx_scan_channels)
+            and not observation_functional_probe_available(before)
+        ):
+            raise SetupPreconditionError(
+                "5.8 GHz RX LO probe was unavailable; require an idle RX data plane "
+                "before changing the persistent setup"
+            )
         candidates = environment_profiles_for_firmware(identity.observed_firmware)
         target = next((candidate for candidate in candidates if candidate != active_profile), None)
         if target is None:

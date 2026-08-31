@@ -587,6 +587,12 @@ sweep across every attached radio therefore stays read-only.
 Only the `attr_name`/`attr_val`/`compatible`/`mode` tuple is repaired. Firmware
 version mismatches are reported, never auto-flashed.
 
+There are two firmware-qualified tuple profiles. Doctor does not infer success from
+either tuple or from an `AD9361`/`AD9363A` label: after every guarded reboot it requires
+four RX scan channels, TX-safe probe conditions, exact 5.8 GHz RX-LO readback, and exact
+restoration of the previous LO. An already bounded 2R2T radio is never rewritten when
+that functional probe is unavailable (for example, while its RX buffer is active).
+
 ### Stale firmware and host libiio
 
 `firmware.release_currency` compares the radio against `UPGRADE_TARGET_PROFILE`,

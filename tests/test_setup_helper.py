@@ -434,6 +434,7 @@ class ScriptedExecutor(FixedSshSetupExecutor):
             identity=_identity(),
             transport=self.recording_transport,
             state_root=tmp_path,
+            poll_interval_s=0.001,
         )
 
     def inspect(self, identity: SetupIdentity | None = None) -> SetupObservation:
@@ -498,7 +499,10 @@ def test_inspector_gates_5g8_probe_and_requires_exact_lo_restoration() -> None:
 
     script = _INSPECT_SCRIPT.decode()
     assert f"lo_target={RX_LO_5G8_HZ}" in script
+    assert 'value="$(awk \'{print $1}\' "$f")"' in script
     assert '[ "$rx_buffer_active" = 0 ] && [ "$tx_safe_for_lo" = 1 ]' in script
+    assert 'emit rx_lo_probe_gains_safe "$gains_safe"' in script
+    assert 'emit rx_lo_probe_dds_safe "$dds_safe"' in script
     assert '[ "$restored" = 1 ]' in script
 
 
@@ -559,6 +563,27 @@ def test_provision_tries_the_second_bounded_profile_after_failed_5g8_probe(
         b"attr_name compatible\nattr_val ad9361\n",
     ]
     assert any(phase.startswith("functional_probe_failed:") for phase in result.completed_phases)
+
+
+def test_provision_waits_for_available_post_reboot_5g8_probe(tmp_path: Path) -> None:
+    before = _observation(canonical=False, tx_safe=True)
+    unavailable = _observation(canonical=True, tx_safe=True).model_copy(
+        update={
+            "rx_lo_5g8_accepted": None,
+            "rx_lo_5g8_readback_hz": None,
+            "rx_lo_restored": None,
+        }
+    )
+    qualified = _observation(canonical=True, tx_safe=True)
+    executor = ScriptedExecutor(tmp_path, [before, unavailable, qualified])
+
+    result = executor.provision(_plan(before))
+
+    assert result.observation == qualified
+    assert executor.events == ["inspect", "backup", "reenumerate", "inspect", "inspect"]
+    assert not any(
+        phase.startswith("functional_probe_failed:") for phase in result.completed_phases
+    )
 
 
 def test_provision_reenrolls_expected_rotated_key_only_after_reenumeration(

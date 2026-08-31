@@ -116,17 +116,25 @@ two-receiver Web preview now pass. A physical cold boot remains a separate check
 
 ## Canonical AD9361/2R2T setup
 
-Only use this profile for an exact serial-attested Pluto+ Rev.C. The persistent tuple is:
+Only use these profiles for an exact serial-attested Pluto+ Rev.C. Two bounded
+persistent tuples are supported because the qualified firmware families do not all
+interpret `attr_name`/`attr_val` identically:
 
 ```text
-attr_name    (unset)
-attr_val     (unset)
-compatible=ad9361
-mode=2r2t
+                       clear-attribute profile     set-attribute profile
+attr_name             (unset)                     compatible
+attr_val              (unset)                     ad9361
+compatible             ad9361                      ad9361
+mode                   2r2t                        2r2t
 ```
 
-`attr_name` and `attr_val` must be **absent**, not set to `compatible`/`ad9361`. The
-AD936x boot script on these boards guards its AD9364 branch with a malformed condition:
+The utility never treats either tuple as sufficient by itself. It chooses the safest
+known order for the exact shipped firmware, reboots after each attempted profile, and
+accepts a profile only when the same serial and USB path return with all four RX scan
+channels, a safe TX path, exact 5,800,000,000 Hz RX-LO readback, and exact restoration
+of the previous LO. Do not set these variables by hand.
+
+Some older AD936x boot scripts guard their AD9364 branch with a malformed condition:
 
 ```text
 test ${compatible} = ad9364 || test -n ${attr_val} = ad9364
@@ -137,7 +145,14 @@ the trailing `= ad9364` and returns true unconditionally (`u-boot cmd/test.c`). 
 non-empty `attr_val` therefore fires that branch on every boot, which strips
 `adi,2rx-2tx-mode-enable` and runs `setenv mode 1r1t; saveenv` — silently reverting the
 radio to 1R1T and persisting the revert. `compatible=ad9361` drives the AD9361 override on
-its own through a separate, correctly formed branch, so the unlock is unaffected.
+its own through a separate, correctly formed branch on those firmware families.
+
+Conversely, live testing on 2026-08-31 found two Pluto+ Rev.C radios on the qualified
+v0.42 DDR-burst-v2 and v0.44 DDR-ring-prefill-v1 releases that retained a native
+`ad9363a` PHY and rejected 5.8 GHz under the clear-attribute profile. Both required the
+set-attribute profile; after the guarded reboot they reported `ad9361`, retained 2R2T,
+and read back exactly 5.8 GHz. This is why the post-reboot behavioral proof, not a
+marketing label or tuple alone, is authoritative.
 
 A safe provisioner must perform this entire transaction:
 
@@ -148,7 +163,8 @@ A safe provisioner must perform this entire transaction:
 5. Change only mismatching fields, preferably with one `fw_setenv -s` batch.
 6. Sync and reboot; reacquire the same serial and physical path.
 7. Reread all four values and require a supported AD936x PHY identity. A Rev.C may
-   truthfully retain its native `ad9363a` compatible string after the tuple is fixed.
+   truthfully retain its native `ad9363a` compatible string only if the bounded 5.8 GHz
+   RX-LO probe also succeeds and restores the original LO exactly.
 8. Require scan elements 0–3 and take a paired two-receiver sample; this layout,
    rather than the PHY marketing string, is the 2R2T invariant.
 9. Keep DDS/TX buffers disabled and set/read back TX1 and TX2 attenuation to the safe minimum.

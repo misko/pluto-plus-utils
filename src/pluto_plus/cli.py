@@ -11,6 +11,8 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from datetime import date, datetime
+from enum import Enum
 from importlib import import_module
 from ipaddress import ip_address
 from pathlib import Path
@@ -19,6 +21,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import typer
+from pydantic import BaseModel
 
 from pluto_plus.ddr_recovery import (
     DEFAULT_DISCONNECT_DELAY_MS,
@@ -325,7 +328,19 @@ def _api(ctx: typer.Context) -> ApiClient:
 
 
 def _emit(payload: Any) -> None:
-    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+    typer.echo(json.dumps(payload, default=_json_default, indent=2, sort_keys=True))
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _inventory_table(report: Any) -> str:

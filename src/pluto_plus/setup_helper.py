@@ -34,6 +34,7 @@ from pluto_plus.setup import (
     SetupObservation,
     SetupPlan,
     SetupUnavailableError,
+    observation_functional_probe_available,
     observation_functionally_qualified,
 )
 from pluto_plus.setup_profiles import (
@@ -425,9 +426,20 @@ class FixedSshSetupExecutor:
             boot_provenance=provenance,
             rx_scan_channels=scan_channels,
             tx_safe=tx_safe,
+            tx_hardwaregain_db=_csv_numbers(fields.get("tx_hardwaregain_db", "")),
             rx_lo_5g8_accepted=_optional_bool(fields.get("rx_lo_5g8_accepted")),
             rx_lo_5g8_readback_hz=_optional_int(fields.get("rx_lo_5g8_readback_hz")),
             rx_lo_restored=_optional_bool(fields.get("rx_lo_restored")),
+            rx_buffer_active=_optional_bool(fields.get("rx_buffer_active")),
+            rx_lo_probe_tx_safe=_optional_bool(fields.get("rx_lo_probe_tx_safe")),
+            rx_lo_probe_gain_count=_optional_nonnegative_int(
+                fields.get("rx_lo_probe_gain_count")
+            ),
+            rx_lo_probe_dds_count=_optional_nonnegative_int(
+                fields.get("rx_lo_probe_dds_count")
+            ),
+            rx_lo_probe_gains_safe=_optional_bool(fields.get("rx_lo_probe_gains_safe")),
+            rx_lo_probe_dds_safe=_optional_bool(fields.get("rx_lo_probe_dds_safe")),
         )
 
     def provision(self, plan: SetupPlan) -> SetupExecutionResult:
@@ -490,19 +502,26 @@ class FixedSshSetupExecutor:
                 after: SetupObservation | None = None
                 while time.monotonic() < deadline:
                     try:
-                        after = self.inspect(plan.identity).model_copy(
+                        observed = self.inspect(plan.identity).model_copy(
                             update={"boot_provenance": "qspi_reboot_verified"}
                         )
-                        if not after.tx_safe:
+                        if not observed.tx_safe:
                             self._mute_transmit()
-                            after = self.inspect(plan.identity).model_copy(
+                            observed = self.inspect(plan.identity).model_copy(
                                 update={"boot_provenance": "qspi_reboot_verified"}
                             )
+                        last_observation = observed
+                        if not observation_functional_probe_available(observed):
+                            last_error = SetupHelperError(
+                                "5.8 GHz RX LO probe remained unavailable while waiting "
+                                "for an idle radio"
+                            )
+                            time.sleep(self._poll_interval_s)
+                            continue
+                        after = observed
                         break
                     except SetupSshHostKeyChangedError as error:
                         last_error = error
-                        if host_key_rotation is not None:
-                            break
                         reenroll = getattr(
                             self.transport,
                             "reenroll_after_attested_usb_reboot",
@@ -693,6 +712,18 @@ def _optional_int(value: str | None) -> int | None:
     return parsed
 
 
+def _optional_nonnegative_int(value: str | None) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise SetupHelperError("helper report contained an invalid integer") from error
+    if parsed < 0:
+        raise SetupHelperError("helper report contained a negative integer")
+    return parsed
+
+
 def _csv_numbers(value: str) -> tuple[float, ...]:
     try:
         return tuple(float(item) for item in value.split(",") if item != "")
@@ -842,28 +873,40 @@ done
 emit rx_scan_channels "$rx"
 lo_target=5800000000
 lo_readback=''; lo_accepted=''; lo_restored=''
-tx_safe_for_lo=1; gain_count=0; dds_count=0
+tx_safe_for_lo=1; gain_count=0; dds_count=0; gains_safe=1; dds_safe=1
 if [ -n "$phy" ]; then
   for f in "$phy"/out_voltage[0-9]_hardwaregain; do
     [ -e "$f" ] || continue
     gain_count=$((gain_count + 1))
-    awk -v value="$(cat "$f")" 'BEGIN { exit !(value <= -80) }' || tx_safe_for_lo=0
+    if ! awk -v value="$(awk '{print $1}' "$f")" 'BEGIN { exit !(value <= -80) }'; then
+      tx_safe_for_lo=0; gains_safe=0
+    fi
   done
 else
-  tx_safe_for_lo=0
+  tx_safe_for_lo=0; gains_safe=0
 fi
 for d in /sys/bus/iio/devices/iio:device*; do
   [ "$(cat "$d/name" 2>/dev/null || true)" = cf-ad9361-dds-core-lpc ] || continue
   dds_count=$((dds_count + 1))
-  [ "$(cat "$d/buffer/enable" 2>/dev/null || printf 1)" = 0 ] || tx_safe_for_lo=0
+  if [ "$(cat "$d/buffer/enable" 2>/dev/null || printf 1)" != 0 ]; then
+    tx_safe_for_lo=0; dds_safe=0
+  fi
   for f in "$d"/out_altvoltage*_raw "$d"/out_altvoltage*_scale \
       "$d"/scan_elements/out_voltage[0-3]_en; do
     [ -e "$f" ] || continue
-    awk -v value="$(cat "$f")" 'BEGIN { exit !(value == 0) }' || tx_safe_for_lo=0
+    if ! awk -v value="$(cat "$f")" 'BEGIN { exit !(value == 0) }'; then
+      tx_safe_for_lo=0; dds_safe=0
+    fi
   done
 done
-[ "$gain_count" -gt 0 ] || tx_safe_for_lo=0
-[ "$dds_count" -gt 0 ] || tx_safe_for_lo=0
+[ "$gain_count" -gt 0 ] || { tx_safe_for_lo=0; gains_safe=0; }
+[ "$dds_count" -gt 0 ] || { tx_safe_for_lo=0; dds_safe=0; }
+emit rx_buffer_active "$rx_buffer_active"
+emit rx_lo_probe_tx_safe "$tx_safe_for_lo"
+emit rx_lo_probe_gain_count "$gain_count"
+emit rx_lo_probe_dds_count "$dds_count"
+emit rx_lo_probe_gains_safe "$gains_safe"
+emit rx_lo_probe_dds_safe "$dds_safe"
 if [ "$rx_buffer_active" = 0 ] && [ "$tx_safe_for_lo" = 1 ] && [ -n "$phy" ]; then
   lo_path="$phy/out_altvoltage0_RX_LO_frequency"
   if [ -e "$lo_path" ]; then

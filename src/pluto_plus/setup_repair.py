@@ -166,12 +166,25 @@ def probe_and_repair(
             rx_lo_restored=observation.rx_lo_restored,
         )
     if not repair:
+        blocked = []
+        if observation.rx_buffer_active is True:
+            blocked.append("RX buffer active")
+        if observation.rx_lo_probe_tx_safe is False:
+            blocked.append(
+                "TX path not proven safe "
+                f"(gains={observation.rx_lo_probe_gain_count}, "
+                f"gains_safe={observation.rx_lo_probe_gains_safe}, "
+                f"gain_db={observation.tx_hardwaregain_db}, "
+                f"dds={observation.rx_lo_probe_dds_count}, "
+                f"dds_safe={observation.rx_lo_probe_dds_safe})"
+            )
+        suffix = "" if not blocked else f"; 5.8 GHz probe blocked by {', '.join(blocked)}"
         return SetupProbeOutcome(
             status="fail",
             actual=actual,
             summary=(
                 "Persistent AD9361/2R2T environment is not functionally qualified; "
-                "repair is disabled"
+                f"repair is disabled{suffix}"
             ),
             rx_lo_5g8_accepted=observation.rx_lo_5g8_accepted,
             rx_lo_5g8_readback_hz=observation.rx_lo_5g8_readback_hz,
