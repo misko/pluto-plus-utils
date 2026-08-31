@@ -64,7 +64,7 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     assert '"$uv_bin" pip install' in text
     assert "--no-build-isolation" in text
     assert "iq-direct-async-ring-v1-rc1-source/libiio-v1" in text
-    assert "5e1746e66cf4d53e884a816df4613937fb1a231f" in text
+    assert "3f6571845102fd695efb0c4244d892925b524d7d" in text
     assert "iio-gain-timeline-v8-rc1-source/libiio-v4" in text
     assert "98a5e6139459a01a5a42ca7cd3e98d807156b6b0" in text
 
