@@ -1868,6 +1868,7 @@ def test_standalone_reconcile_cli_forwards_exact_receipt_path_and_profile(
             returned_firmware="v7",
             fit_sha256="a" * 64,
             tx_safe=True,
+            reconciled_at="2026-08-31T23:00:00+00:00",
         )
 
     monkeypatch.setattr(

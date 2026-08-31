@@ -2718,6 +2718,43 @@ def test_standalone_reconciliation_is_read_only_and_verifies_exact_fit(
     persisted = json.loads((receipt_directory / f"{receipt_id}.json").read_text())
     assert persisted["original_outcome"] == "unknown"
     assert persisted["outcome"] == "reconciled_verified"
+    assert persisted["reconciliation"]["reconciled_at"] == result.reconciled_at
+    assert persisted["reconciliations"] == [persisted["reconciliation"]]
+
+
+def test_standalone_reconciliation_may_be_repeated_read_only(
+    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
+        planned, tmp_path, monkeypatch
+    )
+    first_transport = ReadOnlyReconciliationTransport(plan)
+    second_transport = ReadOnlyReconciliationTransport(plan)
+
+    first = bootstrap.reconcile_usb_flash_receipt(
+        receipt_id,
+        receipt_directory=receipt_directory,
+        usb_sysfs_path=Path(plan.usb_sysfs_path),
+        mutation_profile_id=plan.mutation_profile_id,
+        transport=first_transport,
+    )
+    second = bootstrap.reconcile_usb_flash_receipt(
+        receipt_id,
+        receipt_directory=receipt_directory,
+        usb_sysfs_path=Path(plan.usb_sysfs_path),
+        mutation_profile_id=plan.mutation_profile_id,
+        transport=second_transport,
+    )
+
+    assert first.outcome == second.outcome == "reconciled_verified"
+    assert len(first_transport.calls) == len(second_transport.calls) == 1
+    persisted = json.loads((receipt_directory / f"{receipt_id}.json").read_text())
+    assert persisted["original_outcome"] == "unknown"
+    assert persisted["outcome"] == "reconciled_verified"
+    assert len(persisted["reconciliations"]) == 2
+    assert persisted["reconciliation"] == persisted["reconciliations"][-1]
 
 
 def test_standalone_reconciliation_accepts_proven_post_eject_mass_storage_receipt(
