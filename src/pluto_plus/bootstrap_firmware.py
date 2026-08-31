@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -63,6 +63,7 @@ from pluto_plus.doctor import (
     IQ_DIRECT_ASYNC_RING_V1_RC1_RAM_POLICY,
     IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_RING_V1_RELEASE_RAM_POLICY,
+    IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
     SINGLE_RX_METADATA_RC1_RAM_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
@@ -114,6 +115,7 @@ class StandaloneFlashProfile:
     buffer_metadata_timing_log: bool = False
     iiod_cpu_affinity: int | None = None
     iiod_rw_cpu_affinity: int | None = None
+    required_iio_capabilities: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.iiod_cpu_affinity is not None and self.iiod_rw_cpu_affinity is not None:
@@ -121,6 +123,9 @@ class StandaloneFlashProfile:
         for cpu in (self.iiod_cpu_affinity, self.iiod_rw_cpu_affinity):
             if cpu is not None and cpu < 0:
                 raise ValueError("iiOD CPU affinity must be non-negative")
+        keys = tuple(key for key, _value in self.required_iio_capabilities)
+        if len(keys) != len(set(keys)) or any(not key for key in keys):
+            raise ValueError("required IIO capability keys must be non-empty and unique")
 
 
 STANDALONE_FLASH_PROFILES = {
@@ -370,6 +375,10 @@ STANDALONE_FLASH_PROFILES = {
         buffer_metadata_status=True,
         buffer_metadata_timing_log=True,
         iiod_rw_cpu_affinity=1,
+        required_iio_capabilities=(
+            ("iio,buffer-direct-async", "1"),
+            ("iio,buffer-direct-async-ring", "1"),
+        ),
     ),
     IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY.profile_id: StandaloneFlashProfile(
         IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
@@ -383,6 +392,30 @@ STANDALONE_FLASH_PROFILES = {
         buffer_metadata_status=True,
         buffer_metadata_timing_log=True,
         iiod_rw_cpu_affinity=1,
+        required_iio_capabilities=(
+            ("iio,buffer-direct-async", "1"),
+            ("iio,buffer-direct-async-ring", "1"),
+            ("iio,buffer-direct-async-overrun-policies", "drop-backlog,preserve-backlog"),
+            ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
+        ),
+    ),
+    IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
+        IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
+        3,
+        True,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+        ddr_ring_max_iq_bytes=200_000_000,
+        ddr_ring_modes="finite,continuous",
+        buffer_metadata_status=True,
+        buffer_metadata_timing_log=True,
+        iiod_rw_cpu_affinity=1,
+        required_iio_capabilities=(
+            ("iio,buffer-direct-async", "1"),
+            ("iio,buffer-direct-async-ring", "1"),
+            ("iio,buffer-direct-async-overrun-policies", "drop-backlog,preserve-backlog"),
+            ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
+        ),
     ),
     DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
         DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,
@@ -2400,6 +2433,22 @@ def _require_same_lan_plan(
         raise BootstrapFirmwareError("deterministic LAN FRM changed during revalidation")
 
 
+def _require_profile_iio_capabilities(
+    facts: Mapping[str, Any],
+    profile: StandaloneFlashProfile,
+    *,
+    transport: str,
+) -> None:
+    """Require exact release-specific IIOD context attributes after return."""
+
+    for key, expected in profile.required_iio_capabilities:
+        actual = str(facts.get(key) or "")
+        if actual != expected:
+            raise BootstrapFirmwareError(
+                f"returned {transport} capability {key} is {actual!r}, expected {expected!r}"
+            )
+
+
 def _attest_return(plan: BootstrapPlan) -> tuple[str | None, str, str]:
     returned = _one_local_target(Path(plan.usb_sysfs_path))
     if plan.operation == "flash" and returned.serial is None:
@@ -2435,6 +2484,10 @@ def _attest_return(plan: BootstrapPlan) -> tuple[str | None, str, str]:
         raise BootstrapFirmwareError(
             f"returned tandem capability is {observed_tandem}, expected {plan.expected_tandem_agc}"
         )
+    profile = STANDALONE_FLASH_PROFILES.get(plan.mutation_profile_id)
+    if profile is None:  # pragma: no cover - immutable plan invariant
+        raise BootstrapFirmwareError("returned USB plan names an unknown profile")
+    _require_profile_iio_capabilities(facts, profile, transport="USB")
     if plan.target_serial is not None:
         mute_returned_radio(plan.target_serial)
     return returned_serial, returned_firmware, returned_phy
@@ -2499,10 +2552,7 @@ def _attest_lan_return(plan: LanFlashPlan) -> tuple[str, str, str]:
         facts.get("iio,buffer-metadata-timing-log") or ""
     ) != "1":
         raise BootstrapFirmwareError("returned LAN timing-log capability is unavailable")
-    if plan.mutation_profile_id == IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY.profile_id:
-        for key in ("iio,buffer-direct-async", "iio,buffer-direct-async-ring"):
-            if str(facts.get(key) or "") != "1":
-                raise BootstrapFirmwareError(f"returned LAN capability {key} is unavailable")
+    _require_profile_iio_capabilities(facts, profile, transport="LAN")
     mute_returned_radio_lan(plan.host, plan.target_serial)
     return returned_serial, returned_firmware, returned_phy
 
