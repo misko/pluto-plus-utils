@@ -114,10 +114,12 @@ must be installed with the Python binding from the same source commit. ABI 1
 uses SPF libiio 0.25 tag `spf-frame-metadata-source/v0.25-final-v3` at
 `c26258bfa33098c2b215e19cf85d448e89499b1a`. The direct-async/RAM-extension
 ABI-3 candidate requires libiio 0.25 commit
-`b7303fded264e10473bbbb084afade8f1b1373d1` and proposed tag
-`iq-direct-async-ring-v1-rc1-source/libiio-v1`; that tag and its matching
-firmware image are not published yet. The installer must fail rather than use
-an older ABI-3 build. See
+`f31a200ed6a884f054e513ce0707a342ee8bd679` and tag
+`iq-direct-async-long-session-v1-source/libiio-v1`. This revision keeps as many
+as 4,096 frames in one finite direct-async session; ordinary metadata batching
+remains limited to 64. A persistent firmware image containing this revision is
+not published yet. The installer must fail rather than use an older ABI-3
+build. See
 [`docs/METADATA_CAPTURE_RUNTIME.md`](docs/METADATA_CAPTURE_RUNTIME.md) for the
 complete matrix and status.
 
@@ -360,14 +362,14 @@ uv run pluto radio direct-async-ladder 192.168.1.15 \
 The rate and duration flags may be omitted because those values are the command
 defaults. For a qualification daemon on a nondefault port, add
 `--ip-port PORT`. The matched radio and host libiio must be ABI 3 commit
-`b7303fd`, and the measured performance profile requires the radio iiOD to run
+`f31a200`, and the measured performance profile requires the radio iiOD to run
 with `-r 1`.
 
 Set `--ram-ring-slots 13 --kernel-buffers 10` to run the same matrix with RAM
 extending the direct DMA FIFO. Zero slots is the default ringless mode. The
 report distinguishes achieved wire-format MB/s, counter-proven gaps inside
-each direct segment, DMA-overflow flags, RAM spill/drain/high-water counts, and
-samples skipped while a new bounded segment is armed.
+each direct session, DMA-overflow flags, RAM spill/drain/high-water counts, and
+samples skipped between sessions if a future request exceeds one session.
 
 When several locally attached Pluto gadgets share `192.168.2.1`, keep IP/TCP
 transport and bind the full matrix to one exact serial and physical USB path:
@@ -386,16 +388,16 @@ runs the entire matrix as one bounded action, restores the host network in a
 path as a physical-IP run; selecting `--transport usb` is a different transport
 and does not substitute for the release TCP measurement.
 
-One direct wire request is limited to 64 frames. A longer duration cell is
-therefore divided into the minimum number of finite direct captures. The
-throughput timer covers each `read_block()` loop and the report makes the
-segment count explicit. Gaplessness is proven within each segment; the command
-does not misrepresent the unavoidable re-arm interval as continuous RF
-coverage. Every matrix run snapshots and exactly restores the original RX
-settings, and a capture failure makes the command exit nonzero after preserving
-the other completed cells in its report. Counter-observed gaps remain measured
-results rather than command failures: this lets a speed matrix report the
-link-limited 25 MS/s cells without pretending they kept pace with the source.
+One direct wire request accepts at most 4,096 frames. The ladder also bounds a
+cell to 4,096 frames, so every supported rate/duration cell is one finite DMA
+producer/consumer session with no periodic re-arm. The throughput timer covers
+the `read_block()` loop and the report records `capture_segments=1` and zero
+inter-segment loss. Every matrix run snapshots and exactly restores the
+original RX settings, and a capture failure makes the command exit nonzero
+after preserving the other completed cells in its report. Counter-observed
+gaps remain measured results rather than command failures: this lets a speed
+matrix report the link-limited 25 MS/s cells without pretending they kept pace
+with the source.
 
 The ladder runs the same passive environment preflight before opening its exact
 target. Missing Python hardware packages, missing native libiio, an incompatible

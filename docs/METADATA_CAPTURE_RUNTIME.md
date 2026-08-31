@@ -11,7 +11,7 @@ not make continuity observable and must not be accepted as a fallback.
 | --- | --- | --- | --- |
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
-| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `iq-direct-async-ring-v1-rc1-source/libiio-v1` | `b7303fded264e10473bbbb084afade8f1b1373d1` |
+| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `iq-direct-async-long-session-v1-source/libiio-v1` | `f31a200ed6a884f054e513ce0707a342ee8bd679` |
 | `iio,buffer-metadata=3` plus `iio,buffer-metadata-abi-versions=1,2,3,4` | strict `RadioMetadataV7` selected as ABI 4 | gain-timeline v8 release source | frozen by the release candidate plan |
 
 The currently deployed `.20` and `.21` radios advertise ABI 1. ABI 2 is a
@@ -94,19 +94,21 @@ result; pass `--tandem-mode auto` to exercise both systems together.
 
 ### ABI-3 direct async and RAM queue extension
 
-The `iq-direct-async-ring-v1-rc1-source` runtime adds one finite direct mode to
-ABI 3. The matched package set is:
+The `iq-direct-async-long-session-v1-source` runtime adds one finite direct
+mode to ABI 3 and allows its target to span as many as 4,096 frames without
+re-arming. The hardware-test package set is:
 
 | Component | Version | Minimum qualified implementation commit |
 | --- | --- | --- |
-| firmware integration | release version not assigned | `a5253497d15613831055dbfb543ca5a9936bd2c6` |
-| firmware Buildroot | PlutoSDR Buildroot fork | `4a1e90704706756a6f6062482a070e63f9b27573` |
-| radio and host libiio | 0.25 | `b7303fded264e10473bbbb084afade8f1b1373d1` |
+| volatile firmware base | `v0.46-plutoplus-spf-iq-coherent-200m-prototype-v1` | `3141573a2cd0ce9009dadd2ffba6c24d4668541e` |
+| firmware Buildroot/rootfs base | `iq-direct-async-ring-v1-rc1-source/buildroot-v2` | `a929267288a80a31407a3af06345c088979bcc2e` |
+| firmware Linux / CMA geometry | `ddr-burst-v1-rc3-source/linux-v1-1-gd7c78e1` | `d7c78e122adccb6836e374463d3930730335bc36` |
+| volatile radio iiOD and host libiio | 0.25 | `f31a200ed6a884f054e513ce0707a342ee8bd679` |
 | radio metadata provider | ABI 3 / `RadioMetadataV6` | `3294365ff44da26b261be4a2ccb241b7896d23ad` |
-| Pluto Plus Utils | 0.1.0, Python 3.11+ | `55e3c08ecf703c2a2f6b5367b3e3d64644c58c1a` |
+| Pluto Plus Utils | 0.1.0, Python 3.11+ | `5d0ba26262f7702ebad159b60d53b49c15ea1717` |
 
 Both the native host library and Python binding must be generated from the
-same `b7303fd` tree. The ABI-3 runtime receipt deliberately rejects older
+same `f31a200` tree. The ABI-3 runtime receipt deliberately rejects older
 ABI-3 libiio commits, upstream libiio, and a PyPI-only binding.
 
 Ringless direct mode requires `iio,buffer-direct-async=1`. The producer leases
@@ -117,10 +119,10 @@ not allocated when `ddr_ring_bytes=0`:
 with radio.begin_metadata_capture(
     1_048_576,
     kernel_buffers=15,
-    direct_async_frames=23,
+    direct_async_frames=250,
     ddr_ring_bytes=0,
 ) as capture:
-    blocks = [capture.read_block() for _ in range(23)]
+    blocks = [capture.read_block() for _ in range(250)]
 ```
 
 Combined mode additionally requires `iio,buffer-direct-async-ring=1`. RAM is
@@ -152,11 +154,13 @@ three DMA periods as ingestion headroom while a 4 MiB RAM copy is in progress.
 DDR burst and direct mode are mutually exclusive, and direct mode supports
 exactly one selected receiver.
 
-The hardware-qualified performance command used `iiod -r 1`. The 30.72 MS/s,
-23-frame acceptance profile requires 15 DMA buffers without RAM and achieved a
-71.19 MB/s application mean with no gaps across 69 frames. The combined
-10-DMA/13-RAM profile is a continuity/capacity profile and is not expected to
-reach 70 MB/s because Zynq performs explicit RAM copies.
+The long-session hardware comparison used `iiod -r 1`, single-RX 25 MS/s,
+1,000,000-sample frames, and one 250-frame request. A 15-buffer/60 MB DMA queue
+delivered 73.27 MB/s, first overflowed at source time 2.08 s, and lost 72
+million samples. A 50-buffer/200 MB DMA queue delivered 72.88 MB/s, first
+overflowed at source time 7.28 s, and lost 26 million samples. Both returned
+all 250 requested frames into exact 1.000 GB files; no RAM ring and no request
+re-arm were involved.
 
 Run the release speed matrix with one Pluto Plus Utils command:
 
@@ -174,21 +178,19 @@ exact `--usb-sysfs-path`, `--isolate-usb-route`, and
 `--isolation-confirm 'ISOLATE USB SSH INTERFACE'`. Route isolation covers the
 whole matrix, restores every peer interface afterward, and emits a durable
 receipt; the ladder remains IP/TCP rather than silently switching to USB bulk.
-Cells needing more than the direct protocol's 64-frame limit are split into
-bounded captures. The report proves counter continuity inside each segment and
-reports the re-arm interval separately; it does not call several bounded
-captures one uninterrupted RF capture. Counter-observed gaps are evidence in a
-completed speed cell, while protocol, readback, cleanup, or capture failures
-make the command exit nonzero.
+The direct protocol and the ladder both cap a cell at 4,096 frames. Every
+supported cell is therefore one bounded session: the same DMA queue is recycled
+until the target completes, and there is no periodic request re-arm.
+Counter-observed gaps remain evidence in a completed speed cell, while
+protocol, readback, cleanup, or capture failures make the command exit nonzero.
 
-The immutable `iq-direct-async-ring-v1-rc1-source/libiio-v1` ref and the
-version-stamped RAM-only RC1 candidate image are published. Persistent firmware
-installation remains unavailable until final-byte hardware qualification and
-an explicit promotion profile; the installer below must fail closed
-and the feature is not an end-user installation. Firmware source requirements,
-submodule commits, binary evidence hashes, publication order, and rollback are
-recorded in `IIO_DIRECT_ASYNC_INSTALL.md` on firmware branch
-`codex/iq-direct-async-main-refresh`.
+The immutable `iq-direct-async-long-session-v1-source/libiio-v1` ref supplies
+the matched host runtime. The comparison used a volatile iiOD/library overlay
+on the version-stamped CMA prototype; no QSPI bytes were changed. A persistent
+firmware image containing `f31a200` remains unavailable until the firmware
+integration is rebuilt and qualified. Firmware source requirements, submodule
+commits, binary evidence hashes, publication order, and rollback are recorded
+in `IIO_DIRECT_ASYNC_INSTALL.md` in the firmware repository.
 
 Build the matched native library and binding into a release-local virtual
 environment:
