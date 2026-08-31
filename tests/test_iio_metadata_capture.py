@@ -446,6 +446,7 @@ class FakeRxAdc:
         self.headers = deque(headers)
         self.kernel_buffers_count = 4
         self.preserve_readback = preserve_readback
+        self.reg_read_count = 0
 
     def set_kernel_buffers_count(self, count: int) -> int:
         if self.preserve_readback:
@@ -453,6 +454,7 @@ class FakeRxAdc:
         return 0
 
     def reg_read(self, _address: int) -> int:
+        self.reg_read_count += 1
         return 1_004
 
 
@@ -1859,7 +1861,7 @@ def test_abi3_ddr_ring_is_a_finite_streaming_buffer_with_atomic_status() -> None
         )
         for sequence in range(frames)
     ]
-    radio, _adi, factory = _open_radio(
+    radio, adi, factory = _open_radio(
         headers,
         metadata_abi=3,
         channels=(0,),
@@ -1885,7 +1887,10 @@ def test_abi3_ddr_ring_is_a_finite_streaming_buffer_with_atomic_status() -> None
             "ddr_ring_frames": frames,
             "ddr_ring_continuous": False,
         }
+        assert adi.device is not None
+        anchor_reads_after_open = adi.device._rxadc.reg_read_count
         assert [capture.read_block().buffer_sequence for _ in range(frames)] == [0, 1, 2]
+        assert adi.device._rxadc.reg_read_count == anchor_reads_after_open
         status = capture.ddr_ring_status()
         assert status["state"] == "complete"
         assert status["produced_frames"] == status["consumed_frames"] == frames

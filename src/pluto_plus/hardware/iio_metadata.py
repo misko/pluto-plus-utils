@@ -675,7 +675,13 @@ class IioMetadataCaptureSession:
         )
         if parsed_v7 is not None:
             self._validate_v7_ledger(parsed_v7)
-        self._refresh_time_anchors(initial=False)
+        # A finite standalone ring can finish capture and restore the FPGA
+        # timestamp-control register before the host drains its cached frames.
+        # Register samples taken after that point are not live counter anchors;
+        # retain the initial in-capture anchors instead.  Direct+ring remains a
+        # streaming transport and continues refreshing normally.
+        if not (self.ddr_ring_enabled and not self._direct_async_frames):
+            self._refresh_time_anchors(initial=False)
         timing = self._capture_time(metadata.first_sample_sequence)
         utc_ns = (
             timing["sample_time_realtime_start_ns"]
