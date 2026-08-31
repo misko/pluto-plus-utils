@@ -109,10 +109,20 @@ uv run pluto environment --format json
 uv run pluto serve --hardware --state-root /var/lib/pluto-plus
 ```
 
-The supported native host library is the SPF libiio 0.25 line at immutable tag
-`spf-frame-metadata-source/v0.25-final-v3` (commit
-`c26258bfa33098c2b215e19cf85d448e89499b1a`), built with
-`WITH_USB_BACKEND=ON`. On Debian 12 `amd64`/`arm64`, prefer one matching
+The native host library is selected by the radio's declared metadata ABI and
+must be installed with the Python binding from the same source commit. ABI 1
+uses SPF libiio 0.25 tag `spf-frame-metadata-source/v0.25-final-v3` at
+`c26258bfa33098c2b215e19cf85d448e89499b1a`. The direct-async/RAM-extension
+ABI-3 candidate requires libiio 0.25 commit
+`b7303fded264e10473bbbb084afade8f1b1373d1` and proposed tag
+`iq-direct-async-ring-v1-rc1-source/libiio-v1`; that tag and its matching
+firmware image are not published yet. The installer must fail rather than use
+an older ABI-3 build. See
+[`docs/METADATA_CAPTURE_RUNTIME.md`](docs/METADATA_CAPTURE_RUNTIME.md) for the
+complete matrix and status.
+
+Host libiio is built with `WITH_USB_BACKEND=ON`. On Debian 12 `amd64`/`arm64`,
+prefer one matching
 `libiio-artifacts-v0.25-spfmeta3.*` release bundle from
 [`misko/spf`](https://github.com/misko/spf/releases) and its checksum-verifying
 `install_spf_libiio_artifacts.sh`. The supported source-build fallback is
@@ -125,14 +135,20 @@ unmodified PyPI `pylibiio` installation does not provide native libiio.
 For a rootless, checkout-local install on Linux, use the repository installer:
 
 ```bash
-scripts/install_native_libiio.sh
+scripts/install_native_libiio.sh \
+  --uv-bin /ABSOLUTE/PATH/TO/NON-SYMLINK/uv \
+  --metadata-abi 3 \
+  --python "$PWD/.venv/bin/python" \
+  --prefix "$PWD/.venv"
 uv run pluto environment
 ```
 
 It verifies the immutable source commit, builds the USB backend, installs the
 matched native library and patched binding into `.venv`, and performs the same
 preflight. Pluto+ Utils automatically preloads `.venv/lib/libiio.so.0`; no
-`LD_LIBRARY_PATH`, `ldconfig`, or system-wide installation is required.
+`LD_LIBRARY_PATH`, `ldconfig`, or system-wide installation is required. Use
+`--metadata-abi 1` for the currently deployed production ABI-1 radios; ABI 3
+is only for the exact source-qualified stack described above.
 
 Standard network/libiio radios are explicit and may optionally be pinned to a
 known serial:

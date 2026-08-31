@@ -11,7 +11,7 @@ not make continuity observable and must not be accepted as a fallback.
 | --- | --- | --- | --- |
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
-| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `ddr-ring-v1-rc1-source/libiio-v1` | `739a250b92610184b12d773f6a367e549f0dfe29` |
+| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `iq-direct-async-ring-v1-rc1-source/libiio-v1` | `b7303fded264e10473bbbb084afade8f1b1373d1` |
 | `iio,buffer-metadata=3` plus `iio,buffer-metadata-abi-versions=1,2,3,4` | strict `RadioMetadataV7` selected as ABI 4 | gain-timeline v8 release source | frozen by the release candidate plan |
 
 The currently deployed `.20` and `.21` radios advertise ABI 1. ABI 2 is a
@@ -92,13 +92,86 @@ fraction. Transport qualification
 uses tandem HOLD by default so gain transitions do not confound the data-path
 result; pass `--tandem-mode auto` to exercise both systems together.
 
+### ABI-3 direct async and RAM queue extension
+
+The `iq-direct-async-ring-v1-rc1-source` runtime adds one finite direct mode to
+ABI 3. The matched package set is:
+
+| Component | Version | Minimum qualified implementation commit |
+| --- | --- | --- |
+| firmware integration | release version not assigned | `a5253497d15613831055dbfb543ca5a9936bd2c6` |
+| firmware Buildroot | PlutoSDR Buildroot fork | `4a1e90704706756a6f6062482a070e63f9b27573` |
+| radio and host libiio | 0.25 | `b7303fded264e10473bbbb084afade8f1b1373d1` |
+| radio metadata provider | ABI 3 / `RadioMetadataV6` | `3294365ff44da26b261be4a2ccb241b7896d23ad` |
+| Pluto Plus Utils | 0.1.0, Python 3.11+ | `55e3c08ecf703c2a2f6b5367b3e3d64644c58c1a` |
+
+Both the native host library and Python binding must be generated from the
+same `b7303fd` tree. The ABI-3 runtime receipt deliberately rejects older
+ABI-3 libiio commits, upstream libiio, and a PyPI-only binding.
+
+Ringless direct mode requires `iio,buffer-direct-async=1`. The producer leases
+DMA blocks while the existing TCP worker consumes one ordered queue; RAM is
+not allocated when `ddr_ring_bytes=0`:
+
+```python
+with radio.begin_metadata_capture(
+    1_048_576,
+    kernel_buffers=15,
+    direct_async_frames=23,
+    ddr_ring_bytes=0,
+) as capture:
+    blocks = [capture.read_block() for _ in range(23)]
+```
+
+Combined mode additionally requires `iio,buffer-direct-async-ring=1`. RAM is
+overflow capacity within the same descriptor FIFO: a queued DMA-backed frame
+may be copied into a RAM slot and release its DMA lease without changing FIFO
+position. `direct_async_frames` remains the only finite target, so the ring
+target and continuous switch must remain disabled:
+
+```python
+with radio.begin_metadata_capture(
+    1_048_576,
+    kernel_buffers=10,
+    direct_async_frames=23,
+    ddr_ring_bytes=13 * 4_194_304,
+    ddr_ring_frames=0,
+    ddr_ring_continuous=False,
+) as capture:
+    assert capture.direct_async_ring_extension
+    blocks = [capture.read_block() for _ in range(23)]
+    status = capture.ddr_ring_status()
+    assert status["state"] == "complete"
+    assert status["produced_frames"] == status["consumed_frames"]
+```
+
+Combined ring status counts actual RAM spills and drains; it does not count
+DMA-backed frames, and its target is zero because direct mode owns completion.
+At least three kernel buffers are required. With five or more, iiOD reserves
+three DMA periods as ingestion headroom while a 4 MiB RAM copy is in progress.
+DDR burst and direct mode are mutually exclusive, and direct mode supports
+exactly one selected receiver.
+
+The hardware-qualified performance command used `iiod -r 1`. The 30.72 MS/s,
+23-frame acceptance profile requires 15 DMA buffers without RAM and achieved a
+71.19 MB/s application mean with no gaps across 69 frames. The combined
+10-DMA/13-RAM profile is a continuity/capacity profile and is not expected to
+reach 70 MB/s because Zynq performs explicit RAM copies.
+
+The immutable source ref is not published yet and no version-stamped firmware
+image exists. Until both are published, the installer below must fail closed
+and the feature is not an end-user installation. Firmware source requirements,
+submodule commits, binary evidence hashes, publication order, and rollback are
+recorded in `IIO_DIRECT_ASYNC_INSTALL.md` on firmware branch
+`codex/iq-direct-async-main-refresh`.
+
 Build the matched native library and binding into a release-local virtual
 environment:
 
 ```bash
 scripts/install_native_libiio.sh \
   --uv-bin /srv/leo/releases/RELEASE/.release-tools/uv \
-  --metadata-abi 1 \
+  --metadata-abi 3 \
   --python /srv/leo/releases/RELEASE/.venv/bin/python \
   --prefix /srv/leo/releases/RELEASE/.venv
 ```
@@ -112,7 +185,7 @@ The installer resolves an immutable Git tag, verifies its exact commit, builds
 native and Python pieces together, and validates the `MetadataBuffer`
 constructor for the selected ABI. It writes a release-local
 `share/pluto-plus-utils/metadata-runtime.json` receipt containing both installed
-file hashes. `verify_metadata_runtime(expected_abi=1)` resolves and hashes the
+file hashes. `verify_metadata_runtime(expected_abi=3)` resolves and hashes the
 receipt files, explicitly preloads that absolute native library, verifies the
 loaded native and Python paths, and checks the constructor ABI before radio
 capture. `begin_metadata_capture()` invokes this gate automatically. A missing
@@ -145,7 +218,8 @@ Construct a production IIO adapter with the release's declared ABI before
 opening it:
 
 ```python
-radio = IioRadioDevice(uri, serial=serial, expected_metadata_abi=1)
+# ABI 3 is required for the direct-async candidate; deployed ABI-1 radios use 1.
+radio = IioRadioDevice(uri, serial=serial, expected_metadata_abi=3)
 radio.open()
 ```
 
