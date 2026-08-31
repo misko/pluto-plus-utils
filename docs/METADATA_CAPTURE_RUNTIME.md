@@ -14,11 +14,12 @@ not make continuity observable and must not be accepted as a fallback.
 | `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `iq-direct-async-v2-source/libiio-v1` | `8f66f353c9a70a5524988ceb588b0e9271c2390d` |
 | `iio,buffer-metadata=3` plus `iio,buffer-metadata-abi-versions=1,2,3,4` | strict `RadioMetadataV7` selected as ABI 4 | gain-timeline v8 release source | frozen by the release candidate plan |
 
-The currently deployed `.20` and `.21` radios advertise ABI 1. ABI 2 is a
-separate, gated firmware and host-runtime migration; it must not be selected
-only because newer code is available.
+The released direct-async v2 firmware advertises ABI 3. Radios still running an
+older release may advertise ABI 1 or 2; the host must select from the radio's
+attested capabilities rather than choosing a newer parser only because it is
+available.
 
-ABI 3 is the additive single-RX candidate. The radio must also advertise the
+ABI 3 is the additive single-RX release. The radio must also advertise the
 exact capability string
 `00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1`: RX0 and RX1 use four bytes
 per sample with an even sample count, while dual RX uses eight bytes per sample.
@@ -98,14 +99,14 @@ The `iq-direct-async-v2-source` runtime adds one finite direct mode to ABI 3,
 allows its target to span as many as 4,096 frames without re-arming, and makes
 radio-side overrun handling explicit. The hardware-test package set is:
 
-| Component | Version | Minimum qualified implementation commit |
+| Component | Exact released version | Qualified source commit |
 | --- | --- | --- |
-| volatile firmware base | `v0.46-plutoplus-spf-iq-coherent-200m-prototype-v1` | `3141573a2cd0ce9009dadd2ffba6c24d4668541e` |
-| firmware Buildroot/rootfs base | `iq-direct-async-ring-v1-rc1-source/buildroot-v2` | `a929267288a80a31407a3af06345c088979bcc2e` |
-| firmware Linux / CMA geometry | `ddr-burst-v1-rc3-source/linux-v1-1-gd7c78e1` | `d7c78e122adccb6836e374463d3930730335bc36` |
-| volatile radio iiOD and host libiio | 0.25 | `8f66f353c9a70a5524988ceb588b0e9271c2390d` |
+| persistent firmware | `v0.47-plutoplus-spf-iq-direct-async-v2` | `2bab87dcd9b18c8f957ae781603e88160c8509cc` |
+| firmware Buildroot/rootfs | `iq-direct-async-v2-source/buildroot-v1` | `3e1dd15acf361cc06e202e9e59e907dd379a13c3` |
+| firmware Linux / CMA geometry | `ddr-burst-v1-rc3-source/linux-v1` | `93174a1c049ca6ee42f042dbe93f0fb06fbc9cd7` |
+| radio iiOD and host libiio | 0.25 / `iq-direct-async-v2-source/libiio-v1` | `8f66f353c9a70a5524988ceb588b0e9271c2390d` |
 | radio metadata provider | ABI 3 / `RadioMetadataV6` | `3294365ff44da26b261be4a2ccb241b7896d23ad` |
-| Pluto Plus Utils | 0.1.0, Python 3.11+ | `e1fddf624f6e627d8b831d4180f5b5fe53eab889` |
+| Pluto Plus Utils | 0.1.0, Python 3.11+ | `9f9a2bd6d059833bc7d9259a48eabff8e20642ad` or later |
 
 Both the native host library and Python binding must be generated from the
 same `8f66f35` tree. The ABI-3 runtime receipt deliberately rejects older
@@ -213,13 +214,15 @@ until the target completes, and there is no periodic request re-arm.
 Counter-observed gaps remain evidence in a completed speed cell, while
 protocol, readback, cleanup, or capture failures make the command exit nonzero.
 
-The immutable `iq-direct-async-v2-source/libiio-v1` ref supplies
-the matched host runtime. The comparison used a volatile iiOD/library overlay
-on the version-stamped CMA prototype; no QSPI bytes were changed. A persistent
-firmware image containing `8f66f35` remains unavailable until the firmware
-integration is rebuilt and qualified. Firmware source requirements, submodule
-commits, binary evidence hashes, publication order, and rollback are recorded
-in `IIO_DIRECT_ASYNC_INSTALL.md` in the firmware repository.
+The immutable `iq-direct-async-v2-source/libiio-v1` ref supplies the matched
+host runtime. Early comparison runs used a volatile iiOD/library overlay on the
+version-stamped CMA prototype; those results are historical prototype evidence,
+not installation artifacts. The persistent image containing exact `8f66f35` is
+now published as
+[`v0.47-plutoplus-spf-iq-direct-async-v2`](https://github.com/misko/plutosdr-fw/releases/tag/v0.47-plutoplus-spf-iq-direct-async-v2).
+Its firmware source requirements, submodule commits, binary hashes, guarded
+installation steps, and rollback rules are recorded in
+[`IIO_DIRECT_ASYNC_INSTALL.md`](https://github.com/misko/plutosdr-fw/blob/main/IIO_DIRECT_ASYNC_INSTALL.md).
 
 Build the matched native library and binding into a release-local virtual
 environment:
