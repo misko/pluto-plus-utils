@@ -48,7 +48,7 @@ case "$metadata_abi" in
     ;;
 3)
     source_ref="iq-direct-async-ring-v1-rc1-source/libiio-v1"
-    source_commit="3f6571845102fd695efb0c4244d892925b524d7d"
+    source_commit="c89e379e30d6a78a9292c8953cf3a74f0075cee2"
     ;;
 4)
     source_ref="iio-gain-timeline-v8-rc1-source/libiio-v4"
