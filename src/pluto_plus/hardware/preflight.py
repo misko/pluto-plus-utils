@@ -24,7 +24,7 @@ METADATA_RUNTIME_RECEIPT = Path("share/pluto-plus-utils/metadata-runtime.json")
 METADATA_RUNTIME_SOURCE_COMMITS = {
     1: "c26258bfa33098c2b215e19cf85d448e89499b1a",
     2: "6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7",
-    3: "1e5002702f3033f5bc741da315dfe5d5558ef394",
+    3: "393cd218f5a8953dd4f1574ae3f80d088d93d793",
     4: "98a5e6139459a01a5a42ca7cd3e98d807156b6b0",
 }
 _RING_METADATA_BUFFER_PARAMETERS = (
@@ -39,10 +39,14 @@ _RING_METADATA_BUFFER_PARAMETERS = (
     "ddr_ring_frames",
     "ddr_ring_continuous",
 )
+_DIRECT_ASYNC_METADATA_BUFFER_PARAMETERS = (
+    *_RING_METADATA_BUFFER_PARAMETERS,
+    "direct_async_frames",
+)
 METADATA_BUFFER_PARAMETERS = {
     1: ("self", "device", "samples_count", "metadata_capacity"),
     2: ("self", "device", "samples_count", "request", "metadata_capacity"),
-    3: _RING_METADATA_BUFFER_PARAMETERS,
+    3: _DIRECT_ASYNC_METADATA_BUFFER_PARAMETERS,
     4: _RING_METADATA_BUFFER_PARAMETERS,
 }
 

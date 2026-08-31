@@ -173,6 +173,9 @@ class MetadataCapture(Protocol):
     def kernel_buffers(self) -> int: ...
 
     @property
+    def direct_async_frames(self) -> int: ...
+
+    @property
     def ddr_burst_enabled(self) -> bool: ...
 
     @property
@@ -368,5 +371,10 @@ class MetadataRadioDevice(RadioDevice, Protocol):
     def tune_center_frequency(self, center_frequency_hz: float) -> float: ...
 
     def begin_metadata_capture(
-        self, sample_count: int, *, kernel_buffers: int, ddr_burst_bytes: int = 0
+        self,
+        sample_count: int,
+        *,
+        kernel_buffers: int,
+        ddr_burst_bytes: int = 0,
+        direct_async_frames: int = 0,
     ) -> MetadataCapture: ...

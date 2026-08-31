@@ -199,8 +199,8 @@ def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
     (
         (
             3,
-            "ddr-ring-v1-rc2-source/libiio-v1",
-            "1e5002702f3033f5bc741da315dfe5d5558ef394",
+            "iq-direct-async-minimal-rc1-source/libiio-v1",
+            "393cd218f5a8953dd4f1574ae3f80d088d93d793",
         ),
         (
             4,
@@ -247,25 +247,46 @@ def test_metadata_runtime_gate_accepts_exact_ring_request_constructor(
                     "ddr_ring_bytes",
                     "ddr_ring_frames",
                     "ddr_ring_continuous",
+                    *(["direct_async_frames"] if abi == 3 else []),
                 ],
             }
         )
     )
 
-    class MetadataBuffer:
-        def __init__(
-            self,
-            device: object,
-            samples_count: int,
-            request: bytes,
-            metadata_capacity: int = 64 * 1024,
-            batch_frames: int = 1,
-            ddr_burst_bytes: int = 0,
-            ddr_ring_bytes: int = 0,
-            ddr_ring_frames: int = 0,
-            ddr_ring_continuous: bool = False,
-        ) -> None:
-            pass
+    if abi == 3:
+
+        class MetadataBuffer:
+            def __init__(
+                self,
+                device: object,
+                samples_count: int,
+                request: bytes,
+                metadata_capacity: int = 64 * 1024,
+                batch_frames: int = 1,
+                ddr_burst_bytes: int = 0,
+                ddr_ring_bytes: int = 0,
+                ddr_ring_frames: int = 0,
+                ddr_ring_continuous: bool = False,
+                direct_async_frames: int = 0,
+            ) -> None:
+                pass
+
+    else:
+
+        class MetadataBuffer:
+            def __init__(
+                self,
+                device: object,
+                samples_count: int,
+                request: bytes,
+                metadata_capacity: int = 64 * 1024,
+                batch_frames: int = 1,
+                ddr_burst_bytes: int = 0,
+                ddr_ring_bytes: int = 0,
+                ddr_ring_frames: int = 0,
+                ddr_ring_continuous: bool = False,
+            ) -> None:
+                pass
 
     module = SimpleNamespace(MetadataBuffer=MetadataBuffer, __file__=str(binding))
     monkeypatch.setattr(preflight.sys, "prefix", str(prefix))

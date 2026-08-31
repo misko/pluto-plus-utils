@@ -525,6 +525,57 @@ class FakeMetadataBufferFactory:
         return result
 
 
+def test_direct_async_capture_is_explicit_finite_and_ringless() -> None:
+    radio, adi, factory = _open_radio([], metadata_abi=3, channels=(0,))
+    assert adi.device is not None
+    adi.device.ctx.attrs["iio,buffer-direct-async"] = "1"
+    try:
+        capture = radio.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=4,
+            direct_async_frames=3,
+        )
+        assert capture.direct_async_frames == 3
+        assert not capture.ddr_burst_enabled
+        assert not capture.ddr_ring_enabled
+        assert factory.instances[0].keywords == {
+            "batch_frames": 1,
+            "direct_async_frames": 3,
+        }
+        capture.close()
+    finally:
+        radio.close()
+
+
+def test_direct_async_capture_fails_closed_outside_qualified_contract() -> None:
+    radio, adi, _factory = _open_radio([], metadata_abi=3, channels=(0,))
+    assert adi.device is not None
+    try:
+        with pytest.raises(RadioConfigurationError, match="does not advertise"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                direct_async_frames=3,
+            )
+        adi.device.ctx.attrs["iio,buffer-direct-async"] = "1"
+        with pytest.raises(ValueError, match="at least two"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=1,
+                direct_async_frames=3,
+            )
+        with pytest.raises(ValueError, match="storage off"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                ddr_ring_bytes=SAMPLE_COUNT * 4,
+                ddr_ring_frames=1,
+                direct_async_frames=3,
+            )
+    finally:
+        radio.close()
+
+
 class FakeAd9361:
     def __init__(
         self,

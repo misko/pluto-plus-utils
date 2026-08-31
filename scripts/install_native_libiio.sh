@@ -47,8 +47,8 @@ case "$metadata_abi" in
     source_commit="6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7"
     ;;
 3)
-    source_ref="ddr-ring-v1-rc2-source/libiio-v1"
-    source_commit="1e5002702f3033f5bc741da315dfe5d5558ef394"
+    source_ref="iq-direct-async-minimal-rc1-source/libiio-v1"
+    source_commit="393cd218f5a8953dd4f1574ae3f80d088d93d793"
     ;;
 4)
     source_ref="iio-gain-timeline-v8-rc1-source/libiio-v4"
@@ -168,6 +168,7 @@ expected = (
             if abi in {3, 4}
             else ()
         ),
+        *(("direct_async_frames",) if abi == 3 else ()),
     )
 )
 assert parameters == expected, (parameters, expected)

@@ -700,6 +700,7 @@ class IioRadioDevice:
         ddr_ring_bytes: int = 0,
         ddr_ring_frames: int = 0,
         ddr_ring_continuous: bool = False,
+        direct_async_frames: int = 0,
     ) -> IioMetadataCaptureSession:
         """Reset and arm one fail-closed FPGA-metadata capture generation."""
 
@@ -717,10 +718,20 @@ class IioRadioDevice:
             raise TypeError("ddr_ring_frames must be an integer")
         if not isinstance(ddr_ring_continuous, bool):
             raise TypeError("ddr_ring_continuous must be a bool")
+        if isinstance(direct_async_frames, bool) or not isinstance(
+            direct_async_frames, int
+        ):
+            raise TypeError("direct_async_frames must be an integer")
+        if not 0 <= direct_async_frames <= 64:
+            raise ValueError("direct_async_frames must be in [0, 64]")
+        if direct_async_frames and kernel_buffers < 2:
+            raise ValueError("direct async capture requires at least two kernel buffers")
         if ddr_ring_bytes < 0 or ddr_ring_frames < 0:
             raise ValueError("DDR ring values must not be negative")
         if ddr_burst_bytes and ddr_ring_bytes:
             raise ValueError("device DDR burst and DDR ring are mutually exclusive")
+        if direct_async_frames and (ddr_burst_bytes or ddr_ring_bytes):
+            raise ValueError("direct async capture requires DDR burst/ring storage off")
         if ddr_ring_bytes:
             if ddr_ring_continuous and ddr_ring_frames:
                 raise ValueError("continuous DDR ring must not specify a frame target")
@@ -831,6 +842,15 @@ class IioRadioDevice:
             raise RadioConfigurationError(
                 "metadata ABI 2, 3, and 4 capture requires the tandem-agc IIO device"
             )
+        if direct_async_frames:
+            if metadata_abi != 3 or len(channels) != 1:
+                raise RadioConfigurationError(
+                    "direct async capture is qualified only for metadata ABI 3 and one receiver"
+                )
+            if facts.get("buffer_direct_async") is not True:
+                raise RadioConfigurationError(
+                    "IIO context does not advertise direct async DMA-to-network capture"
+                )
         if not (
             self._capabilities.supports_device_sample_counter
             and self._capabilities.supports_continuity_sequence
@@ -870,6 +890,7 @@ class IioRadioDevice:
             ddr_ring_bytes=ddr_ring_bytes,
             ddr_ring_frames=ddr_ring_frames,
             ddr_ring_continuous=ddr_ring_continuous,
+            direct_async_frames=direct_async_frames,
             iq_decoder=self._iq_decoder,
         )
         try:
@@ -1063,6 +1084,7 @@ def context_facts(context: Any) -> dict[str, object]:
     except (KeyError, TypeError, ValueError):
         ddr_ring_max_iq_bytes = None
     ddr_ring_modes_raw = attrs.get("iio,buffer-ddr-ring-modes")
+    direct_async_raw = attrs.get("iio,buffer-direct-async")
     metadata_status_raw = attrs.get("iio,buffer-metadata-status")
     legacy_metadata_status_version = (
         1 if metadata_status_raw == "1" else 2 if metadata_status_raw == "2" else None
@@ -1110,6 +1132,8 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_ddr_ring_raw": ddr_ring_raw,
         "buffer_ddr_ring_max_iq_bytes": ddr_ring_max_iq_bytes,
         "buffer_ddr_ring_modes_raw": ddr_ring_modes_raw,
+        "buffer_direct_async": direct_async_raw == "1",
+        "buffer_direct_async_raw": direct_async_raw,
         "buffer_metadata_status": metadata_status_max_version is not None,
         "buffer_metadata_status_raw": metadata_status_raw,
         "buffer_metadata_status_legacy_version": legacy_metadata_status_version,

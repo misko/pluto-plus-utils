@@ -271,6 +271,7 @@ class IioMetadataCaptureSession:
         ddr_ring_bytes: int = 0,
         ddr_ring_frames: int = 0,
         ddr_ring_continuous: bool = False,
+        direct_async_frames: int = 0,
         iq_decoder: IioIqDecoder = "pyadi",
     ) -> None:
         validate_iq_decoder(iq_decoder)
@@ -294,10 +295,20 @@ class IioMetadataCaptureSession:
             raise TypeError("ddr_ring_frames must be an integer")
         if not isinstance(ddr_ring_continuous, bool):
             raise TypeError("ddr_ring_continuous must be a bool")
+        if isinstance(direct_async_frames, bool) or not isinstance(
+            direct_async_frames, int
+        ):
+            raise TypeError("direct_async_frames must be an integer")
+        if not 0 <= direct_async_frames <= 64:
+            raise ValueError("direct_async_frames must be in [0, 64]")
+        if direct_async_frames and kernel_buffers < 2:
+            raise ValueError("direct async capture requires at least two kernel buffers")
         if ddr_ring_bytes < 0 or ddr_ring_frames < 0:
             raise ValueError("DDR ring values must not be negative")
         if ddr_burst_bytes and ddr_ring_bytes:
             raise ValueError("device DDR burst and DDR ring are mutually exclusive")
+        if direct_async_frames and (ddr_burst_bytes or ddr_ring_bytes):
+            raise ValueError("direct async capture requires DDR burst/ring storage off")
         if ddr_ring_bytes:
             if ddr_ring_continuous and ddr_ring_frames:
                 raise ValueError("continuous DDR ring must not specify a frame target")
@@ -317,6 +328,7 @@ class IioMetadataCaptureSession:
         self._ddr_ring_requested_bytes = ddr_ring_bytes
         self._ddr_ring_capture_frames = ddr_ring_frames
         self._ddr_ring_continuous = ddr_ring_continuous
+        self._direct_async_frames = direct_async_frames
         self._tandem_request = tandem_request or TandemSessionRequestV1.auto_for_sample_count(
             samples_per_channel,
             retention_frames=(kernel_buffers + 1 if metadata_abi == 4 else 2),
@@ -356,6 +368,10 @@ class IioMetadataCaptureSession:
     @property
     def kernel_buffers(self) -> int:
         return self._kernel_buffers
+
+    @property
+    def direct_async_frames(self) -> int:
+        return self._direct_async_frames
 
     @property
     def is_open(self) -> bool:
@@ -534,6 +550,15 @@ class IioMetadataCaptureSession:
                         ddr_ring_bytes=self._ddr_ring_requested_bytes,
                         ddr_ring_frames=self._ddr_ring_capture_frames,
                         ddr_ring_continuous=self._ddr_ring_continuous,
+                    )
+                if self._direct_async_frames:
+                    return self._metadata_buffer_type(
+                        self._sdr._rxadc,
+                        self._samples_per_channel,
+                        request,
+                        self._metadata_capacity,
+                        batch_frames=1,
+                        direct_async_frames=self._direct_async_frames,
                     )
                 return self._metadata_buffer_type(
                     self._sdr._rxadc,
