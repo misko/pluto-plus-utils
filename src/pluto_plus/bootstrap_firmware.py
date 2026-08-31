@@ -1,9 +1,10 @@
-"""Exceptional physical-path bootstrap for Pluto radios without a serial.
+"""Guarded standalone firmware workflows for local and LAN Pluto radios.
 
-This module deliberately does not provide a generic safety bypass.  It accepts
-only the hardware-qualified canonical DFU, one direct runtime USB sysfs node,
-and a radio whose USB and IIOD serials are both blank.  Normal serial-attested
-radios must use the plan/token firmware manager instead.
+This module deliberately does not provide a generic safety bypass. Blank-serial
+recovery accepts only the hardware-qualified canonical DFU and one direct USB
+sysfs node. LAN flashing requires a literal private address, exact IIOD serial,
+hardware-qualified persistent profile, pinned pre-reboot SSH key, post-reboot
+IIOD attestation, and explicit ephemeral-key rotation.
 """
 
 from __future__ import annotations
@@ -1048,6 +1049,168 @@ def _run_lan_default_password_ssh(
     return output
 
 
+def rotate_lan_ssh_host_key_after_attested_return(
+    *,
+    serial: str,
+    host: str,
+    expected_firmware: str,
+    expected_metadata_abi: int,
+    password: str,
+    known_hosts_file: Path,
+    timeout_s: float = 30,
+) -> dict[str, str]:
+    """Rotate an ephemeral LAN SSH key only after exact IIOD return attestation."""
+
+    normalized_host = _literal_private_lan_ipv4(host)
+    if _SERIAL_PATTERN.fullmatch(serial) is None:
+        raise BootstrapFirmwareError("LAN SSH rotation requires one exact stable serial")
+    if not password:
+        raise BootstrapFirmwareError("LAN SSH rotation password cannot be empty")
+    if timeout_s <= 0 or timeout_s > 60:
+        raise BootstrapFirmwareError("LAN SSH rotation timeout must be at most 60 seconds")
+    try:
+        facts = _inspect_iio_context(normalized_host)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise BootstrapFirmwareError(
+            f"cannot re-attest LAN IIOD before SSH key rotation: {error}"
+        ) from error
+    if str(facts.get("hw_serial") or "").strip() != serial:
+        raise BootstrapFirmwareError("LAN IIOD serial changed before SSH key rotation")
+    if str(facts.get("fw_version") or "").strip() != expected_firmware:
+        raise BootstrapFirmwareError("LAN firmware changed before SSH key rotation")
+    try:
+        require_metadata_abi_capability(facts, expected_metadata_abi)
+    except ValueError as error:
+        raise BootstrapFirmwareError(
+            "LAN metadata ABI changed before SSH key rotation"
+        ) from error
+
+    candidate = known_hosts_file.expanduser()
+    if candidate.is_symlink():
+        raise BootstrapFirmwareError("pre-reboot LAN known_hosts cannot be a symlink")
+    destination = candidate.resolve()
+    try:
+        metadata = destination.stat()
+        previous = destination.read_bytes()
+    except OSError as error:
+        raise BootstrapFirmwareError("cannot read the pre-reboot LAN known_hosts") from error
+    if (
+        not destination.is_file()
+        or destination.is_symlink()
+        or metadata.st_mode & 0o077
+        or not previous
+    ):
+        raise BootstrapFirmwareError("pre-reboot LAN known_hosts is not one private regular file")
+    previous_sha256 = hashlib.sha256(previous).hexdigest()
+    previous_fingerprint = _run_output(
+        ("ssh-keygen", "-lf", str(destination), "-E", "sha256"), timeout_s=10
+    ).strip()
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.replacement.", dir=destination.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    temporary.chmod(0o600)
+    try:
+        try:
+            import pexpect
+        except ImportError as error:  # pragma: no cover - composition guard
+            raise BootstrapFirmwareError("LAN SSH rotation requires pexpect") from error
+        arguments = [
+            "-F",
+            "/dev/null",
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "NumberOfPasswordPrompts=1",
+            "-o",
+            "PreferredAuthentications=password",
+            "-o",
+            "PubkeyAuthentication=no",
+            "-o",
+            "PasswordAuthentication=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"UserKnownHostsFile={temporary}",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
+            "-o",
+            "UpdateHostKeys=no",
+            f"root@{normalized_host}",
+            _REMOTE_GADGET_SERIAL_COMMAND,
+        ]
+        child = pexpect.spawn("ssh", arguments, encoding=None, timeout=timeout_s)
+        transcript = bytearray()
+        password_sent = False
+        try:
+            while True:
+                matched = child.expect([b"[Pp]assword:", pexpect.EOF, pexpect.TIMEOUT])
+                transcript.extend(cast(bytes, child.before or b""))
+                if matched == 0:
+                    if password_sent:
+                        raise BootstrapFirmwareError("replacement LAN SSH authentication failed")
+                    child.sendline(password.encode())
+                    password_sent = True
+                    continue
+                if matched == 1:
+                    break
+                raise BootstrapFirmwareError("replacement LAN SSH enrollment timed out")
+        finally:
+            child.close(force=True)
+        output = bytes(transcript).decode(errors="replace").replace("\r", "")
+        if (
+            not password_sent
+            or child.exitstatus != 0
+            or child.signalstatus is not None
+        ):
+            raise BootstrapFirmwareError("replacement LAN SSH serial command failed")
+        serial_lines = [
+            line.removeprefix("serial=").strip()
+            for line in output.splitlines()
+            if line.startswith("serial=")
+        ]
+        if serial_lines != [serial]:
+            observed = serial_lines[0] if len(serial_lines) == 1 else None
+            raise BootstrapFirmwareError(
+                f"replacement LAN SSH key attested serial {observed!r}, expected {serial!r}"
+            )
+        replacement = temporary.read_bytes()
+        replacement_sha256 = hashlib.sha256(replacement).hexdigest()
+        if not replacement or replacement_sha256 == previous_sha256:
+            raise BootstrapFirmwareError("LAN SSH host key did not rotate after reboot")
+        replacement_fingerprint = _run_output(
+            ("ssh-keygen", "-lf", str(temporary), "-E", "sha256"), timeout_s=10
+        ).strip()
+        backup = destination.with_name(
+            f"{destination.name}.pre-reboot-{previous_sha256[:12]}"
+        )
+        try:
+            os.link(destination, backup)
+        except FileExistsError as error:
+            raise BootstrapFirmwareError("pre-reboot LAN key backup already exists") from error
+        os.replace(temporary, destination)
+        with destination.open("rb") as stream:
+            os.fsync(stream.fileno())
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return {
+            "previous_known_hosts_sha256": previous_sha256,
+            "replacement_known_hosts_sha256": replacement_sha256,
+            "previous_fingerprint": previous_fingerprint,
+            "replacement_fingerprint": replacement_fingerprint,
+            "previous_known_hosts_backup": str(backup),
+            "known_hosts_file": str(destination),
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _require_usb_ssh_route(interface: str, host: str) -> None:
     try:
         require_unambiguous_usb_ssh_route(interface, host)
@@ -1078,6 +1241,29 @@ class BootstrapPlan:
     expected_tandem_agc: bool = False
     operation: Literal["flash", "force_flash"] = "force_flash"
     target_serial: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LanFlashPlan:
+    """Exact-image persistent flash plan for one serial-attested LAN radio."""
+
+    plan_id: str
+    host: str
+    target_serial: str
+    before_firmware: str
+    before_model: str
+    before_phy: str
+    image_path: str
+    image_sha256: str
+    fit_sha256: str
+    fit_size: int
+    frm_sha256: str
+    expected_firmware: str
+    mutation_profile_id: str
+    expected_metadata_abi: int
+    expected_tandem_agc: bool
+    confirmation_phrase: str
+    trust_model: str = "explicit_lan_tofu"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1224,6 +1410,124 @@ def prepare_usb_flash_plan(
             confirmation_phrase=confirmation,
             operation=operation,
             target_serial=local.serial,
+        ),
+        frm,
+    )
+
+
+def prepare_lan_flash_plan(
+    image: Path,
+    *,
+    serial: str,
+    host: str,
+    mutation_profile_id: str,
+) -> tuple[LanFlashPlan, bytes]:
+    """Create a read-only exact-image plan for one network-only Pluto+."""
+
+    normalized_host = _literal_private_lan_ipv4(host)
+    if _SERIAL_PATTERN.fullmatch(serial) is None:
+        raise BootstrapFirmwareError("LAN flash requires one exact stable serial")
+    profile = STANDALONE_FLASH_PROFILES.get(mutation_profile_id)
+    if profile is None:
+        raise BootstrapFirmwareError(
+            f"unknown standalone mutation profile {mutation_profile_id!r}; expected one of "
+            f"{sorted(STANDALONE_FLASH_PROFILES)}"
+        )
+    if not profile.persistent_allowed or not bool(profile.policy.hardware_qualified):
+        raise BootstrapFirmwareError(
+            f"profile {mutation_profile_id!r} is not qualified for persistent LAN flashing"
+        )
+    try:
+        image_data = image.read_bytes()
+    except OSError as error:
+        raise BootstrapFirmwareError(f"cannot read firmware image: {error}") from error
+    image_sha256 = hashlib.sha256(image_data).hexdigest()
+    if image_sha256 != profile.policy.asset_sha256:
+        raise BootstrapFirmwareError(
+            f"profile {mutation_profile_id!r} accepts only its exact qualified DFU: "
+            f"expected SHA-256 {profile.policy.asset_sha256}, got {image_sha256}"
+        )
+    try:
+        frm = generate_frm(image_data)
+        fit = validate_frm(frm)
+    except FirmwareImageError as error:
+        raise BootstrapFirmwareError(f"invalid qualified DFU: {error}") from error
+    fit_sha256 = hashlib.sha256(fit).hexdigest()
+    if fit_sha256 != profile.policy.fit_body_sha256 or len(fit) != profile.policy.fit_body_size:
+        raise BootstrapFirmwareError("qualified DFU FIT identity does not match its profile")
+
+    try:
+        facts = _inspect_iio_context(normalized_host)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise BootstrapFirmwareError(
+            f"cannot attest LAN IIOD identity at {normalized_host}: {error}"
+        ) from error
+    observed_serial = str(facts.get("hw_serial") or "").strip()
+    if observed_serial != serial:
+        raise BootstrapFirmwareError(
+            f"LAN IIOD endpoint {normalized_host} attested serial {observed_serial!r}, "
+            f"expected {serial!r}"
+        )
+    observed_model = str(facts.get("hw_model") or "").strip()
+    if "plutosdr rev.c" not in observed_model.lower():
+        raise BootstrapFirmwareError(
+            f"persistent LAN flash requires a live PlutoSDR Rev.C, got {observed_model!r}"
+        )
+    before_firmware = str(facts.get("fw_version") or "").strip()
+    before_phy = str(facts.get("ad9361-phy,model") or "").strip()
+    if not before_firmware or before_phy not in SUPPORTED_AD936X_PHY_MODELS:
+        raise BootstrapFirmwareError("LAN target did not expose complete firmware/PHY facts")
+    if before_firmware == profile.policy.device_firmware:
+        raise BootstrapFirmwareError(
+            f"LAN target already reports exact firmware {before_firmware!r}; refusing a rewrite"
+        )
+    try:
+        observed_metadata_abi = int(str(facts.get("iio,buffer-metadata") or ""))
+    except ValueError as error:
+        raise BootstrapFirmwareError("LAN target metadata ABI is missing or malformed") from error
+    if observed_metadata_abi < 1:
+        raise BootstrapFirmwareError("LAN target metadata ABI must be positive")
+    raw_device_names = facts.get("device_names", ())
+    device_names = (
+        {str(value) for value in raw_device_names}
+        if isinstance(raw_device_names, (tuple, list, set, frozenset))
+        else set()
+    )
+    if not {"ad9361-phy", "cf-ad9361-lpc"} <= device_names:
+        raise BootstrapFirmwareError("LAN target lacks the canonical paired-RX IIO devices")
+    raw_scan_channels = facts.get("cf-ad9361-lpc,scan_channels", ())
+    scan_channels = (
+        {str(value) for value in raw_scan_channels}
+        if isinstance(raw_scan_channels, (tuple, list, set, frozenset))
+        else set()
+    )
+    if not {"voltage0", "voltage1", "voltage2", "voltage3"} <= scan_channels:
+        raise BootstrapFirmwareError("LAN target lacks the canonical paired-RX scan layout")
+    observed_tandem = "tandem-agc" in device_names
+    if observed_tandem is not profile.tandem_agc:
+        raise BootstrapFirmwareError(
+            f"LAN target tandem capability is {observed_tandem}, "
+            f"expected {profile.tandem_agc}"
+        )
+
+    return (
+        LanFlashPlan(
+            plan_id=str(uuid.uuid4()),
+            host=normalized_host,
+            target_serial=serial,
+            before_firmware=before_firmware,
+            before_model=observed_model,
+            before_phy=before_phy,
+            image_path=str(image.resolve()),
+            image_sha256=image_sha256,
+            fit_sha256=fit_sha256,
+            fit_size=len(fit),
+            frm_sha256=hashlib.sha256(frm).hexdigest(),
+            expected_firmware=profile.policy.device_firmware,
+            mutation_profile_id=mutation_profile_id,
+            expected_metadata_abi=profile.metadata_abi,
+            expected_tandem_agc=profile.tandem_agc,
+            confirmation_phrase=f"FLASH LAN {serial} {normalized_host}",
         ),
         frm,
     )
@@ -1561,6 +1865,168 @@ def execute_usb_flash_plan_ssh(
     return result
 
 
+def execute_lan_flash_plan(
+    plan: LanFlashPlan,
+    frm: bytes,
+    *,
+    confirmation: str,
+    receipt_directory: Path,
+    transport: BootstrapSshTransport,
+    host_key_rotator: Callable[[], dict[str, str]],
+    return_timeout_s: float = 180,
+) -> BootstrapResult:
+    """Flash one serial-attested LAN Pluto through its fixed on-radio updater."""
+
+    if return_timeout_s < 30 or return_timeout_s > 1800:
+        raise BootstrapFirmwareError("LAN return timeout must be between 30 and 1800 seconds")
+    _validate_plan_payload(plan, frm, confirmation)
+    fresh_plan, fresh_frm = prepare_lan_flash_plan(
+        Path(plan.image_path),
+        serial=plan.target_serial,
+        host=plan.host,
+        mutation_profile_id=plan.mutation_profile_id,
+    )
+    _require_same_lan_plan(plan, fresh_plan, fresh_frm, frm)
+
+    receipt_id = str(uuid.uuid4())
+    receipt_path = receipt_directory / f"{receipt_id}.json"
+    phases: list[str] = ["preflight_revalidated"]
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "receipt_id": receipt_id,
+        "transport": "lan_ssh_frm",
+        "outcome": "started",
+        "plan": asdict(plan),
+        "phases": phases,
+        "error": None,
+    }
+    _write_receipt(receipt_path, receipt)
+    updater_dispatched = False
+    stage_created = False
+    try:
+        before = transport.run(_REMOTE_ATTEST_COMMAND, timeout_s=15)
+        remote = _remote_attestation(before)
+        if remote["serial"] != plan.target_serial:
+            raise BootstrapFirmwareError("remote serial changed before LAN firmware staging")
+        if "plutosdr rev.c" not in remote["model"].lower():
+            raise BootstrapFirmwareError("remote board is not an attested PlutoSDR Rev.C")
+        if remote["firmware"] != plan.before_firmware:
+            raise BootstrapFirmwareError("remote firmware changed before LAN firmware staging")
+        if remote["updater"] != "/sbin/update_frm.sh":
+            raise BootstrapFirmwareError("fixed radio updater is unavailable")
+        phases.append("remote_preflight_attested")
+        _update_receipt(receipt_path, receipt, phases)
+        safe_output = transport.run(
+            f"sh -s -- {plan.target_serial} {plan.fit_size}",
+            stdin=_REMOTE_RECONCILE_SCRIPT,
+            timeout_s=120,
+        )
+        safe_fields = _parse_reconciliation_report(safe_output)
+        if safe_fields["serial"] != plan.target_serial:
+            raise BootstrapFirmwareError("remote TX-safe preflight serial changed")
+        if safe_fields["firmware"] != plan.before_firmware:
+            raise BootstrapFirmwareError("remote TX-safe preflight firmware changed")
+        _require_remote_tx_safe(safe_fields)
+        phases.append("remote_tx_safe_read_only_attested")
+        _update_receipt(receipt_path, receipt, phases)
+
+        transport.run(_REMOTE_STAGE_COMMAND, timeout_s=15)
+        stage_created = True
+        transport.upload_frm(frm, timeout_s=120)
+        phases.append("pluto_frm_staged")
+        _update_receipt(receipt_path, receipt, phases)
+        remote_hash = _one_sha256(transport.run(_REMOTE_STAGE_HASH_COMMAND, timeout_s=30))
+        if remote_hash != plan.frm_sha256:
+            raise BootstrapFirmwareError("remote staged FRM hash does not match the LAN plan")
+        phases.append("staged_hash_verified")
+        _update_receipt(receipt_path, receipt, phases)
+
+        updater_dispatched = True
+        update_output = transport.run(_REMOTE_UPDATE_COMMAND, timeout_s=120)
+        if "Failed" in update_output or not re.search(r"(?m)^Done\s*$", update_output):
+            raise BootstrapFirmwareError("radio updater did not report an unambiguous Done")
+        phases.append("updater_reported_done")
+        _update_receipt(receipt_path, receipt, phases)
+        flashed_hash = _one_sha256(
+            transport.run(
+                f"head -c {plan.fit_size} /dev/mtdblock3 | sha256sum",
+                timeout_s=120,
+            )
+        )
+        if flashed_hash != plan.fit_sha256:
+            raise BootstrapFirmwareError("flashed mtd3 FIT hash does not match the LAN plan")
+        phases.append("mtd3_fit_verified")
+        _update_receipt(receipt_path, receipt, phases)
+        transport.run(_REMOTE_CLEANUP_COMMAND, timeout_s=30)
+        stage_created = False
+        phases.append("remote_stage_removed")
+        _update_receipt(receipt_path, receipt, phases)
+        transport.run(_REMOTE_REBOOT_COMMAND, timeout_s=15)
+        phases.append("reboot_dispatched")
+        _update_receipt(receipt_path, receipt, phases)
+
+        _wait_for_lan_iio_state(
+            plan.host,
+            available=False,
+            timeout_s=return_timeout_s,
+        )
+        phases.append("lan_iio_disappeared")
+        _update_receipt(receipt_path, receipt, phases)
+        _wait_for_lan_iio_state(
+            plan.host,
+            available=True,
+            timeout_s=return_timeout_s,
+        )
+        phases.append("lan_iio_reappeared")
+        _update_receipt(receipt_path, receipt, phases)
+        returned_serial, returned_firmware, returned_phy = _attest_lan_return_when_ready(
+            plan,
+            timeout_s=return_timeout_s,
+        )
+        phases.extend(("return_attested", "tx_safe_attested"))
+        host_key_rotation = host_key_rotator()
+        receipt["host_key_rotation"] = host_key_rotation
+        phases.append("lan_ssh_host_key_rotated")
+        _update_receipt(receipt_path, receipt, phases)
+        result = BootstrapResult(
+            receipt_id=receipt_id,
+            outcome="success",
+            phases=tuple(phases),
+            receipt_path=str(receipt_path),
+            returned_serial=returned_serial,
+            returned_firmware=returned_firmware,
+            returned_phy=returned_phy,
+        )
+    except Exception as error:
+        if stage_created and not updater_dispatched:
+            try:
+                transport.run(_REMOTE_CLEANUP_COMMAND, timeout_s=30)
+                phases.append("cleanup_remote_stage_removed")
+            except Exception:
+                phases.append("cleanup_remote_stage_failed")
+        classification = (
+            "post_updater_uncertain" if updater_dispatched else "qspi_write_not_started"
+        )
+        result = BootstrapResult(
+            receipt_id=receipt_id,
+            outcome="unknown" if updater_dispatched else "failed",
+            phases=tuple(phases),
+            receipt_path=str(receipt_path),
+            error=f"{type(error).__name__}: {error}",
+            failure_phase=_lan_flash_failure_phase(phases),
+            failure_classification=classification,
+            retryable=not updater_dispatched,
+            remediation=(
+                "Do not retry; read-only re-attest the endpoint and receipt first."
+                if updater_dispatched
+                else "No updater command was dispatched; correct the error and create a new plan."
+            ),
+        )
+    receipt.update(asdict(result))
+    _write_receipt(receipt_path, receipt)
+    return result
+
+
 def reconcile_usb_flash_receipt(
     receipt_id: str,
     *,
@@ -1686,27 +2152,7 @@ def reconcile_usb_flash_receipt(
     remote_fit = fields.get("fit_sha256", "")
     if not hmac.compare_digest(remote_fit, plan.fit_sha256):
         raise BootstrapFirmwareError("remote mtd3 FIT does not match the receipt")
-    try:
-        gains = tuple(float(value) for value in fields["tx_hardwaregain_db"].split(","))
-        buffers = tuple(float(value) for value in fields["tx_buffer_enable"].split(","))
-        scans = tuple(float(value) for value in fields["tx_scan_enable"].split(","))
-        raws = tuple(float(value) for value in fields["tx_dds_raw"].split(","))
-        scales = tuple(float(value) for value in fields["tx_dds_scale"].split(","))
-    except (KeyError, ValueError) as error:
-        raise BootstrapFirmwareError("remote TX-safe report is invalid") from error
-    tx_safe = (
-        len(gains) == 2
-        and all(value <= -80 for value in gains)
-        and buffers == (0,)
-        and len(scans) == 4
-        and all(value == 0 for value in scans)
-        and len(raws) == 8
-        and all(value == 0 for value in raws)
-        and len(scales) == 8
-        and all(value == 0 for value in scales)
-    )
-    if not tx_safe:
-        raise BootstrapFirmwareError("remote TX-safe readback was not affirmative")
+    _require_remote_tx_safe(fields)
 
     phases = (
         "receipt_validated",
@@ -1763,7 +2209,7 @@ for d in /sys/bus/iio/devices/iio:device*; do
   esac
 done
 test -n "$phy" && test -n "$dds"
-gains=''; scans=''; raws=''; scales=''
+gains=''; scans=''; raws=''; scales=''; buffers=''
 for f in "$phy"/out_voltage0_hardwaregain "$phy"/out_voltage1_hardwaregain; do
   value=$(awk '{print $1}' "$f")
   gains="${gains}${gains:+,}${value}"
@@ -1780,9 +2226,16 @@ for f in "$dds"/out_altvoltage*_scale; do
   value=$(cat "$f")
   scales="${scales}${scales:+,}${value}"
 done
+for f in /sys/bus/iio/devices/iio:device*/buffer/enable; do
+  test -f "$f" || continue
+  value=$(cat "$f")
+  buffers="${buffers}${buffers:+,}${value}"
+done
+test -n "$buffers"
 emit serial "$serial"
 emit firmware "$firmware"
 emit fit_sha256 "$fit_sha256"
+emit all_buffer_enable "$buffers"
 emit tx_hardwaregain_db "$gains"
 emit tx_buffer_enable "$(cat "$dds/buffer/enable")"
 emit tx_scan_enable "$scans"
@@ -1818,6 +2271,7 @@ def _parse_reconciliation_report(output: str) -> dict[str, str]:
         "serial",
         "firmware",
         "fit_sha256",
+        "all_buffer_enable",
         "tx_hardwaregain_db",
         "tx_buffer_enable",
         "tx_scan_enable",
@@ -1829,7 +2283,36 @@ def _parse_reconciliation_report(output: str) -> dict[str, str]:
     return fields
 
 
-def _validate_plan_payload(plan: BootstrapPlan, frm: bytes, confirmation: str) -> None:
+def _require_remote_tx_safe(fields: dict[str, str]) -> None:
+    try:
+        gains = tuple(float(value) for value in fields["tx_hardwaregain_db"].split(","))
+        all_buffers = tuple(float(value) for value in fields["all_buffer_enable"].split(","))
+        buffers = tuple(float(value) for value in fields["tx_buffer_enable"].split(","))
+        scans = tuple(float(value) for value in fields["tx_scan_enable"].split(","))
+        raws = tuple(float(value) for value in fields["tx_dds_raw"].split(","))
+        scales = tuple(float(value) for value in fields["tx_dds_scale"].split(","))
+    except (KeyError, ValueError) as error:
+        raise BootstrapFirmwareError("remote TX-safe report is invalid") from error
+    tx_safe = (
+        len(gains) == 2
+        and all(value <= -80 for value in gains)
+        and len(all_buffers) >= 2
+        and all(value == 0 for value in all_buffers)
+        and buffers == (0,)
+        and len(scans) == 4
+        and all(value == 0 for value in scans)
+        and len(raws) == 8
+        and all(value == 0 for value in raws)
+        and len(scales) == 8
+        and all(value == 0 for value in scales)
+    )
+    if not tx_safe:
+        raise BootstrapFirmwareError("remote TX-safe readback was not affirmative")
+
+
+def _validate_plan_payload(
+    plan: BootstrapPlan | LanFlashPlan, frm: bytes, confirmation: str
+) -> None:
     if confirmation != plan.confirmation_phrase:
         raise BootstrapFirmwareError(f"confirmation must be exactly {plan.confirmation_phrase!r}")
     if hashlib.sha256(frm).hexdigest() != plan.frm_sha256:
@@ -1873,6 +2356,36 @@ def _require_same_plan(
         raise BootstrapFirmwareError("deterministic FRM changed during revalidation")
 
 
+def _require_same_lan_plan(
+    plan: LanFlashPlan,
+    fresh_plan: LanFlashPlan,
+    fresh_frm: bytes,
+    frm: bytes,
+) -> None:
+    for field in (
+        "host",
+        "target_serial",
+        "before_firmware",
+        "before_model",
+        "before_phy",
+        "image_path",
+        "image_sha256",
+        "fit_sha256",
+        "fit_size",
+        "frm_sha256",
+        "expected_firmware",
+        "mutation_profile_id",
+        "expected_metadata_abi",
+        "expected_tandem_agc",
+        "confirmation_phrase",
+        "trust_model",
+    ):
+        if getattr(fresh_plan, field) != getattr(plan, field):
+            raise BootstrapFirmwareError(f"LAN flash precondition changed: {field}")
+    if fresh_frm != frm:
+        raise BootstrapFirmwareError("deterministic LAN FRM changed during revalidation")
+
+
 def _attest_return(plan: BootstrapPlan) -> tuple[str | None, str, str]:
     returned = _one_local_target(Path(plan.usb_sysfs_path))
     if plan.operation == "flash" and returned.serial is None:
@@ -1911,6 +2424,121 @@ def _attest_return(plan: BootstrapPlan) -> tuple[str | None, str, str]:
     if plan.target_serial is not None:
         mute_returned_radio(plan.target_serial)
     return returned_serial, returned_firmware, returned_phy
+
+
+def _attest_lan_return(plan: LanFlashPlan) -> tuple[str, str, str]:
+    try:
+        facts = _inspect_iio_context(plan.host)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise BootstrapFirmwareError(f"cannot inspect returned LAN IIOD: {error}") from error
+    returned_serial = str(facts.get("hw_serial") or "").strip()
+    returned_firmware = str(facts.get("fw_version") or "").strip()
+    returned_phy = str(facts.get("ad9361-phy,model") or "").strip()
+    if returned_serial != plan.target_serial:
+        raise BootstrapFirmwareError("a different serial returned at the LAN endpoint")
+    if returned_firmware != plan.expected_firmware:
+        raise BootstrapFirmwareError(
+            f"returned LAN firmware is {returned_firmware!r}, expected {plan.expected_firmware!r}"
+        )
+    if returned_phy not in SUPPORTED_AD936X_PHY_MODELS:
+        raise BootstrapFirmwareError("returned LAN PHY model is unsupported")
+    try:
+        require_metadata_abi_capability(facts, plan.expected_metadata_abi)
+    except ValueError as error:
+        raise BootstrapFirmwareError(
+            f"returned LAN metadata ABI does not provide expected ABI {plan.expected_metadata_abi}"
+        ) from error
+    raw_device_names = facts.get("device_names", ())
+    device_names = (
+        {str(value) for value in raw_device_names}
+        if isinstance(raw_device_names, (tuple, list, set, frozenset))
+        else set()
+    )
+    if not {"ad9361-phy", "cf-ad9361-lpc"} <= device_names:
+        raise BootstrapFirmwareError("returned LAN radio lacks canonical paired-RX devices")
+    observed_tandem = "tandem-agc" in device_names
+    if observed_tandem is not plan.expected_tandem_agc:
+        raise BootstrapFirmwareError(
+            f"returned LAN tandem capability is {observed_tandem}, "
+            f"expected {plan.expected_tandem_agc}"
+        )
+    profile = STANDALONE_FLASH_PROFILES.get(plan.mutation_profile_id)
+    if profile is None:  # pragma: no cover - immutable plan invariant
+        raise BootstrapFirmwareError("returned LAN plan names an unknown profile")
+    expected_integers = {
+        "iio,buffer-ddr-burst-max-iq-bytes": profile.ddr_burst_max_iq_bytes,
+        "iio,buffer-ddr-burst-reserve-bytes": profile.ddr_burst_reserve_bytes,
+        "iio,buffer-ddr-ring-max-iq-bytes": profile.ddr_ring_max_iq_bytes,
+    }
+    for key, expected in expected_integers.items():
+        if expected is not None and str(facts.get(key) or "") != str(expected):
+            raise BootstrapFirmwareError(
+                f"returned LAN capability {key} is {facts.get(key)!r}, expected {expected}"
+            )
+    if profile.ddr_ring_modes is not None and str(facts.get("iio,buffer-ddr-ring-modes") or "") != (
+        profile.ddr_ring_modes
+    ):
+        raise BootstrapFirmwareError("returned LAN DDR-ring modes do not match the profile")
+    if profile.buffer_metadata_status and str(facts.get("iio,buffer-metadata-status") or "") != "1":
+        raise BootstrapFirmwareError("returned LAN metadata-status capability is unavailable")
+    if profile.buffer_metadata_timing_log and str(
+        facts.get("iio,buffer-metadata-timing-log") or ""
+    ) != "1":
+        raise BootstrapFirmwareError("returned LAN timing-log capability is unavailable")
+    if plan.mutation_profile_id == IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY.profile_id:
+        for key in ("iio,buffer-direct-async", "iio,buffer-direct-async-ring"):
+            if str(facts.get(key) or "") != "1":
+                raise BootstrapFirmwareError(f"returned LAN capability {key} is unavailable")
+    mute_returned_radio_lan(plan.host, plan.target_serial)
+    return returned_serial, returned_firmware, returned_phy
+
+
+def _attest_lan_return_when_ready(
+    plan: LanFlashPlan,
+    *,
+    timeout_s: float,
+) -> tuple[str, str, str]:
+    deadline = time.monotonic() + timeout_s
+    last_error: BootstrapFirmwareError | None = None
+    while time.monotonic() < deadline:
+        try:
+            return _attest_lan_return(plan)
+        except BootstrapFirmwareError as error:
+            last_error = error
+            time.sleep(1)
+    detail = f": {last_error}" if last_error is not None else ""
+    raise BootstrapFirmwareError(
+        f"LAN radio did not pass exact return attestation within {timeout_s:g}s{detail}"
+    )
+
+
+def mute_returned_radio_lan(host: str, serial: str) -> None:
+    """Mute and read back one exact serial-attested LAN-IIO radio."""
+
+    try:
+        environment = inspect_iio_environment(require_usb=False)
+        if not environment.healthy:
+            raise BootstrapFirmwareError(
+                f"returned-radio IIO environment failed: {environment.actionable_message}"
+            )
+        import adi
+
+        from pluto_plus.hardware.iio import _mute_transmit
+
+        device = adi.ad9361(uri=f"ip:{host}")
+        try:
+            if device._ctx.attrs.get("hw_serial") != serial:
+                raise BootstrapFirmwareError("LAN TX safety context has the wrong serial")
+            _mute_transmit(device)
+        finally:
+            device.rx_destroy_buffer()
+            _close_adi_context(device)
+    except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as error:
+        if isinstance(error, BootstrapFirmwareError):
+            raise
+        raise BootstrapFirmwareError(
+            f"cannot attest returned LAN TX-safe state: {error}"
+        ) from error
 
 
 def mute_returned_radio(serial: str) -> None:
@@ -2423,6 +3051,24 @@ def _bootstrap_failure_phase(phases: list[str]) -> str:
     return "return_attestation"
 
 
+def _lan_flash_failure_phase(phases: list[str]) -> str:
+    if "remote_preflight_attested" not in phases:
+        return "remote_preflight"
+    if "remote_tx_safe_read_only_attested" not in phases:
+        return "tx_safe_preflight"
+    if "pluto_frm_staged" not in phases:
+        return "staging"
+    if "staged_hash_verified" not in phases:
+        return "staged_hash_verification"
+    if "updater_reported_done" not in phases:
+        return "updater"
+    if "mtd3_fit_verified" not in phases:
+        return "mtd3_fit_verification"
+    if "return_attested" not in phases:
+        return "return_attestation"
+    return "host_key_rotation"
+
+
 def _mountpoint_for(partition: Path) -> Path | None:
     try:
         device = partition.stat().st_rdev
@@ -2525,6 +3171,22 @@ def _wait_for_path(path: Path, *, present: bool, timeout_s: float) -> None:
         time.sleep(0.5)
     state = "appear" if present else "disappear"
     raise BootstrapFirmwareError(f"USB path {path} did not {state} within {timeout_s:g}s")
+
+
+def _wait_for_lan_iio_state(host: str, *, available: bool, timeout_s: float) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        observed = False
+        try:
+            facts = _inspect_iio_context(host)
+            observed = bool(str(facts.get("hw_serial") or "").strip())
+        except (OSError, RuntimeError, ValueError):
+            observed = False
+        if observed is available:
+            return
+        time.sleep(0.5)
+    state = "return" if available else "disappear"
+    raise BootstrapFirmwareError(f"LAN IIOD at {host} did not {state} within {timeout_s:g}s")
 
 
 def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
