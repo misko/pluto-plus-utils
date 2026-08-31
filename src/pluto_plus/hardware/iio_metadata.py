@@ -303,6 +303,10 @@ class IioMetadataCaptureSession:
             raise ValueError("direct_async_frames must be in [0, 64]")
         if direct_async_frames and kernel_buffers < 2:
             raise ValueError("direct async capture requires at least two kernel buffers")
+        if direct_async_frames and ddr_ring_bytes and kernel_buffers < 3:
+            raise ValueError(
+                "direct async RAM extension requires at least three kernel buffers"
+            )
         if ddr_ring_bytes < 0 or ddr_ring_frames < 0:
             raise ValueError("DDR ring values must not be negative")
         if ddr_burst_bytes and ddr_ring_bytes:

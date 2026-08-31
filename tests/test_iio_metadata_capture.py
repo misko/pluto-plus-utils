@@ -605,6 +605,13 @@ def test_direct_async_ram_ring_extends_the_existing_dma_queue() -> None:
     )
     requested_bytes = SAMPLE_COUNT * 4 * 2 + 1
     try:
+        with pytest.raises(ValueError, match="at least three"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=2,
+                ddr_ring_bytes=requested_bytes,
+                direct_async_frames=3,
+            )
         capture = radio.begin_metadata_capture(
             SAMPLE_COUNT,
             kernel_buffers=4,
