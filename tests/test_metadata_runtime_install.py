@@ -65,8 +65,8 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     assert "--no-build-isolation" in text
     assert "ddr-ring-v1-rc2-source/libiio-v1" in text
     assert "1e5002702f3033f5bc741da315dfe5d5558ef394" in text
-    assert "iio-gain-timeline-v8-rc1-source/libiio-v3" in text
-    assert "b48b25542681e3796ce61358237bb6ecbada5152" in text
+    assert "iio-gain-timeline-v8-rc1-source/libiio-v4" in text
+    assert "98a5e6139459a01a5a42ca7cd3e98d807156b6b0" in text
 
 
 def test_source_installer_fails_fast_when_setuptools_is_missing(tmp_path: Path) -> None:

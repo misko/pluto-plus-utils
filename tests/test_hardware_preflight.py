@@ -204,8 +204,8 @@ def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
         ),
         (
             4,
-            "iio-gain-timeline-v8-rc1-source/libiio-v3",
-            "b48b25542681e3796ce61358237bb6ecbada5152",
+            "iio-gain-timeline-v8-rc1-source/libiio-v4",
+            "98a5e6139459a01a5a42ca7cd3e98d807156b6b0",
         ),
     ),
 )
