@@ -670,6 +670,26 @@ IQ_DIRECT_ASYNC_RING_V1_RELEASE_PERSISTENT_POLICY = (
     )
 )
 
+# Exact final-version-stamped direct-async v2 bytes from protected main run
+# 33440908273. V2 adds the explicit drop-backlog/preserve-backlog overrun policy
+# and makes drop-backlog the default, including when RAM extends the same FIFO.
+# This reviewed identity authorizes volatile DFU only until these exact bytes
+# pass the physical-1-GbE, RAM-ring, recovery, RF, and cold-boot promotion gates.
+# There is intentionally no matching persistent-write profile yet.
+IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY = FirmwarePolicy(
+    profile_id="iq-direct-async-v2-release-ram",
+    release_tag="v0.47-plutoplus-spf-iq-direct-async-v2",
+    device_firmware="v0.47-plutoplus-spf-iq-direct-async-v2",
+    asset_name="plutoplus-spf-iq-direct-async-v2-2bab87dcd9b1-pluto.dfu",
+    asset_sha256="b97564524058b4b57e73ccfa60cdf1acbefaac05f90b16ccd460b0a8bb6c307d",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33440908273",
+    source_commit="2bab87dcd9b18c8f957ae781603e88160c8509cc",
+    fit_body_sha256="7a198f961cd6765ebd831c21314baac0f962650541af671911c23e76db33cbc2",
+    fit_body_size=12_826_107,
+    hardware_qualified=False,
+    published_at=datetime(2026, 8, 31, 22, 5, 24, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
