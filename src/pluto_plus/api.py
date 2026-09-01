@@ -72,6 +72,7 @@ from pluto_plus.setup import (
     SetupError,
     SetupExecutionError,
     SetupPlanNotFoundError,
+    SetupPlanRequest,
     SetupPreconditionError,
     SetupReceiptNotFoundError,
     SetupUnavailableError,
@@ -327,6 +328,7 @@ def create_app(
                 "error": {"code": "setup_execution_failed", "message": str(error)},
                 "receipt": {
                     "receipt_id": error.receipt.receipt_id,
+                    "target": error.receipt.target.value,
                     "success": error.receipt.success,
                     "outcome": error.receipt.outcome,
                     "failure_phase": error.receipt.failure_phase,
@@ -399,9 +401,14 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
         response_model=None,
     )
-    def create_canonical_setup_plan(radio_id: str, request: Request) -> Any:
+    def create_canonical_setup_plan(
+        radio_id: str,
+        request: Request,
+        payload: SetupPlanRequest | None = None,
+    ) -> Any:
         require_admin(request, mutation=True)
-        return service.create_canonical_setup_plan(radio_id)
+        selected = payload or SetupPlanRequest()
+        return service.create_canonical_setup_plan(radio_id, selected.target)
 
     @router.post(
         "/setup/executions",

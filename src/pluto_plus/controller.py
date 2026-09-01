@@ -24,7 +24,11 @@ from pluto_plus.errors import (
     RadioSetupRequiredError,
     RevisionConflictError,
 )
-from pluto_plus.hardware.base import RadioDevice, SampleBlock, restore_settings_exact
+from pluto_plus.hardware.base import (
+    RadioDevice,
+    SampleBlock,
+    restore_settings_exact,
+)
 from pluto_plus.models import (
     JobState,
     RadioSettings,
@@ -42,6 +46,7 @@ from pluto_plus.models import (
     utc_now,
 )
 from pluto_plus.radio_lock import acquire_radio_lock
+from pluto_plus.rf_profile import RxLayoutExpectation
 
 
 class SpectrumSubscription:
@@ -228,6 +233,12 @@ class RadioController:
 
         with self._lock:
             return self._setup_required
+
+    @property
+    def supports_rx_layout_selection(self) -> bool:
+        """Whether this adapter can select a target-specific RX layout before open."""
+
+        return callable(getattr(self._device, "configure_rx_layout", None))
 
     def update_settings(self, patch: SettingsPatch) -> RadioSnapshot:
         with self._lock:
@@ -450,8 +461,20 @@ class RadioController:
 
         self.recover_after_radio_mutation()
 
-    def recover_after_radio_mutation(self, *, require_paired_rx: bool = False) -> None:
-        """Reopen, re-attest, and optionally prove one paired dual-RX read."""
+    def recover_after_radio_mutation(
+        self,
+        *,
+        require_paired_rx: bool = False,
+        rx_layout: RxLayoutExpectation | None = None,
+    ) -> None:
+        """Reopen, re-attest, and optionally prove one selected-layout read."""
+
+        if (
+            require_paired_rx
+            and rx_layout is not None
+            and rx_layout.receiver_channels != (0, 1)
+        ):
+            raise ValueError("paired-RX recovery contradicts the selected RX layout")
 
         with self._lock:
             if self._state is not RadioState.FLASHING:
@@ -460,9 +483,32 @@ class RadioController:
             expected_serial = self._device.identity.serial
         try:
             with self._device_lock:
+                if rx_layout is not None:
+                    configure_rx_layout = getattr(
+                        self._device, "configure_rx_layout", None
+                    )
+                    if not callable(configure_rx_layout):
+                        raise RadioConfigurationError(
+                            "radio adapter cannot select a runtime RX layout"
+                        )
+                    configure_rx_layout(rx_layout)
                 self._device.open()
                 actual = self._device.read_settings()
-                if require_paired_rx:
+                if rx_layout is not None:
+                    expected_channels = rx_layout.receiver_channels
+                    if actual.channels != expected_channels:
+                        raise RadioConfigurationError(
+                            "setup verification returned receiver channels "
+                            f"{actual.channels}, expected {expected_channels}"
+                        )
+                    block = self._device.read_block(1024)
+                    expected_shape = (len(expected_channels), 1024)
+                    if block.samples.shape != expected_shape:
+                        raise RadioConfigurationError(
+                            "setup receiver verification returned "
+                            f"{block.samples.shape}, expected {expected_shape}"
+                        )
+                elif require_paired_rx:
                     if set(actual.channels) != {0, 1}:
                         raise RadioConfigurationError(
                             "canonical setup verification requires both receiver channels"
@@ -478,6 +524,19 @@ class RadioController:
                     f"reopened serial {self._device.identity.serial!r}, "
                     f"expected {expected_serial!r}"
                 )
+        except RadioSetupRequiredError as error:
+            reader = getattr(self._device, "diagnostic_facts", None)
+            facts = reader() if callable(reader) else {}
+            with suppress(Exception), self._device_lock:
+                self._device.close()
+            with self._lock:
+                self._state = RadioState.ERROR
+                self._last_error = f"{type(error).__name__}: {error}"
+                self._setup_required = True
+                self._setup_diagnostic_facts = (
+                    dict(facts) if isinstance(facts, Mapping) else {}
+                )
+            raise
         except Exception as error:
             with self._lock:
                 self._state = RadioState.ERROR

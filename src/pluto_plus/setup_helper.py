@@ -43,11 +43,12 @@ from pluto_plus.setup import (
     observation_functionally_qualified,
 )
 from pluto_plus.setup_profiles import (
+    ALL_SETUP_ENVIRONMENT_PROFILES,
     RX_LO_5G8_HZ,
-    SETUP_ENVIRONMENT_PROFILES,
     SetupEnvironmentProfile,
     environment_profile_for_uboot,
-    environment_profiles_for_firmware,
+    environment_profiles_for_target,
+    setup_target_profile,
 )
 
 _SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -349,7 +350,7 @@ def _require_usb_ssh_route(interface: str, host: str) -> None:
 
 
 class FixedSshSetupExecutor:
-    """Inspect and apply the one immutable AD9361/2R2T policy."""
+    """Inspect and apply one plan-bound target from the immutable AD936x registry."""
 
     def __init__(
         self,
@@ -387,7 +388,7 @@ class FixedSshSetupExecutor:
             raise SetupHelperError("setup requested an unsupported U-Boot key")
         matching_profiles = tuple(
             profile
-            for profile in SETUP_ENVIRONMENT_PROFILES
+            for profile in ALL_SETUP_ENVIRONMENT_PROFILES
             if all(profile.uboot[key] == expected for key, expected in changes.items())
         )
         if not matching_profiles:
@@ -460,6 +461,7 @@ class FixedSshSetupExecutor:
             raise SetupHelperError("setup plan is bound to a different radio")
         if plan.profile_id != self._policy.profile_id:
             raise SetupHelperError("setup plan selected an unsupported profile")
+        target_profile = setup_target_profile(plan.target)
         before = self.inspect(plan.identity)
         if before != plan.before or before.environment_sha256 != plan.environment_sha256:
             raise SetupHelperError("radio state changed after setup planning")
@@ -524,7 +526,10 @@ class FixedSshSetupExecutor:
                                 update={"boot_provenance": "qspi_reboot_verified"}
                             )
                         last_observation = observed
-                        if not observation_functional_probe_available(observed):
+                        if (
+                            target_profile.require_5g8_rx_lo
+                            and not observation_functional_probe_available(observed)
+                        ):
                             last_error = SetupHelperError(
                                 "5.8 GHz RX LO probe remained unavailable while waiting "
                                 "for an idle radio"
@@ -558,10 +563,9 @@ class FixedSshSetupExecutor:
                 current = after
                 last_observation = after
                 completed_phases.append(f"post_reboot_attestation:{profile.profile_id}")
-                if (
-                    environment_profile_for_uboot(after.uboot) is not None
-                    and observation_functionally_qualified(after)
-                ):
+                if environment_profile_for_uboot(
+                    after.uboot, plan.target
+                ) is not None and observation_functionally_qualified(after, plan.target):
                     return SetupExecutionResult(
                         observation=after,
                         backup_path=str(backup_path),
@@ -570,9 +574,13 @@ class FixedSshSetupExecutor:
                         host_key_rotation=host_key_rotation,
                     )
                 completed_phases.append(f"functional_probe_failed:{profile.profile_id}")
+            requirement = (
+                f" with an accepted and restored {RX_LO_5G8_HZ} Hz RX LO"
+                if target_profile.require_5g8_rx_lo
+                else ""
+            )
             raise SetupHelperError(
-                "neither bounded U-Boot profile returned dual RX with an accepted and "
-                f"restored {RX_LO_5G8_HZ} Hz RX LO"
+                f"neither bounded U-Boot profile returned {plan.target.value}{requirement}"
             )
         except BaseException as error:
             raise SetupExecutorFailure(
@@ -592,10 +600,10 @@ class FixedSshSetupExecutor:
     ) -> tuple[SetupEnvironmentProfile, SetupEnvironmentProfile]:
         primary_values = dict(plan.before.uboot)
         primary_values.update(plan.changes)
-        primary = environment_profile_for_uboot(primary_values)
+        primary = environment_profile_for_uboot(primary_values, plan.target)
         if primary is None:
             raise SetupHelperError("setup plan does not produce a bounded environment profile")
-        ordered = environment_profiles_for_firmware(plan.identity.observed_firmware)
+        ordered = environment_profiles_for_target(plan.target, plan.identity.observed_firmware)
         secondary = next(profile for profile in ordered if profile != primary)
         return primary, secondary
 
@@ -612,8 +620,9 @@ class FixedSshSetupExecutor:
         versions_hex = _required_hex(report, "versions_hex", maximum_bytes=64 * 1024)
         mtd1_sha256 = _required_digest(report, "mtd1_sha256")
         document = {
-            "schema_version": 1,
+            "schema_version": 2,
             "plan_id": plan.plan_id,
+            "target": plan.target.value,
             "identity": self.identity.model_dump(mode="json"),
             "observation": observation.model_dump(mode="json"),
             "environment": bytes.fromhex(environment_hex).decode(errors="replace"),

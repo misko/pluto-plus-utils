@@ -697,19 +697,29 @@ setup provenance, and guarded remediation. Read
 [`docs/FLASHING_AND_DOCTOR.md`](docs/FLASHING_AND_DOCTOR.md) before any Pluto+
 setup or firmware operation.
 
-Canonical AD9361/2R2T setup is a distinct inspect → plan → confirm → execute workflow:
+Guarded AD936x setup is a distinct inspect → plan → confirm → execute workflow.
+Omitting `--target` preserves the hardware-qualified `ad9361-2r2t` default; two
+explicit single-stream development targets keep driver personality independent
+from channel mode:
 
 ```bash
 uv run pluto --admin-token-file /private/admin.token setup status
 uv run pluto --admin-token-file /private/admin.token setup plan RADIO_ID
+uv run pluto --admin-token-file /private/admin.token setup plan RADIO_ID --target ad9361-1r1t
+uv run pluto --admin-token-file /private/admin.token setup plan RADIO_ID --target ad9363a-1r1t
 uv run pluto --admin-token-file /private/admin.token setup execute PLAN_ID --token TOKEN
 uv run pluto --admin-token-file /private/admin.token setup receipt-list
 ```
 
 The daemon enables this only with `--enable-canonical-setup` plus one exact serial,
 USB sysfs path, USB network interface/address, private password file, pinned host-key
-file, admin token file, and allowed browser Origin. The Web Doctor panel exposes the
-same guarded flow and never renders or stores the one-time token. Read-only radio and
+file, admin token file, and allowed browser Origin. It derives firmware authority from
+the managed radio's exact active version and the persistent setup allowlist; selecting
+an RF target never selects or authorizes firmware. A single-stream daemon must also use
+`--setup-target ad9361-1r1t` or `--setup-target ad9363a-1r1t`; this explicit runtime
+binding survives restarts through service configuration and must match `setup plan
+--target`. Omitting both flags retains the legacy 2R2T path unchanged. The Web Doctor
+panel exposes the default guarded repair flow and never renders or stores the one-time token. Read-only radio and
 doctor views may remain LAN-visible, but privileged Web/API requests are accepted only
 over HTTPS, a Unix socket, or loopback (for example through an SSH tunnel); the browser
 will not send the bearer token over non-loopback plaintext HTTP.

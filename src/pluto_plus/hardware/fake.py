@@ -8,8 +8,10 @@ from collections.abc import Mapping
 
 import numpy as np
 
+from pluto_plus.errors import RadioSetupRequiredError
 from pluto_plus.hardware.base import SampleBlock
 from pluto_plus.models import RadioCapabilities, RadioIdentity, RadioSettings, Transport
+from pluto_plus.rf_profile import RxLayoutExpectation
 
 
 class FakeRadioDevice:
@@ -47,6 +49,7 @@ class FakeRadioDevice:
         self._rng = np.random.default_rng(seed)
         self._sample_cursor = 0
         self._open = False
+        self._rx_layout_expectation: RxLayoutExpectation | None = None
         self._lock = threading.Lock()
         self.apply_count = 0
 
@@ -58,10 +61,33 @@ class FakeRadioDevice:
     def capabilities(self) -> RadioCapabilities:
         return self._capabilities
 
+    def configure_rx_layout(self, expectation: RxLayoutExpectation | None) -> None:
+        with self._lock:
+            if self._open:
+                raise RuntimeError("fake RX layout can change only while the radio is closed")
+            self._rx_layout_expectation = expectation
+
     def open(self) -> None:
         with self._lock:
             if self._open:
                 raise RuntimeError("fake radio is already open")
+            if (
+                self._rx_layout_expectation is not None
+                and self._settings.channels
+                != self._rx_layout_expectation.receiver_channels
+            ):
+                raise RadioSetupRequiredError(
+                    "fake radio does not match the selected RX layout"
+                )
+            self._capabilities = self._capabilities.model_copy(
+                update={
+                    "receiver_channels": (
+                        self._settings.channels
+                        if self._rx_layout_expectation is None
+                        else self._rx_layout_expectation.receiver_channels
+                    )
+                }
+            )
             self._open = True
 
     def close(self) -> None:

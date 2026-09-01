@@ -1045,6 +1045,30 @@ def test_data_plane_status_binds_shared_usb_ssh_to_exact_local_radio(
             {},
         ),
         (
+            [
+                "setup",
+                "plan",
+                "fake-001",
+                "--target",
+                "ad9361-1r1t",
+            ],
+            "POST",
+            "/api/v1/radios/fake-001/doctor/setup-plans",
+            {"target": "ad9361-1r1t"},
+        ),
+        (
+            [
+                "setup",
+                "plan",
+                "fake-001",
+                "--target",
+                "ad9363a-1r1t",
+            ],
+            "POST",
+            "/api/v1/radios/fake-001/doctor/setup-plans",
+            {"target": "ad9363a-1r1t"},
+        ),
+        (
             ["setup", "execute", "setup-plan-1", "--token", "secret"],
             "POST",
             "/api/v1/setup/executions",
@@ -1331,6 +1355,112 @@ def test_serve_refuses_partial_or_unauthenticated_setup_configuration(
     )
     assert unauthenticated.exit_code == 2
     assert json.loads(unauthenticated.stderr)["error"]["code"] == "admin_authentication_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("target_arguments", "expected_target"),
+    [
+        ([], "ad9361-2r2t"),
+        (["--setup-target", "ad9361-1r1t"], "ad9361-1r1t"),
+        (["--setup-target", "ad9363a-1r1t"], "ad9363a-1r1t"),
+    ],
+)
+def test_serve_opens_before_binding_setup_firmware_and_runtime_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    target_arguments: list[str],
+    expected_target: str,
+) -> None:
+    from pluto_plus.doctor import IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY
+    from pluto_plus.hardware.fake import FakeRadioDevice
+
+    policy = IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY
+    configured_channels: list[tuple[int, ...] | None] = []
+
+    class V48FakeRadio(FakeRadioDevice):
+        def __init__(self, serial: str) -> None:
+            super().__init__(serial=serial)
+
+        def open(self) -> None:
+            # Production IIO learns these facts during open, before its RX-layout
+            # gate. Setup enrollment must not read the unopened placeholder.
+            self._identity = self._identity.model_copy(
+                update={
+                    "firmware_version": policy.device_firmware,
+                    "usb_path": "/sys/bus/usb/devices/3-8",
+                }
+            )
+            super().open()
+
+        def configure_rx_layout(self, expectation: Any) -> None:
+            configured_channels.append(
+                None if expectation is None else expectation.receiver_channels
+            )
+            super().configure_rx_layout(expectation)
+
+    observed: dict[str, Any] = {}
+    monkeypatch.setattr("pluto_plus.hardware.fake.FakeRadioDevice", V48FakeRadio)
+    monkeypatch.setattr(
+        "pluto_plus.setup_helper.validate_bound_interface",
+        lambda interface, path: None,
+    )
+    monkeypatch.setattr("pluto_plus.setup_helper.remote_ssh_available", lambda: True)
+    monkeypatch.setattr(
+        "pluto_plus.setup_helper.BoundSshTransport",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    def inspect_setup_policy(api: Any, **kwargs: Any) -> None:
+        del kwargs
+        observed.update(api.state.pluto_service.setup_status())
+
+    monkeypatch.setattr("uvicorn.run", inspect_setup_policy)
+    admin_token = tmp_path / "admin-token"
+    password = tmp_path / "password"
+    known_hosts = tmp_path / "known-hosts"
+    admin_token.write_text("a" * 32)
+    password.write_text("analog\n")
+    known_hosts.write_text("192.168.2.1 ssh-ed25519 AAAATEST\n")
+    admin_token.chmod(0o600)
+    password.chmod(0o600)
+    known_hosts.chmod(0o600)
+
+    result = runner.invoke(
+        app,
+        [
+            "serve",
+            "--state-root",
+            str(tmp_path / "state"),
+            "--fake-radio",
+            "SERIAL_A",
+            "--admin-token-file",
+            str(admin_token),
+            "--enable-canonical-setup",
+            "--setup-serial",
+            "SERIAL_A",
+            "--setup-usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--setup-usb-interface",
+            "usb0",
+            "--setup-usb-host",
+            "192.168.2.1",
+            "--setup-password-file",
+            str(password),
+            "--setup-known-hosts-file",
+            str(known_hosts),
+            *target_arguments,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed["profile_id"] == policy.profile_id
+    assert observed["firmware_policy"]["device_firmware"] == policy.device_firmware
+    assert observed["default_target"] == "ad9361-2r2t"
+    assert observed["configured_target"] == expected_target
+    assert observed["configured_radio_id"] == "SERIAL_A"
+    assert configured_channels == (
+        [] if expected_target == "ad9361-2r2t" else [(0,)]
+    )
 
 
 def test_direct_ip_targets_are_explicitly_host_and_serial_bound() -> None:

@@ -16,7 +16,10 @@ import numpy as np
 
 from pluto_plus.diagnostic_profiles import SUPPORTED_AD936X_PHY_MODELS, parse_metadata_abi
 from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
-from pluto_plus.hardware.base import DEFAULT_RESTORE_LO_SEARCH_HZ, SampleBlock
+from pluto_plus.hardware.base import (
+    DEFAULT_RESTORE_LO_SEARCH_HZ,
+    SampleBlock,
+)
 from pluto_plus.hardware.iio_iq_decode import (
     IioIqDecoder,
     read_interleaved_complex64,
@@ -44,6 +47,7 @@ from pluto_plus.models import (
     RadioSettings,
     Transport,
 )
+from pluto_plus.rf_profile import RxLayoutExpectation
 from pluto_plus.tandem import TandemSessionRequestV1
 
 PLUTO_USB_VENDOR = "0456"
@@ -121,6 +125,7 @@ class IioRadioDevice:
         self._metadata_runtime: MetadataRuntimeVerification | None = None
         self._selected_metadata_abi: int | None = None
         self._device: Any | None = None
+        self._rx_layout_expectation: RxLayoutExpectation | None = None
         self._buffer_size: int | None = None
         self._metadata_capture: IioMetadataCaptureSession | None = None
         self._kernel_buffer_configuration_basis: Literal[
@@ -158,6 +163,13 @@ class IioRadioDevice:
         """State whether kernel-buffer configuration had an independent readback."""
 
         return self._kernel_buffer_configuration_basis
+
+    def configure_rx_layout(self, expectation: RxLayoutExpectation | None) -> None:
+        """Select an already-attested RX layout before the next open."""
+
+        if self._device is not None:
+            raise RuntimeError("IIO RX layout can change only while the radio is closed")
+        self._rx_layout_expectation = expectation
 
     def open(self) -> None:
         if self._device is not None:
@@ -255,7 +267,18 @@ class IioRadioDevice:
             # per-channel pyadi properties. A 1R1T device raises a bare Exception
             # from those getters rather than AttributeError.
             _mute_transmit(device)
-            _require_canonical_rx_layout(facts)
+            _require_rx_layout(facts, self._rx_layout_expectation)
+            if self._rx_layout_expectation is not None:
+                device.rx_enabled_channels = list(
+                    self._rx_layout_expectation.receiver_channels
+                )
+                enabled_channels = tuple(int(item) for item in device.rx_enabled_channels)
+                if enabled_channels != self._rx_layout_expectation.receiver_channels:
+                    raise RadioConfigurationError(
+                        "IIO RX channel selection readback is "
+                        f"{enabled_channels}, expected "
+                        f"{self._rx_layout_expectation.receiver_channels}"
+                    )
             actual_metadata_abi = _select_context_metadata_abi(
                 facts, expected=self._expected_metadata_abi
             )
@@ -306,6 +329,15 @@ class IioRadioDevice:
             )
             self._device = device
             self._selected_metadata_abi = actual_metadata_abi
+            self._capabilities = self._capabilities.model_copy(
+                update={
+                    "receiver_channels": (
+                        (0, 1)
+                        if self._rx_layout_expectation is None
+                        else self._rx_layout_expectation.receiver_channels
+                    )
+                }
+            )
         except BaseException as failure:
             self._selected_metadata_abi = None
             try:
@@ -346,7 +378,11 @@ class IioRadioDevice:
         device = self._require_device()
         channels = tuple(int(item) for item in device.rx_enabled_channels)
         if not channels:
-            channels = (0, 1)
+            channels = (
+                (0, 1)
+                if self._rx_layout_expectation is None
+                else self._rx_layout_expectation.receiver_channels
+            )
         modes = tuple(
             GainMode(str(getattr(device, f"gain_control_mode_chan{channel}")))
             for channel in channels
@@ -373,6 +409,13 @@ class IioRadioDevice:
 
     def apply_settings(self, settings: RadioSettings) -> RadioSettings:
         device = self._require_device()
+        if any(
+            channel not in self._capabilities.receiver_channels
+            for channel in settings.channels
+        ):
+            raise RadioConfigurationError(
+                "requested receiver channels are outside the selected RX layout"
+            )
         self.reset_receive_buffer()
         device.sample_rate = round(settings.sample_rate_hz)
         device.rx_rf_bandwidth = round(settings.bandwidth_hz)
@@ -513,7 +556,7 @@ class IioRadioDevice:
             values = values[np.newaxis, :]
         if values.ndim != 2 or values.shape != (expected_receivers, sample_count):
             raise RuntimeError(
-                f"paired Pluto read returned {values.shape}, expected "
+                f"Pluto read returned {values.shape}, expected "
                 f"({expected_receivers}, {sample_count})"
             )
         return SampleBlock(
@@ -1366,6 +1409,36 @@ def _require_canonical_rx_layout(facts: Mapping[str, object]) -> None:
     if wrong_phy or incomplete_scan:
         raise RadioSetupRequiredError(
             "radio requires a supported AD936x paired-RX setup "
+            f"(phy_model={phy_model or 'unknown'}, rx_scan_channels={scan_channels})"
+        )
+
+
+def _require_rx_layout(
+    facts: Mapping[str, object],
+    expectation: RxLayoutExpectation | None,
+) -> None:
+    """Preserve the legacy gate or require an explicitly selected exact layout."""
+
+    if expectation is None:
+        _require_canonical_rx_layout(facts)
+        return
+    phy_model = _optional_string(facts.get("phy_model"))
+    raw_scan_channels = facts.get("rx_scan_channels")
+    scan_channels = (
+        tuple(str(item) for item in raw_scan_channels)
+        if isinstance(raw_scan_channels, (tuple, list, set, frozenset))
+        else ()
+    )
+    observed = set(scan_channels)
+    expected = set(expectation.scan_channels)
+    scan_matches = (
+        expected.issubset(observed)
+        if expectation.allow_additional_scan_channels
+        else observed == expected
+    )
+    if phy_model not in expectation.live_phy_models or not scan_matches:
+        raise RadioSetupRequiredError(
+            "radio does not match the selected RX layout "
             f"(phy_model={phy_model or 'unknown'}, rx_scan_channels={scan_channels})"
         )
 

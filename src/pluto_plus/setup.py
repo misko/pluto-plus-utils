@@ -1,4 +1,4 @@
-"""Guarded canonical AD9361/2R2T setup plans and durable receipts."""
+"""Guarded target-aware AD936x setup plans and durable receipts."""
 
 from __future__ import annotations
 
@@ -17,13 +17,15 @@ from typing import Literal, Protocol
 
 from pydantic import Field, field_validator
 
-from pluto_plus.diagnostic_profiles import SUPPORTED_AD936X_PHY_MODELS
 from pluto_plus.doctor import CANONICAL_POLICY, CANONICAL_UBOOT, require_setup_repair_policy
 from pluto_plus.models import ApiModel, FirmwarePolicy
 from pluto_plus.setup_profiles import (
+    DEFAULT_SETUP_TARGET,
     RX_LO_5G8_HZ,
+    SetupTarget,
     environment_profile_for_uboot,
-    environment_profiles_for_firmware,
+    environment_profiles_for_target,
+    setup_target_profile,
 )
 
 
@@ -88,6 +90,12 @@ class SetupIdentity(ApiModel):
     observed_firmware: str = Field(min_length=1, max_length=256)
 
 
+class SetupPlanRequest(ApiModel):
+    """An explicit runtime target; omission preserves the legacy default."""
+
+    target: SetupTarget = DEFAULT_SETUP_TARGET
+
+
 class SetupObservation(ApiModel):
     identity: SetupIdentity
     board_model: str = Field(min_length=1, max_length=256)
@@ -142,6 +150,7 @@ class SetupPlan:
     created_at: datetime
     expires_at: datetime
     identity: SetupIdentity
+    target: SetupTarget
     profile_id: str
     environment_sha256: str
     before: SetupObservation
@@ -167,6 +176,7 @@ class SetupReceipt:
     started_at: datetime
     finished_at: datetime
     identity: SetupIdentity
+    target: SetupTarget
     before: SetupObservation
     after: SetupObservation | None
     changes_items: tuple[tuple[str, str | None], ...]
@@ -196,17 +206,30 @@ class SetupExecutor(Protocol):
     def provision(self, plan: SetupPlan) -> SetupExecutionResult: ...
 
 
-def observation_functionally_qualified(observation: SetupObservation) -> bool:
-    """Require live 2R2T, safe TX, and an exact restored 5.8 GHz RX-LO probe."""
+def observation_functionally_qualified(
+    observation: SetupObservation,
+    target: SetupTarget = DEFAULT_SETUP_TARGET,
+) -> bool:
+    """Require the selected target's live driver, RX geometry, and safety facts."""
 
-    required = {"voltage0", "voltage1", "voltage2", "voltage3"}
-    return (
-        observation.live_phy_model in SUPPORTED_AD936X_PHY_MODELS
-        and required.issubset(observation.rx_scan_channels)
-        and observation.tx_safe
-        and observation.rx_lo_5g8_accepted is True
+    profile = setup_target_profile(target)
+    observed_scan = set(observation.rx_scan_channels)
+    expected_scan = set(profile.expected_rx_scan_channels)
+    scan_qualified = (
+        expected_scan.issubset(observed_scan)
+        if profile.allow_additional_rx_scan_channels
+        else observed_scan == expected_scan
+    )
+    lo_qualified = not profile.require_5g8_rx_lo or (
+        observation.rx_lo_5g8_accepted is True
         and observation.rx_lo_5g8_readback_hz == RX_LO_5G8_HZ
         and observation.rx_lo_restored is True
+    )
+    return (
+        observation.live_phy_model in profile.expected_live_phy_models
+        and scan_qualified
+        and observation.tx_safe
+        and lo_qualified
     )
 
 
@@ -228,7 +251,7 @@ class _TokenRecord:
 
 
 class CanonicalSetupManager:
-    """Issue and execute short-lived plans for the one canonical setup action."""
+    """Issue and execute short-lived plans for bounded AD936x setup targets."""
 
     _BOARD_MODEL = "Analog Devices PlutoSDR Rev.C (Z7010/AD9363)"
     _SAFE_BOOT_PROVENANCE = {
@@ -260,6 +283,12 @@ class CanonicalSetupManager:
         self._lock = threading.Lock()
         self._load_receipts()
 
+    @property
+    def firmware_policy(self) -> FirmwarePolicy:
+        """Exact persistent firmware authority, independent of setup target."""
+
+        return self._policy
+
     def inspect(self, identity: SetupIdentity) -> SetupObservation:
         observation = self._inspect(identity)
         self._validate_identity(identity, observation)
@@ -272,14 +301,20 @@ class CanonicalSetupManager:
         self._validate_preconditions(observation)
         return observation
 
-    def create_plan(self, identity: SetupIdentity) -> PlannedSetup:
+    def create_plan(
+        self,
+        identity: SetupIdentity,
+        target: SetupTarget = DEFAULT_SETUP_TARGET,
+    ) -> PlannedSetup:
         before = self.inspect_qualified(identity)
-        active_profile = environment_profile_for_uboot(before.uboot)
-        if active_profile is not None and observation_functionally_qualified(before):
+        target_profile = setup_target_profile(target)
+        active_profile = environment_profile_for_uboot(before.uboot, target)
+        if active_profile is not None and observation_functionally_qualified(before, target):
             raise SetupPreconditionError("radio setup is already functionally qualified")
-        required_scan = {"voltage0", "voltage1", "voltage2", "voltage3"}
+        required_scan = set(target_profile.expected_rx_scan_channels)
         if (
-            active_profile is not None
+            target_profile.require_5g8_rx_lo
+            and active_profile is not None
             and required_scan.issubset(before.rx_scan_channels)
             and not observation_functional_probe_available(before)
         ):
@@ -287,13 +322,15 @@ class CanonicalSetupManager:
                 "5.8 GHz RX LO probe was unavailable; require an idle RX data plane "
                 "before changing the persistent setup"
             )
-        candidates = environment_profiles_for_firmware(identity.observed_firmware)
-        target = next((candidate for candidate in candidates if candidate != active_profile), None)
-        if target is None:
+        candidates = environment_profiles_for_target(target, identity.observed_firmware)
+        environment = next(
+            (candidate for candidate in candidates if candidate != active_profile), None
+        )
+        if environment is None:
             raise SetupPreconditionError("no alternate bounded setup profile is available")
         changes = tuple(
             (key, expected)
-            for key, expected in target.uboot.items()
+            for key, expected in environment.uboot.items()
             if before.uboot.get(key) != expected
         )
         if not changes:
@@ -304,6 +341,7 @@ class CanonicalSetupManager:
             created_at=now,
             expires_at=now + self._ttl,
             identity=identity,
+            target=target,
             profile_id=self._policy.profile_id,
             environment_sha256=before.environment_sha256,
             before=before,
@@ -349,7 +387,7 @@ class CanonicalSetupManager:
                 before_mutation()
             mutation_started = True
             result = self._executor.provision(plan)
-            self._validate_success(plan.identity, result.observation)
+            self._validate_success(plan.identity, plan.target, result.observation)
         except SetupExecutorFailure as caught:
             partial_failure = caught
             error = f"{type(caught).__name__}: {caught}"
@@ -387,12 +425,13 @@ class CanonicalSetupManager:
                 "post_reboot_attestation",
             )
         receipt = SetupReceipt(
-            schema_version=3,
+            schema_version=4,
             receipt_id=uuid.uuid4().hex,
             plan_id=plan.plan_id,
             started_at=started,
             finished_at=self._now(),
             identity=plan.identity,
+            target=plan.target,
             before=plan.before,
             after=(
                 result.observation
@@ -449,17 +488,18 @@ class CanonicalSetupManager:
             observation = observation.model_copy(update={"boot_provenance": "qspi_reboot_verified"})
         error: str | None = None
         try:
-            self._validate_success(original.identity, observation)
+            self._validate_success(original.identity, original.target, observation)
         except SetupPreconditionError as caught:
             error = f"{type(caught).__name__}: {caught}"
         success = error is None
         receipt = SetupReceipt(
-            schema_version=3,
+            schema_version=4,
             receipt_id=uuid.uuid4().hex,
             plan_id=original.plan_id,
             started_at=started,
             finished_at=self._now(),
             identity=original.identity,
+            target=original.target,
             before=original.before,
             after=observation,
             changes_items=original.changes_items,
@@ -498,14 +538,21 @@ class CanonicalSetupManager:
         if observation.identity != expected:
             raise SetupPreconditionError("setup helper returned a different radio identity")
 
-    def _validate_success(self, identity: SetupIdentity, observation: SetupObservation) -> None:
+    def _validate_success(
+        self,
+        identity: SetupIdentity,
+        target: SetupTarget,
+        observation: SetupObservation,
+    ) -> None:
         self._validate_identity(identity, observation)
-        if environment_profile_for_uboot(observation.uboot) is None:
+        if environment_profile_for_uboot(observation.uboot, target) is None:
             raise SetupPreconditionError("no supported U-Boot environment profile persisted")
-        if not observation_functionally_qualified(observation):
-            raise SetupPreconditionError(
-                f"setup did not return as 2R2T with restored {RX_LO_5G8_HZ} Hz RX LO"
+        if not observation_functionally_qualified(observation, target):
+            target_profile = setup_target_profile(target)
+            requirement = (
+                f" and restored {RX_LO_5G8_HZ} Hz RX LO" if target_profile.require_5g8_rx_lo else ""
             )
+            raise SetupPreconditionError(f"setup did not return as {target.value}{requirement}")
         if observation.boot_provenance not in {
             "qspi_reboot_verified",
             "qspi_cold_boot_verified",
@@ -601,6 +648,7 @@ def _receipt_document(receipt: SetupReceipt) -> dict[str, object]:
         "started_at": receipt.started_at.isoformat(),
         "finished_at": receipt.finished_at.isoformat(),
         "identity": receipt.identity.model_dump(mode="json"),
+        "target": receipt.target.value,
         "before": _observation_document(receipt.before),
         "after": None if receipt.after is None else _observation_document(receipt.after),
         "changes_items": list(receipt.changes_items),
@@ -622,6 +670,10 @@ def _receipt_document(receipt: SetupReceipt) -> dict[str, object]:
 
 
 def _receipt_from_document(document: Mapping[str, object]) -> SetupReceipt:
+    schema_version = int(str(document["schema_version"]))
+    raw_target = document.get("target")
+    if schema_version >= 4 and raw_target is None:
+        raise KeyError("schema-4 setup receipt omitted target")
     after = document["after"]
     raw_changes = document["changes_items"]
     if not isinstance(raw_changes, list):
@@ -645,12 +697,15 @@ def _receipt_from_document(document: Mapping[str, object]) -> SetupReceipt:
     }:
         raise ValueError("invalid setup receipt outcome")
     return SetupReceipt(
-        schema_version=int(str(document["schema_version"])),
+        schema_version=schema_version,
         receipt_id=str(document["receipt_id"]),
         plan_id=str(document["plan_id"]),
         started_at=datetime.fromisoformat(str(document["started_at"])),
         finished_at=datetime.fromisoformat(str(document["finished_at"])),
         identity=SetupIdentity.model_validate(document["identity"]),
+        target=SetupTarget(
+            DEFAULT_SETUP_TARGET.value if raw_target is None else str(raw_target)
+        ),
         before=SetupObservation.model_validate(document["before"]),
         after=None if after is None else SetupObservation.model_validate(after),
         changes_items=tuple(changes),

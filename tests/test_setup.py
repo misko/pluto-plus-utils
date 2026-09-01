@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,13 @@ from pluto_plus.setup import (
     SetupIdentity,
     SetupObservation,
     SetupPreconditionError,
+    observation_functionally_qualified,
+)
+from pluto_plus.setup_profiles import (
+    AD9361_1R1T_CLEAR_ATTR_PROFILE,
+    AD9363A_1R1T_CLEAR_ATTR_PROFILE,
+    DEFAULT_SETUP_TARGET,
+    SetupTarget,
 )
 
 
@@ -81,6 +89,54 @@ class FakeSetupBackend:
         )
 
 
+class NativeSetupBackend(FakeSetupBackend):
+    def provision(self, plan: object) -> SetupExecutionResult:
+        from pluto_plus.setup import SetupPlan
+
+        assert isinstance(plan, SetupPlan)
+        assert plan.target is SetupTarget.AD9363A_1R1T
+        self.plans.append(plan)
+        self.current = _observation(
+            live_phy_model="ad9363a",
+            uboot=AD9363A_1R1T_CLEAR_ATTR_PROFILE.uboot,
+            environment_sha256="3" * 64,
+            boot_provenance="qspi_reboot_verified",
+            rx_scan_channels=("voltage0", "voltage1"),
+            rx_lo_5g8_accepted=False,
+            rx_lo_5g8_readback_hz=None,
+            rx_lo_restored=True,
+        )
+        return SetupExecutionResult(
+            observation=self.current,
+            backup_path="backups/SERIAL_A-before.txt",
+            backup_sha256="4" * 64,
+        )
+
+
+class Ad9361SingleSetupBackend(FakeSetupBackend):
+    def provision(self, plan: object) -> SetupExecutionResult:
+        from pluto_plus.setup import SetupPlan
+
+        assert isinstance(plan, SetupPlan)
+        assert plan.target is SetupTarget.AD9361_1R1T
+        self.plans.append(plan)
+        self.current = _observation(
+            live_phy_model="ad9361",
+            uboot=AD9361_1R1T_CLEAR_ATTR_PROFILE.uboot,
+            environment_sha256="4" * 64,
+            boot_provenance="qspi_reboot_verified",
+            rx_scan_channels=("voltage0", "voltage1"),
+            rx_lo_5g8_accepted=True,
+            rx_lo_5g8_readback_hz=5_800_000_000,
+            rx_lo_restored=True,
+        )
+        return SetupExecutionResult(
+            observation=self.current,
+            backup_path="backups/SERIAL_A-before.txt",
+            backup_sha256="5" * 64,
+        )
+
+
 def test_setup_plan_is_exact_identity_environment_and_policy_bound(tmp_path: Path) -> None:
     backend = FakeSetupBackend(_observation())
     manager = CanonicalSetupManager(
@@ -97,6 +153,127 @@ def test_setup_plan_is_exact_identity_environment_and_policy_bound(tmp_path: Pat
     assert planned.plan.changes == {"compatible": "ad9361"}
     assert "mode" not in planned.plan.changes
     assert planned.plan.tx_mute_required is False
+    assert planned.plan.target is DEFAULT_SETUP_TARGET
+
+
+def test_setup_plan_binds_an_explicit_native_single_stream_target(tmp_path: Path) -> None:
+    backend = NativeSetupBackend(_observation(uboot=CANONICAL_UBOOT))
+    receipt_directory = tmp_path / "receipts"
+    manager = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    )
+
+    planned = manager.create_plan(_identity(), SetupTarget.AD9363A_1R1T)
+
+    assert planned.plan.target is SetupTarget.AD9363A_1R1T
+    assert planned.plan.profile_id == CANONICAL_POLICY.profile_id
+    assert planned.plan.changes == {
+        "compatible": "ad9363a",
+        "mode": "1r1t",
+    }
+
+    receipt = manager.execute(planned.plan, planned.confirmation_token)
+    assert receipt.target is SetupTarget.AD9363A_1R1T
+    assert receipt.after is not None
+    assert receipt.after.live_phy_model == "ad9363a"
+    assert receipt.after.rx_scan_channels == ("voltage0", "voltage1")
+    assert receipt.after.rx_lo_5g8_accepted is False
+    reloaded = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    ).list_receipts()
+    assert len(reloaded) == 1
+    assert reloaded[0].schema_version == 4
+    assert reloaded[0].target is SetupTarget.AD9363A_1R1T
+
+
+def test_setup_plan_binds_ad9361_driver_independently_of_1r1t_mode(
+    tmp_path: Path,
+) -> None:
+    backend = Ad9361SingleSetupBackend(_observation(uboot=CANONICAL_UBOOT))
+    manager = CanonicalSetupManager(
+        receipt_directory=tmp_path / "receipts",
+        inspector=backend.inspect,
+        executor=backend,
+    )
+
+    planned = manager.create_plan(_identity(), SetupTarget.AD9361_1R1T)
+
+    assert planned.plan.target is SetupTarget.AD9361_1R1T
+    assert planned.plan.changes == {"mode": "1r1t"}
+    receipt = manager.execute(planned.plan, planned.confirmation_token)
+    assert receipt.after is not None
+    assert receipt.after.live_phy_model == "ad9361"
+    assert receipt.after.rx_scan_channels == ("voltage0", "voltage1")
+    assert receipt.after.rx_lo_5g8_readback_hz == 5_800_000_000
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"live_phy_model": "ad9363a"},
+        {"rx_scan_channels": ("voltage0", "voltage1", "voltage2", "voltage3")},
+        {"rx_lo_5g8_accepted": False, "rx_lo_5g8_readback_hz": None},
+    ],
+)
+def test_ad9361_1r1t_requires_exact_driver_single_rx_and_5g8_proof(
+    updates: dict[str, object],
+) -> None:
+    values: dict[str, object] = {
+        "live_phy_model": "ad9361",
+        "uboot": AD9361_1R1T_CLEAR_ATTR_PROFILE.uboot,
+        "rx_scan_channels": ("voltage0", "voltage1"),
+        "rx_lo_5g8_accepted": True,
+        "rx_lo_5g8_readback_hz": 5_800_000_000,
+        "rx_lo_restored": True,
+    }
+    values.update(updates)
+
+    assert not observation_functionally_qualified(
+        _observation(**values), SetupTarget.AD9361_1R1T
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"live_phy_model": "ad9361"},
+        {"rx_scan_channels": ("voltage0", "voltage1", "voltage2", "voltage3")},
+        {"tx_safe": False},
+    ],
+)
+def test_native_target_requires_exact_driver_single_rx_geometry_and_safe_tx(
+    updates: dict[str, object],
+) -> None:
+    values: dict[str, object] = {
+        "live_phy_model": "ad9363a",
+        "uboot": AD9363A_1R1T_CLEAR_ATTR_PROFILE.uboot,
+        "rx_scan_channels": ("voltage0", "voltage1"),
+        "tx_safe": True,
+        "rx_lo_5g8_accepted": False,
+        "rx_lo_restored": True,
+    }
+    values.update(updates)
+    observation = _observation(**values)
+
+    assert not observation_functionally_qualified(observation, SetupTarget.AD9363A_1R1T)
+
+
+def test_native_target_does_not_relabel_legacy_5g8_fields_as_a_generic_probe() -> None:
+    observation = _observation(
+        live_phy_model="ad9363a",
+        uboot=AD9363A_1R1T_CLEAR_ATTR_PROFILE.uboot,
+        rx_scan_channels=("voltage0", "voltage1"),
+        rx_lo_5g8_accepted=False,
+        rx_lo_5g8_readback_hz=None,
+        rx_lo_restored=True,
+    )
+
+    assert observation_functionally_qualified(observation, SetupTarget.AD9363A_1R1T)
+    assert not observation_functionally_qualified(observation)
 
 
 def test_setup_plan_accepts_only_exact_shipped_persistent_policy(tmp_path: Path) -> None:
@@ -116,6 +293,7 @@ def test_setup_plan_accepts_only_exact_shipped_persistent_policy(tmp_path: Path)
 
     planned = manager.create_plan(identity)
 
+    assert manager.firmware_policy is policy
     assert planned.plan.profile_id == policy.profile_id
     assert planned.plan.identity.observed_firmware == policy.device_firmware
     assert planned.plan.changes == {
@@ -284,7 +462,7 @@ def test_setup_receipt_persists_post_reboot_host_key_rotation(tmp_path: Path) ->
         executor=backend,
     ).list_receipts()[0]
 
-    assert receipt.schema_version == 3
+    assert receipt.schema_version == 4
     assert receipt.host_key_rotation == backend.host_key_rotation
     assert reloaded.host_key_rotation == backend.host_key_rotation
 
@@ -302,3 +480,68 @@ def test_setup_token_rejects_tampered_plan(tmp_path: Path) -> None:
     tampered = replace(planned.plan, environment_sha256="a" * 64)
     with pytest.raises(SetupAuthorizationError, match="another plan"):
         manager.execute(tampered, planned.confirmation_token)
+
+
+def test_setup_token_is_bound_to_target(tmp_path: Path) -> None:
+    backend = FakeSetupBackend(_observation())
+    manager = CanonicalSetupManager(
+        receipt_directory=tmp_path / "receipts",
+        inspector=backend.inspect,
+        executor=backend,
+    )
+    planned = manager.create_plan(_identity())
+    tampered = replace(planned.plan, target=SetupTarget.AD9363A_1R1T)
+
+    with pytest.raises(SetupAuthorizationError, match="another plan"):
+        manager.execute(tampered, planned.confirmation_token)
+
+
+def test_legacy_setup_receipt_without_target_loads_as_default(tmp_path: Path) -> None:
+    receipt_directory = tmp_path / "receipts"
+    backend = FakeSetupBackend(_observation())
+    manager = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    )
+    planned = manager.create_plan(_identity())
+    receipt = manager.execute(planned.plan, planned.confirmation_token)
+    receipt_path = receipt_directory / f"{receipt.receipt_id}.json"
+    document = json.loads(receipt_path.read_text())
+    document.pop("target")
+    document["schema_version"] = 3
+    receipt_path.write_text(json.dumps(document))
+
+    reloaded = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    ).list_receipts()
+
+    assert len(reloaded) == 1
+    assert reloaded[0].schema_version == 3
+    assert reloaded[0].target is DEFAULT_SETUP_TARGET
+
+
+def test_schema4_setup_receipt_without_target_is_rejected(tmp_path: Path) -> None:
+    receipt_directory = tmp_path / "receipts"
+    backend = FakeSetupBackend(_observation())
+    manager = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    )
+    planned = manager.create_plan(_identity())
+    receipt = manager.execute(planned.plan, planned.confirmation_token)
+    receipt_path = receipt_directory / f"{receipt.receipt_id}.json"
+    document = json.loads(receipt_path.read_text())
+    document.pop("target")
+    receipt_path.write_text(json.dumps(document))
+
+    reloaded = CanonicalSetupManager(
+        receipt_directory=receipt_directory,
+        inspector=backend.inspect,
+        executor=backend,
+    ).list_receipts()
+
+    assert reloaded == []
