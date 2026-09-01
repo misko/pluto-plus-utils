@@ -708,6 +708,27 @@ IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V2_RELEASE_RAM_PO
     }
 )
 
+# Exact locally built v0.48 bytes for issue #72 qualification.  The firmware
+# carries the final release version so the bytes tested in RAM can be promoted
+# unchanged, but this policy deliberately authorizes volatile DFU only until
+# the sustained capture, recovery, RF, and cold-boot gates have all passed.
+IQ_DIRECT_ASYNC_V3_CANDIDATE_RAM_POLICY = FirmwarePolicy(
+    profile_id="iq-direct-async-v3-candidate-ram",
+    release_tag="iq-direct-async-v3-candidate-322b67f9580d",
+    device_firmware="v0.48-plutoplus-spf-iq-direct-async-v3",
+    asset_name="plutoplus-spf-iq-direct-async-v3-322b67f9580d-pluto.dfu",
+    asset_sha256="4f981697af03a2c8fe041c7c5a932da7ce0cf66bf78e24518f7574e3738ac6a4",
+    release_url=(
+        "https://github.com/misko/plutosdr-fw/commit/"
+        "322b67f9580d215c1f8362735c877f7c5ee2f89e"
+    ),
+    source_commit="322b67f9580d215c1f8362735c877f7c5ee2f89e",
+    fit_body_sha256="958e4e1d3f128bd3c90c449d674ef7f79c23afebcb23f1af9627c8e6f6f93d7e",
+    fit_body_size=12_825_599,
+    hardware_qualified=False,
+    published_at=datetime(2026, 9, 1, 6, 9, 45, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
@@ -817,6 +838,7 @@ SETUP_REPAIR_POLICIES = (
 SETUP_INSPECTION_POLICIES = (
     *SETUP_REPAIR_POLICIES,
     IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
+    IQ_DIRECT_ASYNC_V3_CANDIDATE_RAM_POLICY,
 )
 
 

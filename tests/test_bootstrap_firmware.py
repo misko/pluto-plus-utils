@@ -1520,6 +1520,35 @@ def test_v2_return_capabilities_require_both_modes_and_drop_default() -> None:
         bootstrap._require_profile_iio_capabilities(facts, profile, transport="USB")
 
 
+def test_issue_72_v3_candidate_is_exact_and_ram_only() -> None:
+    policy = bootstrap.IQ_DIRECT_ASYNC_V3_CANDIDATE_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.device_firmware == "v0.48-plutoplus-spf-iq-direct-async-v3"
+    assert policy.source_commit == "322b67f9580d215c1f8362735c877f7c5ee2f89e"
+    assert policy.asset_sha256 == (
+        "4f981697af03a2c8fe041c7c5a932da7ce0cf66bf78e24518f7574e3738ac6a4"
+    )
+    assert policy.fit_body_sha256 == (
+        "958e4e1d3f128bd3c90c449d674ef7f79c23afebcb23f1af9627c8e6f6f93d7e"
+    )
+    assert policy.fit_body_size == 12_825_599
+    assert policy.hardware_qualified is False
+    assert profile.persistent_allowed is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.iiod_rw_cpu_affinity == 1
+    assert profile.required_iio_capabilities == (
+        ("iio,buffer-direct-async", "1"),
+        ("iio,buffer-direct-async-ring", "1"),
+        (
+            "iio,buffer-direct-async-overrun-policies",
+            "drop-backlog,preserve-backlog",
+        ),
+        ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
+    )
+
+
 def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:
     policy = bootstrap.IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY
 

@@ -236,6 +236,7 @@ def test_inspect_data_plane_runtime_uses_read_only_fixed_script() -> None:
     assert b"/proc/interrupts" in transport.stdin
     assert b"rx_bus_path" in transport.stdin
     assert b"tandem_device" in transport.stdin
+    assert b"metadata|gain sampler|rssi|direct async|stale" in transport.stdin
     assert b"kill " not in transport.stdin
     assert b'>"$rx_device' not in transport.stdin
     assert status.iiod_pid == 4371

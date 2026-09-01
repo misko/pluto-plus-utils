@@ -6,6 +6,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from typing import Literal, Protocol, cast
 
 from pydantic import Field, model_validator
@@ -382,6 +383,7 @@ def _run_cell(
     ring_bytes = ram_ring_slots * frame_iq_bytes
     while remaining:
         segment_frames = min(remaining, MAX_DIRECT_ASYNC_FRAMES)
+        capture: MetadataCapture | None = None
         try:
             with radio.begin_metadata_capture(
                 samples_per_frame,
@@ -478,6 +480,11 @@ def _run_cell(
                         last_ring_status.high_water_frames,
                     )
         except Exception as error:
+            if ram_ring_slots and capture is not None:
+                with suppress(Exception):
+                    last_ring_status = DdrRingStatusSnapshot.model_validate(
+                        capture.ddr_ring_status()
+                    )
             raise _DirectAsyncCellError(error, last_ring_status) from error
         remaining -= segment_frames
     elapsed_seconds = elapsed_ns / 1_000_000_000
