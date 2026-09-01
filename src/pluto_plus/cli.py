@@ -5695,6 +5695,14 @@ def firmware_candidate_ram_plan(
         ..., "--usb-inventory", help="Private inventory produced by candidate-ram inventory."
     ),
     serial: str = typer.Option(..., "--serial", help="Exact target USB serial."),
+    runtime_target: SetupTarget | None = typer.Option(  # noqa: B008
+        None,
+        "--runtime-target",
+        help=(
+            "Required only by RX-only candidate-plan.v2; must be ad9361-1r1t "
+            "or ad9363a-1r1t. Legacy v1 plans reject this option."
+        ),
+    ),
     expected_current_firmware: str = typer.Option(
         ...,
         "--expected-current-firmware",
@@ -5716,33 +5724,81 @@ def firmware_candidate_ram_plan(
     from datetime import UTC, datetime
 
     from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
+        ReleaseCandidateOperationPlan,
         ReleaseCandidatePlan,
         ReleaseUsbInventory,
         build_operation_plan,
-        load_private_contract,
         write_private_contract,
     )
     from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_rx_only import (
+        ReleaseCandidateOperationPlanV2,
+        ReleaseCandidatePlanV2,
+        RxOnlyRuntimeTarget,
+        build_rx_only_operation_plan,
+        load_candidate_plan_document,
+    )
 
     try:
         candidate_path = candidate_plan.expanduser().absolute()
         inventory_path = usb_inventory.expanduser().absolute()
-        candidate = load_private_contract(candidate_path, ReleaseCandidatePlan)
+        candidate = load_candidate_plan_document(candidate_path)
+        from pluto_plus.release_candidate import load_private_contract
+
         inventory = load_private_contract(inventory_path, ReleaseUsbInventory)
-        operation = build_operation_plan(
-            candidate,
-            inventory,
-            candidate_path=candidate_path,
-            inventory_path=inventory_path,
-            serial=serial,
-            expected_current_firmware=expected_current_firmware,
-            receipt_path=receipt.expanduser().absolute(),
-            plan_id=uuid.uuid4().hex,
-            created_at=datetime.now(UTC),
-            ssh_host=ssh_host,
-        )
+        operation: ReleaseCandidateOperationPlan | ReleaseCandidateOperationPlanV2
+        if isinstance(candidate, ReleaseCandidatePlan):
+            if runtime_target is not None:
+                raise ValueError("legacy candidate-plan.v1 does not accept --runtime-target")
+            operation = build_operation_plan(
+                candidate,
+                inventory,
+                candidate_path=candidate_path,
+                inventory_path=inventory_path,
+                serial=serial,
+                expected_current_firmware=expected_current_firmware,
+                receipt_path=receipt.expanduser().absolute(),
+                plan_id=uuid.uuid4().hex,
+                created_at=datetime.now(UTC),
+                ssh_host=ssh_host,
+            )
+        elif isinstance(candidate, ReleaseCandidatePlanV2):
+            if runtime_target not in {
+                SetupTarget.AD9361_1R1T,
+                SetupTarget.AD9363A_1R1T,
+            }:
+                raise ValueError(
+                    "candidate-plan.v2 requires --runtime-target ad9361-1r1t "
+                    "or ad9363a-1r1t"
+                )
+            selected_runtime_target: RxOnlyRuntimeTarget = (
+                "ad9361-1r1t"
+                if runtime_target is SetupTarget.AD9361_1R1T
+                else "ad9363a-1r1t"
+            )
+            operation = build_rx_only_operation_plan(
+                candidate,
+                inventory,
+                candidate_path=candidate_path,
+                inventory_path=inventory_path,
+                serial=serial,
+                runtime_target=selected_runtime_target,
+                expected_current_firmware=expected_current_firmware,
+                receipt_path=receipt.expanduser().absolute(),
+                plan_id=uuid.uuid4().hex,
+                created_at=datetime.now(UTC),
+                ssh_host=ssh_host,
+            )
+        else:
+            raise AssertionError("exact candidate-plan dispatch was not exhaustive")
         identity = write_private_contract(output.expanduser().absolute(), operation)
-    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+    except (
+        OSError,
+        ValueError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
         _fail("candidate_ram_plan_failed", str(error), 4)
     _emit(
         {
@@ -5791,8 +5847,9 @@ def firmware_candidate_ram_execute(
 
     from pluto_plus import __version__
     from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
         ReleaseCandidateOperationPlan,
-        load_private_contract,
+        ReleaseCandidateRamReceipt,
     )
     from pluto_plus.release_candidate_lifecycle import (
         ReleaseCandidateLifecycleError,
@@ -5802,28 +5859,67 @@ def firmware_candidate_ram_execute(
         LinuxReleaseCandidateBackend,
         attest_clean_tool_repository,
     )
+    from pluto_plus.release_candidate_rx_only import (
+        ReleaseCandidateOperationPlanV2,
+        ReleaseCandidateRamReceiptV2,
+        load_operation_plan_document,
+    )
+    from pluto_plus.release_candidate_rx_only_lifecycle import (
+        RxOnlyReleaseCandidateLifecycleError,
+        execute_rx_only_candidate_ram,
+    )
+    from pluto_plus.release_candidate_rx_only_linux import (
+        LinuxRxOnlyReleaseCandidateBackend,
+    )
 
     try:
         selected_operation = operation_plan.expanduser().absolute()
-        planned = load_private_contract(selected_operation, ReleaseCandidateOperationPlan)
+        planned = load_operation_plan_document(selected_operation)
         repository = tool_repository.expanduser().absolute()
         source = attest_clean_tool_repository(repository)
-        backend = LinuxReleaseCandidateBackend(
-            state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
-        )
-        receipt, digest = execute_candidate_ram(
-            selected_operation,
-            password_path=ssh_password_file.expanduser().absolute(),
-            confirmation=confirmation,
-            backend=backend,
-            tool_repository=source.repository,
-            tool_version=__version__,
-            tool_source_commit=source.commit,
-            timeout_s=timeout_s,
-        )
-    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        receipt: ReleaseCandidateRamReceipt | ReleaseCandidateRamReceiptV2
+        if isinstance(planned, ReleaseCandidateOperationPlan):
+            backend = LinuxReleaseCandidateBackend(
+                state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
+            )
+            receipt, digest = execute_candidate_ram(
+                selected_operation,
+                password_path=ssh_password_file.expanduser().absolute(),
+                confirmation=confirmation,
+                backend=backend,
+                tool_repository=source.repository,
+                tool_version=__version__,
+                tool_source_commit=source.commit,
+                timeout_s=timeout_s,
+            )
+        elif isinstance(planned, ReleaseCandidateOperationPlanV2):
+            backend_v2 = LinuxRxOnlyReleaseCandidateBackend(
+                state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
+            )
+            receipt, digest = execute_rx_only_candidate_ram(
+                selected_operation,
+                password_path=ssh_password_file.expanduser().absolute(),
+                confirmation=confirmation,
+                backend=backend_v2,
+                tool_repository=source.repository,
+                tool_version=__version__,
+                tool_source_commit=source.commit,
+                timeout_s=timeout_s,
+            )
+        else:
+            raise AssertionError("exact operation-plan dispatch was not exhaustive")
+    except (
+        OSError,
+        ValueError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+        RxOnlyReleaseCandidateLifecycleError,
+    ) as error:
         detail = ""
-        if isinstance(error, ReleaseCandidateLifecycleError) and error.receipt is not None:
+        if isinstance(
+            error,
+            (ReleaseCandidateLifecycleError, RxOnlyReleaseCandidateLifecycleError),
+        ) and error.receipt is not None:
             detail = (
                 f"; durable {error.receipt.outcome} receipt={planned.receipt_path} "
                 f"sha256={error.receipt_sha256}"
@@ -5846,6 +5942,7 @@ def firmware_candidate_ram_receipt_verify(
     """Replay a durable receipt against its exact candidate and operation plans."""
 
     from pluto_plus.release_candidate import (
+        ReleaseCandidateContractError,
         ReleaseCandidateOperationPlan,
         ReleaseCandidatePlan,
         ReleaseCandidateRamReceipt,
@@ -5853,20 +5950,51 @@ def firmware_candidate_ram_receipt_verify(
         validate_contract_bundle,
     )
     from pluto_plus.release_candidate_lifecycle import ReleaseCandidateLifecycleError
+    from pluto_plus.release_candidate_rx_only import (
+        ReleaseCandidateOperationPlanV2,
+        ReleaseCandidatePlanV2,
+        ReleaseCandidateRamReceiptV2,
+        load_ram_receipt_document,
+        validate_rx_only_contract_bundle,
+    )
 
     try:
         selected = receipt.expanduser().absolute()
-        value = load_private_contract(selected, ReleaseCandidateRamReceipt)
-        operation = load_private_contract(value.operation_plan.path, ReleaseCandidateOperationPlan)
-        candidate = load_private_contract(value.candidate_plan.path, ReleaseCandidatePlan)
-        validate_contract_bundle(
-            candidate,
-            operation,
-            value,
-            candidate_path=value.candidate_plan.path,
-            operation_path=value.operation_plan.path,
-        )
-    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+        value = load_ram_receipt_document(selected)
+        if isinstance(value, ReleaseCandidateRamReceipt):
+            operation = load_private_contract(
+                value.operation_plan.path, ReleaseCandidateOperationPlan
+            )
+            candidate = load_private_contract(value.candidate_plan.path, ReleaseCandidatePlan)
+            validate_contract_bundle(
+                candidate,
+                operation,
+                value,
+                candidate_path=value.candidate_plan.path,
+                operation_path=value.operation_plan.path,
+            )
+        elif isinstance(value, ReleaseCandidateRamReceiptV2):
+            operation_v2 = load_private_contract(
+                value.operation_plan.path, ReleaseCandidateOperationPlanV2
+            )
+            candidate_v2 = load_private_contract(
+                value.candidate_plan.path, ReleaseCandidatePlanV2
+            )
+            validate_rx_only_contract_bundle(
+                candidate_v2,
+                operation_v2,
+                value,
+                candidate_path=value.candidate_plan.path,
+                operation_path=value.operation_plan.path,
+            )
+        else:
+            raise AssertionError("exact RAM-receipt dispatch was not exhaustive")
+    except (
+        OSError,
+        ValueError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+    ) as error:
         _fail("candidate_ram_receipt_invalid", str(error), 4)
     _emit(
         {
@@ -5886,7 +6014,12 @@ def firmware_candidate_ram_recover(
         ..., "--ssh-password-file", help="Owned mode-0600 one-line radio password file."
     ),
     confirmation: str = typer.Option(
-        ..., "--confirm", help="Exact phrase RECOVER RELEASE CANDIDATE <serial>."
+        ...,
+        "--confirm",
+        help=(
+            "Exact v1 RECOVER RELEASE CANDIDATE phrase or v2 "
+            "RECOVER RX-ONLY RELEASE CANDIDATE <serial> <runtime-target> phrase."
+        ),
     ),
     expected_return_firmware: str = typer.Option(
         ...,
@@ -5910,7 +6043,7 @@ def firmware_candidate_ram_recover(
         45.0, "--timeout", min=5.0, max=600.0, help="Per-recovery wait timeout."
     ),
 ) -> None:
-    """Return one exact unknown candidate DFU transition to a safe runtime."""
+    """Return one v1 UNKNOWN or eligible v2 PASS/UNKNOWN to a safe runtime."""
 
     import uuid
     from datetime import UTC, datetime
@@ -5919,6 +6052,7 @@ def firmware_candidate_ram_recover(
     from pluto_plus.release_candidate import (
         RECOVERY_RECEIPT_SCHEMA,
         CleanupReceipt,
+        ReleaseCandidateContractError,
         ReleaseCandidateOperationPlan,
         ReleaseCandidatePlan,
         ReleaseCandidateRamReceipt,
@@ -5936,10 +6070,69 @@ def firmware_candidate_ram_recover(
         LinuxReleaseCandidateBackend,
         attest_clean_tool_repository,
     )
+    from pluto_plus.release_candidate_rx_only import (
+        ReleaseCandidateOperationPlanV2,
+        ReleaseCandidateRamReceiptV2,
+        load_ram_receipt_document,
+    )
+    from pluto_plus.release_candidate_rx_only_lifecycle import (
+        RxOnlyReleaseCandidateLifecycleError,
+        recover_rx_only_candidate_ram,
+    )
+    from pluto_plus.release_candidate_rx_only_linux import (
+        LinuxRxOnlyReleaseCandidateBackend,
+    )
 
     try:
         selected_receipt = receipt.expanduser().absolute()
-        unknown = load_private_contract(selected_receipt, ReleaseCandidateRamReceipt)
+        source_document = load_ram_receipt_document(selected_receipt)
+        if isinstance(source_document, ReleaseCandidateRamReceiptV2):
+            operation_v2 = load_private_contract(
+                source_document.operation_plan.path,
+                ReleaseCandidateOperationPlanV2,
+            )
+            if expected_return_firmware != operation_v2.expected_current_firmware:
+                raise RxOnlyReleaseCandidateLifecycleError(
+                    "v2 recovery must return to the operation plan's persistent firmware"
+                )
+            source_v2 = attest_clean_tool_repository(
+                tool_repository.expanduser().absolute()
+            )
+            backend_v2 = LinuxRxOnlyReleaseCandidateBackend(
+                state_root=state_root.expanduser().absolute(), timeout_s=timeout_s
+            )
+            recovery_v2, recovery_digest = recover_rx_only_candidate_ram(
+                selected_receipt,
+                password_path=ssh_password_file.expanduser().absolute(),
+                confirmation=confirmation,
+                output_path=output.expanduser().absolute(),
+                backend=backend_v2,
+                tool_repository=source_v2.repository,
+                tool_version=__version__,
+                tool_source_commit=source_v2.commit,
+                timeout_s=timeout_s,
+            )
+            _emit(
+                {
+                    "outcome": "pass",
+                    "recovery_receipt": str(output.expanduser().absolute()),
+                    "recovery_receipt_sha256": recovery_digest,
+                    "serial": recovery_v2.target.serial,
+                    "runtime_target": recovery_v2.runtime_target,
+                    "firmware_version": recovery_v2.recovered_runtime.firmware_version,
+                    "runtime_layout": recovery_v2.recovered_runtime.layout.kind,
+                    "qspi_unchanged": recovery_v2.qspi_unchanged,
+                    "route_release_verified": recovery_v2.host_route.release_verified,
+                    "source_outcome": recovery_v2.source_outcome,
+                    "pre_reset_usb_departure_verified": (
+                        recovery_v2.pre_reset_usb_departure_verified
+                    ),
+                }
+            )
+            return
+        if not isinstance(source_document, ReleaseCandidateRamReceipt):
+            raise AssertionError("exact RAM-receipt recovery dispatch was not exhaustive")
+        unknown = source_document
         operation = load_private_contract(
             unknown.operation_plan.path, ReleaseCandidateOperationPlan
         )
@@ -6023,7 +6216,13 @@ def firmware_candidate_ram_recover(
             cleanup=CleanupReceipt(verified=True),
         )
         identity = write_private_contract(output.expanduser().absolute(), recovery)
-    except (OSError, ValueError, ReleaseCandidateLifecycleError) as error:
+    except (
+        OSError,
+        ValueError,
+        ReleaseCandidateContractError,
+        ReleaseCandidateLifecycleError,
+        RxOnlyReleaseCandidateLifecycleError,
+    ) as error:
         _fail("candidate_ram_recovery_failed", str(error), 5)
     _emit(
         {
