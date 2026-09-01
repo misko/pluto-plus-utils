@@ -47,8 +47,8 @@ case "$metadata_abi" in
     source_commit="6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7"
     ;;
 3)
-    source_ref="iq-direct-async-v2-source/libiio-v1"
-    source_commit="8f66f353c9a70a5524988ceb588b0e9271c2390d"
+    source_ref="0d323080a0a1067da8c7adbadfd03ee186a40ec2"
+    source_commit="0d323080a0a1067da8c7adbadfd03ee186a40ec2"
     ;;
 4)
     source_ref="iio-gain-timeline-v8-rc1-source/libiio-v4"
@@ -96,8 +96,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$source_ref" \
-    https://github.com/misko/libiio.git "$worktree/src"
+git -C "$worktree" init --quiet src
+git -C "$worktree/src" remote add origin https://github.com/misko/libiio.git
+git -C "$worktree/src" fetch --quiet --depth 1 origin "$source_ref"
+git -C "$worktree/src" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
 actual_commit="$(git -C "$worktree/src" rev-parse HEAD)"
 [[ "$actual_commit" == "$source_commit" ]] || {
     printf 'ERROR: immutable libiio tag resolved to %s, expected %s\n' \

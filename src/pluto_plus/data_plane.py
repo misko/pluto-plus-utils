@@ -661,7 +661,9 @@ dma_devices=$(for candidate in "$rx_bus_path"/*; do
   case "$name:$compatible" in *dma*) printf '%s\n' "$candidate";; esac
 done)
 interrupt_lines=$(cat /proc/interrupts)
-kernel_events=$(dmesg | grep -Ei 'dma|cf-ad9361|iio|timeout|overflow' | tail -40 || true)
+kernel_events=$(dmesg | grep -Ei \
+  'dma|cf-ad9361|iio|timeout|overflow|metadata|gain sampler|rssi|direct async|stale' \
+  | tail -40 || true)
 emit serial "$serial"
 emit iiod_pid "$iiod_pid"
 emit iiod_start_ticks "$iiod_start_ticks"

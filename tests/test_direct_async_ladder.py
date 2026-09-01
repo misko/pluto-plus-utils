@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import errno
+
 import numpy as np
 import pytest
 
@@ -333,6 +335,82 @@ def test_direct_ladder_accounts_failed_rate_and_continues_matrix() -> None:
     assert report.original_settings_restored
 
 
+def test_direct_ladder_preserves_terminal_ring_status_after_read_failure() -> None:
+    class _FailedCapture(_Capture):
+        def read_block(self) -> SampleBlockV2:
+            if self.reads == 1:
+                raise OSError(errno.ESTALE, "Stale file handle")
+            return super().read_block()
+
+        def ddr_ring_status(self) -> dict[str, object]:
+            return {
+                "version": 1,
+                "state": "failed",
+                "terminal_reason": "dma_error",
+                "error_code": -errno.ESTALE,
+                "requested_capacity_iq_bytes": self.ddr_ring_requested_bytes,
+                "admitted_capacity_iq_bytes": self.ddr_ring_admitted_bytes,
+                "target_frames": 0,
+                "produced_frames": 2,
+                "consumed_frames": 1,
+                "high_water_frames": 2,
+                "wrap_count": 0,
+                "producer_position": 0,
+                "consumer_position": 0,
+                "last_contiguous_sample_sequence": None,
+                "first_unavailable_sample_sequence": None,
+                "failure_frame_index": None,
+                "failure_sample_sequence": None,
+            }
+
+    class _FailedRadio(_Radio):
+        def begin_metadata_capture(
+            self,
+            sample_count: int,
+            *,
+            kernel_buffers: int,
+            ddr_burst_bytes: int = 0,
+            ddr_ring_bytes: int = 0,
+            ddr_ring_frames: int = 0,
+            ddr_ring_continuous: bool = False,
+            direct_async_frames: int = 0,
+            drop_backlog_on_overrun: bool = True,
+            tandem_request: TandemSessionRequestV1 | None = None,
+        ) -> MetadataCapture:
+            del ddr_burst_bytes, ddr_ring_frames, ddr_ring_continuous, tandem_request
+            capture = _FailedCapture(
+                self,
+                samples=sample_count,
+                kernel_buffers=kernel_buffers,
+                ring_bytes=ddr_ring_bytes,
+                direct_frames=direct_async_frames,
+            )
+            capture.drop_backlog_on_overrun = drop_backlog_on_overrun
+            return capture
+
+    radio = _FailedRadio()
+    report = run_direct_async_ladder(
+        uri="ip:192.168.1.15",
+        serial="SERIAL_A",
+        rates_hz=(1_000_000,),
+        durations_seconds=(0.05,),
+        channels=(0,),
+        samples_per_frame=16_384,
+        kernel_buffers=3,
+        ram_ring_slots=2,
+        radio_factory=lambda _uri, _serial, _decoder: radio,
+        clock_ns=_Clock(),
+    )
+
+    assert not report.cells
+    assert len(report.failures) == 1
+    failure = report.failures[0]
+    assert failure.error_type == "OSError"
+    assert failure.last_ring_status is not None
+    assert failure.last_ring_status.state == "failed"
+    assert failure.last_ring_status.error_code == -errno.ESTALE
+
+
 def test_direct_ladder_rejects_oversized_dma_queue_before_open() -> None:
     radio = _Radio()
     with pytest.raises(ValueError, match="DMA request"):
@@ -344,6 +422,41 @@ def test_direct_ladder_rejects_oversized_dma_queue_before_open() -> None:
             channels=(0,),
             samples_per_frame=4_194_304,
             kernel_buffers=16,
+            radio_factory=lambda _uri, _serial, _decoder: radio,
+        )
+    assert not radio.opened
+
+
+def test_direct_ladder_accepts_dma_queue_within_radio_limit() -> None:
+    radio = _Radio()
+
+    report = run_direct_async_ladder(
+        uri="ip:192.168.1.15",
+        serial="SERIAL_A",
+        rates_hz=(1_000_000,),
+        durations_seconds=(0.05,),
+        channels=(0,),
+        samples_per_frame=1_048_576,
+        kernel_buffers=47,
+        radio_factory=lambda _uri, _serial, _decoder: radio,
+        clock_ns=_Clock(),
+    )
+
+    assert report.kernel_buffers == 47
+    assert radio.opened
+
+
+def test_direct_ladder_rejects_dma_queue_above_radio_limit() -> None:
+    radio = _Radio()
+    with pytest.raises(ValueError, match="201326592 bytes; maximum is 200000000"):
+        run_direct_async_ladder(
+            uri="ip:192.168.1.15",
+            serial="SERIAL_A",
+            rates_hz=(1_000_000,),
+            durations_seconds=(0.05,),
+            channels=(0,),
+            samples_per_frame=1_048_576,
+            kernel_buffers=48,
             radio_factory=lambda _uri, _serial, _decoder: radio,
         )
     assert not radio.opened

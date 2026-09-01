@@ -6,6 +6,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from typing import Literal, Protocol, cast
 
 from pydantic import Field, model_validator
@@ -30,7 +31,7 @@ MAX_DURATION_RUNGS = 8
 MAX_DURATION_SECONDS = 60.0
 MAX_TOTAL_FRAMES_PER_CELL = 4_096
 MAX_DIRECT_ASYNC_FRAMES = DIRECT_ASYNC_FRAME_TARGET_MAX
-MAX_DIRECT_DMA_BYTES = 64 * 1024 * 1024
+MAX_DIRECT_DMA_BYTES = 200_000_000
 MAX_DIRECT_RAM_BYTES = 200_000_000
 WIRE_BYTES_PER_COMPLEX_SAMPLE = 4
 DirectAsyncMode = Literal["direct", "direct-ram"]
@@ -382,6 +383,7 @@ def _run_cell(
     ring_bytes = ram_ring_slots * frame_iq_bytes
     while remaining:
         segment_frames = min(remaining, MAX_DIRECT_ASYNC_FRAMES)
+        capture: MetadataCapture | None = None
         try:
             with radio.begin_metadata_capture(
                 samples_per_frame,
@@ -478,6 +480,11 @@ def _run_cell(
                         last_ring_status.high_water_frames,
                     )
         except Exception as error:
+            if ram_ring_slots and capture is not None:
+                with suppress(Exception):
+                    last_ring_status = DdrRingStatusSnapshot.model_validate(
+                        capture.ddr_ring_status()
+                    )
             raise _DirectAsyncCellError(error, last_ring_status) from error
         remaining -= segment_frames
     elapsed_seconds = elapsed_ns / 1_000_000_000
