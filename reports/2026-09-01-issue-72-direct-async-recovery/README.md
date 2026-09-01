@@ -2,13 +2,20 @@
 
 ## Outcome
 
-Firmware `v0.48-plutoplus-spf-iq-direct-async-v3` fixes the long-session
+Full release `v0.48-plutoplus-spf-iq-direct-async-v3` fixes the long-session
 `ENODATA` failure reproduced on v0.47. Under a deliberately overloaded USB
-Ethernet path, the candidate returned every requested frame in both 10-second
-and 60-second sessions. Over physical 1 GbE, the 47-frame direct DMA queue
-delivered 73.06, 75.07, and 72.86 MB/s for 3-, 10-, and 60-second 25 MS/s
-captures. The 60-second result is one 1,431-frame, 6.002 GB session; it did not
-segment or re-arm.
+Ethernet path, the implementation candidate returned every requested frame in
+both 10-second and 60-second sessions. The exact protected-main release bytes
+were then RAM-booted on four serial/path-bound radios and tested over physical
+1 GbE. The 47-frame direct DMA queue delivered 73.57, 74.09, and 72.82 MB/s for
+3-, 10-, and 60-second 25 MS/s captures. The 60-second result is one
+1,431-frame, 6.002 GB session; it did not segment, re-arm, or return `ENODATA`.
+
+After all volatile and performance gates passed, PPU persistently installed
+the same DFU/FIT bytes on `winbond-db6968136727402c`. The radio returned as
+v0.48/AD9361/TX-safe, `/dev/mtd3` matched the qualified FIT hash, a separate
+guarded reboot returned the same identity, and repeat reconciliation plus a
+gapless post-reboot capture passed.
 
 ![Issue 72 recovery summary](issue-72-recovery-summary.png)
 
@@ -46,20 +53,25 @@ the exact `error_code=-116` identifies `ESTALE`.
 
 | Component | Exact tested version |
 | --- | --- |
-| firmware integration | `322b67f9580d215c1f8362735c877f7c5ee2f89e` |
+| protected firmware build | `e3078376a6e1a8c6ea841dc69966b3880e020c70`; run `33481347855` |
+| recovery implementation ancestor | `322b67f9580d215c1f8362735c877f7c5ee2f89e` |
 | Buildroot/rootfs | `1c337a0b8d8126c9d1ed785607bc5ea52e7fed22` |
 | radio iiOD and host libiio | 0.25 at `0d323080a0a1067da8c7adbadfd03ee186a40ec2` |
 | PPU terminal-status/runtime pin | `7ff398aa67b36f5b5f3978153674c1b46c836110` |
 | PPU 200 MB DMA ladder guard | `7d412dfc60f7ad58601092b7332b21a74d5a3ff0` |
+| PPU exact release RAM profile | `1287462dca2dfd6d06ca192e3c8c37eabb64181a` |
+| PPU persistent promotion | `0a21ce250b44006a7880ae35dc30d11673fd2180` |
 | SPF metadata provider | ABI 3, `3294365ff44da26b261be4a2ccb241b7896d23ad` |
 | HDL | `145bd47e55d5c5537e0ba49d53cb25a5393f66ba` |
 | Linux | `93174a1c049ca6ee42f042dbe93f0fb06fbc9cd7` |
 | U-Boot | `1ff0468e9bea29b0a768a7bf52db8d025c521b9a` |
 
-The tested DFU SHA-256 is
-`4f981697af03a2c8fe041c7c5a932da7ce0cf66bf78e24518f7574e3738ac6a4`;
-its FIT body is
-`958e4e1d3f128bd3c90c449d674ef7f79c23afebcb23f1af9627c8e6f6f93d7e`.
+The release DFU is 12,825,587 bytes with SHA-256
+`cc87c36a3aad609a64b45f4a02eecf916b99a3099fa523eed1bf4526ed98995a`;
+its 12,825,571-byte FIT body is
+`db777ac93d5c6f0be0cf2799808a4d06fe39264ee1e99e76001509394d75f1df`.
+The protected source tarball is SHA-256
+`4839ef4e97b2c7d2f56363219184ec48db8fbdab67f1b6d8388f531ca79836fd`.
 The image reports `--rw-cpu-affinity 1`, which is the supervised equivalent of
 the historical `iiod -r 1` shorthand.
 
@@ -92,19 +104,22 @@ The USB link intentionally cannot keep pace. Success here means that v0.48
 kept one direct session alive, returned the finite target, and accounted for
 loss instead of aborting.
 
-## Twenty-second policy matrix
+## Twenty-second final-byte policy matrix
 
 | Queue | Policy | Result | Gap frames | Missing samples | Payload |
 | --- | --- | --- | ---: | ---: | ---: |
-| 11 DMA | preserve | 477/477 | 464 | 1,715,470,336 | 22.053 MB/s |
-| 11 DMA | drop | 477/477 | 118 | 1,734,344,704 | 21.981 MB/s |
-| 11 DMA + 128 MiB RAM | preserve | **`ESTALE` after 114 frames** | — | — | — |
-| 11 DMA + 128 MiB RAM | drop | **477/477** | 68 | 1,880,096,768 | 19.659 MB/s |
+| 11 DMA | preserve | 477/477 | 143 | 153,092,096 | 75.016 MB/s |
+| 11 DMA | drop | 477/477 | 21 | 178,257,920 | 72.779 MB/s |
+| 11 DMA + 128 MiB RAM | preserve | 477/477 | 198 | 213,909,504 | 65.606 MB/s |
+| 11 DMA + 128 MiB RAM | drop | 477/477 | 12 | 298,844,160 | 60.311 MB/s |
 
-Ringless drop mode reduced the number of gap-bearing frames by 74.6%. With RAM,
-drop mode converted a terminal preserve failure into a complete capture. It did
-not reduce missing sample count: dropping the stale queue intentionally creates
-fewer, larger discontinuities and returns to fresher RF time sooner.
+Ringless drop mode reduced the number of gap-bearing frames by 85.3%. With RAM,
+it reduced them by 93.9%. Every final-byte run returned all 477 requested
+frames. Drop mode did not reduce missing sample count: retiring the stale queue
+intentionally creates fewer, larger discontinuities and returns to fresher RF
+time sooner. The RAM preserve run filled all 32 slots and drained all 365
+spilled frames. RAM drop spilled 357, drained 155, and explicitly retired 202;
+`spilled = drained + dropped`.
 
 RAM slots extend the existing ordered queue. They do not create a second DMA
 session, and reaching RAM high-water does not clear the in-flight TCP frame or
@@ -124,9 +139,9 @@ commit `7d412df` replaces an obsolete 64 MiB host-only guard and still rejects
 
 | Window | Returned | Payload | Gap frames | Missing samples |
 | ---: | ---: | ---: | ---: | ---: |
-| 3 s | 72/72 | **73.063 MB/s** | 2 | 20,971,520 |
-| 10 s | 239/239 | **75.070 MB/s** | 7 | 72,351,744 |
-| 60 s | 1,431/1,431 | **72.860 MB/s** | 53 | 550,502,400 |
+| 3 s | 72/72 | **73.571 MB/s** | 2 | 20,971,520 |
+| 10 s | 239/239 | **74.088 MB/s** | 7 | 73,400,320 |
+| 60 s | 1,431/1,431 | **72.823 MB/s** | 53 | 552,599,552 |
 
 Example PPU-only performance command for a newly flashed radio:
 
@@ -152,17 +167,37 @@ For the complete lower-rate ladder, replace `--rates 25M` with
 
 ## Fleet and compatibility checks
 
-The exact DFU was RAM-booted with PPU on four serial/path-bound local USB
-radios. Every receipt attested v0.48, AD9361, and TX-safe state without writing
-QSPI. Each radio then returned 15/15 frames at 5 MS/s over USB with zero gaps,
-zero missing samples, and zero overflow; payload rates ranged from 17.956 to
-18.083 MB/s.
+The exact protected-build DFU was RAM-booted with PPU on four serial/path-bound
+local USB radios. Every receipt attested v0.48, AD9361, and TX-safe state
+without writing QSPI. Each radio then returned 15/15 frames at 5 MS/s over its
+isolated USB Ethernet route with zero gaps, zero missing samples, and zero
+overflow; payload rates ranged from 18.070 to 18.259 MB/s.
 
 On serial `winbond-db6968136727402c`, ordinary dual-RX capture kept pace at
 2.5 and 5 MS/s (20.012 and 40.046 MB/s). A bounded PPU Fast Lock probe tuned
 ordinary and volatile-profile paths between 2.4 and 5.8 GHz, verified the
 5.8 GHz ordinary readback, kept TX muted, and restored the exact original RF
 settings.
+
+## Persistent installation and reboot evidence
+
+PPU profile `iq-direct-async-v3-release-persistent-promotion` authorized only
+the exact final DFU/FIT hashes above. A serial/path-bound mass-storage flash on
+`winbond-db6968136727402c` completed all write, sync, eject, disappearance,
+return, identity, and TX-safe phases under receipt
+`016eb590-5fb4-42e3-9568-afe0f4d4254c`.
+
+Read-only reconciliation hashed exactly 12,825,571 bytes from `/dev/mtd3` and
+matched `db777a…d1df`. Guarded reboot receipt
+`7605359b000b474994626df2e602691b` then proved same-topology return as v0.48
+with AD9361, paired RX, tandem AGC, and muted TX. Because Pluto generates SSH
+host keys at boot, PPU enrolled a new serial-specific key after return and
+repeated `/dev/mtd3` reconciliation. The final post-reboot 5 MS/s test returned
+15/15 frames at 19.026 MB/s with zero gaps.
+
+This is a persistent software-reboot qualification. It is not described as an
+all-power-removed cold boot; the v0.47 release remains the independently
+cold-boot-qualified rollback image.
 
 ## Reproduction and retained data
 
@@ -178,3 +213,7 @@ uv run --with matplotlib python \
 Raw PPU reports and serial-bound deployment/isolation receipts remain in the
 private qualification archive. They are intentionally not copied into the
 public repository because they contain host topology and local absolute paths.
+Canonical report hashes include `162dd057…65d` for the physical-GbE 3/10/60 s
+gate, `88680d86…34b` for the RAM ladder, `f33fa412…24d2` / `2bd524e9…b74e` /
+`0d77b56f…64a3` / `963a60f8…97ed` for the four-way matrix, and
+`e8659e0e…f096` / `bd427436…faec` for persistent flash and reboot receipts.

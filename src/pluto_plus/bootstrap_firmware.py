@@ -67,6 +67,8 @@ from pluto_plus.doctor import (
     IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V3_CANDIDATE_RAM_POLICY,
+    IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
+    IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY,
     SINGLE_RX_METADATA_RC1_RAM_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
@@ -424,6 +426,49 @@ STANDALONE_FLASH_PROFILES = {
         3,
         True,
         persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+        ddr_ring_max_iq_bytes=200_000_000,
+        ddr_ring_modes="finite,continuous",
+        buffer_metadata_status=True,
+        buffer_metadata_timing_log=True,
+        iiod_rw_cpu_affinity=1,
+        required_iio_capabilities=(
+            ("iio,buffer-direct-async", "1"),
+            ("iio,buffer-direct-async-ring", "1"),
+            (
+                "iio,buffer-direct-async-overrun-policies",
+                "drop-backlog,preserve-backlog",
+            ),
+            ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
+        ),
+    ),
+    IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY.profile_id: StandaloneFlashProfile(
+        IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY,
+        3,
+        True,
+        persistent_allowed=False,
+        ddr_burst_max_iq_bytes=200_000_000,
+        ddr_burst_reserve_bytes=128 * 1024 * 1024,
+        ddr_ring_max_iq_bytes=200_000_000,
+        ddr_ring_modes="finite,continuous",
+        buffer_metadata_status=True,
+        buffer_metadata_timing_log=True,
+        iiod_rw_cpu_affinity=1,
+        required_iio_capabilities=(
+            ("iio,buffer-direct-async", "1"),
+            ("iio,buffer-direct-async-ring", "1"),
+            (
+                "iio,buffer-direct-async-overrun-policies",
+                "drop-backlog,preserve-backlog",
+            ),
+            ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
+        ),
+    ),
+    IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
+        IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
+        3,
+        True,
         ddr_burst_max_iq_bytes=200_000_000,
         ddr_burst_reserve_bytes=128 * 1024 * 1024,
         ddr_ring_max_iq_bytes=200_000_000,
@@ -1152,9 +1197,7 @@ def rotate_lan_ssh_host_key_after_attested_return(
     try:
         require_metadata_abi_capability(facts, expected_metadata_abi)
     except ValueError as error:
-        raise BootstrapFirmwareError(
-            "LAN metadata ABI changed before SSH key rotation"
-        ) from error
+        raise BootstrapFirmwareError("LAN metadata ABI changed before SSH key rotation") from error
 
     candidate = known_hosts_file.expanduser()
     if candidate.is_symlink():
@@ -1232,11 +1275,7 @@ def rotate_lan_ssh_host_key_after_attested_return(
         finally:
             child.close(force=True)
         output = bytes(transcript).decode(errors="replace").replace("\r", "")
-        if (
-            not password_sent
-            or child.exitstatus != 0
-            or child.signalstatus is not None
-        ):
+        if not password_sent or child.exitstatus != 0 or child.signalstatus is not None:
             raise BootstrapFirmwareError("replacement LAN SSH serial command failed")
         serial_lines = [
             line.removeprefix("serial=").strip()
@@ -1255,9 +1294,7 @@ def rotate_lan_ssh_host_key_after_attested_return(
         replacement_fingerprint = _run_output(
             ("ssh-keygen", "-lf", str(temporary), "-E", "sha256"), timeout_s=10
         ).strip()
-        backup = destination.with_name(
-            f"{destination.name}.pre-reboot-{previous_sha256[:12]}"
-        )
+        backup = destination.with_name(f"{destination.name}.pre-reboot-{previous_sha256[:12]}")
         try:
             os.link(destination, backup)
         except FileExistsError as error:
@@ -1578,8 +1615,7 @@ def prepare_lan_flash_plan(
     observed_tandem = "tandem-agc" in device_names
     if observed_tandem is not profile.tandem_agc:
         raise BootstrapFirmwareError(
-            f"LAN target tandem capability is {observed_tandem}, "
-            f"expected {profile.tandem_agc}"
+            f"LAN target tandem capability is {observed_tandem}, expected {profile.tandem_agc}"
         )
 
     return (
@@ -2595,9 +2631,10 @@ def _attest_lan_return(plan: LanFlashPlan) -> tuple[str, str, str]:
         raise BootstrapFirmwareError("returned LAN DDR-ring modes do not match the profile")
     if profile.buffer_metadata_status and str(facts.get("iio,buffer-metadata-status") or "") != "1":
         raise BootstrapFirmwareError("returned LAN metadata-status capability is unavailable")
-    if profile.buffer_metadata_timing_log and str(
-        facts.get("iio,buffer-metadata-timing-log") or ""
-    ) != "1":
+    if (
+        profile.buffer_metadata_timing_log
+        and str(facts.get("iio,buffer-metadata-timing-log") or "") != "1"
+    ):
         raise BootstrapFirmwareError("returned LAN timing-log capability is unavailable")
     _require_profile_iio_capabilities(facts, profile, transport="LAN")
     mute_returned_radio_lan(plan.host, plan.target_serial)

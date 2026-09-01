@@ -114,14 +114,14 @@ must be installed with the Python binding from the same source commit. ABI 1
 uses SPF libiio 0.25 tag `spf-frame-metadata-source/v0.25-final-v3` at
 `c26258bfa33098c2b215e19cf85d448e89499b1a`. The released direct-async/RAM-extension
 ABI-3 runtime requires libiio 0.25 commit
-`8f66f353c9a70a5524988ceb588b0e9271c2390d` and tag
-`iq-direct-async-v2-source/libiio-v1`. This revision keeps as many as 4,096
-frames in one finite direct-async session and adds the explicit
-`drop_backlog_on_overrun` policy; ordinary metadata batching remains limited
-to 64. Full persistent firmware release
-[`v0.47-plutoplus-spf-iq-direct-async-v2`](https://github.com/misko/plutosdr-fw/releases/tag/v0.47-plutoplus-spf-iq-direct-async-v2)
-contains the matched radio runtime. The installer must fail rather than use an
-older ABI-3 build. See
+`0d323080a0a1067da8c7adbadfd03ee186a40ec2` and tag
+`iq-direct-async-v3-source/libiio-v1`. It keeps as many as 4,096 frames in one
+finite session, exposes both overrun policies, and recovers stale metadata in
+drop-backlog mode without ending the host request; ordinary metadata batching
+remains limited to 64. Full persistent firmware release
+[`v0.48-plutoplus-spf-iq-direct-async-v3`](https://github.com/misko/plutosdr-fw/releases/tag/v0.48-plutoplus-spf-iq-direct-async-v3)
+contains the matched radio runtime. The installer fails closed on an older
+ABI-3 build. See
 [`docs/METADATA_CAPTURE_RUNTIME.md`](docs/METADATA_CAPTURE_RUNTIME.md) for the
 complete matrix and status.
 
@@ -1046,8 +1046,8 @@ For a network-only radio whose key was enrolled as above, `firmware flash-lan`
 provides a standalone, receipt-bound persistent update. It accepts only a literal
 private IPv4 address, one exact serial, and an immutable hardware-qualified
 persistent profile. The current full direct-async/RAM-extension release uses
-profile `iq-direct-async-v2-release-persistent-promotion` and exact firmware
-release `v0.47-plutoplus-spf-iq-direct-async-v2`.
+profile `iq-direct-async-v3-release-persistent-promotion` and exact firmware
+release `v0.48-plutoplus-spf-iq-direct-async-v3`.
 
 Create a read-only plan first:
 
@@ -1055,7 +1055,7 @@ Create a read-only plan first:
 uv run pluto firmware flash-lan /absolute/path/to/qualified-pluto.dfu \
   --serial EXACT_SERIAL \
   --host 192.168.1.20 \
-  --profile iq-direct-async-v2-release-persistent-promotion \
+  --profile iq-direct-async-v3-release-persistent-promotion \
   --ssh-known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts
 ```
 
@@ -1067,7 +1067,7 @@ option for a hidden prompt):
 uv run pluto firmware flash-lan /absolute/path/to/qualified-pluto.dfu \
   --serial EXACT_SERIAL \
   --host 192.168.1.20 \
-  --profile iq-direct-async-v2-release-persistent-promotion \
+  --profile iq-direct-async-v3-release-persistent-promotion \
   --ssh-known-hosts-file /private/EXACT_SERIAL.lan-20.known_hosts \
   --ssh-password-file /private/radio.password \
   --receipt-directory /private/lan-flash-receipts \
