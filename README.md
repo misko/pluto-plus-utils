@@ -853,6 +853,81 @@ and persistent targets are outside this command.
 The full ownership and migration decision is recorded in
 [`docs/adr/0006-release-candidate-device-lifecycle.md`](docs/adr/0006-release-candidate-device-lifecycle.md).
 
+#### RX-only RAM qualification v2
+
+RX-only candidates use parallel `.v2` candidate, operation, RAM-receipt, and
+recovery-receipt schemas. They do not weaken or reinterpret the tandem-capable
+v1 lifecycle. The v1 schemas, attestor, confirmation phrase, and qualification
+campaign remain unchanged, and the legacy tandem qualification commands reject
+v2 operation plans.
+
+Before creating a v2 operation plan, use the normal PPU setup workflow to apply
+and reboot into exactly one reviewed 1R1T target (`ad9361-1r1t` or
+`ad9363a-1r1t`). Retain its successful setup receipt. The v2 preflight then
+requires that same U-Boot compatible/mode/attr pair, driver personality, exact
+`voltage0,voltage1` RX scan geometry, and TX-capable 1R1T FPGA topology. A
+legacy 2R2T runtime cannot enter this lifecycle.
+
+```bash
+uv run pluto firmware candidate-ram plan \
+  --candidate-plan /private/rx-only/candidate-plan-v2.json \
+  --usb-inventory /private/rx-only/usb-inventory.json \
+  --serial EXACT_SERIAL \
+  --runtime-target ad9361-1r1t \
+  --expected-current-firmware EXACT_PERSISTENT_VERSION \
+  --receipt /private/rx-only/EXACT_SERIAL/ram-receipt-v2.json \
+  --output /private/rx-only/EXACT_SERIAL-operation-plan-v2.json
+
+uv run pluto firmware candidate-ram execute \
+  --operation-plan /private/rx-only/EXACT_SERIAL-operation-plan-v2.json \
+  --ssh-password-file /private/credentials/EXACT_SERIAL.password \
+  --tool-repository "$PWD" \
+  --confirm 'RAM BOOT RX-ONLY RELEASE CANDIDATE EXACT_SERIAL ad9361-1r1t'
+```
+
+Preflight first proves the exact one exposed 1R1T TX-gain control, the expected
+RX-LO plus shared TX-LO powerdown-control inventory, and four DDS raw/scale
+controls. It then performs only safe-direction quiesce writes: gain at or below
+-80 dB, shared TX LO powered down, DDS disabled, and both DAC zero sources
+selected. Readback must prove those values plus tandem IDLE, empty FIFO, and no
+faults before DFU begins. Those writes are receipted and intentionally remain
+applied if preflight aborts; the utility never restores them by enabling TX.
+
+Postboot qualification requires the same serial, USB topology, model, 1R1T
+target and U-Boot identity, a new boot ID, byte-identical `qspi-linux`, exact
+`voltage0,voltage1` scan geometry, RX DMA present, and DDS, TX DMA, and tandem
+absent. Absence is accepted only with the exact reviewed root device-tree marker
+`misko,rx-only-fpga` under policy `rx-only-v1`. The postboot control inventory
+must contain one real TX gain and the one shared TX LO; values are never cloned
+to manufacture two-channel evidence.
+
+Every passing v2 RAM trial must be deliberately rolled back before the next
+trial. A route-released PASS receipt is the normal rollback source; a
+route-released UNKNOWN is also eligible only when its sealed transition started.
+`cleanup.verified` on an UNKNOWN means that failure reconciliation found one
+safe candidate or persistent runtime; it never substitutes for rollback. FAILED
+pre-transition receipts are not eligible. Recovery always resets through
+unchanged persistent QSPI and re-attests the original TX-capable 1R1T setup and
+firmware. Reusing whichever runtime currently answers is not recovery, and the
+pre-reset USB runtime must disappear before its return can be accepted:
+
+```bash
+uv run pluto firmware candidate-ram recover \
+  /private/rx-only/EXACT_SERIAL/ram-receipt-v2.json \
+  --ssh-password-file /private/credentials/EXACT_SERIAL.password \
+  --expected-return-firmware EXACT_PERSISTENT_VERSION \
+  --output /private/rx-only/EXACT_SERIAL/recovery-receipt-v2.json \
+  --confirm 'RECOVER RX-ONLY RELEASE CANDIDATE EXACT_SERIAL ad9361-1r1t'
+```
+
+Retain both the RAM receipt and recovery receipt for each staged 15, 30, and
+60 MS/s trial. Do not begin the next trial until the recovery receipt proves a
+new persistent boot ID, unchanged `qspi-linux`, the original 1R1T setup and
+firmware, pre-reset USB departure, verified TX quiesce, and released host route.
+
+See [ADR 0007](docs/adr/0007-rx-only-ram-qualification-v2.md) for the schema,
+rollback, and migration boundaries.
+
 ABI-4 authoritative gain-timeline candidates use the first-class
 `candidate-ram qualification-plan` and `qualification-execute` campaign. It
 owns the fixed USB/physical-IP, HOLD/AUTO, ordinary/single+dual, and
