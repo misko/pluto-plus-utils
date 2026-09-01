@@ -291,8 +291,7 @@ IIO_THROUGHPUT_SAMPLER_WAKE_V5_RC1_PROFILE = DiagnosticProfile(
     metadata_abis=(3,),
     tandem_agc_required=True,
     release_status=(
-        "RAM-only interruptible metadata-sampler wait diagnostic; never "
-        "persistence-qualified"
+        "RAM-only interruptible metadata-sampler wait diagnostic; never persistence-qualified"
     ),
     release_rank=28,
 )
@@ -303,8 +302,7 @@ IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_PROFILE = DiagnosticProfile(
     metadata_abis=(3,),
     tandem_agc_required=True,
     release_status=(
-        "RAM-only full-DMA-queue metadata coverage diagnostic; never "
-        "persistence-qualified"
+        "RAM-only full-DMA-queue metadata coverage diagnostic; never persistence-qualified"
     ),
     release_rank=29,
 )
@@ -326,9 +324,7 @@ IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_PROFILE = DiagnosticProfile(
     firmware_version="v0.45-plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1",
     metadata_abis=(3,),
     tandem_agc_required=True,
-    release_status=(
-        "RAM-only continuous buffered-sampler candidate; never persistence-qualified"
-    ),
+    release_status=("RAM-only continuous buffered-sampler candidate; never persistence-qualified"),
     release_rank=31,
 )
 
@@ -337,9 +333,7 @@ IQ_DIRECT_ASYNC_RING_V1_RC1_PROFILE = DiagnosticProfile(
     firmware_version="v0.46-plutoplus-spf-iq-direct-async-ring-v1-rc1",
     metadata_abis=(3,),
     tandem_agc_required=True,
-    release_status=(
-        "RAM-only direct-async IQ queue candidate; never persistence-qualified"
-    ),
+    release_status=("RAM-only direct-async IQ queue candidate; never persistence-qualified"),
     release_rank=32,
 )
 
@@ -365,6 +359,19 @@ IQ_DIRECT_ASYNC_V2_RELEASE_PROFILE = DiagnosticProfile(
         "persistent QSPI installation authorized"
     ),
     release_rank=34,
+)
+
+IQ_DIRECT_ASYNC_V3_RELEASE_PROFILE = DiagnosticProfile(
+    profile_id="iq-direct-async-v3-release",
+    firmware_version="v0.48-plutoplus-spf-iq-direct-async-v3",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status=(
+        "full hardware-qualified direct-async v3 stale-metadata recovery, "
+        "RAM-extension, and drop-backlog release; persistent QSPI installation "
+        "authorized"
+    ),
+    release_rank=35,
 )
 
 DIAGNOSTIC_PROFILES = (
@@ -402,6 +409,7 @@ DIAGNOSTIC_PROFILES = (
     IQ_DIRECT_ASYNC_RING_V1_RC1_PROFILE,
     IQ_DIRECT_ASYNC_RING_V1_RELEASE_PROFILE,
     IQ_DIRECT_ASYNC_V2_RELEASE_PROFILE,
+    IQ_DIRECT_ASYNC_V3_RELEASE_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 

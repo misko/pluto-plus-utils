@@ -1181,9 +1181,7 @@ def test_iio_throughput_refill_sampler_v4_rc1_profile_is_exactly_bound_and_ram_o
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
     assert policy.release_tag == "iio-throughput-refill-sampler-v4-rc1-854a719f4d8a"
-    assert policy.device_firmware == (
-        "v0.45-plutoplus-spf-iio-throughput-refill-sampler-v4-rc1"
-    )
+    assert policy.device_firmware == ("v0.45-plutoplus-spf-iio-throughput-refill-sampler-v4-rc1")
     assert policy.source_commit == "854a719f4d8a39eb3a7da708eb6f56360971f917"
     assert policy.asset_name == (
         "plutoplus-spf-iio-throughput-refill-sampler-v4-rc1-854a719f4d8a-pluto.dfu"
@@ -1218,9 +1216,7 @@ def test_iio_throughput_sampler_wake_v5_rc1_profile_is_exactly_bound_and_ram_onl
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
     assert policy.release_tag == "iio-throughput-sampler-wake-v5-rc1-3ac0dd51035a"
-    assert policy.device_firmware == (
-        "v0.45-plutoplus-spf-iio-throughput-sampler-wake-v5-rc1"
-    )
+    assert policy.device_firmware == ("v0.45-plutoplus-spf-iio-throughput-sampler-wake-v5-rc1")
     assert policy.source_commit == "3ac0dd51035ad739185efbe9cf4332c861b89704"
     assert policy.asset_name == (
         "plutoplus-spf-iio-throughput-sampler-wake-v5-rc1-3ac0dd51035a-pluto.dfu"
@@ -1255,9 +1251,7 @@ def test_iio_throughput_coverage_window_v6_rc1_profile_is_exactly_bound_and_ram_
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
     assert policy.release_tag == "iio-throughput-coverage-window-v6-rc1-1cbc115b2ea7"
-    assert policy.device_firmware == (
-        "v0.45-plutoplus-spf-iio-throughput-coverage-window-v6-rc1"
-    )
+    assert policy.device_firmware == ("v0.45-plutoplus-spf-iio-throughput-coverage-window-v6-rc1")
     assert policy.source_commit == "1cbc115b2ea7aa7d1678ae1ca329ceed1af6a07c"
     assert policy.asset_name == (
         "plutoplus-spf-iio-throughput-coverage-window-v6-rc1-1cbc115b2ea7-pluto.dfu"
@@ -1292,9 +1286,7 @@ def test_iio_throughput_coverage_window_v6_release_profile_is_exactly_bound_and_
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
     assert policy.release_tag == "v0.45-plutoplus-spf-iio-throughput-coverage-window-v6"
-    assert policy.device_firmware == (
-        "v0.45-plutoplus-spf-iio-throughput-coverage-window-v6"
-    )
+    assert policy.device_firmware == ("v0.45-plutoplus-spf-iio-throughput-coverage-window-v6")
     assert policy.source_commit == "4f15c87033e332293711ad679a50af0109c72862"
     assert policy.asset_name == (
         "plutoplus-spf-iio-throughput-coverage-window-v6-4f15c87033e3-pluto.dfu"
@@ -1329,13 +1321,10 @@ def test_iio_throughput_buffered_sampler_v7_rc1_profile_is_exactly_bound_and_ram
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
     assert policy.release_tag == "iio-throughput-buffered-sampler-v7-rc1-aaed8a8e38b0"
-    assert policy.device_firmware == (
-        "v0.45-plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1"
-    )
+    assert policy.device_firmware == ("v0.45-plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1")
     assert policy.source_commit == "aaed8a8e38b02cb9802d18102a21dcead5c94a74"
     assert policy.asset_name == (
-        "plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1-"
-        "aaed8a8e38b0-pluto.dfu"
+        "plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1-aaed8a8e38b0-pluto.dfu"
     )
     assert policy.asset_sha256 == (
         "9fd59860a169966d827a7dcafa57be555700faa8e3ea3e2538b31daeb64880ca"
@@ -1367,13 +1356,9 @@ def test_iq_direct_async_ring_v1_rc1_profile_is_exactly_bound_and_ram_only() -> 
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
     assert policy.release_tag == "iq-direct-async-ring-v1-rc1-4af2ab74605a"
-    assert policy.device_firmware == (
-        "v0.46-plutoplus-spf-iq-direct-async-ring-v1-rc1"
-    )
+    assert policy.device_firmware == ("v0.46-plutoplus-spf-iq-direct-async-ring-v1-rc1")
     assert policy.source_commit == "4af2ab74605a62832f7f38a0eefe3b3bc1d492cf"
-    assert policy.asset_name == (
-        "plutoplus-spf-iq-direct-async-ring-v1-rc1-4af2ab74605a-pluto.dfu"
-    )
+    assert policy.asset_name == ("plutoplus-spf-iq-direct-async-ring-v1-rc1-4af2ab74605a-pluto.dfu")
     assert policy.asset_sha256 == (
         "6b29618d186d82c6b8fa02f74073853029b7d081196cb8643b92550e09162391"
     )
@@ -1406,9 +1391,7 @@ def test_iq_direct_async_ring_v1_release_requires_distinct_persistent_promotion(
     assert policy.release_tag == "v0.46-plutoplus-spf-iq-direct-async-ring-v1"
     assert policy.device_firmware == "v0.46-plutoplus-spf-iq-direct-async-ring-v1"
     assert policy.source_commit == "f182a8fa0811d2e70186b8f75d06ff4d5d896140"
-    assert policy.asset_name == (
-        "plutoplus-spf-iq-direct-async-ring-v1-f182a8fa0811-pluto.dfu"
-    )
+    assert policy.asset_name == ("plutoplus-spf-iq-direct-async-ring-v1-f182a8fa0811-pluto.dfu")
     assert policy.asset_sha256 == (
         "ac51893dac8a914621aa8eb6f5c65d324ae8f09812033aa4880dc1dad8e6d739"
     )
@@ -1456,9 +1439,7 @@ def test_iq_direct_async_v2_release_requires_distinct_persistent_promotion() -> 
     assert policy.release_tag == "v0.47-plutoplus-spf-iq-direct-async-v2"
     assert policy.device_firmware == "v0.47-plutoplus-spf-iq-direct-async-v2"
     assert policy.source_commit == "2bab87dcd9b18c8f957ae781603e88160c8509cc"
-    assert policy.asset_name == (
-        "plutoplus-spf-iq-direct-async-v2-2bab87dcd9b1-pluto.dfu"
-    )
+    assert policy.asset_name == ("plutoplus-spf-iq-direct-async-v2-2bab87dcd9b1-pluto.dfu")
     assert policy.asset_sha256 == (
         "b97564524058b4b57e73ccfa60cdf1acbefaac05f90b16ccd460b0a8bb6c307d"
     )
@@ -1549,16 +1530,14 @@ def test_issue_72_v3_candidate_is_exact_and_ram_only() -> None:
     )
 
 
-def test_issue_72_v3_final_trusted_bytes_are_exact_and_ram_only() -> None:
+def test_issue_72_v3_final_trusted_bytes_require_distinct_persistent_promotion() -> None:
     policy = bootstrap.IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY
     profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
 
     assert policy.release_tag == "v0.48-plutoplus-spf-iq-direct-async-v3"
     assert policy.device_firmware == "v0.48-plutoplus-spf-iq-direct-async-v3"
     assert policy.source_commit == "e3078376a6e1a8c6ea841dc69966b3880e020c70"
-    assert policy.asset_name == (
-        "plutoplus-spf-iq-direct-async-v3-e3078376a6e1-pluto.dfu"
-    )
+    assert policy.asset_name == ("plutoplus-spf-iq-direct-async-v3-e3078376a6e1-pluto.dfu")
     assert policy.asset_sha256 == (
         "cc87c36a3aad609a64b45f4a02eecf916b99a3099fa523eed1bf4526ed98995a"
     )
@@ -1582,6 +1561,26 @@ def test_issue_72_v3_final_trusted_bytes_are_exact_and_ram_only() -> None:
         ),
         ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
     )
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "iq-direct-async-v3-release-persistent-promotion"
+    ]
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.profile_id != policy.profile_id
+    assert promotion.policy.asset_sha256 == policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == policy.fit_body_sha256
+    assert promotion.policy.fit_body_size == policy.fit_body_size
+    assert promotion.policy.source_commit == policy.source_commit
+    assert promotion.policy.hardware_qualified is True
+    assert promotion.metadata_abi == profile.metadata_abi == 3
+    assert promotion.tandem_agc is profile.tandem_agc is True
+    assert promotion.ddr_burst_max_iq_bytes == profile.ddr_burst_max_iq_bytes
+    assert promotion.ddr_burst_reserve_bytes == profile.ddr_burst_reserve_bytes
+    assert promotion.ddr_ring_max_iq_bytes == profile.ddr_ring_max_iq_bytes
+    assert promotion.ddr_ring_modes == profile.ddr_ring_modes == "finite,continuous"
+    assert promotion.buffer_metadata_status is profile.buffer_metadata_status is True
+    assert promotion.buffer_metadata_timing_log is profile.buffer_metadata_timing_log is True
+    assert promotion.iiod_rw_cpu_affinity == profile.iiod_rw_cpu_affinity == 1
+    assert promotion.required_iio_capabilities == profile.required_iio_capabilities
 
 
 def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:
@@ -2413,8 +2412,10 @@ def test_execute_lan_flash_orders_attestation_rotation_and_receipt(
     monkeypatch.setattr(
         bootstrap,
         "_attest_lan_return_when_ready",
-        lambda *args, **kwargs: lifecycle.append("return-attested")
-        or (plan.target_serial, plan.expected_firmware, "ad9361"),
+        lambda *args, **kwargs: (
+            lifecycle.append("return-attested")
+            or (plan.target_serial, plan.expected_firmware, "ad9361")
+        ),
     )
 
     def rotate() -> dict[str, str]:
@@ -2561,9 +2562,7 @@ def test_rotate_lan_ssh_key_archives_old_key_after_exact_iio_return(
         del kwargs
         assert binary == "ssh"
         destination = next(
-            item.partition("=")[2]
-            for item in arguments
-            if item.startswith("UserKnownHostsFile=")
+            item.partition("=")[2] for item in arguments if item.startswith("UserKnownHostsFile=")
         )
         Path(destination).write_bytes(new_key)
         return SuccessfulChild()
@@ -2791,9 +2790,7 @@ def test_standalone_reconciliation_may_be_repeated_read_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(
-        planned, tmp_path, monkeypatch
-    )
+    plan, receipt_directory, receipt_id = _uncertain_serial_receipt(planned, tmp_path, monkeypatch)
     first_transport = ReadOnlyReconciliationTransport(plan)
     second_transport = ReadOnlyReconciliationTransport(plan)
 

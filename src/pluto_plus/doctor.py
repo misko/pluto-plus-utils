@@ -480,9 +480,7 @@ IIO_THROUGHPUT_RW_AFFINITY_V2_RC1_RAM_POLICY = FirmwarePolicy(
     profile_id="iio-throughput-rw-affinity-v2-rc1-ram",
     release_tag="iio-throughput-rw-affinity-v2-rc1-6d0ece066f2f",
     device_firmware="v0.45-plutoplus-spf-iio-throughput-rw-affinity-v2-rc1",
-    asset_name=(
-        "plutoplus-spf-iio-throughput-rw-affinity-v2-rc1-6d0ece066f2f-pluto.dfu"
-    ),
+    asset_name=("plutoplus-spf-iio-throughput-rw-affinity-v2-rc1-6d0ece066f2f-pluto.dfu"),
     asset_sha256="5ef822b253e7bdd46cae2bc0fc291863911e0057de3e8321a9af56097fce2361",
     release_url="https://github.com/misko/plutosdr-fw/actions/runs/33285375350",
     source_commit="6d0ece066f2f780dbb558358cf6d64ce089e8ee7",
@@ -520,9 +518,7 @@ IIO_THROUGHPUT_REFILL_SAMPLER_V4_RC1_RAM_POLICY = FirmwarePolicy(
     profile_id="iio-throughput-refill-sampler-v4-rc1-ram",
     release_tag="iio-throughput-refill-sampler-v4-rc1-854a719f4d8a",
     device_firmware="v0.45-plutoplus-spf-iio-throughput-refill-sampler-v4-rc1",
-    asset_name=(
-        "plutoplus-spf-iio-throughput-refill-sampler-v4-rc1-854a719f4d8a-pluto.dfu"
-    ),
+    asset_name=("plutoplus-spf-iio-throughput-refill-sampler-v4-rc1-854a719f4d8a-pluto.dfu"),
     asset_sha256="cc26011083192b3f83a105ba47d25e25ed2ce102948eb24ad12c23297ced73b6",
     release_url="https://github.com/misko/plutosdr-fw/actions/runs/33289043863",
     source_commit="854a719f4d8a39eb3a7da708eb6f56360971f917",
@@ -540,9 +536,7 @@ IIO_THROUGHPUT_SAMPLER_WAKE_V5_RC1_RAM_POLICY = FirmwarePolicy(
     profile_id="iio-throughput-sampler-wake-v5-rc1-ram",
     release_tag="iio-throughput-sampler-wake-v5-rc1-3ac0dd51035a",
     device_firmware="v0.45-plutoplus-spf-iio-throughput-sampler-wake-v5-rc1",
-    asset_name=(
-        "plutoplus-spf-iio-throughput-sampler-wake-v5-rc1-3ac0dd51035a-pluto.dfu"
-    ),
+    asset_name=("plutoplus-spf-iio-throughput-sampler-wake-v5-rc1-3ac0dd51035a-pluto.dfu"),
     asset_sha256="c0a86b4426b5ac951be8f0a84af1f8012842c6da57967f160af4b029073d84ef",
     release_url="https://github.com/misko/plutosdr-fw/actions/runs/33291037025",
     source_commit="3ac0dd51035ad739185efbe9cf4332c861b89704",
@@ -560,9 +554,7 @@ IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_RAM_POLICY = FirmwarePolicy(
     profile_id="iio-throughput-coverage-window-v6-rc1-ram",
     release_tag="iio-throughput-coverage-window-v6-rc1-1cbc115b2ea7",
     device_firmware="v0.45-plutoplus-spf-iio-throughput-coverage-window-v6-rc1",
-    asset_name=(
-        "plutoplus-spf-iio-throughput-coverage-window-v6-rc1-1cbc115b2ea7-pluto.dfu"
-    ),
+    asset_name=("plutoplus-spf-iio-throughput-coverage-window-v6-rc1-1cbc115b2ea7-pluto.dfu"),
     asset_sha256="7bad93cc3411b30d15c4c93472cd82a5fb5e10481f246062fae7f60f1a21207a",
     release_url="https://github.com/misko/plutosdr-fw/actions/runs/33293657116",
     source_commit="1cbc115b2ea7aa7d1678ae1ca329ceed1af6a07c",
@@ -581,9 +573,7 @@ IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RELEASE_RAM_POLICY = FirmwarePolicy(
     profile_id="iio-throughput-coverage-window-v6-release-ram",
     release_tag="v0.45-plutoplus-spf-iio-throughput-coverage-window-v6",
     device_firmware="v0.45-plutoplus-spf-iio-throughput-coverage-window-v6",
-    asset_name=(
-        "plutoplus-spf-iio-throughput-coverage-window-v6-4f15c87033e3-pluto.dfu"
-    ),
+    asset_name=("plutoplus-spf-iio-throughput-coverage-window-v6-4f15c87033e3-pluto.dfu"),
     asset_sha256="69224a5c0e927f4bb09c21b0bfc07f5d04b7998cf514c1478ccc1e2eb78dc2f8",
     release_url="https://github.com/misko/plutosdr-fw/actions/runs/33318745366",
     source_commit="4f15c87033e332293711ad679a50af0109c72862",
@@ -603,10 +593,7 @@ IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_RAM_POLICY = FirmwarePolicy(
     profile_id="iio-throughput-buffered-sampler-v7-rc1-ram",
     release_tag="iio-throughput-buffered-sampler-v7-rc1-aaed8a8e38b0",
     device_firmware="v0.45-plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1",
-    asset_name=(
-        "plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1-"
-        "aaed8a8e38b0-pluto.dfu"
-    ),
+    asset_name=("plutoplus-spf-iio-throughput-buffered-sampler-v7-rc1-aaed8a8e38b0-pluto.dfu"),
     asset_sha256="9fd59860a169966d827a7dcafa57be555700faa8e3ea3e2538b31daeb64880ca",
     release_url="https://github.com/misko/plutosdr-fw/actions/runs/33321123385",
     source_commit="aaed8a8e38b02cb9802d18102a21dcead5c94a74",
@@ -623,9 +610,7 @@ IQ_DIRECT_ASYNC_RING_V1_RC1_RAM_POLICY = FirmwarePolicy(
     profile_id="iq-direct-async-ring-v1-rc1-ram",
     release_tag="iq-direct-async-ring-v1-rc1-4af2ab74605a",
     device_firmware="v0.46-plutoplus-spf-iq-direct-async-ring-v1-rc1",
-    asset_name=(
-        "plutoplus-spf-iq-direct-async-ring-v1-rc1-4af2ab74605a-pluto.dfu"
-    ),
+    asset_name=("plutoplus-spf-iq-direct-async-ring-v1-rc1-4af2ab74605a-pluto.dfu"),
     asset_sha256="6b29618d186d82c6b8fa02f74073853029b7d081196cb8643b92550e09162391",
     release_url="https://github.com/misko/plutosdr-fw/actions/runs/33360776546",
     source_commit="4af2ab74605a62832f7f38a0eefe3b3bc1d492cf",
@@ -719,8 +704,7 @@ IQ_DIRECT_ASYNC_V3_CANDIDATE_RAM_POLICY = FirmwarePolicy(
     asset_name="plutoplus-spf-iq-direct-async-v3-322b67f9580d-pluto.dfu",
     asset_sha256="4f981697af03a2c8fe041c7c5a932da7ce0cf66bf78e24518f7574e3738ac6a4",
     release_url=(
-        "https://github.com/misko/plutosdr-fw/commit/"
-        "322b67f9580d215c1f8362735c877f7c5ee2f89e"
+        "https://github.com/misko/plutosdr-fw/commit/322b67f9580d215c1f8362735c877f7c5ee2f89e"
     ),
     source_commit="322b67f9580d215c1f8362735c877f7c5ee2f89e",
     fit_body_sha256="958e4e1d3f128bd3c90c449d674ef7f79c23afebcb23f1af9627c8e6f6f93d7e",
@@ -746,6 +730,23 @@ IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY = FirmwarePolicy(
     fit_body_size=12_825_571,
     hardware_qualified=False,
     published_at=datetime(2026, 9, 1, 8, 0, 26, tzinfo=UTC),
+)
+
+# The same protected-build v0.48 DFU/FIT receives a distinct QSPI authority
+# after the exact bytes passed all four serial/path-bound USB RAM boots and
+# smoke captures, the physical-GbE 25 MS/s 3/10/60-second gate at 70 MB/s+,
+# the 5/10/15/20/25 MS/s RAM-ring ladder, and the matched 20-second
+# ringless/RAM preserve/drop recovery matrix.  Keeping this object separate
+# means the volatile profile can never authorize persistence by implication.
+IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "iq-direct-async-v3-release-persistent-promotion",
+        "release_url": (
+            "https://github.com/misko/plutosdr-fw/releases/tag/"
+            "v0.48-plutoplus-spf-iq-direct-async-v3"
+        ),
+        "hardware_qualified": True,
+    }
 )
 
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
@@ -836,7 +837,7 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 # repair. USB and enrolled-network upgrades select the newest release that has
 # completed the persistent hardware gate; setup keeps the immutable U-Boot
 # tuple but accepts only an exact QSPI image in the allowlist below.
-PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY
+PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY
 
 # Canonical U-Boot repair may run only while one of these exact, reviewed,
 # hardware-qualified QSPI images is active. The tuple itself remains fixed;
@@ -847,6 +848,7 @@ SETUP_REPAIR_POLICIES = (
     DDR_BURST_V2_RELEASE_PERSISTENT_POLICY,
     DDR_RING_V1_RELEASE_PERSISTENT_POLICY,
     DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,
+    IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
     PERSISTENT_UPGRADE_POLICY,
 )
 
