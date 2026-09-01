@@ -11,11 +11,12 @@ not make continuity observable and must not be accepted as a fallback.
 | --- | --- | --- | --- |
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
-| `iio,buffer-metadata=3` | strict `RadioMetadataV6` | `iq-direct-async-v3-source/libiio-v1` | `0d323080a0a1067da8c7adbadfd03ee186a40ec2` |
+| `iio,buffer-metadata=3`, exact DMA admission absent | strict `RadioMetadataV6` | `iq-direct-async-v3-source/libiio-v1` | `0d323080a0a1067da8c7adbadfd03ee186a40ec2` |
+| `iio,buffer-metadata=3` plus `iio,buffer-direct-async-exact-kernel-queue=1` | strict `RadioMetadataV6` | `iq-direct-async-v4-source/libiio-v1` | `5cb2389719d46d12463daa0371d1fda19eb25fa7` |
 | `iio,buffer-metadata=3` plus `iio,buffer-metadata-abi-versions=1,2,3,4` | strict `RadioMetadataV7` selected as ABI 4 | gain-timeline v8 release source | frozen by the release candidate plan |
 
-The released direct-async v3 firmware advertises ABI 3. Radios still running an
-older release may advertise ABI 1 or 2; the host must select from the radio's
+The released direct-async v4 firmware advertises ABI 3 plus authoritative DMA
+admission. Radios still running an older release may advertise ABI 1 or 2; the host must select from the radio's
 attested capabilities rather than choosing a newer parser only because it is
 available.
 
@@ -93,24 +94,27 @@ fraction. Transport qualification
 uses tandem HOLD by default so gain transitions do not confound the data-path
 result; pass `--tandem-mode auto` to exercise both systems together.
 
-### ABI-3 direct async and RAM queue extension
+### ABI-3 direct async, exact DMA admission, and RAM queue extension
 
-The `iq-direct-async-v3-source` runtime adds one finite direct mode to ABI 3,
+The `iq-direct-async-v4-source` runtime adds one finite direct mode to ABI 3,
 allows its target to span as many as 4,096 frames without re-arming, and makes
 radio-side overrun handling explicit. The hardware-test package set is:
 
 | Component | Exact released version | Qualified source commit |
 | --- | --- | --- |
-| persistent firmware | `v0.48-plutoplus-spf-iq-direct-async-v3` | protected build `e3078376a6e1a8c6ea841dc69966b3880e020c70`; implementation ancestor `322b67f9580d215c1f8362735c877f7c5ee2f89e` |
-| firmware Buildroot/rootfs | `iq-direct-async-v3-source/buildroot-v1` | `1c337a0b8d8126c9d1ed785607bc5ea52e7fed22` |
-| firmware Linux / CMA geometry | `ddr-burst-v1-rc3-source/linux-v1` | `93174a1c049ca6ee42f042dbe93f0fb06fbc9cd7` |
-| radio iiOD and host libiio | 0.25 / `iq-direct-async-v3-source/libiio-v1` | `0d323080a0a1067da8c7adbadfd03ee186a40ec2` |
+| persistent firmware | `v0.49-plutoplus-spf-iq-direct-async-v4` | protected build `bc00edb8c340dd4f9b04361398cbd2c8edcc9cae`, run `33535095284` |
+| firmware Buildroot/rootfs | `iq-direct-async-v4-source/buildroot-v1` | `2e146948a52eaf7c7f675c5e6ac746eeff4aacac` |
+| firmware Linux / CMA geometry | `iq-direct-async-v4-source/linux-v1` | `7176508dd84bde78c62d8790bbd17957fdda12d7` |
+| radio iiOD and host libiio | 0.25 / `iq-direct-async-v4-source/libiio-v1` | `5cb2389719d46d12463daa0371d1fda19eb25fa7` |
 | radio metadata provider | ABI 3 / `RadioMetadataV6` | `3294365ff44da26b261be4a2ccb241b7896d23ad` |
-| Pluto Plus Utils | 0.1.0, Python 3.11+ | persistent v3 profile `0a21ce250b44006a7880ae35dc30d11673fd2180` or later |
+| Pluto Plus Utils | 0.1.0, Python 3.11+ | persistent v4 profile `35a827c0f8d6255fa29646c75ea191492e403b69` or later |
 
 Both the native host library and Python binding must be generated from the
-same `0d32308` tree. The ABI-3 runtime receipt deliberately rejects older
-ABI-3 libiio commits, upstream libiio, and a PyPI-only binding.
+same `5cb2389` tree. The ABI-3 runtime receipt deliberately rejects older
+ABI-3 libiio commits, upstream libiio, and a PyPI-only binding. Direct capture
+also fails before allocation unless the context advertises
+`iio,buffer-direct-async-exact-kernel-queue=1`; a successful open reports the
+allocated count and guarantees it equals the request.
 
 Ringless direct mode requires `iio,buffer-direct-async=1`. The producer leases
 DMA blocks while the existing TCP worker consumes one ordered queue; RAM is

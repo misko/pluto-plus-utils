@@ -112,16 +112,17 @@ uv run pluto serve --hardware --state-root /var/lib/pluto-plus
 The native host library is selected by the radio's declared metadata ABI and
 must be installed with the Python binding from the same source commit. ABI 1
 uses SPF libiio 0.25 tag `spf-frame-metadata-source/v0.25-final-v3` at
-`c26258bfa33098c2b215e19cf85d448e89499b1a`. The released direct-async/RAM-extension
+`c26258bfa33098c2b215e19cf85d448e89499b1a`. The current direct-async/RAM-extension
 ABI-3 runtime requires libiio 0.25 commit
-`0d323080a0a1067da8c7adbadfd03ee186a40ec2` and tag
-`iq-direct-async-v3-source/libiio-v1`. It keeps as many as 4,096 frames in one
-finite session, exposes both overrun policies, and recovers stale metadata in
-drop-backlog mode without ending the host request; ordinary metadata batching
-remains limited to 64. Full persistent firmware release
-[`v0.48-plutoplus-spf-iq-direct-async-v3`](https://github.com/misko/plutosdr-fw/releases/tag/v0.48-plutoplus-spf-iq-direct-async-v3)
-contains the matched radio runtime. The installer fails closed on an older
-ABI-3 build. See
+`5cb2389719d46d12463daa0371d1fda19eb25fa7` and tag
+`iq-direct-async-v4-source/libiio-v1`. It keeps as many as 4,096 frames in one
+finite session, exposes both overrun policies, recovers stale metadata, and
+requires the kernel's allocated DMA count to exactly match the request. Full
+persistent firmware release
+[`v0.49-plutoplus-spf-iq-direct-async-v4`](https://github.com/misko/plutosdr-fw/releases/tag/v0.49-plutoplus-spf-iq-direct-async-v4)
+contains the matched radio runtime and a 216 MiB CMA pool admitting the
+qualified 50 × 1,000,000-sample queue as exactly 200,000,000 IQ bytes. The
+installer fails closed on every older ABI-3 build. See
 [`docs/METADATA_CAPTURE_RUNTIME.md`](docs/METADATA_CAPTURE_RUNTIME.md) for the
 complete matrix and status.
 
