@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -24,7 +25,16 @@ from pluto_plus.setup_helper import (
     SetupSshHostKeyChangedError,
     SetupTransport,
 )
-from pluto_plus.setup_profiles import RX_LO_5G8_HZ, SET_ATTR_PROFILE
+from pluto_plus.setup_profiles import (
+    AD9361_1R1T_CLEAR_ATTR_PROFILE,
+    AD9361_1R1T_SET_ATTR_PROFILE,
+    AD9363A_1R1T_CLEAR_ATTR_PROFILE,
+    AD9363A_1R1T_SET_ATTR_PROFILE,
+    DEFAULT_SETUP_TARGET,
+    RX_LO_5G8_HZ,
+    SET_ATTR_PROFILE,
+    SetupTarget,
+)
 
 
 def test_bound_ssh_transport_supports_private_lan_without_usb_bind(
@@ -408,6 +418,7 @@ def _plan(before: SetupObservation) -> SetupPlan:
         created_at=created,
         expires_at=created + timedelta(minutes=5),
         identity=_identity(),
+        target=DEFAULT_SETUP_TARGET,
         profile_id=CANONICAL_POLICY.profile_id,
         environment_sha256=before.environment_sha256,
         before=before,
@@ -417,6 +428,84 @@ def _plan(before: SetupObservation) -> SetupPlan:
             ("mode", "2r2t"),
         ),
         tx_mute_required=not before.tx_safe,
+    )
+
+
+def _native_plan(before: SetupObservation) -> SetupPlan:
+    created = datetime(2026, 8, 15, tzinfo=UTC)
+    changes = tuple(
+        (key, expected)
+        for key, expected in AD9363A_1R1T_CLEAR_ATTR_PROFILE.uboot.items()
+        if before.uboot.get(key) != expected
+    )
+    return SetupPlan(
+        plan_id="plan-native",
+        created_at=created,
+        expires_at=created + timedelta(minutes=5),
+        identity=_identity(),
+        target=SetupTarget.AD9363A_1R1T,
+        profile_id=CANONICAL_POLICY.profile_id,
+        environment_sha256=before.environment_sha256,
+        before=before,
+        changes_items=changes,
+        tx_mute_required=not before.tx_safe,
+    )
+
+
+def _ad9361_single_plan(before: SetupObservation) -> SetupPlan:
+    created = datetime(2026, 8, 15, tzinfo=UTC)
+    changes = tuple(
+        (key, expected)
+        for key, expected in AD9361_1R1T_CLEAR_ATTR_PROFILE.uboot.items()
+        if before.uboot.get(key) != expected
+    )
+    return SetupPlan(
+        plan_id="plan-ad9361-single",
+        created_at=created,
+        expires_at=created + timedelta(minutes=5),
+        identity=_identity(),
+        target=SetupTarget.AD9361_1R1T,
+        profile_id=CANONICAL_POLICY.profile_id,
+        environment_sha256=before.environment_sha256,
+        before=before,
+        changes_items=changes,
+        tx_mute_required=not before.tx_safe,
+    )
+
+
+def _native_observation(*, explicit: bool = False) -> SetupObservation:
+    profile = AD9363A_1R1T_SET_ATTR_PROFILE if explicit else AD9363A_1R1T_CLEAR_ATTR_PROFILE
+    return _observation(canonical=False, tx_safe=True).model_copy(
+        update={
+            "live_phy_model": "ad9363a",
+            "uboot": profile.uboot,
+            "environment_sha256": ("6" if explicit else "5") * 64,
+            "boot_provenance": "qspi_reboot_verified",
+            "rx_scan_channels": ("voltage0", "voltage1"),
+            "rx_lo_5g8_accepted": None,
+            "rx_lo_5g8_readback_hz": None,
+            "rx_lo_restored": None,
+        }
+    )
+
+
+def _ad9361_single_observation(*, explicit: bool = False) -> SetupObservation:
+    profile = (
+        AD9361_1R1T_SET_ATTR_PROFILE
+        if explicit
+        else AD9361_1R1T_CLEAR_ATTR_PROFILE
+    )
+    return _observation(canonical=False, tx_safe=True).model_copy(
+        update={
+            "live_phy_model": "ad9361",
+            "uboot": profile.uboot,
+            "environment_sha256": ("8" if explicit else "7") * 64,
+            "boot_provenance": "qspi_reboot_verified",
+            "rx_scan_channels": ("voltage0", "voltage1"),
+            "rx_lo_5g8_accepted": True,
+            "rx_lo_5g8_readback_hz": 5_800_000_000,
+            "rx_lo_restored": True,
+        }
     )
 
 
@@ -480,6 +569,8 @@ def test_executor_backs_up_before_exact_batch_write_and_reboot(tmp_path: Path) -
     assert b"mode" not in batch
     with pytest.raises(SetupHelperError):
         executor.canonical_batch({"arbitrary": "value"})
+    with pytest.raises(SetupHelperError, match="outside the bounded profiles"):
+        executor.canonical_batch({"compatible": "ad9363a", "mode": "2r2t"})
     assert CANONICAL_UBOOT["mode"] == "2r2t"
 
 
@@ -496,6 +587,36 @@ def test_executor_has_no_arbitrary_command_or_value_surface(tmp_path: Path) -> N
     )
     with pytest.raises(SetupHelperError):
         executor.canonical_batch({"attr_name": "$(reboot)"})
+
+
+def test_backup_durably_records_the_plan_bound_target(tmp_path: Path) -> None:
+    transport = RecordingTransport()
+    transport.responses.append(
+        "\n".join(
+            (
+                "PPU\tserial\tSERIAL_A",
+                "PPU\tenvironment_hex\t" + b"mode=2r2t\n".hex(),
+                "PPU\tversions_hex\t" + b"v-test\n".hex(),
+                f"PPU\tmtd1_sha256\t{'9' * 64}",
+            )
+        )
+    )
+    executor = FixedSshSetupExecutor(
+        identity=_identity(),
+        transport=transport,
+        state_root=tmp_path,
+    )
+    before = _observation(canonical=False, tx_safe=True)
+
+    backup_path, backup_digest = executor._write_backup(  # noqa: SLF001
+        _native_plan(before),
+        before,
+    )
+
+    document = json.loads(backup_path.read_text())
+    assert document["schema_version"] == 2
+    assert document["target"] == "ad9363a-1r1t"
+    assert len(backup_digest) == 64
 
 
 def test_ram_only_inspection_executor_cannot_provision(tmp_path: Path) -> None:
@@ -585,6 +706,71 @@ def test_provision_tries_the_second_bounded_profile_after_failed_5g8_probe(
         b"attr_name compatible\nattr_val ad9361\n",
     ]
     assert any(phase.startswith("functional_probe_failed:") for phase in result.completed_phases)
+
+
+def test_provision_applies_native_target_without_requiring_legacy_5g8_probe(
+    tmp_path: Path,
+) -> None:
+    before = _observation(canonical=False, tx_safe=True)
+    after = _native_observation()
+    executor = ScriptedExecutor(tmp_path, [before, after])
+
+    result = executor.provision(_native_plan(before))
+
+    assert result.observation == after
+    assert result.observation.rx_lo_5g8_accepted is None
+    assert executor.events == ["inspect", "backup", "reenumerate", "inspect"]
+    assert [stdin for _command, stdin in executor.recording_transport.commands] == [
+        b"attr_name\nattr_val\ncompatible ad9363a\n"
+    ]
+
+
+def test_native_target_fallback_never_crosses_into_ad9361_profiles(
+    tmp_path: Path,
+) -> None:
+    before = _observation(canonical=False, tx_safe=True)
+    wrong_driver = _native_observation().model_copy(update={"live_phy_model": "ad9361"})
+    explicit = _native_observation(explicit=True)
+    executor = ScriptedExecutor(tmp_path, [before, wrong_driver, explicit])
+    executor.recording_transport.responses.append("")
+
+    result = executor.provision(_native_plan(before))
+
+    assert result.observation == explicit
+    assert [stdin for _command, stdin in executor.recording_transport.commands] == [
+        b"attr_name\nattr_val\ncompatible ad9363a\n",
+        b"attr_name compatible\nattr_val ad9363a\n",
+    ]
+    assert all(
+        "ad9361" not in (stdin or b"").decode()
+        for _, stdin in executor.recording_transport.commands
+    )
+
+
+def test_ad9361_1r1t_target_uses_only_its_single_stream_candidates(
+    tmp_path: Path,
+) -> None:
+    before = _observation(canonical=False, tx_safe=True)
+    wrong_driver = _ad9361_single_observation().model_copy(
+        update={"live_phy_model": "ad9363a"}
+    )
+    explicit = _ad9361_single_observation(explicit=True)
+    executor = ScriptedExecutor(tmp_path, [before, wrong_driver, explicit])
+    executor.recording_transport.responses.append("")
+
+    result = executor.provision(_ad9361_single_plan(before))
+
+    assert result.observation == explicit
+    assert result.observation.rx_scan_channels == ("voltage0", "voltage1")
+    assert [stdin for _command, stdin in executor.recording_transport.commands] == [
+        b"attr_name\nattr_val\n",
+        b"attr_name compatible\nattr_val ad9361\n",
+    ]
+    assert all(
+        b"mode 2r2t" not in (stdin or b"")
+        and b"compatible ad9363a" not in (stdin or b"")
+        for _, stdin in executor.recording_transport.commands
+    )
 
 
 def test_provision_waits_for_available_post_reboot_5g8_probe(tmp_path: Path) -> None:

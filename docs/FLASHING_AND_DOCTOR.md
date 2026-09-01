@@ -143,6 +143,37 @@ accepts a profile only when the same serial and USB path return with all four RX
 channels, a safe TX path, exact 5,800,000,000 Hz RX-LO readback, and exact restoration
 of the previous LO. Do not set these variables by hand.
 
+The CLI also exposes two explicit development targets. Driver personality, digital
+channel mode, and receiver layout are independent facts:
+
+| Setup target | Live driver required | RX scan geometry | 5.8 GHz proof | Support |
+| --- | --- | --- | --- | --- |
+| `ad9361-2r2t` (default) | existing qualified AD936x behavior | voltage0..3 present | accepted and restored | hardware-qualified |
+| `ad9361-1r1t` | exactly `ad9361` | exactly voltage0..1 | accepted and restored | development |
+| `ad9363a-1r1t` | exactly `ad9363a` | exactly voltage0..1 | not a success criterion | development |
+
+Each target has only two bounded persistent candidates: a cleared attribute pair and
+an explicit `attr_name=compatible`/`attr_val=<driver>` pair, both with that target's
+`compatible` and `mode`. A plan and its one-time token bind the target; candidate
+fallback never crosses into another target. The native AD9363A target retains the
+legacy receipt fields by leaving the 5.8 GHz probe semantics unchanged, rather than
+mislabeling an in-range frequency as `rx_lo_5g8_*`. Its development success proves
+driver identity, one-RX geometry, and fail-closed TX only; in-range tuning and physical
+RFIC identity require separate hardware evidence.
+
+Target selection does not choose firmware or claim which RFIC is fitted. At daemon
+enrollment, the managed radio's exact active firmware must match one persistent setup
+policy, including its QSPI FIT hash. Physical RFIC inventory still requires independent
+visual, bill-of-materials, or manufacturer evidence.
+
+The daemon runtime target is explicit operator intent, not inferred from U-Boot or the
+live driver. Omission keeps the legacy 2R2T open path unchanged. To plan either
+single-stream target, start the sole-radio setup enrollment with the matching
+`--setup-target`; the API/CLI plan target must agree. This prevents an accidental 1R1T
+boot from silently redefining the receiver layout, and lets a later daemon restart open
+the intended one-channel IIO path. Direct-USB and direct-IP capture adapters remain
+dual-stream-only and reject a single-stream plan before any helper mutation.
+
 Some older AD936x boot scripts guard their AD9364 branch with a malformed condition:
 
 ```text
@@ -204,6 +235,8 @@ Guarded CLI primitives are:
 ```console
 pluto --admin-token-file /private/admin.token setup status
 pluto --admin-token-file /private/admin.token setup plan RADIO_ID
+pluto --admin-token-file /private/admin.token setup plan RADIO_ID --target ad9361-1r1t
+pluto --admin-token-file /private/admin.token setup plan RADIO_ID --target ad9363a-1r1t
 pluto --admin-token-file /private/admin.token setup execute PLAN_ID --token ONE_TIME_TOKEN
 pluto --admin-token-file /private/admin.token setup receipt-list
 ```

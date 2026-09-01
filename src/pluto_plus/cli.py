@@ -102,6 +102,7 @@ from pluto_plus.seeded_hop import (
     DEFAULT_THRESHOLD_DB,
 )
 from pluto_plus.setup_helper import BoundSshTransport
+from pluto_plus.setup_profiles import DEFAULT_SETUP_TARGET, SetupTarget, setup_target_profile
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
 DEFAULT_STATE_ROOT = Path(os.environ.get("PLUTO_STATE_ROOT", "./pluto-state"))
@@ -156,7 +157,7 @@ environment_survey_app = typer.Typer(
     help="Plan, execute, and verify exact-USB RX-only RF environment surveys.",
 )
 setup_app = typer.Typer(
-    no_args_is_help=True, help="Plan and execute guarded canonical AD9361/2R2T setup."
+    no_args_is_help=True, help="Plan and execute guarded target-aware AD936x setup."
 )
 config_app = typer.Typer(
     no_args_is_help=True,
@@ -196,6 +197,14 @@ class _SshFirmwareEnrollmentConfig:
     host: str
     known_hosts_file: Path
     private_key_file: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _SetupEnrollmentConfig:
+    serial: str
+    usb_sysfs_path: Path
+    runtime_target: SetupTarget
+    transport: BoundSshTransport
 
 
 class ApiClient:
@@ -6504,14 +6513,22 @@ def setup_status(ctx: typer.Context) -> None:
 
 
 @setup_app.command("plan")
-def setup_plan(ctx: typer.Context, radio_id: str = typer.Argument(...)) -> None:
-    """Create an expiring identity/environment-bound canonical setup plan."""
+def setup_plan(
+    ctx: typer.Context,
+    radio_id: str = typer.Argument(...),
+    target: SetupTarget | None = typer.Option(  # noqa: B008
+        None,
+        "--target",
+        help="Explicit RF driver/channel target; omission retains AD9361/2R2T.",
+    ),
+) -> None:
+    """Create an expiring identity/environment/target-bound setup plan."""
 
     _emit(
         _api(ctx).request(
             "POST",
             f"radios/{radio_id}/doctor/setup-plans",
-            json_body={},
+            json_body={} if target is None else {"target": target.value},
         )
     )
 
@@ -7044,7 +7061,12 @@ def serve(
     enable_canonical_setup: bool = typer.Option(
         False,
         "--enable-canonical-setup",
-        help="Explicitly enable one exact-radio AD9361/2R2T setup executor.",
+        help="Explicitly enable one exact-radio target-aware AD936x setup executor.",
+    ),
+    setup_target: SetupTarget | None = typer.Option(  # noqa: B008
+        None,
+        "--setup-target",
+        help="Runtime RF target for the sole setup radio; omission retains AD9361/2R2T.",
     ),
     setup_serial: str | None = typer.Option(
         None, "--setup-serial", help="Exact serial of the sole setup target."
@@ -7166,7 +7188,7 @@ def serve(
             2,
         )
 
-    setup_manager = None
+    setup_enrollment: _SetupEnrollmentConfig | None = None
     setup_options = {
         "--setup-serial": setup_serial,
         "--setup-usb-sysfs-path": setup_usb_sysfs_path,
@@ -7175,7 +7197,10 @@ def serve(
         "--setup-password-file": setup_password_file,
         "--setup-known-hosts-file": setup_known_hosts_file,
     }
-    if not enable_canonical_setup and any(value is not None for value in setup_options.values()):
+    setup_requested_options = {**setup_options, "--setup-target": setup_target}
+    if not enable_canonical_setup and any(
+        value is not None for value in setup_requested_options.values()
+    ):
         _fail(
             "canonical_setup_not_enabled",
             "setup target options require explicit --enable-canonical-setup",
@@ -7195,11 +7220,8 @@ def serve(
                 "canonical setup requires --admin-token-file",
                 2,
             )
-        from pluto_plus.doctor import CANONICAL_POLICY
-        from pluto_plus.setup import CanonicalSetupManager, SetupIdentity
         from pluto_plus.setup_helper import (
             BoundSshTransport,
-            FixedSshSetupExecutor,
             SetupHelperError,
             remote_ssh_available,
             validate_bound_interface,
@@ -7211,6 +7233,7 @@ def serve(
         selected_host = _private_usb_host(cast(str, setup_usb_host))
         selected_password_file = cast(Path, setup_password_file)
         selected_known_hosts_file = cast(Path, setup_known_hosts_file)
+        selected_target = setup_target or DEFAULT_SETUP_TARGET
         if not selected_sysfs.is_absolute() or selected_sysfs.parent != Path(
             "/sys/bus/usb/devices"
         ):
@@ -7219,15 +7242,20 @@ def serve(
                 "--setup-usb-sysfs-path must name one direct USB sysfs device",
                 2,
             )
-        matches = [
-            device.identity for device in devices if device.identity.serial == selected_serial
-        ]
+        matches = [device for device in devices if device.identity.serial == selected_serial]
         if len(matches) != 1:
             _fail(
                 "setup_identity_unavailable",
                 "setup target serial must match exactly one configured managed radio",
                 2,
             )
+        if selected_target is not DEFAULT_SETUP_TARGET:
+            try:
+                matches[0].configure_rx_layout(
+                    setup_target_profile(selected_target).rx_layout_expectation
+                )
+            except (RuntimeError, ValueError) as error:
+                _fail("invalid_setup_target", str(error), 2)
         try:
             validate_bound_interface(selected_interface, str(selected_sysfs))
         except ValueError as error:
@@ -7242,13 +7270,10 @@ def serve(
             maximum_bytes=1024 * 1024,
         )
         try:
-            identity = SetupIdentity(
+            setup_enrollment = _SetupEnrollmentConfig(
                 serial=selected_serial,
-                usb_sysfs_path=str(selected_sysfs),
-                observed_firmware=CANONICAL_POLICY.device_firmware,
-            )
-            executor = FixedSshSetupExecutor(
-                identity=identity,
+                usb_sysfs_path=selected_sysfs,
+                runtime_target=selected_target,
                 transport=BoundSshTransport(
                     host=selected_host,
                     interface=selected_interface,
@@ -7257,15 +7282,9 @@ def serve(
                     ),
                     known_hosts_file=selected_known_hosts_file,
                 ),
-                state_root=state_root.absolute(),
             )
         except ValueError as error:
             _fail("invalid_canonical_setup", str(error), 2)
-        setup_manager = CanonicalSetupManager(
-            receipt_directory=(state_root / "setup" / "receipts").absolute(),
-            inspector=executor.inspect,
-            executor=executor,
-        )
 
     firmware_manager = None
     if firmware_helper_socket is not None:
@@ -7320,8 +7339,61 @@ def serve(
         devices=tuple(devices),
         discovered_radios=discovered_radios,
         firmware_manager=firmware_manager,
-        setup_manager=setup_manager,
     )
+    if setup_enrollment is not None:
+        from pluto_plus.doctor import setup_repair_policy_for_firmware
+        from pluto_plus.setup import CanonicalSetupManager, SetupIdentity
+        from pluto_plus.setup_helper import FixedSshSetupExecutor
+
+        try:
+            matching_snapshots = [
+                snapshot
+                for snapshot in service.list_radios()
+                if snapshot.managed
+                and snapshot.identity.serial == setup_enrollment.serial
+            ]
+            if len(matching_snapshots) != 1:
+                raise ValueError(
+                    "setup target serial must match exactly one managed radio"
+                )
+            managed_snapshot = matching_snapshots[0]
+            managed_identity = managed_snapshot.identity
+            if managed_identity.usb_path != str(setup_enrollment.usb_sysfs_path):
+                raise ValueError(
+                    "setup target sysfs path must match the opened managed radio"
+                )
+            if managed_identity.firmware_version is None:
+                raise ValueError(
+                    "setup target must expose an attested firmware version"
+                )
+            selected_policy = setup_repair_policy_for_firmware(
+                managed_identity.firmware_version
+            )
+            setup_identity = SetupIdentity(
+                serial=setup_enrollment.serial,
+                usb_sysfs_path=str(setup_enrollment.usb_sysfs_path),
+                observed_firmware=selected_policy.device_firmware,
+            )
+            setup_executor = FixedSshSetupExecutor(
+                identity=setup_identity,
+                transport=setup_enrollment.transport,
+                state_root=state_root.absolute(),
+                policy=selected_policy,
+            )
+            service.enroll_setup_manager(
+                managed_identity.radio_id,
+                CanonicalSetupManager(
+                    receipt_directory=(state_root / "setup" / "receipts").absolute(),
+                    inspector=setup_executor.inspect,
+                    executor=setup_executor,
+                    policy=selected_policy,
+                ),
+                setup_enrollment.runtime_target,
+            )
+        except (RuntimeError, ValueError) as error:
+            with suppress(Exception):
+                service.close()
+            _fail("invalid_canonical_setup", str(error), 2)
     if ssh_enrollments:
         from pluto_plus.doctor import PERSISTENT_UPGRADE_POLICY
         from pluto_plus.firmware import (

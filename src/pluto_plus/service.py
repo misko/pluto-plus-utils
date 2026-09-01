@@ -77,8 +77,16 @@ from pluto_plus.setup import (
     SetupIdentity,
     SetupPlan,
     SetupPlanNotFoundError,
+    SetupPreconditionError,
     SetupReceipt,
     SetupUnavailableError,
+)
+from pluto_plus.setup_profiles import (
+    DEFAULT_SETUP_TARGET,
+    SETUP_TARGET_PROFILES,
+    SetupTarget,
+    setup_operating_profile,
+    setup_target_profile,
 )
 
 
@@ -123,6 +131,10 @@ class PlutoService:
                 raise ValueError("IP firmware managers must use ssh_frm transport")
             self.network_config_managers = dict(network_config_managers or {})
             self.setup_manager = setup_manager
+            # Direct constructor injection remains unbound for compatibility
+            # with library/test composition. Production enrollment binds both.
+            self._setup_radio_id: str | None = None
+            self._setup_runtime_target: SetupTarget | None = None
             self._firmware_filesystem = LocalFirmwareFilesystem()
             self._firmware_images: dict[str, tuple[FirmwareImageSummary, Path]] = {}
             self._firmware_plans: dict[str, FirmwarePlan] = {}
@@ -376,11 +388,53 @@ class PlutoService:
         self.ip_firmware_managers[radio_id] = manager
 
     def setup_status(self) -> dict[str, object]:
+        firmware_policy = (
+            CANONICAL_POLICY
+            if self.setup_manager is None
+            else self.setup_manager.firmware_policy
+        )
         return {
             "helper_available": self.setup_manager is not None,
             "safety": "inspect-plan-token-execute-receipt",
-            "profile_id": CANONICAL_POLICY.profile_id,
+            # Compatibility field retained for existing UI/clients.  It names
+            # firmware authority, not the independently selected RF target.
+            "profile_id": firmware_policy.profile_id,
+            "firmware_policy": firmware_policy.model_dump(mode="json"),
+            "default_target": DEFAULT_SETUP_TARGET.value,
+            "configured_target": (
+                None
+                if self._setup_runtime_target is None
+                else self._setup_runtime_target.value
+            ),
+            "configured_radio_id": self._setup_radio_id,
+            "targets": [
+                {
+                    "target": target_profile.target.value,
+                    "configuration": target_profile.configuration.model_dump(mode="json"),
+                    "operating_policy": setup_operating_profile(target_profile.target).model_dump(
+                        mode="json"
+                    ),
+                }
+                for target_profile in SETUP_TARGET_PROFILES
+            ],
         }
+
+    def enroll_setup_manager(
+        self,
+        radio_id: str,
+        manager: CanonicalSetupManager,
+        target: SetupTarget = DEFAULT_SETUP_TARGET,
+    ) -> None:
+        """Bind one helper and runtime target after managed-radio attestation."""
+
+        self._controller(radio_id)
+        if self.setup_manager is not None:
+            raise ValueError("setup manager is already enrolled")
+        if self._setup_plans:
+            raise RuntimeError("cannot enroll setup after planning has begun")
+        self.setup_manager = manager
+        self._setup_radio_id = radio_id
+        self._setup_runtime_target = target
 
     def enroll_network_config_manager(
         self, radio_id: str, manager: NetworkConfigManager
@@ -480,10 +534,35 @@ class PlutoService:
             receipts.values(), key=lambda item: item.started_at, reverse=True
         )
 
-    def create_canonical_setup_plan(self, radio_id: str) -> PlannedSetup:
+    def create_canonical_setup_plan(
+        self,
+        radio_id: str,
+        target: SetupTarget = DEFAULT_SETUP_TARGET,
+    ) -> PlannedSetup:
         manager = self._require_setup()
+        if self._setup_radio_id is not None and radio_id != self._setup_radio_id:
+            raise SetupPreconditionError("setup helper is bound to another managed radio")
+        if self._setup_runtime_target is not None and target is not self._setup_runtime_target:
+            raise SetupPreconditionError(
+                "setup plan target does not match the daemon's configured runtime target"
+            )
         controller = self._controller(radio_id)
         snapshot = controller.snapshot()
+        target_profile = setup_target_profile(target)
+        if (
+            snapshot.capabilities.supports_direct_capture
+            and not target_profile.require_paired_rx_recovery
+        ):
+            raise SetupPreconditionError(
+                "single-stream setup is unavailable through a dual-stream direct-capture adapter"
+            )
+        if (
+            not target_profile.require_paired_rx_recovery
+            and not controller.supports_rx_layout_selection
+        ):
+            raise SetupPreconditionError(
+                "single-stream setup requires a radio adapter with runtime RX-layout selection"
+            )
         if snapshot.state is not RadioState.READY and not controller.setup_required:
             raise RadioBusyError(f"radio cannot plan setup while {snapshot.state}")
         identity = snapshot.identity
@@ -496,7 +575,8 @@ class PlutoService:
                 serial=identity.serial,
                 usb_sysfs_path=identity.usb_path,
                 observed_firmware=identity.firmware_version,
-            )
+            ),
+            target,
         )
         self._setup_plans[planned.plan.plan_id] = planned.plan
         return planned
@@ -508,12 +588,27 @@ class PlutoService:
         except KeyError as error:
             raise SetupPlanNotFoundError(f"unknown setup plan: {plan_id}") from error
         controller = self._controller_for_serial(plan.identity.serial)
+        if self._setup_radio_id is not None and controller.radio_id != self._setup_radio_id:
+            raise SetupPreconditionError("setup helper is bound to another managed radio")
+        if (
+            self._setup_runtime_target is not None
+            and plan.target is not self._setup_runtime_target
+        ):
+            raise SetupPreconditionError(
+                "setup plan target no longer matches the configured runtime target"
+            )
+        target_profile = setup_target_profile(plan.target)
         return manager.execute(
             plan,
             confirmation_token,
             before_mutation=controller.prepare_setup_mutation,
             after_mutation=lambda: controller.recover_after_radio_mutation(
-                require_paired_rx=True
+                require_paired_rx=target_profile.require_paired_rx_recovery,
+                rx_layout=(
+                    None
+                    if target_profile.require_paired_rx_recovery
+                    else target_profile.rx_layout_expectation
+                ),
             ),
         )
 

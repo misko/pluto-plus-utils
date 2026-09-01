@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pluto_plus.direct_radio.ip_transport import DirectIpTransport
+from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.base import RadioDevice, SampleBlock
 from pluto_plus.models import RadioCapabilities, RadioIdentity, RadioSettings, Transport
+from pluto_plus.rf_profile import RxLayoutExpectation
 
 
 class DirectIpRadioDevice:
@@ -30,6 +32,14 @@ class DirectIpRadioDevice:
         return self._control.capabilities.model_copy(
             update={"receiver_channels": (0, 1), "supports_direct_capture": True}
         )
+
+    def configure_rx_layout(self, expectation: RxLayoutExpectation | None) -> None:
+        if expectation is not None and expectation.receiver_channels != (0, 1):
+            raise RadioConfigurationError("direct-IP capture requires paired RX")
+        configure_rx_layout = getattr(self._control, "configure_rx_layout", None)
+        if not callable(configure_rx_layout):
+            raise RadioConfigurationError("IIO control cannot select an RX layout")
+        configure_rx_layout(expectation)
 
     def open(self) -> None:
         if self._open:

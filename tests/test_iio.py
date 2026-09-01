@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from pluto_plus.catalog import Catalog
+from pluto_plus.controller import RadioController
 from pluto_plus.errors import RadioConfigurationError, RadioSetupRequiredError
 from pluto_plus.hardware.iio import (
     IioRadioDevice,
@@ -14,7 +16,8 @@ from pluto_plus.hardware.iio import (
     resolve_iio_uri,
 )
 from pluto_plus.hardware.iio_metadata import IIO_CONTEXT_TIMEOUT_MS
-from pluto_plus.models import GainMode, RadioSettings, Transport
+from pluto_plus.models import GainMode, RadioSettings, RadioState, Transport
+from pluto_plus.setup_profiles import SetupTarget, setup_target_profile
 
 
 class FakeRxAdc:
@@ -182,6 +185,29 @@ class OneRxFakeAd9361(FakeAd9361):
 class OneRxFakeAdi(FakeAdi):
     def ad9361(self, uri: str) -> FakeAd9361:
         self.device = OneRxFakeAd9361(uri, self.serial)
+        return self.device
+
+
+class IgnoredRxSelectionFakeAd9361(OneRxFakeAd9361):
+    def __init__(self, uri: str, serial: str = "SERIAL_A") -> None:
+        self._ignore_rx_selection = False
+        self._selected_rx_channels: list[int] = []
+        super().__init__(uri, serial)
+        self._ignore_rx_selection = True
+
+    @property
+    def rx_enabled_channels(self) -> list[int]:
+        return list(self._selected_rx_channels)
+
+    @rx_enabled_channels.setter
+    def rx_enabled_channels(self, value: list[int]) -> None:
+        if not self._ignore_rx_selection:
+            self._selected_rx_channels = list(value)
+
+
+class IgnoredRxSelectionFakeAdi(FakeAdi):
+    def ad9361(self, uri: str) -> FakeAd9361:
+        self.device = IgnoredRxSelectionFakeAd9361(uri, self.serial)
         return self.device
 
 
@@ -480,6 +506,131 @@ def test_iio_adapter_retains_facts_and_types_noncanonical_1r1t() -> None:
     assert module.device is not None
     assert module.device.tx_hardwaregain_chan0 == -80.0
     assert module.device.tx_enabled_channels == []
+
+
+def test_iio_adapter_opens_exact_native_single_stream_target() -> None:
+    module = OneRxFakeAdi()
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        adi_module=module,
+        iio_contexts={"usb:1": "serial=SERIAL_A"},
+    )
+    radio.configure_rx_layout(
+        setup_target_profile(SetupTarget.AD9363A_1R1T).rx_layout_expectation
+    )
+
+    radio.open()
+    try:
+        assert radio.read_settings().channels == (0,)
+        assert radio.capabilities.receiver_channels == (0,)
+        assert radio.read_block(1024).samples.shape == (1, 1024)
+        with pytest.raises(RadioConfigurationError, match="selected RX layout"):
+            radio.apply_settings(
+                radio.read_settings().model_copy(update={"channels": (0, 1)})
+            )
+    finally:
+        radio.close()
+
+
+def test_iio_adapter_opens_ad9361_driver_in_single_stream_mode() -> None:
+    class Ad9361OneRxFakeAdi(OneRxFakeAdi):
+        def ad9361(self, uri: str) -> FakeAd9361:
+            device = super().ad9361(uri)
+            device.ctx.attrs["ad9361-phy,model"] = "ad9361"
+            return device
+
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        adi_module=Ad9361OneRxFakeAdi(),
+        iio_contexts={"usb:1": "serial=SERIAL_A"},
+    )
+    radio.configure_rx_layout(
+        setup_target_profile(SetupTarget.AD9361_1R1T).rx_layout_expectation
+    )
+
+    radio.open()
+    try:
+        assert radio.read_settings().channels == (0,)
+        assert radio.capabilities.receiver_channels == (0,)
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize("reported_model", [None, "ad9361"])
+def test_iio_adapter_single_stream_target_requires_exact_live_driver(
+    reported_model: str | None,
+) -> None:
+    class ModelFakeAdi(OneRxFakeAdi):
+        def ad9361(self, uri: str) -> FakeAd9361:
+            device = super().ad9361(uri)
+            if reported_model is None:
+                device.ctx.attrs.pop("ad9361-phy,model")
+            else:
+                device.ctx.attrs["ad9361-phy,model"] = reported_model
+            return device
+
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        adi_module=ModelFakeAdi(),
+        iio_contexts={"usb:1": "serial=SERIAL_A"},
+    )
+    radio.configure_rx_layout(
+        setup_target_profile(SetupTarget.AD9363A_1R1T).rx_layout_expectation
+    )
+
+    with pytest.raises(RadioSetupRequiredError, match="selected RX layout"):
+        radio.open()
+    assert radio.capabilities.receiver_channels == (0, 1)
+
+
+def test_iio_adapter_requires_exact_single_channel_selection_readback() -> None:
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        adi_module=IgnoredRxSelectionFakeAdi(),
+        iio_contexts={"usb:1": "serial=SERIAL_A"},
+    )
+    radio.configure_rx_layout(
+        setup_target_profile(SetupTarget.AD9363A_1R1T).rx_layout_expectation
+    )
+
+    with pytest.raises(RadioConfigurationError, match="channel selection readback"):
+        radio.open()
+    assert radio.capabilities.receiver_channels == (0, 1)
+
+
+def test_controller_recovers_setup_required_iio_as_one_receiver(tmp_path) -> None:
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        adi_module=OneRxFakeAdi(),
+        iio_contexts={"usb:1": "serial=SERIAL_A"},
+    )
+    controller = RadioController(
+        radio,
+        tmp_path / "captures",
+        Catalog(tmp_path / "catalog.sqlite3"),
+    )
+    try:
+        assert controller.snapshot().state is RadioState.ERROR
+        assert controller.setup_required
+
+        controller.prepare_setup_mutation()
+        controller.recover_after_radio_mutation(
+            rx_layout=setup_target_profile(
+                SetupTarget.AD9363A_1R1T
+            ).rx_layout_expectation
+        )
+
+        snapshot = controller.snapshot()
+        assert snapshot.state is RadioState.READY
+        assert snapshot.actual_settings.channels == (0,)
+        assert snapshot.capabilities.receiver_channels == (0,)
+    finally:
+        controller.close()
 
 
 def test_iio_adapter_does_not_hide_genuine_tx_probe_io_error() -> None:

@@ -22,6 +22,11 @@ from pluto_plus.setup import (
     SetupPlan,
     SetupUnavailableError,
 )
+from pluto_plus.setup_profiles import (
+    AD9361_1R1T_CLEAR_ATTR_PROFILE,
+    AD9363A_1R1T_CLEAR_ATTR_PROFILE,
+    SetupTarget,
+)
 
 ADMIN_TOKEN = "setup-admin-token-is-at-least-32-bytes"
 ALLOWED_ORIGIN = "http://127.0.0.1"
@@ -84,6 +89,18 @@ class RepairableFakeRadio(FakeRadioDevice):
 
     def mark_canonical(self) -> None:
         self._canonical = True
+
+
+class LegacyRadioAdapter:
+    """Model an existing third-party adapter predating RX-layout selection."""
+
+    def __init__(self, delegate: RepairableFakeRadio) -> None:
+        self._delegate = delegate
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "configure_rx_layout":
+            raise AttributeError(name)
+        return getattr(self._delegate, name)
 
 
 class StartupDegradedRepairableRadio(RepairableFakeRadio):
@@ -182,6 +199,102 @@ class SetupBackend:
         )
 
 
+class NativeSetupBackend(SetupBackend):
+    def __init__(self, radio: RepairableFakeRadio) -> None:
+        super().__init__(radio)
+        self.native = False
+
+    def observation(self) -> SetupObservation:
+        if not self.native:
+            return super().observation()
+        return SetupObservation(
+            identity=self.identity(),
+            board_model="Analog Devices PlutoSDR Rev.C (Z7010/AD9363)",
+            live_phy_model="ad9363a",
+            uboot=AD9363A_1R1T_CLEAR_ATTR_PROFILE.uboot,
+            environment_sha256="5" * 64,
+            versions_sha256="2" * 64,
+            qspi_firmware_sha256=CANONICAL_POLICY.fit_body_sha256,
+            boot_provenance="qspi_reboot_verified",
+            rx_scan_channels=("voltage0", "voltage1"),
+            tx_safe=True,
+            rx_lo_5g8_accepted=False,
+            rx_lo_5g8_readback_hz=None,
+            rx_lo_restored=True,
+        )
+
+    def provision(self, plan: SetupPlan) -> SetupExecutionResult:
+        assert plan.target is SetupTarget.AD9363A_1R1T
+        self.executed.append(plan)
+        self.native = True
+        self.radio._settings = self.radio._settings.model_copy(update={"channels": (0,)})
+        return SetupExecutionResult(
+            observation=self.observation(),
+            backup_path="setup-backups/SERIAL_A-before.txt",
+            backup_sha256="4" * 64,
+        )
+
+
+class UncertainNativeSetupBackend(NativeSetupBackend):
+    def provision(self, plan: SetupPlan) -> SetupExecutionResult:
+        assert plan.target is SetupTarget.AD9363A_1R1T
+        self.executed.append(plan)
+        self.native = True
+        self.radio._settings = self.radio._settings.model_copy(  # noqa: SLF001
+            update={"channels": (0,)}
+        )
+        after = self.observation()
+        raise SetupExecutorFailure(
+            "post-reboot response was lost",
+            backup_path="setup-backups/SERIAL_A-before.txt",
+            backup_sha256="4" * 64,
+            after=after,
+            failure_phase="post_reboot_attestation",
+            completed_phases=(
+                "preflight",
+                "backup",
+                "mutation_dispatched",
+                "reboot_observed",
+            ),
+        )
+
+
+class Ad9361SingleSetupBackend(SetupBackend):
+    def __init__(self, radio: RepairableFakeRadio) -> None:
+        super().__init__(radio)
+        self.single = False
+
+    def observation(self) -> SetupObservation:
+        if not self.single:
+            return super().observation()
+        return SetupObservation(
+            identity=self.identity(),
+            board_model="Analog Devices PlutoSDR Rev.C (Z7010/AD9363)",
+            live_phy_model="ad9361",
+            uboot=AD9361_1R1T_CLEAR_ATTR_PROFILE.uboot,
+            environment_sha256="6" * 64,
+            versions_sha256="2" * 64,
+            qspi_firmware_sha256=CANONICAL_POLICY.fit_body_sha256,
+            boot_provenance="qspi_reboot_verified",
+            rx_scan_channels=("voltage0", "voltage1"),
+            tx_safe=True,
+            rx_lo_5g8_accepted=True,
+            rx_lo_5g8_readback_hz=5_800_000_000,
+            rx_lo_restored=True,
+        )
+
+    def provision(self, plan: SetupPlan) -> SetupExecutionResult:
+        assert plan.target is SetupTarget.AD9361_1R1T
+        self.executed.append(plan)
+        self.single = True
+        self.radio._settings = self.radio._settings.model_copy(update={"channels": (0,)})
+        return SetupExecutionResult(
+            observation=self.observation(),
+            backup_path="setup-backups/SERIAL_A-before.txt",
+            backup_sha256="4" * 64,
+        )
+
+
 class UnavailableSetupBackend:
     """Models SSH transport/host-key refusal without exposing stale facts."""
 
@@ -240,6 +353,16 @@ def _post_plan(client: TestClient, headers: dict[str, str] | None = None) -> Any
     return client.post(
         f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
         json={},
+        headers=headers,
+    )
+
+
+def _post_plan_without_body(
+    client: TestClient,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    return client.post(
+        f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
         headers=headers,
     )
 
@@ -373,6 +496,193 @@ def test_setup_api_plan_execute_receipt_and_fresh_doctor(tmp_path: Path) -> None
         assert [item["receipt_id"] for item in receipts.json()] == [receipt["receipt_id"]]
 
 
+def test_setup_api_without_body_retains_legacy_default_target(tmp_path: Path) -> None:
+    service, _radio, backend = _service(tmp_path)
+    with _client(service, _policy()) as client:
+        planned = _post_plan_without_body(client, AUTH_HEADERS)
+
+        assert planned.status_code == 201
+        assert planned.json()["plan"]["target"] == "ad9361-2r2t"
+    assert backend.executed == []
+
+
+def test_setup_api_selects_native_target_and_recovers_without_paired_rx(
+    tmp_path: Path,
+) -> None:
+    radio = RepairableFakeRadio()
+    radio.mark_canonical()
+    backend = NativeSetupBackend(radio)
+    service = PlutoService(
+        tmp_path / "state",
+        (radio,),
+        setup_manager=_manager(tmp_path, backend),
+    )
+
+    with _client(service, _policy()) as client:
+        status = client.get(f"{API_PREFIX}/setup").json()
+        targets = {item["target"]: item for item in status["targets"]}
+        assert status["default_target"] == "ad9361-2r2t"
+        assert set(targets) == {"ad9361-2r2t", "ad9361-1r1t", "ad9363a-1r1t"}
+        assert targets["ad9363a-1r1t"]["configuration"]["receiver_layout"] == ("single_stream")
+        assert targets["ad9363a-1r1t"]["operating_policy"]["support_tier"] == ("development")
+        assert targets["ad9363a-1r1t"]["operating_policy"]["intended_physical_rfic"] is None
+
+        planned = client.post(
+            f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
+            json={"target": "ad9363a-1r1t"},
+            headers=AUTH_HEADERS,
+        )
+        assert planned.status_code == 201
+        document = planned.json()
+        assert document["plan"]["target"] == "ad9363a-1r1t"
+        assert dict(document["plan"]["changes_items"]) == {
+            "compatible": "ad9363a",
+            "mode": "1r1t",
+        }
+
+        executed = client.post(
+            f"{API_PREFIX}/setup/executions",
+            json={
+                "plan_id": document["plan"]["plan_id"],
+                "confirmation_token": document["confirmation_token"],
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert executed.status_code == 201
+        assert executed.json()["target"] == "ad9363a-1r1t"
+        assert service.get_radio("SERIAL_A").actual_settings.channels == (0,)
+        assert service.get_radio("SERIAL_A").state.value == "ready"
+        assert len(backend.executed) == 1
+
+
+def test_setup_api_rejects_unknown_target_before_planning(tmp_path: Path) -> None:
+    service, _radio, backend = _service(tmp_path)
+    with _client(service, _policy()) as client:
+        refused = client.post(
+            f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
+            json={"target": "ad9369-super-mode"},
+            headers=AUTH_HEADERS,
+        )
+
+        assert refused.status_code == 422
+    assert backend.executed == []
+
+
+def test_enrolled_runtime_target_rejects_mismatched_setup_plan(tmp_path: Path) -> None:
+    radio = RepairableFakeRadio()
+    radio.mark_canonical()
+    backend = NativeSetupBackend(radio)
+    service = PlutoService(tmp_path / "state", (radio,))
+    service.enroll_setup_manager(
+        "SERIAL_A",
+        _manager(tmp_path, backend),
+        SetupTarget.AD9363A_1R1T,
+    )
+
+    with _client(service, _policy()) as client:
+        status = client.get(f"{API_PREFIX}/setup").json()
+        assert status["configured_radio_id"] == "SERIAL_A"
+        assert status["configured_target"] == "ad9363a-1r1t"
+
+        refused = _post_plan(client, AUTH_HEADERS)
+        assert refused.status_code == 409
+        assert refused.json()["error"]["code"] == "setup_precondition_failed"
+
+        accepted = client.post(
+            f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
+            json={"target": "ad9363a-1r1t"},
+            headers=AUTH_HEADERS,
+        )
+        assert accepted.status_code == 201
+    assert backend.executed == []
+
+
+def test_single_stream_plan_is_rejected_before_direct_capture_mutation(
+    tmp_path: Path,
+) -> None:
+    radio = RepairableFakeRadio()
+    radio._capabilities = radio.capabilities.model_copy(  # noqa: SLF001
+        update={"supports_direct_capture": True}
+    )
+    backend = NativeSetupBackend(radio)
+    service = PlutoService(
+        tmp_path / "state",
+        (radio,),
+        setup_manager=_manager(tmp_path, backend),
+    )
+
+    with _client(service, _policy()) as client:
+        refused = client.post(
+            f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
+            json={"target": "ad9363a-1r1t"},
+            headers=AUTH_HEADERS,
+        )
+
+        assert refused.status_code == 409
+        assert refused.json()["error"]["code"] == "setup_precondition_failed"
+    assert backend.inspect_count == 0
+    assert backend.executed == []
+
+
+def test_single_stream_plan_requires_layout_aware_adapter_before_mutation(
+    tmp_path: Path,
+) -> None:
+    radio = RepairableFakeRadio()
+    backend = NativeSetupBackend(radio)
+    service = PlutoService(
+        tmp_path / "state",
+        (LegacyRadioAdapter(radio),),
+        setup_manager=_manager(tmp_path, backend),
+    )
+
+    with _client(service, _policy()) as client:
+        refused = client.post(
+            f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
+            json={"target": "ad9363a-1r1t"},
+            headers=AUTH_HEADERS,
+        )
+
+        assert refused.status_code == 409
+        assert refused.json()["error"]["code"] == "setup_precondition_failed"
+    assert backend.inspect_count == 0
+    assert backend.executed == []
+
+
+def test_setup_api_keeps_ad9361_driver_independent_from_paired_rx_recovery(
+    tmp_path: Path,
+) -> None:
+    radio = RepairableFakeRadio()
+    radio.mark_canonical()
+    backend = Ad9361SingleSetupBackend(radio)
+    service = PlutoService(
+        tmp_path / "state",
+        (radio,),
+        setup_manager=_manager(tmp_path, backend),
+    )
+
+    with _client(service, _policy()) as client:
+        planned = client.post(
+            f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
+            json={"target": "ad9361-1r1t"},
+            headers=AUTH_HEADERS,
+        ).json()
+        assert planned["plan"]["target"] == "ad9361-1r1t"
+        assert dict(planned["plan"]["changes_items"]) == {"mode": "1r1t"}
+
+        executed = client.post(
+            f"{API_PREFIX}/setup/executions",
+            json={
+                "plan_id": planned["plan"]["plan_id"],
+                "confirmation_token": planned["confirmation_token"],
+            },
+            headers=AUTH_HEADERS,
+        )
+
+        assert executed.status_code == 201
+        assert executed.json()["target"] == "ad9361-1r1t"
+        assert service.get_radio("SERIAL_A").actual_settings.channels == (0,)
+
+
 def test_setup_required_radio_does_not_hide_healthy_radios_and_can_be_repaired(
     tmp_path: Path,
 ) -> None:
@@ -468,6 +778,93 @@ def test_setup_execution_failure_is_receipted_and_controller_recovers(tmp_path: 
         assert len(backend.executed) == 1
         assert radio.open_count == opens_before_reconcile
         assert radio.close_count == closes_before_reconcile
+
+
+def test_failed_single_stream_transition_remains_setup_repairable(
+    tmp_path: Path,
+) -> None:
+    radio = RepairableFakeRadio()
+    backend = SetupBackend(radio, fail=True)
+    service = PlutoService(
+        tmp_path / "state",
+        (radio,),
+        setup_manager=_manager(tmp_path, backend),
+    )
+
+    with _client(service, _policy()) as client:
+        planned = client.post(
+            f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
+            json={"target": "ad9363a-1r1t"},
+            headers=AUTH_HEADERS,
+        ).json()
+        failed = client.post(
+            f"{API_PREFIX}/setup/executions",
+            json={
+                "plan_id": planned["plan"]["plan_id"],
+                "confirmation_token": planned["confirmation_token"],
+            },
+            headers=AUTH_HEADERS,
+        )
+
+        assert failed.status_code == 500
+        snapshot = client.get(f"{API_PREFIX}/radios/SERIAL_A").json()
+        assert snapshot["state"] == "error"
+        assert "RadioSetupRequiredError" in snapshot["last_error"]
+
+        retry = client.post(
+            f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
+            json={"target": "ad9363a-1r1t"},
+            headers=AUTH_HEADERS,
+        )
+
+        assert retry.status_code == 201
+        assert retry.json()["plan"]["target"] == "ad9363a-1r1t"
+    assert backend.inspect_count >= 3
+    assert len(backend.executed) == 1
+
+
+def test_native_target_is_preserved_through_uncertain_receipt_reconciliation(
+    tmp_path: Path,
+) -> None:
+    radio = RepairableFakeRadio()
+    radio.mark_canonical()
+    backend = UncertainNativeSetupBackend(radio)
+    service = PlutoService(
+        tmp_path / "state",
+        (radio,),
+        setup_manager=_manager(tmp_path, backend),
+    )
+
+    with _client(service, _policy()) as client:
+        planned = client.post(
+            f"{API_PREFIX}/radios/SERIAL_A/doctor/setup-plans",
+            json={"target": "ad9363a-1r1t"},
+            headers=AUTH_HEADERS,
+        ).json()
+        failed = client.post(
+            f"{API_PREFIX}/setup/executions",
+            json={
+                "plan_id": planned["plan"]["plan_id"],
+                "confirmation_token": planned["confirmation_token"],
+            },
+            headers=AUTH_HEADERS,
+        )
+
+        assert failed.status_code == 500
+        failure_receipt = failed.json()["receipt"]
+        assert failure_receipt["target"] == "ad9363a-1r1t"
+        assert service.get_radio("SERIAL_A").actual_settings.channels == (0,)
+
+        reconciled = client.post(
+            f"{API_PREFIX}/setup/receipts/{failure_receipt['receipt_id']}/reconcile",
+            json={},
+            headers=AUTH_HEADERS,
+        )
+
+        assert reconciled.status_code == 201
+        assert reconciled.json()["target"] == "ad9363a-1r1t"
+        assert reconciled.json()["outcome"] == "reconciled_verified"
+        assert len(backend.executed) == 1
 
 
 def test_setup_plan_is_refused_while_radio_is_busy(tmp_path: Path) -> None:

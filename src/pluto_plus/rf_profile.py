@@ -87,6 +87,27 @@ class RfConfiguration(_RfModel):
         return self
 
 
+class RxLayoutExpectation(_RfModel):
+    """Exact live RX facts authorized for one managed runtime target."""
+
+    live_phy_models: tuple[str, ...]
+    scan_channels: tuple[str, ...]
+    receiver_channels: tuple[int, ...]
+    allow_additional_scan_channels: bool = False
+
+    @model_validator(mode="after")
+    def validate_expectation(self) -> RxLayoutExpectation:
+        if not self.live_phy_models or not self.scan_channels:
+            raise ValueError("RX layout expectation must include PHY and scan facts")
+        if (
+            not self.receiver_channels
+            or len(set(self.receiver_channels)) != len(self.receiver_channels)
+            or any(channel not in (0, 1) for channel in self.receiver_channels)
+        ):
+            raise ValueError("RX layout receiver channels must be unique RX0/RX1 values")
+        return self
+
+
 class RfSupportTier(StrEnum):
     """Evidence level assigned by an operating-profile policy."""
 
