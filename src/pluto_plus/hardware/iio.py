@@ -865,6 +865,10 @@ class IioRadioDevice:
                 raise RadioConfigurationError(
                     "IIO context does not advertise direct async DMA-to-network capture"
                 )
+            if facts.get("buffer_direct_async_exact_kernel_queue") is not True:
+                raise RadioConfigurationError(
+                    "IIO context does not advertise exact direct-async DMA admission"
+                )
             if ddr_ring_bytes and facts.get("buffer_direct_async_ring") is not True:
                 raise RadioConfigurationError(
                     "IIO context does not advertise direct async RAM queue extension"
@@ -1113,6 +1117,9 @@ def context_facts(context: Any) -> dict[str, object]:
         ddr_ring_max_iq_bytes = None
     ddr_ring_modes_raw = attrs.get("iio,buffer-ddr-ring-modes")
     direct_async_raw = attrs.get("iio,buffer-direct-async")
+    direct_async_exact_kernel_queue_raw = attrs.get(
+        "iio,buffer-direct-async-exact-kernel-queue"
+    )
     direct_async_ring_raw = attrs.get("iio,buffer-direct-async-ring")
     direct_async_overrun_policies_raw = attrs.get(
         "iio,buffer-direct-async-overrun-policies"
@@ -1174,6 +1181,12 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_ddr_ring_modes_raw": ddr_ring_modes_raw,
         "buffer_direct_async": direct_async_raw == "1",
         "buffer_direct_async_raw": direct_async_raw,
+        "buffer_direct_async_exact_kernel_queue": (
+            direct_async_exact_kernel_queue_raw == "1"
+        ),
+        "buffer_direct_async_exact_kernel_queue_raw": (
+            direct_async_exact_kernel_queue_raw
+        ),
         "buffer_direct_async_ring": direct_async_ring_raw == "1",
         "buffer_direct_async_ring_raw": direct_async_ring_raw,
         "buffer_direct_async_overrun_policies_raw": (

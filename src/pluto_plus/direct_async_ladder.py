@@ -121,6 +121,7 @@ class DirectAsyncLadderReport(ApiModel):
         le=MAX_SAMPLES_PER_CHANNEL,
     )
     kernel_buffers: int = Field(ge=2, le=64)
+    allocated_kernel_buffers: int = Field(ge=0, le=64)
     ram_ring_slots: int = Field(ge=0)
     drop_backlog_on_overrun: bool = True
     tandem_mode: DirectAsyncTandemMode
@@ -152,6 +153,8 @@ class DirectAsyncLadderReport(ApiModel):
             raise ValueError("ringless direct ladder reported RAM storage")
         if self.mode == "direct-ram" and self.ram_ring_slots < 1:
             raise ValueError("direct-RAM ladder has no RAM slots")
+        if self.cells and self.allocated_kernel_buffers != self.kernel_buffers:
+            raise ValueError("direct ladder DMA allocation is not exact")
         return self
 
 
@@ -332,6 +335,7 @@ def run_direct_async_ladder(
         durations_seconds=durations,
         samples_per_frame=samples_per_frame,
         kernel_buffers=kernel_buffers,
+        allocated_kernel_buffers=(kernel_buffers if cells else 0),
         ram_ring_slots=ram_ring_slots,
         drop_backlog_on_overrun=drop_backlog_on_overrun,
         tandem_mode=tandem_mode,
@@ -404,6 +408,12 @@ def _run_cell(
             ) as capture:
                 if capture.kernel_buffers != kernel_buffers:
                     raise RuntimeError("direct ladder kernel-buffer readback is not exact")
+                if capture.allocated_kernel_buffers != kernel_buffers:
+                    raise RuntimeError(
+                        "direct ladder DMA admission is not exact: "
+                        f"requested {kernel_buffers}, allocated "
+                        f"{capture.allocated_kernel_buffers}"
+                    )
                 if capture.direct_async_frames != segment_frames:
                     raise RuntimeError("direct ladder finite target readback is not exact")
                 if capture.direct_async_ring_extension is not bool(ram_ring_slots):

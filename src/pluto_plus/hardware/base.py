@@ -173,6 +173,9 @@ class MetadataCapture(Protocol):
     def kernel_buffers(self) -> int: ...
 
     @property
+    def allocated_kernel_buffers(self) -> int: ...
+
+    @property
     def direct_async_frames(self) -> int: ...
 
     @property
