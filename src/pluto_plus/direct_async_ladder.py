@@ -27,6 +27,8 @@ from pluto_plus.tandem import TandemMode, TandemSessionRequestV1
 
 DEFAULT_DIRECT_ASYNC_RATES = "5M,10M,15M,25M"
 DEFAULT_DIRECT_ASYNC_DURATIONS = "3,10"
+DEFAULT_DIRECT_ASYNC_SAMPLES_PER_FRAME = 1_000_000
+DEFAULT_DIRECT_ASYNC_KERNEL_BUFFERS = 50
 MAX_DURATION_RUNGS = 8
 MAX_DURATION_SECONDS = 60.0
 MAX_TOTAL_FRAMES_PER_CELL = 4_096
@@ -203,8 +205,8 @@ def run_direct_async_ladder(
     rates_hz: Sequence[int],
     durations_seconds: Sequence[float],
     channels: tuple[int, ...] = (0,),
-    samples_per_frame: int = 1_048_576,
-    kernel_buffers: int = 15,
+    samples_per_frame: int = DEFAULT_DIRECT_ASYNC_SAMPLES_PER_FRAME,
+    kernel_buffers: int = DEFAULT_DIRECT_ASYNC_KERNEL_BUFFERS,
     ram_ring_slots: int = 0,
     drop_backlog_on_overrun: bool = True,
     tandem_mode: DirectAsyncTandemMode = "hold",

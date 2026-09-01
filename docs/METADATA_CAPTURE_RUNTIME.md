@@ -122,8 +122,8 @@ not allocated when `ddr_ring_bytes=0`:
 
 ```python
 with radio.begin_metadata_capture(
-    1_048_576,
-    kernel_buffers=15,
+    1_000_000,
+    kernel_buffers=50,
     direct_async_frames=250,
     ddr_ring_bytes=0,
     drop_backlog_on_overrun=True,
@@ -206,10 +206,14 @@ Run the release speed matrix with one Pluto Plus Utils command:
 ```bash
 uv run pluto radio direct-async-ladder 192.168.1.15 \
   --transport ip --expect-serial EXACT_SERIAL \
-  --rates 5M,10M,15M,25M --durations 3,10 \
-  --samples 1048576 --kernel-buffers 15 \
   --format json --report /ABSOLUTE/PRIVATE/PATH/direct-matrix.json
 ```
+
+The omitted defaults select 1,000,000 samples per frame, exactly 50/50 kernel
+DMA buffers (200,000,000 IQ bytes), no RAM extension, and drop-backlog. PPU
+requires authoritative allocation readback and never silently falls back to a
+partial queue. Use `--samples 1048576 --kernel-buffers 15` only for an explicit
+legacy/baseline comparison.
 
 Add `--ram-ring-slots 13 --kernel-buffers 10` for the RAM-extension matrix.
 The command defaults to `--drop-backlog-on-overrun`; use
