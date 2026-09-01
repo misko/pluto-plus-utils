@@ -10,6 +10,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from pluto_plus.rf_profile import (
+    Ad936xChannelMode,
+    Ad936xDriverProfile,
+    ReceiverLayout,
+    RfConfiguration,
+)
+
 RX_LO_5G8_HZ = 5_800_000_000
 UBOOT_KEYS = ("attr_name", "attr_val", "compatible", "mode")
 
@@ -18,10 +25,18 @@ UBOOT_KEYS = ("attr_name", "attr_val", "compatible", "mode")
 class SetupEnvironmentProfile:
     profile_id: str
     uboot_items: tuple[tuple[str, str | None], ...]
+    configuration: RfConfiguration
 
     @property
     def uboot(self) -> dict[str, str | None]:
         return dict(self.uboot_items)
+
+
+AD9361_2R2T_CONFIGURATION = RfConfiguration(
+    driver_profile=Ad936xDriverProfile.AD9361,
+    channel_mode=Ad936xChannelMode.TWO_RX_TWO_TX,
+    receiver_layout=ReceiverLayout.DUAL_STREAM,
+)
 
 
 CLEAR_ATTR_PROFILE = SetupEnvironmentProfile(
@@ -32,6 +47,7 @@ CLEAR_ATTR_PROFILE = SetupEnvironmentProfile(
         ("compatible", "ad9361"),
         ("mode", "2r2t"),
     ),
+    configuration=AD9361_2R2T_CONFIGURATION,
 )
 
 SET_ATTR_PROFILE = SetupEnvironmentProfile(
@@ -42,6 +58,7 @@ SET_ATTR_PROFILE = SetupEnvironmentProfile(
         ("compatible", "ad9361"),
         ("mode", "2r2t"),
     ),
+    configuration=AD9361_2R2T_CONFIGURATION,
 )
 
 SETUP_ENVIRONMENT_PROFILES = (CLEAR_ATTR_PROFILE, SET_ATTR_PROFILE)
