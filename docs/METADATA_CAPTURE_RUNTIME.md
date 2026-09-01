@@ -181,6 +181,13 @@ dropping minimizes the number of discontinuity events and stale-data latency,
 not missing-sample count or source-time coverage. RAM copies also consume Zynq
 CPU and are not the maximum-throughput configuration.
 
+The follow-up
+[`20-second timeline comparison`](../reports/2026-09-01-direct-async-overrun/README.md)
+extends this to four 500-frame, 2 GB sessions and plots every authoritative
+FPGA timestamp against host arrival time. It includes the metadata-only raw
+reports, individual and combined PNGs, exact reproduction scripts, artifact
+hashes, RAM spill/drain evidence, and clean postflight state.
+
 The radio advertises both supported values through
 `iio,buffer-direct-async-overrun-policies=drop-backlog,preserve-backlog` and
 advertises `drop-backlog` as its default. The Python API and CLI default to
