@@ -425,3 +425,38 @@ def test_direct_ladder_rejects_oversized_dma_queue_before_open() -> None:
             radio_factory=lambda _uri, _serial, _decoder: radio,
         )
     assert not radio.opened
+
+
+def test_direct_ladder_accepts_dma_queue_within_radio_limit() -> None:
+    radio = _Radio()
+
+    report = run_direct_async_ladder(
+        uri="ip:192.168.1.15",
+        serial="SERIAL_A",
+        rates_hz=(1_000_000,),
+        durations_seconds=(0.05,),
+        channels=(0,),
+        samples_per_frame=1_048_576,
+        kernel_buffers=47,
+        radio_factory=lambda _uri, _serial, _decoder: radio,
+        clock_ns=_Clock(),
+    )
+
+    assert report.kernel_buffers == 47
+    assert radio.opened
+
+
+def test_direct_ladder_rejects_dma_queue_above_radio_limit() -> None:
+    radio = _Radio()
+    with pytest.raises(ValueError, match="201326592 bytes; maximum is 200000000"):
+        run_direct_async_ladder(
+            uri="ip:192.168.1.15",
+            serial="SERIAL_A",
+            rates_hz=(1_000_000,),
+            durations_seconds=(0.05,),
+            channels=(0,),
+            samples_per_frame=1_048_576,
+            kernel_buffers=48,
+            radio_factory=lambda _uri, _serial, _decoder: radio,
+        )
+    assert not radio.opened
