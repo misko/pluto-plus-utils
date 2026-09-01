@@ -10,6 +10,20 @@
     "dfu_sha256": "4f981697af03a2c8fe041c7c5a932da7ce0cf66bf78e24518f7574e3738ac6a4",
     "fit_sha256": "958e4e1d3f128bd3c90c449d674ef7f79c23afebcb23f1af9627c8e6f6f93d7e"
   },
+  "final_release": {
+    "firmware": "v0.48-plutoplus-spf-iq-direct-async-v3",
+    "firmware_commit": "e3078376a6e1a8c6ea841dc69966b3880e020c70",
+    "implementation_commit": "322b67f9580d215c1f8362735c877f7c5ee2f89e",
+    "protected_run_id": 33481347855,
+    "buildroot_commit": "1c337a0b8d8126c9d1ed785607bc5ea52e7fed22",
+    "libiio_commit": "0d323080a0a1067da8c7adbadfd03ee186a40ec2",
+    "ppu_ram_profile_commit": "1287462dca2dfd6d06ca192e3c8c37eabb64181a",
+    "ppu_persistent_profile_commit": "0a21ce250b44006a7880ae35dc30d11673fd2180",
+    "dfu_sha256": "cc87c36a3aad609a64b45f4a02eecf916b99a3099fa523eed1bf4526ed98995a",
+    "fit_sha256": "db777ac93d5c6f0be0cf2799808a4d06fe39264ee1e99e76001509394d75f1df",
+    "persistent_flash_receipt_id": "016eb590-5fb4-42e3-9568-afe0f4d4254c",
+    "reboot_receipt_id": "7605359b000b474994626df2e602691b"
+  },
   "usb_red_green": [
     {
       "firmware": "v0.47",
@@ -58,37 +72,44 @@
       "policy": "preserve",
       "completed": true,
       "observed_frames": 477,
-      "gap_frames": 464,
-      "missing_samples": 1715470336,
-      "payload_mb_s": 22.0530396634636
+      "gap_frames": 143,
+      "missing_samples": 153092096,
+      "payload_mb_s": 75.01574458757234
     },
     {
       "queue": "11 DMA",
       "policy": "drop",
       "completed": true,
       "observed_frames": 477,
-      "gap_frames": 118,
-      "missing_samples": 1734344704,
-      "payload_mb_s": 21.980575092186424
+      "gap_frames": 21,
+      "missing_samples": 178257920,
+      "payload_mb_s": 72.77868505061043
     },
     {
       "queue": "11 DMA + 128 MiB RAM",
       "policy": "preserve",
-      "completed": false,
-      "observed_frames": 114,
-      "gap_frames": null,
-      "missing_samples": null,
-      "payload_mb_s": null,
-      "failure": "ESTALE (-116)"
+      "completed": true,
+      "observed_frames": 477,
+      "gap_frames": 198,
+      "missing_samples": 213909504,
+      "payload_mb_s": 65.60621754077458,
+      "ram_spilled_frames": 365,
+      "ram_drained_frames": 365,
+      "ram_dropped_frames": 0,
+      "ram_high_water_frames": 32
     },
     {
       "queue": "11 DMA + 128 MiB RAM",
       "policy": "drop",
       "completed": true,
       "observed_frames": 477,
-      "gap_frames": 68,
-      "missing_samples": 1880096768,
-      "payload_mb_s": 19.658861084357557
+      "gap_frames": 12,
+      "missing_samples": 298844160,
+      "payload_mb_s": 60.31134708021043,
+      "ram_spilled_frames": 357,
+      "ram_drained_frames": 155,
+      "ram_dropped_frames": 202,
+      "ram_high_water_frames": 25
     }
   ],
   "gbe_25msps_47_dma": [
@@ -96,7 +117,7 @@
       "duration_seconds": 3,
       "requested_frames": 72,
       "observed_frames": 72,
-      "payload_mb_s": 73.06327554553683,
+      "payload_mb_s": 73.57080926631701,
       "gap_frames": 2,
       "missing_samples": 20971520
     },
@@ -104,7 +125,7 @@
       "duration_seconds": 10,
       "requested_frames": 239,
       "observed_frames": 239,
-      "payload_mb_s": 75.07047925990193,
+      "payload_mb_s": 74.08811037839098,
       "gap_frames": 7,
       "missing_samples": 72351744
     },
@@ -112,7 +133,7 @@
       "duration_seconds": 60,
       "requested_frames": 1431,
       "observed_frames": 1431,
-      "payload_mb_s": 72.85998801907184,
+      "payload_mb_s": 72.82267932996048,
       "gap_frames": 53,
       "missing_samples": 550502400
     }
@@ -120,25 +141,25 @@
   "fleet_smoke_5msps_3s": [
     {
       "serial": "1040007c4a94000211000b009186843ef2",
-      "payload_mb_s": 18.01269748676727,
+      "payload_mb_s": 18.069832713250207,
       "observed_frames": 15,
       "gap_frames": 0
     },
     {
       "serial": "104000bac4950008230026001b440a003a",
-      "payload_mb_s": 18.073446851791765,
+      "payload_mb_s": 18.25933814361719,
       "observed_frames": 15,
       "gap_frames": 0
     },
     {
       "serial": "winbond-db620818a328172c",
-      "payload_mb_s": 18.083422099585288,
+      "payload_mb_s": 18.22530065901291,
       "observed_frames": 15,
       "gap_frames": 0
     },
     {
       "serial": "winbond-db6968136727402c",
-      "payload_mb_s": 17.95553228803421,
+      "payload_mb_s": 18.093052373931148,
       "observed_frames": 15,
       "gap_frames": 0
     }

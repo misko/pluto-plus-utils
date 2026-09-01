@@ -15,7 +15,7 @@ DATA = json.loads((ROOT / "data.json").read_text())
 def main() -> None:
     figure, axes = plt.subplots(2, 2, figsize=(16, 10), constrained_layout=True)
     figure.suptitle(
-        "Issue #72 — direct-async stale-metadata recovery",
+        "Issue #72 — v0.48 final direct-async recovery qualification",
         fontsize=18,
         fontweight="bold",
     )
