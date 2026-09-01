@@ -24,7 +24,7 @@ METADATA_RUNTIME_RECEIPT = Path("share/pluto-plus-utils/metadata-runtime.json")
 METADATA_RUNTIME_SOURCE_COMMITS = {
     1: "c26258bfa33098c2b215e19cf85d448e89499b1a",
     2: "6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7",
-    3: "8f66f353c9a70a5524988ceb588b0e9271c2390d",
+    3: "0d323080a0a1067da8c7adbadfd03ee186a40ec2",
     4: "98a5e6139459a01a5a42ca7cd3e98d807156b6b0",
 }
 _RING_METADATA_BUFFER_PARAMETERS = (
