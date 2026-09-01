@@ -749,6 +749,27 @@ IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V3_RELEASE_RAM_PO
     }
 )
 
+# Exact final-version-stamped direct-async v4 bytes from trusted build run
+# 33535095284. V4 makes DMA admission authoritative end to end: iiOD reports
+# the queue the kernel actually allocated and refuses a direct-async request
+# unless it exactly matches the requested queue. The enlarged 216 MiB CMA pool
+# admits the qualified 50 x 1,000,000-sample profile as exactly 200,000,000 IQ
+# payload bytes. This identity remains volatile-only until those exact bytes
+# complete the attached-radio capture and persistent-return qualification gates.
+IQ_DIRECT_ASYNC_V4_CANDIDATE_RAM_POLICY = FirmwarePolicy(
+    profile_id="iq-direct-async-v4-candidate-ram",
+    release_tag="iq-direct-async-v4-candidate-bc00edb8c340",
+    device_firmware="v0.49-plutoplus-spf-iq-direct-async-v4",
+    asset_name="plutoplus-spf-iq-direct-async-v4-bc00edb8c340-pluto.dfu",
+    asset_sha256="f45524f4765d5743144703ff6f4541084ff1ab9b1ce20a77f3f6fa820a1f84b6",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/33535095284",
+    source_commit="bc00edb8c340dd4f9b04361398cbd2c8edcc9cae",
+    fit_body_sha256="77f899610548d486aab2c83c4dc7170532d470b115d2bd0e8fc43e72b3bfca67",
+    fit_body_size=12_825_815,
+    hardware_qualified=False,
+    published_at=datetime(2026, 9, 1, 17, 21, 28, tzinfo=UTC),
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
@@ -861,6 +882,7 @@ SETUP_INSPECTION_POLICIES = (
     IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V3_CANDIDATE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY,
+    IQ_DIRECT_ASYNC_V4_CANDIDATE_RAM_POLICY,
 )
 
 
