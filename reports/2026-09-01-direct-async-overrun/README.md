@@ -182,6 +182,149 @@ tandem FIFO occupancy, zero tandem fault/overflow counts, and 66,826,240 of
 67,108,864 CMA bytes free. iiOD remained generation 1 with the same PID; it was
 not restarted to make a failed test appear clean.
 
+## Pluto Plus Utils ladder on a newly flashed radio
+
+No SSH session or manual iiOD command is required. The released firmware
+starts supervised iiOD with `--rw-cpu-affinity 1` at every boot. All radio
+identity, capability, capture, counter, and settings-restoration operations
+below go through Pluto Plus Utils.
+
+Start in the Pluto Plus Utils checkout containing the matched ABI-3 host
+runtime. Set the exact physical-IP endpoint and serial, and create a private
+directory for absent-only reports:
+
+```bash
+RADIO_IP=192.168.1.20
+RADIO_SERIAL=1040005e0b100007100010000bf33a5d4d
+LADDER_REPORT_DIR="$PWD/pluto-state/direct-async-ladder-20"
+
+install -d -m 700 "$LADDER_REPORT_DIR"
+```
+
+First verify the host environment and discover only the intended endpoint:
+
+```bash
+uv run pluto environment --format json
+
+uv run pluto radio inventory \
+  --network-cidr "$RADIO_IP/32" \
+  --format json
+```
+
+Do not start the ladder unless the output identifies the expected serial and
+reports:
+
+```text
+firmware_version: v0.47-plutoplus-spf-iq-direct-async-v2
+libiio_version: 0.25 (8f66f35)
+healthy: true
+```
+
+### Standard release ladder
+
+This one command runs the release matrix at 5, 10, 15, and 25 MS/s for 3 and
+10 seconds. It uses the maximum-throughput ringless path, the default
+drop-backlog policy, tandem HOLD, and the vectorized decoder:
+
+```bash
+uv run pluto radio direct-async-ladder "$RADIO_IP" \
+  --transport ip \
+  --expect-serial "$RADIO_SERIAL" \
+  --rates 5M,10M,15M,25M \
+  --durations 3,10 \
+  --samples 1048576 \
+  --kernel-buffers 15 \
+  --ram-ring-slots 0 \
+  --drop-backlog-on-overrun \
+  --tandem-mode hold \
+  --iq-decoder raw-complex64 \
+  --format table \
+  --report "$LADDER_REPORT_DIR/ringless-drop.json"
+```
+
+The command verifies the exact serial and ABI-3 capabilities, checks policy
+readback, keeps each supported cell in one direct-async session, records
+throughput and authoritative FPGA-counter gaps, and restores the original
+settings. Protocol, readback, capture, or cleanup failures make the command
+exit nonzero. Counter-observed gaps remain measured results rather than being
+misreported as command failures.
+
+### Four-way 25 MS/s, 20-second comparison
+
+The following commands reproduce the queue and policy geometry used in this
+report: 1,000,000 samples per 4 MB frame, 12 DMA buffers, and 500 recovered
+frames in one session. Fifty RAM slots are exactly 200,000,000 bytes at this
+frame size.
+
+Ringless with drop-backlog:
+
+```bash
+uv run pluto radio direct-async-ladder "$RADIO_IP" \
+  --transport ip --expect-serial "$RADIO_SERIAL" \
+  --rates 25M --durations 20 \
+  --samples 1000000 --kernel-buffers 12 \
+  --ram-ring-slots 0 --drop-backlog-on-overrun \
+  --tandem-mode hold --iq-decoder raw-complex64 \
+  --format table \
+  --report "$LADDER_REPORT_DIR/ringless-drop-20s.json"
+```
+
+Ringless with preserve-backlog:
+
+```bash
+uv run pluto radio direct-async-ladder "$RADIO_IP" \
+  --transport ip --expect-serial "$RADIO_SERIAL" \
+  --rates 25M --durations 20 \
+  --samples 1000000 --kernel-buffers 12 \
+  --ram-ring-slots 0 --preserve-backlog-on-overrun \
+  --tandem-mode hold --iq-decoder raw-complex64 \
+  --format table \
+  --report "$LADDER_REPORT_DIR/ringless-preserve-20s.json"
+```
+
+The 200 MB RAM extension with drop-backlog:
+
+```bash
+uv run pluto radio direct-async-ladder "$RADIO_IP" \
+  --transport ip --expect-serial "$RADIO_SERIAL" \
+  --rates 25M --durations 20 \
+  --samples 1000000 --kernel-buffers 12 \
+  --ram-ring-slots 50 --drop-backlog-on-overrun \
+  --tandem-mode hold --iq-decoder raw-complex64 \
+  --format table \
+  --report "$LADDER_REPORT_DIR/ram200-drop-20s.json"
+```
+
+The 200 MB RAM extension with preserve-backlog:
+
+```bash
+uv run pluto radio direct-async-ladder "$RADIO_IP" \
+  --transport ip --expect-serial "$RADIO_SERIAL" \
+  --rates 25M --durations 20 \
+  --samples 1000000 --kernel-buffers 12 \
+  --ram-ring-slots 50 --preserve-backlog-on-overrun \
+  --tandem-mode hold --iq-decoder raw-complex64 \
+  --format table \
+  --report "$LADDER_REPORT_DIR/ram200-preserve-20s.json"
+```
+
+Report paths must be absent; use a new private directory for every campaign.
+For the second released radio, use a separate directory and change the exact
+identity variables to:
+
+```bash
+RADIO_IP=192.168.1.21
+RADIO_SERIAL=10400056f695001322002d0010ad1719f2
+LADDER_REPORT_DIR="$PWD/pluto-state/direct-async-ladder-21"
+
+install -d -m 700 "$LADDER_REPORT_DIR"
+```
+
+The four Pluto Plus Utils ladder reports contain aggregate throughput, gap,
+missing-sample, overflow, and RAM accounting for each cell. The per-frame timing
+arrays used for the PNGs in this report are intentionally collected by the
+bounded metadata-only helper below; the ladder does not retain IQ payloads.
+
 ## Reproduction and evidence
 
 [`capture_direct_async_timeline.py`](capture_direct_async_timeline.py) performs
