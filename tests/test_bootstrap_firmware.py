@@ -1549,6 +1549,41 @@ def test_issue_72_v3_candidate_is_exact_and_ram_only() -> None:
     )
 
 
+def test_issue_72_v3_final_trusted_bytes_are_exact_and_ram_only() -> None:
+    policy = bootstrap.IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "v0.48-plutoplus-spf-iq-direct-async-v3"
+    assert policy.device_firmware == "v0.48-plutoplus-spf-iq-direct-async-v3"
+    assert policy.source_commit == "e3078376a6e1a8c6ea841dc69966b3880e020c70"
+    assert policy.asset_name == (
+        "plutoplus-spf-iq-direct-async-v3-e3078376a6e1-pluto.dfu"
+    )
+    assert policy.asset_sha256 == (
+        "cc87c36a3aad609a64b45f4a02eecf916b99a3099fa523eed1bf4526ed98995a"
+    )
+    assert policy.fit_body_sha256 == (
+        "db777ac93d5c6f0be0cf2799808a4d06fe39264ee1e99e76001509394d75f1df"
+    )
+    assert policy.fit_body_size == 12_825_571
+    assert policy.hardware_qualified is False
+    assert profile.persistent_allowed is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.iiod_cpu_affinity is None
+    assert profile.iiod_rw_cpu_affinity == 1
+    assert profile.ddr_ring_max_iq_bytes == 200_000_000
+    assert profile.required_iio_capabilities == (
+        ("iio,buffer-direct-async", "1"),
+        ("iio,buffer-direct-async-ring", "1"),
+        (
+            "iio,buffer-direct-async-overrun-policies",
+            "drop-backlog,preserve-backlog",
+        ),
+        ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
+    )
+
+
 def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:
     policy = bootstrap.IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY
 
