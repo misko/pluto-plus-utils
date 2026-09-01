@@ -15,6 +15,8 @@ from pluto_plus.doctor import (
     IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY,
+    IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY,
+    IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY,
     require_setup_inspection_policy,
     require_setup_repair_policy,
     setup_inspection_policy_for_firmware,
@@ -121,6 +123,7 @@ def test_setup_repair_policy_is_selected_only_by_exact_firmware() -> None:
         DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,
         IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
         IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
+        IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY,
     )
 
     for policy in policies:
@@ -133,6 +136,7 @@ def test_promoted_release_keeps_ram_inspection_separate_from_repair() -> None:
     for ram_policy, persistent_policy in (
         (IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY, IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY),
         (IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY, IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY),
+        (IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY, IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY),
     ):
         assert require_setup_inspection_policy(ram_policy) is ram_policy
         assert setup_inspection_policy_for_firmware(ram_policy.device_firmware) is persistent_policy

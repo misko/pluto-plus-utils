@@ -770,6 +770,27 @@ IQ_DIRECT_ASYNC_V4_CANDIDATE_RAM_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 9, 1, 17, 21, 28, tzinfo=UTC),
 )
 
+# The trusted-build bytes above become the immutable v0.49 release identity
+# after exact-admission, 50/50-buffer, sustained transport, settings-restore,
+# and repeated volatile-return qualification on the selected AD9361 radio.
+# Keep volatile and QSPI authority separate even though their bytes match.
+IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY = IQ_DIRECT_ASYNC_V4_CANDIDATE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "iq-direct-async-v4-release-ram",
+        "release_tag": "v0.49-plutoplus-spf-iq-direct-async-v4",
+        "release_url": (
+            "https://github.com/misko/plutosdr-fw/releases/tag/"
+            "v0.49-plutoplus-spf-iq-direct-async-v4"
+        ),
+    }
+)
+IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "iq-direct-async-v4-release-persistent-promotion",
+        "hardware_qualified": True,
+    }
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target
@@ -858,7 +879,7 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 # repair. USB and enrolled-network upgrades select the newest release that has
 # completed the persistent hardware gate; setup keeps the immutable U-Boot
 # tuple but accepts only an exact QSPI image in the allowlist below.
-PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY
+PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY
 
 # Canonical U-Boot repair may run only while one of these exact, reviewed,
 # hardware-qualified QSPI images is active. The tuple itself remains fixed;
@@ -870,6 +891,7 @@ SETUP_REPAIR_POLICIES = (
     DDR_RING_V1_RELEASE_PERSISTENT_POLICY,
     DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
+    IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
     PERSISTENT_UPGRADE_POLICY,
 )
 
@@ -883,6 +905,7 @@ SETUP_INSPECTION_POLICIES = (
     IQ_DIRECT_ASYNC_V3_CANDIDATE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V4_CANDIDATE_RAM_POLICY,
+    IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY,
 )
 
 

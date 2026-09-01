@@ -1618,6 +1618,27 @@ def test_v4_candidate_binds_exact_200mb_dma_admission_and_is_ram_only() -> None:
     )
 
 
+def test_v4_release_keeps_ram_and_persistent_authority_distinct() -> None:
+    ram = bootstrap.STANDALONE_FLASH_PROFILES["iq-direct-async-v4-release-ram"]
+    persistent = bootstrap.STANDALONE_FLASH_PROFILES[
+        "iq-direct-async-v4-release-persistent-promotion"
+    ]
+
+    assert ram.persistent_allowed is False
+    assert ram.policy.hardware_qualified is False
+    assert persistent.persistent_allowed is True
+    assert persistent.policy.hardware_qualified is True
+    assert persistent.policy.release_tag == "v0.49-plutoplus-spf-iq-direct-async-v4"
+    assert persistent.policy.asset_sha256 == ram.policy.asset_sha256
+    assert persistent.policy.fit_body_sha256 == ram.policy.fit_body_sha256
+    assert persistent.policy.source_commit == ram.policy.source_commit
+    assert persistent.required_iio_capabilities == ram.required_iio_capabilities
+    assert (
+        dict(persistent.required_iio_capabilities)["iio,buffer-direct-async-exact-kernel-queue"]
+        == "1"
+    )
+
+
 def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:
     policy = bootstrap.IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY
 
