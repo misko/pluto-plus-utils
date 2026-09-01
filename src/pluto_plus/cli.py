@@ -579,7 +579,8 @@ def _direct_async_ladder_table(report: DirectAsyncLadderReport) -> str:
     identity = (
         f"Radio {report.serial} · {report.uri} · {report.model} · "
         f"firmware {report.firmware_version or 'unknown'} · mode {report.mode} · "
-        f"IQ decoder {report.iq_decoder} · kernel buffers {report.kernel_buffers} · "
+        f"IQ decoder {report.iq_decoder} · DMA requested/allocated "
+        f"{report.kernel_buffers}/{report.allocated_kernel_buffers} · "
         f"RAM slots {report.ram_ring_slots} · overrun policy "
         f"{'drop-backlog' if report.drop_backlog_on_overrun else 'preserve-backlog'}"
     )

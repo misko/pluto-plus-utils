@@ -342,6 +342,7 @@ class IioMetadataCaptureSession:
         self._sample_rate_hz = int(sample_rate_hz)
         self._samples_per_channel = int(samples_per_channel)
         self._kernel_buffers = int(kernel_buffers)
+        self._allocated_kernel_buffers = 0
         self._metadata_abi = metadata_abi
         self._metadata_capacity = int(metadata_capacity)
         self._ddr_burst_requested_bytes = ddr_burst_bytes
@@ -391,6 +392,12 @@ class IioMetadataCaptureSession:
     @property
     def kernel_buffers(self) -> int:
         return self._kernel_buffers
+
+    @property
+    def allocated_kernel_buffers(self) -> int:
+        """DMA blocks attested by successful exact direct-async admission."""
+
+        return self._allocated_kernel_buffers
 
     @property
     def direct_async_frames(self) -> int:
@@ -494,6 +501,11 @@ class IioMetadataCaptureSession:
             if self.ddr_burst_enabled:
                 self._refresh_time_anchors(initial=True)
             self._buffer = self._open_metadata_buffer()
+            if self._direct_async_frames:
+                # The matched server starts direct capture only when its local
+                # allocation equals the request. Reaching this point is the
+                # session-scoped allocation attestation.
+                self._allocated_kernel_buffers = self._kernel_buffers
             self._sdr._rxbuf = self._buffer
             if not self.ddr_burst_enabled:
                 self._refresh_time_anchors(initial=True)

@@ -38,6 +38,7 @@ class _Capture:
         self.radio = radio
         self.samples = samples
         self.kernel_buffers = kernel_buffers
+        self.allocated_kernel_buffers = radio.allocated_kernel_buffers or kernel_buffers
         self.direct_async_frames = direct_frames
         self.direct_async_ring_extension = bool(ring_bytes)
         self.drop_backlog_on_overrun = True
@@ -117,6 +118,7 @@ class _Radio:
         gap_at_sequence: int = -1,
         rejected_rate: int | None = None,
         ring_dropped_frames: int = 0,
+        allocated_kernel_buffers: int | None = None,
     ) -> None:
         self.identity = RadioIdentity(
             radio_id="SERIAL_A",
@@ -139,6 +141,7 @@ class _Radio:
         self.gap_at_sequence = gap_at_sequence
         self.rejected_rate = rejected_rate
         self.ring_dropped_frames = ring_dropped_frames
+        self.allocated_kernel_buffers = allocated_kernel_buffers
         self.opened = False
         self.closed = False
         self.capture_targets: list[int] = []
@@ -214,6 +217,7 @@ def test_direct_ladder_runs_rate_duration_matrix_in_single_sessions() -> None:
     assert radio.settings == radio.original
     assert report.original_settings_restored
     assert report.mode == "direct"
+    assert report.allocated_kernel_buffers == 4
     assert report.failures == ()
     assert [(cell.sample_rate_hz, cell.requested_duration_seconds) for cell in report.cells] == [
         (1_000_000, 0.032768),
@@ -225,6 +229,25 @@ def test_direct_ladder_runs_rate_duration_matrix_in_single_sessions() -> None:
     assert all(cell.observed_frames == cell.requested_frames for cell in report.cells)
     assert all(cell.capture_segments == 1 for cell in report.cells)
     assert max(radio.capture_targets) == 66
+
+
+def test_direct_ladder_rejects_partial_dma_admission() -> None:
+    radio = _Radio(allocated_kernel_buffers=3)
+    report = run_direct_async_ladder(
+        uri="ip:192.168.1.15",
+        serial="SERIAL_A",
+        rates_hz=(1_000_000,),
+        durations_seconds=(0.05,),
+        channels=(0,),
+        samples_per_frame=16_384,
+        kernel_buffers=4,
+        radio_factory=lambda _uri, _serial, _decoder: radio,
+        clock_ns=_Clock(),
+    )
+
+    assert report.cells == ()
+    assert len(report.failures) == 1
+    assert "allocated 3" in report.failures[0].message
 
 
 def test_direct_ram_ladder_requires_and_accounts_real_spill_status() -> None:

@@ -535,6 +535,7 @@ def test_direct_async_capture_is_explicit_finite_and_ringless() -> None:
     adi.device.ctx.attrs.update(
         {
             "iio,buffer-direct-async": "1",
+            "iio,buffer-direct-async-exact-kernel-queue": "1",
             "iio,buffer-direct-async-overrun-policies": (
                 "drop-backlog,preserve-backlog"
             ),
@@ -548,6 +549,7 @@ def test_direct_async_capture_is_explicit_finite_and_ringless() -> None:
             direct_async_frames=250,
         )
         assert capture.direct_async_frames == 250
+        assert capture.allocated_kernel_buffers == 4
         assert capture.drop_backlog_on_overrun
         assert not capture.direct_async_ring_extension
         assert not capture.ddr_burst_enabled
@@ -573,6 +575,13 @@ def test_direct_async_capture_fails_closed_outside_qualified_contract() -> None:
                 direct_async_frames=3,
             )
         adi.device.ctx.attrs["iio,buffer-direct-async"] = "1"
+        with pytest.raises(RadioConfigurationError, match="exact direct-async DMA"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=4,
+                direct_async_frames=3,
+            )
+        adi.device.ctx.attrs["iio,buffer-direct-async-exact-kernel-queue"] = "1"
         with pytest.raises(ValueError, match=r"\[0, 4096\]"):
             radio.begin_metadata_capture(
                 SAMPLE_COUNT,
@@ -620,6 +629,7 @@ def test_direct_async_ram_ring_extends_the_existing_dma_queue() -> None:
     adi.device.ctx.attrs.update(
         {
             "iio,buffer-direct-async": "1",
+            "iio,buffer-direct-async-exact-kernel-queue": "1",
             "iio,buffer-direct-async-ring": "1",
             "iio,buffer-direct-async-overrun-policies": (
                 "drop-backlog,preserve-backlog"
@@ -643,6 +653,7 @@ def test_direct_async_ram_ring_extends_the_existing_dma_queue() -> None:
             direct_async_frames=3,
         )
         assert capture.direct_async_frames == 3
+        assert capture.allocated_kernel_buffers == 4
         assert capture.direct_async_ring_extension
         assert capture.ddr_ring_enabled
         assert capture.ddr_ring_capacity_frames == 2

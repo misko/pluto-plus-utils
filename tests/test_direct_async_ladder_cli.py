@@ -76,6 +76,7 @@ def _report(**kwargs: Any) -> DirectAsyncLadderReport:
         durations_seconds=kwargs["durations_seconds"],
         samples_per_frame=1_048_576,
         kernel_buffers=kwargs["kernel_buffers"],
+        allocated_kernel_buffers=kwargs["kernel_buffers"],
         ram_ring_slots=0,
         tandem_mode=kwargs["tandem_mode"],
         iq_decoder=kwargs["iq_decoder"],

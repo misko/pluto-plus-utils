@@ -1583,6 +1583,62 @@ def test_issue_72_v3_final_trusted_bytes_require_distinct_persistent_promotion()
     assert promotion.required_iio_capabilities == profile.required_iio_capabilities
 
 
+def test_v4_candidate_binds_exact_200mb_dma_admission_and_is_ram_only() -> None:
+    policy = bootstrap.IQ_DIRECT_ASYNC_V4_CANDIDATE_RAM_POLICY
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[policy.profile_id]
+
+    assert policy.release_tag == "iq-direct-async-v4-candidate-bc00edb8c340"
+    assert policy.device_firmware == "v0.49-plutoplus-spf-iq-direct-async-v4"
+    assert policy.source_commit == "bc00edb8c340dd4f9b04361398cbd2c8edcc9cae"
+    assert policy.asset_name == "plutoplus-spf-iq-direct-async-v4-bc00edb8c340-pluto.dfu"
+    assert policy.asset_sha256 == (
+        "f45524f4765d5743144703ff6f4541084ff1ab9b1ce20a77f3f6fa820a1f84b6"
+    )
+    assert policy.fit_body_sha256 == (
+        "77f899610548d486aab2c83c4dc7170532d470b115d2bd0e8fc43e72b3bfca67"
+    )
+    assert policy.fit_body_size == 12_825_815
+    assert policy.hardware_qualified is False
+    assert profile.persistent_allowed is False
+    assert profile.metadata_abi == 3
+    assert profile.tandem_agc is True
+    assert profile.iiod_cpu_affinity is None
+    assert profile.iiod_rw_cpu_affinity == 1
+    assert profile.ddr_burst_max_iq_bytes == 200_000_000
+    assert profile.ddr_ring_max_iq_bytes == 200_000_000
+    assert profile.required_iio_capabilities == (
+        ("iio,buffer-direct-async", "1"),
+        ("iio,buffer-direct-async-exact-kernel-queue", "1"),
+        ("iio,buffer-direct-async-ring", "1"),
+        (
+            "iio,buffer-direct-async-overrun-policies",
+            "drop-backlog,preserve-backlog",
+        ),
+        ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
+    )
+
+
+def test_v4_release_keeps_ram_and_persistent_authority_distinct() -> None:
+    ram = bootstrap.STANDALONE_FLASH_PROFILES["iq-direct-async-v4-release-ram"]
+    persistent = bootstrap.STANDALONE_FLASH_PROFILES[
+        "iq-direct-async-v4-release-persistent-promotion"
+    ]
+
+    assert ram.persistent_allowed is False
+    assert ram.policy.hardware_qualified is False
+    assert persistent.persistent_allowed is True
+    assert persistent.policy.hardware_qualified is True
+    assert persistent.policy.release_tag == "v0.49-plutoplus-spf-iq-direct-async-v4"
+    assert persistent.policy.asset_sha256 == ram.policy.asset_sha256
+    assert persistent.policy.fit_body_sha256 == ram.policy.fit_body_sha256
+    assert persistent.policy.source_commit == ram.policy.source_commit
+    assert persistent.required_iio_capabilities == ram.required_iio_capabilities
+    assert (
+        dict(persistent.required_iio_capabilities)["iio,buffer-direct-async-exact-kernel-queue"]
+        == "1"
+    )
+
+
 def test_standalone_profile_rejects_ambiguous_or_negative_affinity() -> None:
     policy = bootstrap.IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY
 
