@@ -171,6 +171,12 @@ def test_direct_ladder_defaults_are_the_requested_release_matrix(
     assert result.exit_code == 0, result.output
     assert calls[0]["rates_hz"] == (5_000_000, 10_000_000, 15_000_000, 25_000_000)
     assert calls[0]["durations_seconds"] == (3.0, 10.0)
+    assert calls[0]["samples_per_frame"] == 1_000_000
+    assert calls[0]["kernel_buffers"] == 50
+    assert (
+        calls[0]["samples_per_frame"] * calls[0]["kernel_buffers"] * 4
+        == 200_000_000
+    )
 
 
 def test_direct_ladder_can_select_preserve_backlog(monkeypatch: pytest.MonkeyPatch) -> None:

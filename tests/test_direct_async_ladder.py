@@ -231,6 +231,27 @@ def test_direct_ladder_runs_rate_duration_matrix_in_single_sessions() -> None:
     assert max(radio.capture_targets) == 66
 
 
+def test_direct_ladder_default_profile_is_exact_200mb() -> None:
+    radio = _Radio()
+
+    report = run_direct_async_ladder(
+        uri="ip:192.168.1.15",
+        serial="SERIAL_A",
+        rates_hz=(25_000_000,),
+        durations_seconds=(0.04,),
+        channels=(0,),
+        radio_factory=lambda _uri, _serial, _decoder: radio,
+        clock_ns=_Clock(),
+    )
+
+    assert report.samples_per_frame == 1_000_000
+    assert report.kernel_buffers == 50
+    assert report.allocated_kernel_buffers == 50
+    assert report.samples_per_frame * report.kernel_buffers * 4 == 200_000_000
+    assert report.ram_ring_slots == 0
+    assert report.drop_backlog_on_overrun is True
+
+
 def test_direct_ladder_rejects_partial_dma_admission() -> None:
     radio = _Radio(allocated_kernel_buffers=3)
     report = run_direct_async_ladder(

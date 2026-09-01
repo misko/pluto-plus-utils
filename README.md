@@ -351,22 +351,28 @@ gapless FPGA timeline. Use `radio metadata-ladder` for counter-proven continuity
 
 The ABI-3 direct firmware has a dedicated one-command matrix. Its defaults are
 the release qualification request: single RX0 at 5, 10, 15, and 25 MS/s for
-nominal source durations of 3 and 10 seconds, using 1,048,576-sample frames and
-15 DMA buffers:
+nominal source durations of 3 and 10 seconds, using 1,000,000-sample frames and
+50 exactly allocated DMA buffers. This is the v0.49 preferred profile: exactly
+200,000,000 IQ payload bytes, RAM ring disabled, and drop-backlog enabled:
 
 ```bash
 uv run pluto radio direct-async-ladder 192.168.1.15 \
   --transport ip --expect-serial EXACT_SERIAL \
-  --rates 5M,10M,15M,25M --durations 3,10 \
-  --samples 1048576 --kernel-buffers 15 \
   --format json --report /ABSOLUTE/PRIVATE/PATH/direct-matrix.json
 ```
 
-The rate and duration flags may be omitted because those values are the command
-defaults. For a qualification daemon on a nondefault port, add
-`--ip-port PORT`. The matched radio and host libiio must be ABI 3 commit
-`8f66f35`, and the measured performance profile requires the radio iiOD to run
-with `-r 1`.
+The rates, durations, samples, buffer count, ringless selection, and overrun
+policy may all be omitted because those values are the command defaults. The
+report must attest `kernel_buffers=50`, `allocated_kernel_buffers=50`,
+`samples_per_frame=1000000`, and `ram_ring_slots=0`. For a qualification daemon
+on a nondefault port, add `--ip-port PORT`. The matched radio and host libiio
+must be ABI 3 commit `5cb2389`; released iiOD runs with
+`--rw-cpu-affinity 1`.
+
+Use `--samples 1048576 --kernel-buffers 15` only as an explicit legacy or
+comparison profile. PPU does not silently shrink the new default on an older
+radio: exact admission fails closed so a report can never call a partial queue
+an exact 200 MB queue.
 
 Set `--ram-ring-slots 13 --kernel-buffers 10` to run the same matrix with RAM
 extending the direct DMA FIFO. Zero slots is the default ringless mode. The

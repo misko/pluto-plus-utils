@@ -35,7 +35,9 @@ from pluto_plus.ddr_recovery import (
 from pluto_plus.ddr_recovery import MAX_CYCLES as MAX_DDR_RECOVERY_CYCLES
 from pluto_plus.direct_async_ladder import (
     DEFAULT_DIRECT_ASYNC_DURATIONS,
+    DEFAULT_DIRECT_ASYNC_KERNEL_BUFFERS,
     DEFAULT_DIRECT_ASYNC_RATES,
+    DEFAULT_DIRECT_ASYNC_SAMPLES_PER_FRAME,
     DirectAsyncLadderReport,
     parse_duration_ladder,
     run_direct_async_ladder,
@@ -1557,18 +1559,21 @@ def radio_direct_async_ladder(
         help="Single receive channel: rx0 or rx1.",
     ),
     samples: int = typer.Option(
-        1_048_576,
+        DEFAULT_DIRECT_ASYNC_SAMPLES_PER_FRAME,
         "--samples",
         min=16_384,
         max=4_194_304,
-        help="Even samples per direct-async frame.",
+        help="Even samples per direct-async frame; v0.49 defaults to 1,000,000.",
     ),
     kernel_buffers: int = typer.Option(
-        15,
+        DEFAULT_DIRECT_ASYNC_KERNEL_BUFFERS,
         "--kernel-buffers",
         min=2,
         max=64,
-        help="Direct DMA queue depth; combined RAM mode requires at least three.",
+        help=(
+            "Direct DMA queue depth; v0.49 defaults to an exact 50-buffer/200 MB "
+            "queue and combined RAM mode requires at least three."
+        ),
     ),
     ram_ring_slots: int = typer.Option(
         0,
