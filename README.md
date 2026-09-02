@@ -739,6 +739,12 @@ doctor views may remain LAN-visible, but privileged Web/API requests are accepte
 over HTTPS, a Unix socket, or loopback (for example through an SSH tunnel); the browser
 will not send the bearer token over non-loopback plaintext HTTP.
 
+When several attached Pluto NICs share the default `192.168.2.10/24` host
+address, add `--setup-exact-route-lease`. PPU then adds one owned
+`192.168.2.1/32` route for only the selected interface/source around each fixed
+setup SSH call, verifies the kernel lookup, and deletes that exact route in a
+`finally` path. It never downs or reconfigures peer Pluto interfaces.
+
 If execution becomes uncertain after mutation or reboot, the receipt records the last
 completed phase and durable backup reference. Do not replay the consumed plan. Re-attest
 and use the receipt's read-only reconciliation action. Firmware which regenerates its

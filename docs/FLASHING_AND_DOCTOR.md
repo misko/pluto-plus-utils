@@ -230,6 +230,12 @@ Unix socket, or connect to the daemon's loopback listener through an SSH tunnel.
 LAN Web view remains useful for read-only status and doctor results, but its privileged
 controls stay disabled on an insecure origin.
 
+On hosts where several Pluto USB NICs retain the default duplicate gadget
+subnet, compose the daemon with `--setup-exact-route-lease`. Each fixed setup
+SSH call then owns and verifies only `192.168.2.1/32` on the serial-bound
+interface/source and removes that exact route afterward. Peer interfaces are
+not brought down or reconfigured.
+
 Guarded CLI primitives are:
 
 ```console

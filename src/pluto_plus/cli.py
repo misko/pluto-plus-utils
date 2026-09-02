@@ -103,7 +103,7 @@ from pluto_plus.seeded_hop import (
     DEFAULT_STOP_HZ,
     DEFAULT_THRESHOLD_DB,
 )
-from pluto_plus.setup_helper import BoundSshTransport
+from pluto_plus.setup_helper import BoundSshTransport, ExactUsbSshRouteLease
 from pluto_plus.setup_profiles import DEFAULT_SETUP_TARGET, SetupTarget, setup_target_profile
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
@@ -7323,6 +7323,11 @@ def serve(
         "--setup-known-hosts-file",
         help="Private mode-0600 file pinning the selected radio SSH host key.",
     ),
+    setup_exact_route_lease: bool = typer.Option(
+        False,
+        "--setup-exact-route-lease",
+        help="Own a temporary interface-bound /32 route around each setup SSH call.",
+    ),
     log_level: str = typer.Option("info", "--log-level"),
 ) -> None:
     """Run plutod with fake radios and/or lazily discovered hardware."""
@@ -7427,7 +7432,11 @@ def serve(
         "--setup-password-file": setup_password_file,
         "--setup-known-hosts-file": setup_known_hosts_file,
     }
-    setup_requested_options = {**setup_options, "--setup-target": setup_target}
+    setup_requested_options = {
+        **setup_options,
+        "--setup-target": setup_target,
+        "--setup-exact-route-lease": setup_exact_route_lease or None,
+    }
     if not enable_canonical_setup and any(
         value is not None for value in setup_requested_options.values()
     ):
@@ -7511,6 +7520,14 @@ def serve(
                         selected_password_file, label="setup password"
                     ),
                     known_hosts_file=selected_known_hosts_file,
+                    exact_route_lease=(
+                        ExactUsbSshRouteLease(
+                            interface=selected_interface,
+                            host=selected_host,
+                        )
+                        if setup_exact_route_lease
+                        else None
+                    ),
                 ),
             )
         except ValueError as error:

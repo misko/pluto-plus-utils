@@ -1359,11 +1359,11 @@ def test_serve_refuses_partial_or_unauthenticated_setup_configuration(
 
 
 @pytest.mark.parametrize(
-    ("target_arguments", "expected_target"),
+    ("target_arguments", "expected_target", "exact_route_lease"),
     [
-        ([], "ad9361-2r2t"),
-        (["--setup-target", "ad9361-1r1t"], "ad9361-1r1t"),
-        (["--setup-target", "ad9363a-1r1t"], "ad9363a-1r1t"),
+        ([], "ad9361-2r2t", False),
+        (["--setup-target", "ad9361-1r1t"], "ad9361-1r1t", False),
+        (["--setup-target", "ad9363a-1r1t"], "ad9363a-1r1t", True),
     ],
 )
 def test_serve_opens_before_binding_setup_firmware_and_runtime_target(
@@ -1371,6 +1371,7 @@ def test_serve_opens_before_binding_setup_firmware_and_runtime_target(
     tmp_path: Path,
     target_arguments: list[str],
     expected_target: str,
+    exact_route_lease: bool,
 ) -> None:
     from pluto_plus.doctor import IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY
     from pluto_plus.hardware.fake import FakeRadioDevice
@@ -1400,6 +1401,7 @@ def test_serve_opens_before_binding_setup_firmware_and_runtime_target(
             super().configure_rx_layout(expectation)
 
     observed: dict[str, Any] = {}
+    transport_arguments: dict[str, Any] = {}
     monkeypatch.setattr("pluto_plus.hardware.fake.FakeRadioDevice", V48FakeRadio)
     monkeypatch.setattr(
         "pluto_plus.setup_helper.validate_bound_interface",
@@ -1408,7 +1410,11 @@ def test_serve_opens_before_binding_setup_firmware_and_runtime_target(
     monkeypatch.setattr("pluto_plus.setup_helper.remote_ssh_available", lambda: True)
     monkeypatch.setattr(
         "pluto_plus.setup_helper.BoundSshTransport",
-        lambda **kwargs: SimpleNamespace(**kwargs),
+        lambda **kwargs: transport_arguments.update(kwargs) or SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.ExactUsbSshRouteLease",
+        lambda **kwargs: SimpleNamespace(kind="exact-route-lease", **kwargs),
     )
 
     def inspect_setup_policy(api: Any, **kwargs: Any) -> None:
@@ -1449,6 +1455,7 @@ def test_serve_opens_before_binding_setup_firmware_and_runtime_target(
             str(password),
             "--setup-known-hosts-file",
             str(known_hosts),
+            *(["--setup-exact-route-lease"] if exact_route_lease else []),
             *target_arguments,
         ],
     )
@@ -1462,6 +1469,14 @@ def test_serve_opens_before_binding_setup_firmware_and_runtime_target(
     assert configured_channels == (
         [] if expected_target == "ad9361-2r2t" else [(0,)]
     )
+    if exact_route_lease:
+        assert vars(transport_arguments["exact_route_lease"]) == {
+            "kind": "exact-route-lease",
+            "interface": "usb0",
+            "host": "192.168.2.1",
+        }
+    else:
+        assert transport_arguments["exact_route_lease"] is None
 
 
 def test_direct_ip_targets_are_explicitly_host_and_serial_bound() -> None:

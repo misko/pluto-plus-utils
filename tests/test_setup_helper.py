@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from pluto_plus.setup import (
 )
 from pluto_plus.setup_helper import (
     BoundSshTransport,
+    ExactUsbSshRouteLease,
     FixedSshSetupExecutor,
     SetupHelperError,
     SetupSshHostKeyChangedError,
@@ -53,6 +55,158 @@ def test_bound_ssh_transport_supports_private_lan_without_usb_bind(
 
     assert transport.host == "192.168.1.14"
     assert transport.interface is None
+
+
+class ExactRouteRunner:
+    def __init__(self, *, route_present: bool = False) -> None:
+        self.route_present = route_present
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(self, argv: Sequence[str], *, timeout_s: float = 10) -> str:
+        del timeout_s
+        call = tuple(argv)
+        self.calls.append(call)
+        if call == ("sudo", "-n", "true"):
+            return ""
+        if call[:5] == ("ip", "-j", "-4", "address", "show"):
+            return json.dumps(
+                [
+                    {
+                        "ifname": "enx_path_a",
+                        "addr_info": [
+                            {
+                                "family": "inet",
+                                "scope": "global",
+                                "local": "192.168.2.10",
+                            }
+                        ],
+                    }
+                ]
+            )
+        if call[:5] == ("ip", "-j", "-4", "route", "show"):
+            return json.dumps(
+                [
+                    {
+                        "dst": "192.168.2.1",
+                        "dev": "enx_path_a",
+                        "prefsrc": "192.168.2.10",
+                        "scope": "link",
+                        "protocol": "static",
+                        "table": "main",
+                    }
+                ]
+                if self.route_present
+                else []
+            )
+        if call[:5] == ("ip", "-j", "-4", "route", "get"):
+            return json.dumps(
+                [
+                    {
+                        "dst": "192.168.2.1",
+                        "dev": "enx_path_a",
+                        "prefsrc": "192.168.2.10",
+                    }
+                ]
+            )
+        if call[:6] == ("sudo", "-n", "ip", "route", "add", "192.168.2.1/32"):
+            assert not self.route_present
+            self.route_present = True
+            return ""
+        if call[:6] == ("sudo", "-n", "ip", "route", "del", "192.168.2.1/32"):
+            assert self.route_present
+            self.route_present = False
+            return ""
+        raise AssertionError(f"unexpected command {call}")
+
+
+def test_exact_usb_ssh_route_lease_is_owned_verified_and_removed() -> None:
+    runner = ExactRouteRunner()
+    lease = ExactUsbSshRouteLease(
+        interface="enx_path_a",
+        host="192.168.2.1",
+        command_runner=runner,
+    )
+
+    with lease.session():
+        assert runner.route_present is True
+        lease.verify()
+
+    assert runner.route_present is False
+    assert any(call[:5] == ("sudo", "-n", "ip", "route", "add") for call in runner.calls)
+    assert any(call[:5] == ("sudo", "-n", "ip", "route", "del") for call in runner.calls)
+
+
+def test_exact_usb_ssh_route_lease_never_replaces_an_existing_route() -> None:
+    runner = ExactRouteRunner(route_present=True)
+    lease = ExactUsbSshRouteLease(
+        interface="enx_path_a",
+        host="192.168.2.1",
+        command_runner=runner,
+    )
+
+    with pytest.raises(SetupHelperError, match="pre-existing exact route"), lease.session():
+        pass
+
+    assert runner.route_present is True
+    assert not any(call[:5] == ("sudo", "-n", "ip", "route", "del") for call in runner.calls)
+
+
+def test_exact_usb_ssh_route_lease_removes_route_when_action_fails() -> None:
+    runner = ExactRouteRunner()
+    lease = ExactUsbSshRouteLease(
+        interface="enx_path_a",
+        host="192.168.2.1",
+        command_runner=runner,
+    )
+
+    with pytest.raises(RuntimeError, match="action failed"), lease.session():
+        raise RuntimeError("action failed")
+
+    assert runner.route_present is False
+
+
+def test_bound_ssh_transport_scopes_exact_route_to_each_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    runner = ExactRouteRunner()
+    lease = ExactUsbSshRouteLease(
+        interface="enx_path_a",
+        host="192.168.2.1",
+        command_runner=runner,
+    )
+
+    class SuccessfulChild:
+        before = b""
+        exitstatus = 0
+        signalstatus = None
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            return 1
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", lambda *_args, **_kwargs: SuccessfulChild())
+    transport = BoundSshTransport(
+        host="192.168.2.1",
+        interface="enx_path_a",
+        password="analog",
+        known_hosts_file=known_hosts,
+        exact_route_lease=lease,
+    )
+
+    assert runner.route_present is False
+    assert transport.run("fw_printenv mode") == ""
+    assert runner.route_present is False
+    assert sum(call[:5] == ("sudo", "-n", "ip", "route", "add") for call in runner.calls) == 2
+    assert sum(call[:5] == ("sudo", "-n", "ip", "route", "del") for call in runner.calls) == 2
 
 
 def test_bound_ssh_transport_uses_only_the_selected_known_hosts_file(

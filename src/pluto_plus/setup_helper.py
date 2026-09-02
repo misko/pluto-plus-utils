@@ -15,8 +15,10 @@ import re
 import stat
 import subprocess
 import tempfile
+import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -25,6 +27,11 @@ from pluto_plus.doctor import (
     CANONICAL_UBOOT,
     require_setup_inspection_policy,
     require_setup_repair_policy,
+)
+from pluto_plus.host_isolation import (
+    HostCommandRunner,
+    HostIsolationError,
+    SubprocessHostCommandRunner,
 )
 from pluto_plus.ip_firmware import (
     UsbSshRouteAmbiguous,
@@ -74,6 +81,214 @@ class SetupTransport(Protocol):
     ) -> str: ...
 
 
+class ExactUsbSshRouteLease:
+    """Own one temporary interface/source-bound /32 route for one SSH call."""
+
+    def __init__(
+        self,
+        *,
+        interface: str,
+        host: str,
+        command_runner: HostCommandRunner | None = None,
+        timeout_s: float = 15,
+    ) -> None:
+        if not _INTERFACE_PATTERN.fullmatch(interface):
+            raise ValueError("invalid USB network interface")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError as error:
+            raise ValueError("exact USB SSH route host must be a literal IP address") from error
+        if address.version != 4 or not address.is_private:
+            raise ValueError("exact USB SSH route host must be private IPv4")
+        if timeout_s <= 0:
+            raise ValueError("exact USB SSH route timeout must be positive")
+        self.interface = interface
+        self.host = str(address)
+        self.destination = f"{address}/32"
+        self._runner = command_runner or SubprocessHostCommandRunner()
+        self._timeout_s = timeout_s
+        self._source: str | None = None
+        self._lock = threading.Lock()
+
+    @contextmanager
+    def session(self) -> Iterator[None]:
+        """Acquire, verify, and always release the exact owned route."""
+
+        with self._lock:
+            self._acquire()
+            try:
+                yield
+            finally:
+                self._release()
+
+    def verify(self) -> None:
+        """Re-prove the exact route while a session is active."""
+
+        source = self._source
+        if source is None:
+            raise SetupHelperError("exact USB SSH route lease is not active")
+        if self._interface_source() != source:
+            raise SetupHelperError("exact USB SSH route source changed")
+        records = self._exact_routes()
+        if len(records) != 1 or not self._route_matches(records[0], source):
+            raise SetupHelperError("exact USB SSH route tuple is not owned")
+        lookup = self._ip_json(("route", "get", self.host), label="exact USB SSH route lookup")
+        if (
+            len(lookup) != 1
+            or not isinstance(lookup[0], Mapping)
+            or lookup[0].get("dev") != self.interface
+            or lookup[0].get("prefsrc") != source
+        ):
+            raise SetupHelperError("exact USB SSH route lookup changed")
+
+    def _acquire(self) -> None:
+        if self._source is not None:
+            raise SetupHelperError("exact USB SSH route lease is already active")
+        if self._exact_routes():
+            raise SetupHelperError(
+                f"refusing to overwrite pre-existing exact route {self.destination}"
+            )
+        source = self._interface_source()
+        self._run(("sudo", "-n", "true"), timeout_s=5, label="sudo preflight")
+        self._run(
+            (
+                "sudo",
+                "-n",
+                "ip",
+                "route",
+                "add",
+                self.destination,
+                "dev",
+                self.interface,
+                "src",
+                source,
+                "scope",
+                "link",
+                "proto",
+                "static",
+            ),
+            timeout_s=self._timeout_s,
+            label="exact USB SSH route creation",
+        )
+        self._source = source
+        try:
+            self.verify()
+        except BaseException:
+            self._release()
+            raise
+
+    def _release(self) -> None:
+        source = self._source
+        if source is None:
+            return
+        records = self._exact_routes()
+        if records:
+            if len(records) != 1 or not self._route_matches(records[0], source):
+                raise SetupHelperError("refusing to delete an exact route not owned by setup")
+            self._run(
+                (
+                    "sudo",
+                    "-n",
+                    "ip",
+                    "route",
+                    "del",
+                    self.destination,
+                    "dev",
+                    self.interface,
+                    "src",
+                    source,
+                    "scope",
+                    "link",
+                    "proto",
+                    "static",
+                ),
+                timeout_s=self._timeout_s,
+                label="exact USB SSH route deletion",
+            )
+        if self._exact_routes():
+            raise SetupHelperError("exact USB SSH route deletion was not verified")
+        self._source = None
+
+    def _interface_source(self) -> str:
+        records = self._ip_json(
+            ("address", "show", "dev", self.interface, "scope", "global"),
+            label="exact USB SSH interface source",
+        )
+        sources: list[str] = []
+        for record in records:
+            if not isinstance(record, Mapping) or record.get("ifname") != self.interface:
+                raise SetupHelperError("exact USB SSH interface source record is not exact")
+            details = record.get("addr_info")
+            if not isinstance(details, list):
+                raise SetupHelperError("exact USB SSH interface address inventory is malformed")
+            for detail in details:
+                if (
+                    isinstance(detail, Mapping)
+                    and detail.get("family") == "inet"
+                    and detail.get("scope") == "global"
+                ):
+                    sources.append(str(detail.get("local")))
+        if len(sources) != 1:
+            raise SetupHelperError(
+                f"expected one global IPv4 source on {self.interface}; found {sources}"
+            )
+        try:
+            address = ipaddress.ip_address(sources[0])
+        except ValueError as error:
+            raise SetupHelperError("exact USB SSH interface source is not IPv4") from error
+        if address.version != 4 or str(address) != sources[0]:
+            raise SetupHelperError("exact USB SSH interface source is not canonical IPv4")
+        return str(address)
+
+    def _exact_routes(self) -> list[object]:
+        return self._ip_json(
+            ("route", "show", "table", "all", "exact", self.destination),
+            label="exact USB SSH route inventory",
+        )
+
+    def _ip_json(self, arguments: tuple[str, ...], *, label: str) -> list[object]:
+        try:
+            value = json.loads(
+                self._run(
+                    ("ip", "-j", "-4", *arguments),
+                    timeout_s=self._timeout_s,
+                    label=label,
+                )
+            )
+        except json.JSONDecodeError as error:
+            raise SetupHelperError(f"{label} is not JSON") from error
+        if not isinstance(value, list):
+            raise SetupHelperError(f"{label} must be a JSON array")
+        return value
+
+    def _run(self, arguments: tuple[str, ...], *, timeout_s: float, label: str) -> str:
+        try:
+            return self._runner.run(arguments, timeout_s=timeout_s)
+        except HostIsolationError as error:
+            raise SetupHelperError(f"{label} failed: {error}") from error
+
+    def _route_matches(self, record: object, source: str) -> bool:
+        if not isinstance(record, Mapping):
+            return False
+        destination = str(record.get("dst", ""))
+        if "/" not in destination:
+            destination += "/32"
+        try:
+            destination = str(ipaddress.ip_network(destination, strict=True))
+        except ValueError:
+            return False
+        return bool(
+            destination == self.destination
+            and record.get("dev") == self.interface
+            and record.get("prefsrc") == source
+            and record.get("scope") == "link"
+            and record.get("protocol") == "static"
+            and record.get("table", "main") in {"main", 254}
+            and "gateway" not in record
+            and "metric" not in record
+        )
+
+
 class BoundSshTransport:
     """Password-authenticated OpenSSH bound to one USB network interface."""
 
@@ -87,6 +302,7 @@ class BoundSshTransport:
         username: str = "root",
         ssh_binary: str = "ssh",
         route_preflight: Callable[[], None] | None = None,
+        exact_route_lease: ExactUsbSshRouteLease | None = None,
         usb_identity_checker: Callable[[str, Path], None] | None = None,
     ) -> None:
         if interface is not None and not _INTERFACE_PATTERN.fullmatch(interface):
@@ -109,13 +325,24 @@ class BoundSshTransport:
             raise ValueError("setup known-hosts path must be a regular non-symlink file")
         if known_hosts_mode & 0o077:
             raise ValueError("setup known-hosts file must not be group/other accessible")
-        selected_route_preflight = route_preflight or (
-            (lambda: _require_usb_ssh_route(interface, host))
-            if interface is not None
-            else (lambda: None)
-        )
+        if exact_route_lease is not None:
+            if route_preflight is not None:
+                raise ValueError("exact route lease and custom route preflight are exclusive")
+            if exact_route_lease.interface != interface or exact_route_lease.host != host:
+                raise ValueError("exact route lease does not match the SSH endpoint")
+            selected_route_preflight = exact_route_lease.verify
+        else:
+            selected_route_preflight = route_preflight or (
+                (lambda: _require_usb_ssh_route(interface, host))
+                if interface is not None
+                else (lambda: None)
+            )
         try:
-            selected_route_preflight()
+            if exact_route_lease is None:
+                selected_route_preflight()
+            else:
+                with exact_route_lease.session():
+                    selected_route_preflight()
         except SetupHelperError as error:
             raise ValueError(str(error)) from error
         self.host = host
@@ -125,6 +352,7 @@ class BoundSshTransport:
         self._ssh_binary = ssh_binary
         self._known_hosts_file = known_hosts_file
         self._route_preflight = selected_route_preflight
+        self._exact_route_lease = exact_route_lease
         self._usb_identity_checker = usb_identity_checker or _attest_usb_identity
         self._known_hosts_sha256 = _private_known_hosts_sha256(known_hosts_file)
 
@@ -135,9 +363,22 @@ class BoundSshTransport:
         stdin: bytes | None = None,
         timeout_s: float = 15,
     ) -> str:
-        self._route_preflight()
         if "\x00" in command or "\n" in command:
             raise SetupHelperError("invalid fixed SSH command")
+        route_session = (
+            nullcontext() if self._exact_route_lease is None else self._exact_route_lease.session()
+        )
+        with route_session:
+            self._route_preflight()
+            return self._run_ssh(command, stdin=stdin, timeout_s=timeout_s)
+
+    def _run_ssh(
+        self,
+        command: str,
+        *,
+        stdin: bytes | None,
+        timeout_s: float,
+    ) -> str:
         try:
             import pexpect
         except ImportError as error:  # pragma: no cover - composition guard
@@ -219,7 +460,24 @@ class BoundSshTransport:
             raise SetupHelperError(
                 "automatic post-reboot SSH key enrollment requires the exact USB endpoint"
             )
-        self._route_preflight()
+        route_session = (
+            nullcontext() if self._exact_route_lease is None else self._exact_route_lease.session()
+        )
+        with route_session:
+            self._route_preflight()
+            return self._reenroll_after_attested_usb_reboot(
+                serial=serial,
+                usb_sysfs_path=usb_sysfs_path,
+                timeout_s=timeout_s,
+            )
+
+    def _reenroll_after_attested_usb_reboot(
+        self,
+        *,
+        serial: str,
+        usb_sysfs_path: Path,
+        timeout_s: float,
+    ) -> SetupHostKeyRotation:
         self._usb_identity_checker(serial, usb_sysfs_path)
         previous = _private_known_hosts_bytes(self._known_hosts_file)
         previous_sha256 = hashlib.sha256(previous).hexdigest()
