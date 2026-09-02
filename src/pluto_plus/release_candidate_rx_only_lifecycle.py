@@ -12,7 +12,9 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
+
+from pydantic import ValidationError
 
 from pluto_plus.firmware import FirmwareImageError, validate_dfu
 from pluto_plus.release_candidate import (
@@ -620,32 +622,45 @@ def _publish_uncertain_receipt(
     except BaseException as route_error:
         cleanup_errors = [*cleanup.errors, f"host route release: {route_error}"]
         cleanup = CleanupReceipt(verified=False, errors=tuple(cleanup_errors))
-    receipt = _receipt(
-        receipt_id=receipt_id_factory(),
-        outcome="unknown" if mutation_started else "failed",
-        started_at=started_at,
-        completed_at=_utc(now(), label="execution failure completion"),
-        tool_repository=tool_repository,
-        tool_version=tool_version,
-        tool_source_commit=tool_source_commit,
-        operation=operation,
-        operation_path=operation_path,
-        candidate=candidate,
-        candidate_path=candidate_path,
-        pre=pre,
-        post=reconciled,
-        quiesce=quiesce,
-        route=route.model_copy(update={"release_verified": release_verified}),
-        transition=TransitionReceipt(
+    receipt_options: dict[str, Any] = {
+        "receipt_id": receipt_id_factory(),
+        "outcome": "unknown" if mutation_started else "failed",
+        "started_at": started_at,
+        "completed_at": _utc(now(), label="execution failure completion"),
+        "tool_repository": tool_repository,
+        "tool_version": tool_version,
+        "tool_source_commit": tool_source_commit,
+        "operation": operation,
+        "operation_path": operation_path,
+        "candidate": candidate,
+        "candidate_path": candidate_path,
+        "pre": pre,
+        "quiesce": quiesce,
+        "route": route.model_copy(update={"release_verified": release_verified}),
+        "transition": TransitionReceipt(
             topology=operation.target.topology,
             sealed_input=mutation_started,
             download_completed=download_completed,
             detach_completed=detach_completed,
         ),
-        cleanup=cleanup,
-        failure_phase=failure_phase,
-        error=f"{type(error).__name__}: {error}",
-    )
+        "failure_phase": failure_phase,
+        "error": f"{type(error).__name__}: {error}",
+    }
+    try:
+        receipt = _receipt(post=reconciled, cleanup=cleanup, **receipt_options)
+    except ValidationError as reconciliation_error:
+        if reconciled is None or not mutation_started:
+            raise
+        # A runtime which cannot prove either safe endpoint is evidence, not a
+        # reason to lose the durable UNKNOWN receipt needed for recovery.
+        cleanup = CleanupReceipt(
+            verified=False,
+            errors=(
+                *cleanup.errors,
+                f"reconciled runtime rejected by receipt contract: {reconciliation_error}",
+            ),
+        )
+        receipt = _receipt(post=None, cleanup=cleanup, **receipt_options)
     validate_rx_only_contract_bundle(
         candidate,
         operation,

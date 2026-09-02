@@ -461,6 +461,50 @@ def test_v2_lifecycle_postboot_failure_publishes_unknown_receipt(tmp_path: Path)
     assert "reconcile" in backend.calls
 
 
+def test_v2_lifecycle_rejected_reconciliation_still_publishes_unknown_receipt(
+    tmp_path: Path,
+) -> None:
+    operation_path, password_path, phrase = _bundle(tmp_path)
+    mismatched = _runtime(
+        firmware=CANDIDATE,
+        boot="22222222-2222-4222-8222-222222222222",
+        layout="rx-only",
+    ).model_copy(update={"metadata_abi": "frame-metadata-v3"})
+    backend = FakeBackend(
+        fail_on="attest-post",
+        reconciliation=RxOnlyFailureReconciliation(
+            runtime=mismatched,
+            cleanup=CleanupReceipt(verified=True),
+        ),
+    )
+    ticks = iter((NOW, NOW + timedelta(minutes=1)))
+
+    with pytest.raises(RxOnlyReleaseCandidateLifecycleError) as caught:
+        execute_rx_only_candidate_ram(
+            operation_path,
+            password_path=password_path,
+            confirmation=phrase,
+            backend=backend,
+            tool_repository="misko/pluto-plus-utils",
+            tool_version="0.1.0",
+            tool_source_commit="3" * 40,
+            now=lambda: next(ticks),
+            receipt_id_factory=lambda: "a" * 32,
+        )
+
+    receipt = caught.value.receipt
+    assert receipt is not None
+    assert receipt.outcome == "unknown"
+    assert receipt.post_runtime is None
+    assert not receipt.cleanup.verified
+    assert "reconciled runtime rejected" in receipt.cleanup.errors[-1]
+    saved = load_private_contract(
+        operation_path.parent / SERIAL / "ram-receipt.json",
+        ReleaseCandidateRamReceiptV2,
+    )
+    assert saved == receipt
+
+
 def test_v2_lifecycle_preboot_failure_leaves_only_safe_quiesce_and_no_dfu(
     tmp_path: Path,
 ) -> None:
