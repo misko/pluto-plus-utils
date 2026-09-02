@@ -1505,20 +1505,36 @@ def test_direct_usb_targets_are_exactly_serial_bound() -> None:
     assert json.loads(result.stderr)["error"]["code"] == "invalid_direct_usb"
 
 
-def test_standard_iio_usb_targets_are_exactly_serial_bound_and_layout_selectable() -> None:
+def test_standard_iio_usb_targets_are_exactly_serial_bound_and_layout_selectable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from pluto_plus.setup_profiles import SetupTarget, setup_target_profile
 
-    devices = _iio_usb_devices(["SERIAL_A"])
+    resolved: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.exact_usb_iio_uri",
+        lambda path, serial: resolved.append((path, serial)) or "usb:5.13.5",
+    )
+    devices = _iio_usb_devices(
+        ["SERIAL_A", "SERIAL_B,/sys/bus/usb/devices/5-2"]
+    )
 
-    assert len(devices) == 1
+    assert len(devices) == 2
     assert devices[0].identity.serial == "SERIAL_A"
     assert devices[0].identity.transport is Transport.IIO_USB
     assert devices[0].identity.uri == "usb:"
+    assert devices[1].identity.serial == "SERIAL_B"
+    assert devices[1].identity.uri == "usb:5.13.5"
+    assert resolved == [(Path("/sys/bus/usb/devices/5-2"), "SERIAL_B")]
     devices[0].configure_rx_layout(
         setup_target_profile(SetupTarget.AD9361_1R1T).rx_layout_expectation
     )
 
     result = runner.invoke(app, ["serve", "--iio-usb", " SERIAL_A"])
+    assert result.exit_code == 2
+    assert json.loads(result.stderr)["error"]["code"] == "invalid_iio_usb"
+
+    result = runner.invoke(app, ["serve", "--iio-usb", "SERIAL_A, /sys/bus/usb/devices/5-2"])
     assert result.exit_code == 2
     assert json.loads(result.stderr)["error"]["code"] == "invalid_iio_usb"
 

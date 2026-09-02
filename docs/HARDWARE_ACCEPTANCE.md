@@ -48,6 +48,9 @@ the named serial:
 
 ```bash
 uv run plutod --state-root ./acceptance-state --iio-usb SERIAL_A
+# With busy peer radios, bypass global IIO discovery using the exact sysfs node:
+uv run plutod --state-root ./acceptance-state \
+  --iio-usb SERIAL_A,/sys/bus/usb/devices/5-2
 uv run plutod --state-root ./acceptance-state --direct-usb SERIAL_A
 uv run plutod --state-root ./acceptance-state --direct-ip RADIO_HOST,SERIAL_A
 ```

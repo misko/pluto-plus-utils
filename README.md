@@ -162,6 +162,8 @@ transport:
 
 ```bash
 uv run plutod --iio-usb EXACT_SERIAL
+# Avoid probing busy peer radios by pinning the serial to its direct sysfs node:
+uv run plutod --iio-usb EXACT_SERIAL,/sys/bus/usb/devices/5-2
 ```
 
 Standard network/libiio radios are explicit and may optionally be pinned to a

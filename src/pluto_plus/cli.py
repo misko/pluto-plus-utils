@@ -7112,21 +7112,34 @@ def _direct_usb_devices(serials: list[str]) -> tuple[Any, ...]:
     return tuple(devices)
 
 
-def _iio_usb_devices(serials: list[str]) -> tuple[Any, ...]:
-    """Compose exact-serial standard USB-IIO targets without direct capture."""
+def _iio_usb_devices(specifications: list[str]) -> tuple[Any, ...]:
+    """Compose serial-pinned standard USB-IIO targets without direct capture."""
 
+    from pluto_plus.bootstrap_firmware import BootstrapFirmwareError, exact_usb_iio_uri
     from pluto_plus.hardware.iio import IioRadioDevice
 
     devices: list[Any] = []
-    for raw_serial in serials:
-        serial = raw_serial.strip()
-        if not serial or serial != raw_serial:
+    for specification in specifications:
+        parts = [part.strip() for part in specification.split(",")]
+        if (
+            len(parts) not in {1, 2}
+            or not all(parts)
+            or specification != ",".join(parts)
+        ):
             _fail(
                 "invalid_iio_usb",
-                "--iio-usb must be one non-empty exact serial without surrounding spaces",
+                "--iio-usb must be SERIAL or SERIAL,/sys/bus/usb/devices/DEVICE "
+                "without surrounding spaces",
                 2,
             )
-        devices.append(IioRadioDevice("usb:", serial=serial, radio_id=serial))
+        serial = parts[0]
+        uri = "usb:"
+        if len(parts) == 2:
+            try:
+                uri = exact_usb_iio_uri(Path(parts[1]), serial)
+            except BootstrapFirmwareError as error:
+                _fail("invalid_iio_usb", str(error), 2)
+        devices.append(IioRadioDevice(uri, serial=serial, radio_id=serial))
     return tuple(devices)
 
 
@@ -7243,7 +7256,10 @@ def serve(
     iio_usb: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--iio-usb",
-        help="Add an exact-serial standard USB-IIO target (repeatable).",
+        help=(
+            "Add a standard USB-IIO SERIAL or exact SERIAL,/sys/bus/usb/devices/DEVICE "
+            "target (repeatable)."
+        ),
     ),
     iio_ip: list[str] | None = typer.Option(  # noqa: B008
         None,
