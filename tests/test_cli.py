@@ -19,6 +19,7 @@ from pluto_plus.cli import (
     _direct_ip_devices,
     _direct_usb_devices,
     _iio_ip_devices,
+    _iio_usb_devices,
     _network_iio_inventory,
     _read_ssh_firmware_enrollment,
     app,
@@ -1487,6 +1488,24 @@ def test_direct_usb_targets_are_exactly_serial_bound() -> None:
     result = runner.invoke(app, ["serve", "--direct-usb", " SERIAL_A"])
     assert result.exit_code == 2
     assert json.loads(result.stderr)["error"]["code"] == "invalid_direct_usb"
+
+
+def test_standard_iio_usb_targets_are_exactly_serial_bound_and_layout_selectable() -> None:
+    from pluto_plus.setup_profiles import SetupTarget, setup_target_profile
+
+    devices = _iio_usb_devices(["SERIAL_A"])
+
+    assert len(devices) == 1
+    assert devices[0].identity.serial == "SERIAL_A"
+    assert devices[0].identity.transport is Transport.IIO_USB
+    assert devices[0].identity.uri == "usb:"
+    devices[0].configure_rx_layout(
+        setup_target_profile(SetupTarget.AD9361_1R1T).rx_layout_expectation
+    )
+
+    result = runner.invoke(app, ["serve", "--iio-usb", " SERIAL_A"])
+    assert result.exit_code == 2
+    assert json.loads(result.stderr)["error"]["code"] == "invalid_iio_usb"
 
 
 def test_standard_iio_ip_targets_support_observed_or_pinned_serials() -> None:

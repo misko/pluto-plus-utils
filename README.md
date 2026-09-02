@@ -155,6 +155,15 @@ preflight. Pluto+ Utils automatically preloads `.venv/lib/libiio.so.0`; no
 `--metadata-abi 1` for the currently deployed production ABI-1 radios; ABI 3
 is only for the exact source-qualified stack described above.
 
+Standard USB/libiio radios can be restricted to one exact serial. This is the
+appropriate daemon transport for target-aware one- or two-receiver setup and
+ordinary IIO capture; `--direct-usb` remains the paired-RX high-throughput
+transport:
+
+```bash
+uv run plutod --iio-usb EXACT_SERIAL
+```
+
 Standard network/libiio radios are explicit and may optionally be pinned to a
 known serial:
 

@@ -7112,6 +7112,24 @@ def _direct_usb_devices(serials: list[str]) -> tuple[Any, ...]:
     return tuple(devices)
 
 
+def _iio_usb_devices(serials: list[str]) -> tuple[Any, ...]:
+    """Compose exact-serial standard USB-IIO targets without direct capture."""
+
+    from pluto_plus.hardware.iio import IioRadioDevice
+
+    devices: list[Any] = []
+    for raw_serial in serials:
+        serial = raw_serial.strip()
+        if not serial or serial != raw_serial:
+            _fail(
+                "invalid_iio_usb",
+                "--iio-usb must be one non-empty exact serial without surrounding spaces",
+                2,
+            )
+        devices.append(IioRadioDevice("usb:", serial=serial, radio_id=serial))
+    return tuple(devices)
+
+
 def _iio_ip_devices(specifications: list[str]) -> tuple[Any, ...]:
     """Compose explicit standard libiio network targets, optionally serial-pinned."""
 
@@ -7222,6 +7240,11 @@ def serve(
         "--direct-usb",
         help="Add an exact-serial direct-USB capture target (repeatable).",
     ),
+    iio_usb: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--iio-usb",
+        help="Add an exact-serial standard USB-IIO target (repeatable).",
+    ),
     iio_ip: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--iio-ip",
@@ -7331,6 +7354,7 @@ def serve(
 
     direct_specifications = direct_ip or []
     direct_usb_serials = direct_usb or []
+    iio_usb_serials = iio_usb or []
     iio_ip_specifications = iio_ip or []
     discovery_networks = discover_iio_network or []
     managed_discovered_serials = manage_discovered_iio or []
@@ -7349,6 +7373,7 @@ def serve(
                 not hardware
                 and not direct_specifications
                 and not direct_usb_serials
+                and not iio_usb_serials
                 and not iio_ip_specifications
                 and not discovery_networks
             )
@@ -7358,6 +7383,7 @@ def serve(
     devices: list[Any] = [FakeRadioDevice(serial=serial) for serial in serials]
     devices.extend(_direct_ip_devices(direct_specifications))
     devices.extend(_direct_usb_devices(direct_usb_serials))
+    devices.extend(_iio_usb_devices(iio_usb_serials))
     devices.extend(_iio_ip_devices(iio_ip_specifications))
     discovered_radios: tuple[Any, ...] = ()
     if discovery_networks:

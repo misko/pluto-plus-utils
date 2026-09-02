@@ -47,10 +47,13 @@ For direct transport qualification, start only the daemon composition matching
 the named serial:
 
 ```bash
+uv run plutod --state-root ./acceptance-state --iio-usb SERIAL_A
 uv run plutod --state-root ./acceptance-state --direct-usb SERIAL_A
 uv run plutod --state-root ./acceptance-state --direct-ip RADIO_HOST,SERIAL_A
 ```
 
-Run these alternatives separately. Record sustained sample rate, dropped-frame
+Run these alternatives separately. Use standard `--iio-usb` for a target-aware
+1R1T acceptance run; `--direct-usb` is deliberately paired-RX-only. Record
+sustained sample rate, dropped-frame
 metadata, bounded timeout behavior, USB/IP disconnect recovery, and the exact IIO
 serial observed before and after each transport test.
