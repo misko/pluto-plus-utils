@@ -747,6 +747,11 @@ address, add `--setup-exact-route-lease`. PPU then adds one owned
 setup SSH call, verifies the kernel lookup, and deletes that exact route in a
 `finally` path. It never downs or reconfigures peer Pluto interfaces.
 
+The same non-disruptive route mode is available while refreshing a stale
+USB-pinned SSH host key: use `firmware enroll-usb-ssh --exact-route-lease`.
+The destination known-hosts file must be new; PPU will not overwrite the old
+pin.
+
 If execution becomes uncertain after mutation or reboot, the receipt records the last
 completed phase and durable backup reference. Do not replay the consumed plan. Re-attest
 and use the receipt's read-only reconciliation action. Firmware which regenerates its

@@ -103,7 +103,11 @@ from pluto_plus.seeded_hop import (
     DEFAULT_STOP_HZ,
     DEFAULT_THRESHOLD_DB,
 )
-from pluto_plus.setup_helper import BoundSshTransport, ExactUsbSshRouteLease
+from pluto_plus.setup_helper import (
+    BoundSshTransport,
+    ExactUsbSshRouteLease,
+    SetupHelperError,
+)
 from pluto_plus.setup_profiles import DEFAULT_SETUP_TARGET, SetupTarget, setup_target_profile
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8765"
@@ -4474,6 +4478,11 @@ def firmware_enroll_usb_ssh(
         "--isolate-usb-route",
         help="Temporarily isolate competing local Pluto NICs/routes with a durable receipt.",
     ),
+    exact_route_lease: bool = typer.Option(
+        False,
+        "--exact-route-lease",
+        help="Own one temporary interface/source-bound /32 route during enrollment.",
+    ),
     isolation_confirmation: str | None = typer.Option(
         None,
         "--isolation-confirm",
@@ -4487,6 +4496,18 @@ def firmware_enroll_usb_ssh(
 ) -> None:
     """Pin an SSH host key after USB-selected remote serial attestation."""
 
+    if isolate_usb_route and exact_route_lease:
+        _fail(
+            "usb_ssh_route_mode_conflict",
+            "--isolate-usb-route and --exact-route-lease are mutually exclusive",
+            2,
+        )
+    if exact_route_lease and ssh_host != "192.168.2.1":
+        _fail(
+            "usb_ssh_exact_route_invalid",
+            "--exact-route-lease requires the USB gadget endpoint 192.168.2.1",
+            2,
+        )
     phrase = f"TRUST USB SSH {serial}"
     local_devices = scan_local_usb_plutos()
     matches = [
@@ -4506,6 +4527,7 @@ def firmware_enroll_usb_ssh(
         "usb_interface": matches[0].host_network_interfaces[0].name,
         "known_hosts_file": str(known_hosts_file.expanduser().resolve()),
         "ssh_host": ssh_host,
+        "exact_route_lease": exact_route_lease,
         "confirmation_phrase": phrase,
     }
     isolation_plan = None
@@ -4574,9 +4596,13 @@ def firmware_enroll_usb_ssh(
 
     try:
         isolation_receipt = None
-        if isolation_plan is None:
-            result = enrollment_action()
-        else:
+        if exact_route_lease:
+            with ExactUsbSshRouteLease(
+                interface=matches[0].host_network_interfaces[0].name,
+                host=ssh_host,
+            ).session():
+                result = enrollment_action()
+        elif isolation_plan is not None:
             from pluto_plus.host_isolation import (
                 HostIsolationError,
                 HostIsolationExecutionError,
@@ -4596,7 +4622,9 @@ def firmware_enroll_usb_ssh(
                 raise typer.Exit(5) from error
             except HostIsolationError as error:
                 _fail("host_isolation_failed", str(error), 4)
-    except (BootstrapFirmwareError, OSError, ValueError) as error:
+        else:
+            result = enrollment_action()
+    except (BootstrapFirmwareError, OSError, SetupHelperError, ValueError) as error:
         _fail("usb_ssh_enrollment_failed", str(error), 4)
     if isolation_receipt is None:
         _emit(result)

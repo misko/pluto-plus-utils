@@ -1539,6 +1539,65 @@ def test_standard_iio_usb_targets_are_exactly_serial_bound_and_layout_selectable
     assert json.loads(result.stderr)["error"]["code"] == "invalid_iio_usb"
 
 
+def test_usb_ssh_enrollment_can_lease_one_exact_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+
+    class Lease:
+        def __init__(self, **kwargs: Any) -> None:
+            events.append(("lease", kwargs))
+
+        def session(self) -> Lease:
+            return self
+
+        def __enter__(self) -> None:
+            events.append("route_added")
+
+        def __exit__(self, *args: object) -> None:
+            events.append(("route_removed", args[0]))
+
+    monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
+    monkeypatch.setattr("pluto_plus.cli.ExactUsbSshRouteLease", Lease)
+    monkeypatch.setattr(
+        "pluto_plus.bootstrap_firmware.enroll_bound_usb_ssh_host_key",
+        lambda **kwargs: events.append(("enroll", kwargs)) or {"serial": "SERIAL_A"},
+    )
+    password = tmp_path / "password"
+    password.write_text("analog\n")
+    password.chmod(0o600)
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "enroll-usb-ssh",
+            "SERIAL_A",
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--known-hosts-file",
+            str(tmp_path / "new-known-hosts"),
+            "--password-file",
+            str(password),
+            "--exact-route-lease",
+            "--execute",
+            "--confirm",
+            "TRUST USB SSH SERIAL_A",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"serial": "SERIAL_A"}
+    assert events[0] == (
+        "lease",
+        {"interface": "enx001", "host": "192.168.2.1"},
+    )
+    assert events[1] == "route_added"
+    assert events[2][0] == "enroll"  # type: ignore[index]
+    assert events[3] == ("route_removed", None)
+
+
 def test_standard_iio_ip_targets_support_observed_or_pinned_serials() -> None:
     devices = _iio_ip_devices(["192.168.1.15", "192.168.1.20,1040005e0b100007100010000bf33a5d4d"])
 
