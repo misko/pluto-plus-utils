@@ -88,10 +88,16 @@ class FakeAdi:
     def __init__(self, serial: str = "SERIAL_A") -> None:
         self.serial = serial
         self.device: FakeAd9361 | None = None
+        self.facades: list[str] = []
 
     def ad9361(self, uri: str) -> FakeAd9361:
+        self.facades.append("ad9361")
         self.device = FakeAd9361(uri, self.serial)
         return self.device
+
+    def ad9364(self, uri: str) -> FakeAd9361:
+        self.facades.append("ad9364")
+        return self.ad9361(uri)
 
 
 def test_opt_in_raw_decoder_returns_owned_complex64_and_resets_on_failure(
@@ -557,6 +563,8 @@ def test_iio_adapter_opens_exact_native_single_stream_target() -> None:
 
     radio.open()
     try:
+        assert module.facades == ["ad9364"]
+        assert radio.diagnostic_facts()["pyadi_facade"] == "ad9364"
         assert radio.read_settings().channels == (0,)
         assert radio.capabilities.receiver_channels == (0,)
         assert radio.read_block(1024).samples.shape == (1, 1024)

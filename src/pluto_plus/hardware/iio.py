@@ -220,11 +220,28 @@ class IioRadioDevice:
             self._requested_serial,
             contexts=self._iio_contexts,
         )
-        device = module.ad9361(uri=uri)
+        # pyadi's ad9361/ad9363 facades enumerate all four 2R2T component
+        # channels before creating a buffer. A genuine 1R1T context exposes
+        # only voltage0/voltage1, so use its one-complex-channel ad9364 facade;
+        # the independently attested context model still enforces the selected
+        # AD9361/AD9363A driver personality below.
+        facade_name = (
+            "ad9364"
+            if self._rx_layout_expectation is not None
+            and self._rx_layout_expectation.receiver_channels == (0,)
+            else "ad9361"
+        )
+        facade = getattr(module, facade_name, None)
+        if not callable(facade):
+            raise RadioConfigurationError(
+                f"pyadi runtime does not provide the required {facade_name} facade"
+            )
+        device = facade(uri=uri)
         attested = False
         try:
             configure_iio_context_timeout(device.ctx)
             facts = context_facts(device.ctx)
+            facts["pyadi_facade"] = facade_name
             detected_serial = str(facts.get("serial") or "")
             if self._requested_serial and detected_serial != self._requested_serial:
                 raise RadioConfigurationError(
