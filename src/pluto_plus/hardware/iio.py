@@ -52,9 +52,11 @@ from pluto_plus.tandem import TandemSessionRequestV1
 
 PLUTO_USB_VENDOR = "0456"
 PLUTO_RUNTIME_PRODUCT = "b673"
+PLUTO_USB_ROOT = Path("/sys/bus/usb/devices")
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
 AD9361_FASTLOCK_PROFILE_COUNT = 8
 _CONCRETE_USB_URI = re.compile(r"^usb:[0-9]+[.][0-9]+[.][0-9]+$")
+_SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +100,7 @@ class IioRadioDevice:
         *,
         serial: str | None = None,
         expected_usb_path: str | None = None,
+        usb_sysfs_path: Path | None = None,
         mutation_preflight: Callable[[], None] | None = None,
         require_idle_tandem_owner: bool = False,
         radio_id: str | None = None,
@@ -111,9 +114,18 @@ class IioRadioDevice:
             raise ValueError("expected_metadata_abi must be 1, 2, 3, 4, or None")
         validate_iq_decoder(iq_decoder)
         normalized = uri.removeprefix("pluto://")
+        if usb_sysfs_path is not None:
+            if serial is None or not normalized.startswith("usb:"):
+                raise ValueError("exact USB sysfs IIO selection requires a serial and USB URI")
+            selected_path = str(usb_sysfs_path)
+            if expected_usb_path not in {None, selected_path}:
+                raise ValueError("expected USB path conflicts with exact USB sysfs selection")
+            normalized = exact_usb_iio_uri(usb_sysfs_path, serial)
+            expected_usb_path = selected_path
         self._configured_uri = normalized
         self._requested_serial = serial
         self._expected_usb_path = expected_usb_path
+        self._usb_sysfs_path = usb_sysfs_path
         self._mutation_preflight = mutation_preflight
         self._require_idle_tandem_owner = require_idle_tandem_owner
         self._radio_id = radio_id or serial or normalized
@@ -195,8 +207,16 @@ class IioRadioDevice:
                 raise ImportError(
                     "IIO hardware requires the 'hardware' extra and a compatible native libiio"
                 ) from error
+        configured_uri = self._configured_uri
+        if self._usb_sysfs_path is not None:
+            if self._requested_serial is None:  # pragma: no cover - constructor invariant
+                raise RuntimeError("exact USB sysfs selection lost its serial")
+            configured_uri = exact_usb_iio_uri(
+                self._usb_sysfs_path,
+                self._requested_serial,
+            )
         uri = resolve_iio_uri(
-            self._configured_uri,
+            configured_uri,
             self._requested_serial,
             contexts=self._iio_contexts,
         )
@@ -1017,6 +1037,70 @@ def resolve_iio_uri(
             f"expected exactly one USB Pluto with serial {serial}, found {len(matches)}"
         )
     return matches[0]
+
+
+def exact_usb_iio_uri(
+    usb_sysfs_path: Path,
+    serial: str,
+    *,
+    usb_root: Path = PLUTO_USB_ROOT,
+) -> str:
+    """Resolve one serial/path-bound IIO URI without probing peer radios."""
+
+    if not usb_sysfs_path.is_absolute() or usb_sysfs_path.parent != usb_root:
+        raise RadioConfigurationError(
+            "USB sysfs path must name one direct device below /sys/bus/usb/devices"
+        )
+    try:
+        resolved = usb_sysfs_path.resolve(strict=True)
+        vendor = (resolved / "idVendor").read_text(encoding="ascii").strip().lower()
+        product = (resolved / "idProduct").read_text(encoding="ascii").strip().lower()
+        observed_serial = (resolved / "serial").read_text(encoding="utf-8").strip()
+        bus = int((resolved / "busnum").read_text(encoding="ascii").strip())
+        device = int((resolved / "devnum").read_text(encoding="ascii").strip())
+    except (OSError, UnicodeError, ValueError) as error:
+        raise RadioConfigurationError(f"cannot resolve exact USB-IIO identity: {error}") from error
+    if resolved.name != usb_sysfs_path.name or ":" in usb_sysfs_path.name:
+        raise RadioConfigurationError("USB sysfs path must name one direct device")
+    if (
+        vendor != PLUTO_USB_VENDOR
+        or product != PLUTO_RUNTIME_PRODUCT
+        or bus <= 0
+        or device <= 0
+    ):
+        raise RadioConfigurationError("exact USB path is not one runtime Pluto")
+    if observed_serial != serial or not _SERIAL_PATTERN.fullmatch(serial):
+        raise RadioConfigurationError("exact USB path serial does not match the requested radio")
+
+    interfaces: list[int] = []
+    for candidate in usb_sysfs_path.parent.glob(f"{usb_sysfs_path.name}:*"):
+        try:
+            interface_class = (
+                (candidate / "bInterfaceClass").read_text(encoding="ascii").strip().lower()
+            )
+            interface_subclass = (
+                (candidate / "bInterfaceSubClass").read_text(encoding="ascii").strip().lower()
+            )
+            interface_protocol = (
+                (candidate / "bInterfaceProtocol").read_text(encoding="ascii").strip().lower()
+            )
+            interface_number = int(
+                (candidate / "bInterfaceNumber").read_text(encoding="ascii").strip(), 16
+            )
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if (
+            interface_class == "02"
+            and interface_subclass == "00"
+            and interface_protocol == "00"
+            and interface_number >= 0
+        ):
+            interfaces.append(interface_number)
+    if len(interfaces) != 1:
+        raise RadioConfigurationError(
+            f"expected one exact USB-IIO interface at {usb_sysfs_path}, found {interfaces}"
+        )
+    return f"usb:{bus}.{device}.{interfaces[0]}"
 
 
 def discover_usb_serials(usb_root: Path = Path("/sys/bus/usb/devices")) -> list[str]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -259,6 +260,40 @@ def test_usb_uri_resolution_requires_one_serial_match() -> None:
     assert resolve_iio_uri("usb:3.49.5", "SERIAL_A", contexts={}) == "usb:3.49.5"
     with pytest.raises(RadioConfigurationError, match="found 0"):
         resolve_iio_uri("usb:", "missing", contexts=contexts)
+
+
+def test_sysfs_pinned_iio_uri_is_refreshed_on_every_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path("/sys/bus/usb/devices/5-2")
+    returned_uris = iter(("usb:5.13.5", "usb:5.14.5", "usb:5.15.5"))
+    resolutions: list[tuple[Path, str]] = []
+
+    def resolve(selected_path: Path, serial: str) -> str:
+        resolutions.append((selected_path, serial))
+        return next(returned_uris)
+
+    monkeypatch.setattr("pluto_plus.hardware.iio.exact_usb_iio_uri", resolve)
+    monkeypatch.setattr(
+        "pluto_plus.hardware.iio.find_usb_sysfs_path",
+        lambda serial: str(path),
+    )
+    module = FakeAdi()
+    radio = IioRadioDevice(
+        "usb:",
+        serial="SERIAL_A",
+        usb_sysfs_path=path,
+        adi_module=module,
+    )
+
+    assert radio.identity.uri == "usb:5.13.5"
+    radio.open()
+    assert radio.identity.uri == "usb:5.14.5"
+    radio.close()
+    radio.open()
+    assert radio.identity.uri == "usb:5.15.5"
+    radio.close()
+    assert resolutions == [(path, "SERIAL_A")] * 3
 
 
 def test_iio_adapter_exposes_bufferless_fastlock_and_counter_control() -> None:

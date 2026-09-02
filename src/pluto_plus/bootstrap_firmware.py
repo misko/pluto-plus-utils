@@ -79,6 +79,7 @@ from pluto_plus.doctor import (
     TANDEM_V6_LATCH_CLEAR_PERSISTENT_POLICY,
     TANDEM_V6_LATCH_CLEAR_RAM_POLICY,
 )
+from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.firmware import FirmwareImageError, generate_frm, validate_frm
 from pluto_plus.hardware.discovery import _facts_from_context_xml, _inspect_iio_context
 from pluto_plus.hardware.iio_metadata import require_metadata_abi_capability
@@ -2816,49 +2817,12 @@ def exact_usb_iio_uri(usb_sysfs_path: Path, serial: str) -> str:
     """
 
     path = _direct_usb_path(usb_sysfs_path)
-    try:
-        resolved = path.resolve(strict=True)
-        vendor = (resolved / "idVendor").read_text(encoding="ascii").strip().lower()
-        product = (resolved / "idProduct").read_text(encoding="ascii").strip().lower()
-        observed_serial = (resolved / "serial").read_text(encoding="utf-8").strip()
-        bus = int((resolved / "busnum").read_text(encoding="ascii").strip())
-        device = int((resolved / "devnum").read_text(encoding="ascii").strip())
-    except (OSError, UnicodeError, ValueError) as error:
-        raise BootstrapFirmwareError(f"cannot resolve exact USB-IIO identity: {error}") from error
-    if vendor != "0456" or product != "b673" or bus <= 0 or device <= 0:
-        raise BootstrapFirmwareError("exact USB path is not one runtime Pluto")
-    if observed_serial != serial or not _SERIAL_PATTERN.fullmatch(serial):
-        raise BootstrapFirmwareError("exact USB path serial does not match the requested radio")
+    from pluto_plus.hardware.iio import exact_usb_iio_uri as resolve_exact_usb_iio_uri
 
-    interfaces: list[int] = []
-    for candidate in path.parent.glob(f"{path.name}:*"):
-        try:
-            interface_class = (
-                (candidate / "bInterfaceClass").read_text(encoding="ascii").strip().lower()
-            )
-            interface_subclass = (
-                (candidate / "bInterfaceSubClass").read_text(encoding="ascii").strip().lower()
-            )
-            interface_protocol = (
-                (candidate / "bInterfaceProtocol").read_text(encoding="ascii").strip().lower()
-            )
-            interface_number = int(
-                (candidate / "bInterfaceNumber").read_text(encoding="ascii").strip(), 16
-            )
-        except (OSError, UnicodeError, ValueError):
-            continue
-        if (
-            interface_class == "02"
-            and interface_subclass == "00"
-            and interface_protocol == "00"
-            and interface_number >= 0
-        ):
-            interfaces.append(interface_number)
-    if len(interfaces) != 1:
-        raise BootstrapFirmwareError(
-            f"expected one exact USB-IIO interface at {path}, found {interfaces}"
-        )
-    return f"usb:{bus}.{device}.{interfaces[0]}"
+    try:
+        return resolve_exact_usb_iio_uri(path, serial, usb_root=_USB_ROOT)
+    except RadioConfigurationError as error:
+        raise BootstrapFirmwareError(str(error)) from error
 
 
 def mute_returned_radio_at_path(serial: str, usb_sysfs_path: Path) -> None:

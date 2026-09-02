@@ -1512,7 +1512,7 @@ def test_standard_iio_usb_targets_are_exactly_serial_bound_and_layout_selectable
 
     resolved: list[tuple[Path, str]] = []
     monkeypatch.setattr(
-        "pluto_plus.bootstrap_firmware.exact_usb_iio_uri",
+        "pluto_plus.hardware.iio.exact_usb_iio_uri",
         lambda path, serial: resolved.append((path, serial)) or "usb:5.13.5",
     )
     devices = _iio_usb_devices(

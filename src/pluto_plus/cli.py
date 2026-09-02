@@ -7147,7 +7147,7 @@ def _direct_usb_devices(serials: list[str]) -> tuple[Any, ...]:
 def _iio_usb_devices(specifications: list[str]) -> tuple[Any, ...]:
     """Compose serial-pinned standard USB-IIO targets without direct capture."""
 
-    from pluto_plus.bootstrap_firmware import BootstrapFirmwareError, exact_usb_iio_uri
+    from pluto_plus.errors import RadioConfigurationError
     from pluto_plus.hardware.iio import IioRadioDevice
 
     devices: list[Any] = []
@@ -7165,13 +7165,17 @@ def _iio_usb_devices(specifications: list[str]) -> tuple[Any, ...]:
                 2,
             )
         serial = parts[0]
-        uri = "usb:"
-        if len(parts) == 2:
-            try:
-                uri = exact_usb_iio_uri(Path(parts[1]), serial)
-            except BootstrapFirmwareError as error:
-                _fail("invalid_iio_usb", str(error), 2)
-        devices.append(IioRadioDevice(uri, serial=serial, radio_id=serial))
+        try:
+            devices.append(
+                IioRadioDevice(
+                    "usb:",
+                    serial=serial,
+                    radio_id=serial,
+                    usb_sysfs_path=(None if len(parts) == 1 else Path(parts[1])),
+                )
+            )
+        except RadioConfigurationError as error:
+            _fail("invalid_iio_usb", str(error), 2)
     return tuple(devices)
 
 

@@ -166,6 +166,10 @@ uv run plutod --iio-usb EXACT_SERIAL
 uv run plutod --iio-usb EXACT_SERIAL,/sys/bus/usb/devices/5-2
 ```
 
+The sysfs-pinned form resolves the current concrete USB device number again on
+every open, so a setup or firmware reboot does not leave the managed adapter on
+the pre-reboot libiio URI.
+
 Standard network/libiio radios are explicit and may optionally be pinned to a
 known serial:
 
