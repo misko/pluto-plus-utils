@@ -21,6 +21,8 @@ from .iio import (
     IioCaptureRateAttestation,
     IioExactUsbRxOnlyRateEvidence,
     IioRadioDevice,
+    IioRxSignalPathAttestation,
+    IioSampleCounterSlopeAttestation,
     configure_exact_usb_rx_only_source_locked_rate,
     discover_usb_serials,
 )
@@ -33,6 +35,8 @@ __all__ = [
     "IioRadioDevice",
     "IioCaptureRateAttestation",
     "IioExactUsbRxOnlyRateEvidence",
+    "IioRxSignalPathAttestation",
+    "IioSampleCounterSlopeAttestation",
     "ExactSettingsApplication",
     "ExactSettingsApplicationError",
     "MetadataCapture",

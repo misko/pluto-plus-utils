@@ -84,6 +84,41 @@ class IioCaptureRateAttestation:
 
 
 @dataclass(frozen=True, slots=True)
+class IioRxSignalPathAttestation:
+    """Exact AD936x receive-filter and gain state bound to a rate proof."""
+
+    receiver_channels: tuple[int, ...]
+    requested_rf_bandwidth_hz: int
+    rf_bandwidth_hz: tuple[int, ...]
+    requested_gain_mode: GainMode
+    gain_modes: tuple[GainMode, ...]
+    requested_manual_gain_db: tuple[float, ...] | None
+    hardware_gain_db: tuple[float, ...]
+    requested_fir_enabled: bool
+    fir_enabled: tuple[bool, ...]
+    rx_path_rates: str
+    trx_rate_governor: str
+
+
+@dataclass(frozen=True, slots=True)
+class IioSampleCounterSlopeAttestation:
+    """Host-monotonic slope measurement of the FPGA capture sample counter."""
+
+    expected_rate_hz: int
+    observation_seconds_requested: float
+    counter_start_low32: int
+    counter_end_low32: int
+    counter_delta: int
+    host_elapsed_ns: int
+    start_read_span_ns: int
+    end_read_span_ns: int
+    measured_rate_hz: float
+    error_ppm: float
+    tolerance_ppm: float
+    within_tolerance: bool
+
+
+@dataclass(frozen=True, slots=True)
 class IioExactUsbRxOnlyRateEvidence:
     """Identity and clock proof from a direct RX-only libiio context."""
 
@@ -96,6 +131,8 @@ class IioExactUsbRxOnlyRateEvidence:
     rx_scan_channels: tuple[str, ...]
     access_path: Literal["direct-libiio"]
     rate: IioCaptureRateAttestation
+    signal_path: IioRxSignalPathAttestation | None = None
+    sample_counter_slope: IioSampleCounterSlopeAttestation | None = None
 
 
 def configure_exact_usb_rx_only_source_locked_rate(
@@ -107,11 +144,29 @@ def configure_exact_usb_rx_only_source_locked_rate(
     expected_hardware_model: str | None = None,
     expected_firmware_version: str | None = None,
     expected_metadata_abi: int | None = None,
+    rf_bandwidth_hz: int | None = None,
+    gain_mode: GainMode | None = None,
+    manual_gain_db: tuple[float, ...] | None = None,
+    fir_enabled: bool | None = None,
+    sample_counter_observation_seconds: float | None = None,
+    sample_counter_tolerance_ppm: float = 10_000.0,
     iio_module: ModuleType | Any | None = None,
 ) -> IioExactUsbRxOnlyRateEvidence:
     """Program and attest one exact RX-only Pluto without requiring a TX facade."""
 
     _validate_source_locked_rate(rate_hz)
+    _validate_rx_signal_path_request(
+        expected_rx_layout=expected_rx_layout,
+        rf_bandwidth_hz=rf_bandwidth_hz,
+        gain_mode=gain_mode,
+        manual_gain_db=manual_gain_db,
+        fir_enabled=fir_enabled,
+    )
+    _validate_counter_slope_request(
+        rate_hz=rate_hz,
+        observation_seconds=sample_counter_observation_seconds,
+        tolerance_ppm=sample_counter_tolerance_ppm,
+    )
     uri = exact_usb_iio_uri(usb_sysfs_path, serial)
     module = iio_module
     if module is None:
@@ -156,6 +211,26 @@ def configure_exact_usb_rx_only_source_locked_rate(
                 "direct RX-only rate control requires no DDS or tandem IIO device"
             )
         rate = _configure_context_source_locked_rx_rate(context, rate_hz)
+        signal_path = None
+        if rf_bandwidth_hz is not None:
+            assert gain_mode is not None
+            assert fir_enabled is not None
+            signal_path = _configure_context_rx_signal_path(
+                context,
+                expected_rx_layout=expected_rx_layout,
+                rf_bandwidth_hz=rf_bandwidth_hz,
+                gain_mode=gain_mode,
+                manual_gain_db=manual_gain_db,
+                fir_enabled=fir_enabled,
+            )
+        sample_counter_slope = None
+        if sample_counter_observation_seconds is not None:
+            sample_counter_slope = _attest_context_sample_counter_slope(
+                context,
+                expected_rate_hz=rate_hz,
+                observation_seconds=sample_counter_observation_seconds,
+                tolerance_ppm=sample_counter_tolerance_ppm,
+            )
         raw_scan_channels = facts.get("rx_scan_channels")
         rx_scan_channels = (
             tuple(str(item) for item in raw_scan_channels)
@@ -172,6 +247,8 @@ def configure_exact_usb_rx_only_source_locked_rate(
             rx_scan_channels=rx_scan_channels,
             access_path="direct-libiio",
             rate=rate,
+            signal_path=signal_path,
+            sample_counter_slope=sample_counter_slope,
         )
     finally:
         close = getattr(context, "close", None)
@@ -1623,6 +1700,234 @@ def _capture_rate_channel(device: Any) -> Any:
 def _validate_source_locked_rate(rate_hz: int) -> None:
     if not isinstance(rate_hz, int) or isinstance(rate_hz, bool) or rate_hz <= 0:
         raise ValueError("source-locked RX rate must be a positive integer")
+
+
+def _validate_rx_signal_path_request(
+    *,
+    expected_rx_layout: RxLayoutExpectation,
+    rf_bandwidth_hz: int | None,
+    gain_mode: GainMode | None,
+    manual_gain_db: tuple[float, ...] | None,
+    fir_enabled: bool | None,
+) -> None:
+    requested = (rf_bandwidth_hz is not None, gain_mode is not None, fir_enabled is not None)
+    if any(requested) and not all(requested):
+        raise ValueError(
+            "RF bandwidth, gain mode, and FIR state must be requested together"
+        )
+    if not any(requested):
+        if manual_gain_db is not None:
+            raise ValueError("manual RX gain requires a complete signal-path request")
+        return
+    if (
+        not isinstance(rf_bandwidth_hz, int)
+        or isinstance(rf_bandwidth_hz, bool)
+        or rf_bandwidth_hz <= 0
+    ):
+        raise ValueError("RX RF bandwidth must be a positive integer")
+    if not isinstance(gain_mode, GainMode):
+        raise ValueError("RX gain mode must be a GainMode")
+    if not isinstance(fir_enabled, bool):
+        raise ValueError("RX FIR state must be boolean")
+    if gain_mode is GainMode.MANUAL:
+        if manual_gain_db is None or len(manual_gain_db) != len(
+            expected_rx_layout.receiver_channels
+        ):
+            raise ValueError("manual RX gain must provide one value per receiver channel")
+        if any(
+            not isinstance(value, (int, float)) or isinstance(value, bool)
+            for value in manual_gain_db
+        ):
+            raise ValueError("manual RX gain values must be numeric")
+    elif manual_gain_db is not None:
+        raise ValueError("automatic RX gain modes do not accept manual gain values")
+
+
+def _validate_counter_slope_request(
+    *, rate_hz: int, observation_seconds: float | None, tolerance_ppm: float
+) -> None:
+    if observation_seconds is None:
+        return
+    if (
+        not isinstance(observation_seconds, (int, float))
+        or isinstance(observation_seconds, bool)
+        or not 0.01 <= observation_seconds <= 30.0
+    ):
+        raise ValueError("sample-counter observation must be between 0.01 and 30 seconds")
+    if rate_hz * observation_seconds >= 2**32:
+        raise ValueError("sample-counter observation may span at most one low-word wrap")
+    if (
+        not isinstance(tolerance_ppm, (int, float))
+        or isinstance(tolerance_ppm, bool)
+        or not 0 < tolerance_ppm <= 100_000
+    ):
+        raise ValueError("sample-counter tolerance must be in (0, 100000] ppm")
+
+
+def _required_iio_attribute(container: Any, name: str, *, label: str) -> Any:
+    attributes = getattr(container, "attrs", {})
+    attribute = attributes.get(name) if hasattr(attributes, "get") else None
+    if attribute is None:
+        raise RadioConfigurationError(f"{label} does not expose {name}")
+    return attribute
+
+
+def _parse_iio_float(value: object, *, label: str) -> float:
+    try:
+        return float(str(value).strip().split()[0])
+    except (IndexError, TypeError, ValueError) as error:
+        raise RadioConfigurationError(f"malformed {label} readback: {value!r}") from error
+
+
+def _configure_context_rx_signal_path(
+    context: Any,
+    *,
+    expected_rx_layout: RxLayoutExpectation,
+    rf_bandwidth_hz: int,
+    gain_mode: GainMode,
+    manual_gain_db: tuple[float, ...] | None,
+    fir_enabled: bool,
+) -> IioRxSignalPathAttestation:
+    find_device = getattr(context, "find_device", None)
+    phy = find_device("ad9361-phy") if callable(find_device) else None
+    find_channel = getattr(phy, "find_channel", None)
+    if phy is None or not callable(find_channel):
+        raise RadioConfigurationError("AD936x PHY does not expose receive channels")
+
+    channels: list[Any] = []
+    for receiver_channel in expected_rx_layout.receiver_channels:
+        channel = find_channel(f"voltage{receiver_channel}", False)
+        if channel is None:
+            raise RadioConfigurationError(
+                f"AD936x PHY is missing receiver channel {receiver_channel}"
+            )
+        for name in ("rf_bandwidth", "gain_control_mode", "hardwaregain", "filter_fir_en"):
+            _required_iio_attribute(
+                channel, name, label=f"AD936x RX{receiver_channel} channel"
+            )
+        channels.append(channel)
+
+    try:
+        for index, channel in enumerate(channels):
+            channel.attrs["rf_bandwidth"].value = str(rf_bandwidth_hz)
+            channel.attrs["filter_fir_en"].value = "1" if fir_enabled else "0"
+            channel.attrs["gain_control_mode"].value = gain_mode.value
+            if manual_gain_db is not None:
+                channel.attrs["hardwaregain"].value = str(manual_gain_db[index])
+
+        bandwidths = tuple(
+            int(_parse_iio_float(channel.attrs["rf_bandwidth"].value, label="RF bandwidth"))
+            for channel in channels
+        )
+        fir_states = tuple(bool(int(channel.attrs["filter_fir_en"].value)) for channel in channels)
+        gain_modes = tuple(
+            GainMode(str(channel.attrs["gain_control_mode"].value).strip())
+            for channel in channels
+        )
+        hardware_gains = tuple(
+            _parse_iio_float(channel.attrs["hardwaregain"].value, label="hardware gain")
+            for channel in channels
+        )
+        rx_path_rates = str(
+            _required_iio_attribute(phy, "rx_path_rates", label="AD936x PHY").value
+        ).strip()
+        trx_rate_governor = str(
+            _required_iio_attribute(phy, "trx_rate_governor", label="AD936x PHY").value
+        ).strip()
+    except (AttributeError, KeyError, OSError, TypeError, ValueError) as error:
+        if isinstance(error, RadioConfigurationError):
+            raise
+        raise RadioConfigurationError("AD936x receive signal-path attestation failed") from error
+
+    if bandwidths != (rf_bandwidth_hz,) * len(channels):
+        raise RadioConfigurationError(
+            f"RX RF bandwidth readback mismatch: {bandwidths!r}, expected {rf_bandwidth_hz}"
+        )
+    if fir_states != (fir_enabled,) * len(channels):
+        raise RadioConfigurationError(
+            f"RX FIR readback mismatch: {fir_states!r}, expected {fir_enabled}"
+        )
+    if gain_modes != (gain_mode,) * len(channels):
+        raise RadioConfigurationError(
+            f"RX gain-mode readback mismatch: {gain_modes!r}, expected {gain_mode.value}"
+        )
+    if manual_gain_db is not None and hardware_gains != manual_gain_db:
+        raise RadioConfigurationError(
+            f"manual RX gain readback mismatch: {hardware_gains!r}, expected {manual_gain_db!r}"
+        )
+    if not rx_path_rates or not trx_rate_governor:
+        raise RadioConfigurationError("AD936x path-rate/governor readback is empty")
+
+    return IioRxSignalPathAttestation(
+        receiver_channels=expected_rx_layout.receiver_channels,
+        requested_rf_bandwidth_hz=rf_bandwidth_hz,
+        rf_bandwidth_hz=bandwidths,
+        requested_gain_mode=gain_mode,
+        gain_modes=gain_modes,
+        requested_manual_gain_db=manual_gain_db,
+        hardware_gain_db=hardware_gains,
+        requested_fir_enabled=fir_enabled,
+        fir_enabled=fir_states,
+        rx_path_rates=rx_path_rates,
+        trx_rate_governor=trx_rate_governor,
+    )
+
+
+def _attest_context_sample_counter_slope(
+    context: Any,
+    *,
+    expected_rate_hz: int,
+    observation_seconds: float,
+    tolerance_ppm: float,
+) -> IioSampleCounterSlopeAttestation:
+    find_device = getattr(context, "find_device", None)
+    capture = find_device("cf-ad9361-lpc") if callable(find_device) else None
+    reader = getattr(capture, "reg_read", None)
+    if not callable(reader):
+        raise RadioConfigurationError("FPGA capture device does not expose sample-counter readback")
+
+    start_before_ns = time.monotonic_ns()
+    try:
+        counter_start = int(reader(ADC_SAMPLE_COUNTER_LOW_REG)) & 0xFFFFFFFF
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise RadioConfigurationError("FPGA sample-counter start read failed") from error
+    start_after_ns = time.monotonic_ns()
+    time.sleep(observation_seconds)
+    end_before_ns = time.monotonic_ns()
+    try:
+        counter_end = int(reader(ADC_SAMPLE_COUNTER_LOW_REG)) & 0xFFFFFFFF
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise RadioConfigurationError("FPGA sample-counter end read failed") from error
+    end_after_ns = time.monotonic_ns()
+
+    start_midpoint_ns = (start_before_ns + start_after_ns) // 2
+    end_midpoint_ns = (end_before_ns + end_after_ns) // 2
+    elapsed_ns = end_midpoint_ns - start_midpoint_ns
+    if elapsed_ns <= 0:
+        raise RadioConfigurationError("host monotonic clock did not advance")
+    counter_delta = (counter_end - counter_start) & 0xFFFFFFFF
+    measured_rate_hz = counter_delta * 1_000_000_000.0 / elapsed_ns
+    error_ppm = (measured_rate_hz - expected_rate_hz) * 1_000_000.0 / expected_rate_hz
+    within_tolerance = abs(error_ppm) <= tolerance_ppm
+    attestation = IioSampleCounterSlopeAttestation(
+        expected_rate_hz=expected_rate_hz,
+        observation_seconds_requested=float(observation_seconds),
+        counter_start_low32=counter_start,
+        counter_end_low32=counter_end,
+        counter_delta=counter_delta,
+        host_elapsed_ns=elapsed_ns,
+        start_read_span_ns=start_after_ns - start_before_ns,
+        end_read_span_ns=end_after_ns - end_before_ns,
+        measured_rate_hz=measured_rate_hz,
+        error_ppm=error_ppm,
+        tolerance_ppm=float(tolerance_ppm),
+        within_tolerance=within_tolerance,
+    )
+    if not within_tolerance:
+        raise RadioConfigurationError(
+            "FPGA sample-counter slope is outside tolerance: " f"{attestation!r}"
+        )
+    return attestation
 
 
 def _configure_context_source_locked_rx_rate(
