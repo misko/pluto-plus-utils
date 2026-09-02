@@ -17,7 +17,13 @@ from .base import (
 from .direct_ip import DirectIpRadioDevice
 from .direct_usb import DirectUsbRadioDevice
 from .fake import FakeRadioDevice
-from .iio import IioCaptureRateAttestation, IioRadioDevice, discover_usb_serials
+from .iio import (
+    IioCaptureRateAttestation,
+    IioExactUsbRxOnlyRateEvidence,
+    IioRadioDevice,
+    configure_exact_usb_rx_only_source_locked_rate,
+    discover_usb_serials,
+)
 from .preflight import MetadataRuntimeVerification, verify_metadata_runtime
 
 __all__ = [
@@ -26,6 +32,7 @@ __all__ = [
     "DirectUsbRadioDevice",
     "IioRadioDevice",
     "IioCaptureRateAttestation",
+    "IioExactUsbRxOnlyRateEvidence",
     "ExactSettingsApplication",
     "ExactSettingsApplicationError",
     "MetadataCapture",
@@ -38,6 +45,7 @@ __all__ = [
     "SettingsRestorationAttempt",
     "SettingsRestorationError",
     "apply_settings_exact",
+    "configure_exact_usb_rx_only_source_locked_rate",
     "discover_usb_serials",
     "restore_settings_exact",
     "verify_metadata_runtime",

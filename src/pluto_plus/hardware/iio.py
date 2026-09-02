@@ -83,6 +83,102 @@ class IioCaptureRateAttestation:
     adc_gp_control: int
 
 
+@dataclass(frozen=True, slots=True)
+class IioExactUsbRxOnlyRateEvidence:
+    """Identity and clock proof from a direct RX-only libiio context."""
+
+    serial: str
+    usb_sysfs_path: str
+    usb_uri: str
+    hardware_model: str
+    firmware_version: str
+    phy_model: str
+    rx_scan_channels: tuple[str, ...]
+    access_path: Literal["direct-libiio"]
+    rate: IioCaptureRateAttestation
+
+
+def configure_exact_usb_rx_only_source_locked_rate(
+    *,
+    serial: str,
+    usb_sysfs_path: Path,
+    expected_rx_layout: RxLayoutExpectation,
+    rate_hz: int,
+    expected_hardware_model: str | None = None,
+    expected_firmware_version: str | None = None,
+    expected_metadata_abi: int | None = None,
+    iio_module: ModuleType | Any | None = None,
+) -> IioExactUsbRxOnlyRateEvidence:
+    """Program and attest one exact RX-only Pluto without requiring a TX facade."""
+
+    _validate_source_locked_rate(rate_hz)
+    uri = exact_usb_iio_uri(usb_sysfs_path, serial)
+    module = iio_module
+    if module is None:
+        try:
+            module = importlib.import_module("iio")
+        except ImportError as error:
+            raise ImportError("direct RX-only rate control requires pylibiio") from error
+    context = module.Context(uri)
+    try:
+        configure_iio_context_timeout(context)
+        facts = context_facts(context)
+        observed_serial = str(facts.get("serial") or "")
+        observed_model = str(facts.get("model") or "")
+        observed_firmware = str(facts.get("firmware_version") or "")
+        observed_usb_path = _optional_string(facts.get("usb_path"))
+        if observed_serial != serial:
+            raise RadioConfigurationError(
+                f"opened Pluto serial {observed_serial!r}, expected {serial!r}"
+            )
+        if observed_usb_path is not None and observed_usb_path != str(usb_sysfs_path):
+            raise RadioConfigurationError(
+                f"opened Pluto USB path {observed_usb_path!r}, expected {str(usb_sysfs_path)!r}"
+            )
+        if expected_hardware_model is not None and observed_model != expected_hardware_model:
+            raise RadioConfigurationError(
+                f"opened Pluto model {observed_model!r}, expected {expected_hardware_model!r}"
+            )
+        if (
+            expected_firmware_version is not None
+            and observed_firmware != expected_firmware_version
+        ):
+            raise RadioConfigurationError(
+                f"opened Pluto firmware {observed_firmware!r}, "
+                f"expected {expected_firmware_version!r}"
+            )
+        _require_rx_layout(facts, expected_rx_layout)
+        _select_context_metadata_abi(facts, expected=expected_metadata_abi)
+        if _device_exists(context, "cf-ad9361-dds-core-lpc") or _device_exists(
+            context, "tandem-agc"
+        ):
+            raise RadioConfigurationError(
+                "direct RX-only rate control requires no DDS or tandem IIO device"
+            )
+        rate = _configure_context_source_locked_rx_rate(context, rate_hz)
+        raw_scan_channels = facts.get("rx_scan_channels")
+        rx_scan_channels = (
+            tuple(str(item) for item in raw_scan_channels)
+            if isinstance(raw_scan_channels, (tuple, list))
+            else ()
+        )
+        return IioExactUsbRxOnlyRateEvidence(
+            serial=observed_serial,
+            usb_sysfs_path=str(usb_sysfs_path),
+            usb_uri=uri,
+            hardware_model=observed_model,
+            firmware_version=observed_firmware,
+            phy_model=str(facts.get("phy_model") or ""),
+            rx_scan_channels=rx_scan_channels,
+            access_path="direct-libiio",
+            rate=rate,
+        )
+    finally:
+        close = getattr(context, "close", None)
+        if callable(close):
+            close()
+
+
 def _receiver_settings_restored(
     snapshot: IioReceiverSettingsReadback,
     readback: IioReceiverSettingsReadback,
@@ -730,8 +826,7 @@ class IioRadioDevice:
         the capture device, and require independent rate and bypass readbacks.
         """
 
-        if not isinstance(rate_hz, int) or isinstance(rate_hz, bool) or rate_hz <= 0:
-            raise ValueError("source-locked RX rate must be a positive integer")
+        _validate_source_locked_rate(rate_hz)
         device = self._require_device()
         self.reset_receive_buffer()
         device.sample_rate = rate_hz
@@ -1522,6 +1617,77 @@ def _capture_rate_channel(device: Any) -> Any:
         )
     if not callable(getattr(capture, "reg_read", None)):
         raise RadioConfigurationError("FPGA capture device does not expose register readback")
+    return channel
+
+
+def _validate_source_locked_rate(rate_hz: int) -> None:
+    if not isinstance(rate_hz, int) or isinstance(rate_hz, bool) or rate_hz <= 0:
+        raise ValueError("source-locked RX rate must be a positive integer")
+
+
+def _configure_context_source_locked_rx_rate(
+    context: Any, rate_hz: int
+) -> IioCaptureRateAttestation:
+    find_device = getattr(context, "find_device", None)
+    phy = find_device("ad9361-phy") if callable(find_device) else None
+    capture = find_device("cf-ad9361-lpc") if callable(find_device) else None
+    phy_channel = _required_rate_channel(phy, label="AD936x source")
+    capture_channel = _required_rate_channel(capture, label="FPGA capture")
+    reader = getattr(capture, "reg_read", None)
+    if not callable(reader):
+        raise RadioConfigurationError("FPGA capture device does not expose register readback")
+    try:
+        phy_frequency = phy_channel.attrs["sampling_frequency"]
+        phy_frequency.value = str(rate_hz)
+        phy_rate_hz = int(phy_frequency.value)
+        capture_frequency = capture_channel.attrs["sampling_frequency"]
+        capture_frequency.value = str(rate_hz)
+        capture_rate_hz = int(capture_frequency.value)
+        capture_rates_available_hz = tuple(
+            int(value)
+            for value in str(
+                capture_channel.attrs["sampling_frequency_available"].value
+            )
+            .strip()
+            .replace("[", "")
+            .replace("]", "")
+            .split()
+        )
+        adc_gp_control = int(reader(ADC_GP_CONTROL_REG)) & 0xFFFFFFFF
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise RadioConfigurationError("direct RX-only capture-rate attestation failed") from error
+    fpga_decimation_factor = 8 if adc_gp_control & 1 else 1
+    attestation = IioCaptureRateAttestation(
+        requested_rate_hz=rate_hz,
+        phy_rate_hz=phy_rate_hz,
+        capture_rate_hz=capture_rate_hz,
+        capture_rates_available_hz=capture_rates_available_hz,
+        fpga_decimation_factor=fpga_decimation_factor,
+        fpga_decimation_bypass=fpga_decimation_factor == 1,
+        adc_gp_control=adc_gp_control,
+    )
+    if (
+        phy_rate_hz != rate_hz
+        or capture_rate_hz != rate_hz
+        or capture_rates_available_hz != (rate_hz, rate_hz // 8)
+        or not attestation.fpga_decimation_bypass
+    ):
+        raise RadioConfigurationError(
+            "direct RX-only source rate did not produce an exact factor-one capture path: "
+            f"{attestation!r}"
+        )
+    return attestation
+
+
+def _required_rate_channel(device: Any, *, label: str) -> Any:
+    find_channel = getattr(device, "find_channel", None)
+    channel = find_channel("voltage0", False) if callable(find_channel) else None
+    required = {"sampling_frequency", "sampling_frequency_available"}
+    attributes = getattr(channel, "attrs", {}) if channel is not None else {}
+    if channel is None or not required.issubset(attributes):
+        raise RadioConfigurationError(
+            f"{label} channel does not expose sampling-frequency controls"
+        )
     return channel
 
 
