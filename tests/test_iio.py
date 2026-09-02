@@ -183,9 +183,16 @@ class CaptureRateFakeAdi(FakeAdi):
 
 
 class DirectRateFakeDevice:
-    def __init__(self, name: str, channels: tuple[object, ...]) -> None:
+    def __init__(
+        self,
+        name: str,
+        channels: tuple[object, ...],
+        *,
+        attrs: dict[str, FakeIioAttribute] | None = None,
+    ) -> None:
         self.name = name
         self.channels = channels
+        self.attrs = attrs or {}
 
     def find_channel(self, name: str, output: bool = False):
         return next(
@@ -205,6 +212,11 @@ class DirectRateFakeContext:
         self.timeout_calls: list[int] = []
         self.source_rate_hz = 2_500_000
         self.decimation_factor = 8
+        self.rf_bandwidth_hz = 2_500_000
+        self.gain_mode = GainMode.SLOW_ATTACK.value
+        self.hardware_gain_db = 71.0
+        self.fir_enabled = False
+        self.sample_counter = 123
         self.attrs = {
             "hw_serial": serial,
             "hw_model": "Analog Devices PlutoSDR Rev.C (Z7010-AD9363A)",
@@ -222,6 +234,22 @@ class DirectRateFakeContext:
                 ),
                 "sampling_frequency_available": FakeIioAttribute(
                     lambda: "[2083333 1 61440000]"
+                ),
+                "rf_bandwidth": FakeIioAttribute(
+                    lambda: self.rf_bandwidth_hz,
+                    lambda value: setattr(self, "rf_bandwidth_hz", int(value)),
+                ),
+                "gain_control_mode": FakeIioAttribute(
+                    lambda: self.gain_mode,
+                    lambda value: setattr(self, "gain_mode", str(value)),
+                ),
+                "hardwaregain": FakeIioAttribute(
+                    lambda: f"{self.hardware_gain_db:.6f} dB",
+                    lambda value: setattr(self, "hardware_gain_db", float(value)),
+                ),
+                "filter_fir_en": FakeIioAttribute(
+                    lambda: int(self.fir_enabled),
+                    lambda value: setattr(self, "fir_enabled", bool(int(value))),
                 ),
             },
         )
@@ -242,13 +270,19 @@ class DirectRateFakeContext:
         capture_q = SimpleNamespace(
             id="voltage1", output=False, scan_element=True, attrs={}
         )
-        self.phy = DirectRateFakeDevice("ad9361-phy", (phy_channel,))
-        self.capture = DirectRateFakeDevice("cf-ad9361-lpc", (capture_i, capture_q))
-        self.capture.reg_read = lambda address: (
-            int(self.decimation_factor == 8)
-            if address == 0x800000BC
-            else (_ for _ in ()).throw(AssertionError(address))
+        self.phy = DirectRateFakeDevice(
+            "ad9361-phy",
+            (phy_channel,),
+            attrs={
+                "rx_path_rates": FakeIioAttribute(
+                    lambda: f"BBPLL:960000000 ADC:{self.source_rate_hz * 16} "
+                    f"R2:4 R1:2 RF:2 RXSAMP:{self.source_rate_hz}"
+                ),
+                "trx_rate_governor": FakeIioAttribute(lambda: "nominal"),
+            },
         )
+        self.capture = DirectRateFakeDevice("cf-ad9361-lpc", (capture_i, capture_q))
+        self.capture.reg_read = self._read_capture_register
         self.devices = {
             "ad9361-phy": self.phy,
             "cf-ad9361-lpc": self.capture,
@@ -266,6 +300,13 @@ class DirectRateFakeContext:
             self.decimation_factor = 8
         else:
             raise OSError("unsupported capture rate")
+
+    def _read_capture_register(self, address: int) -> int:
+        if address == 0x800000BC:
+            return int(self.decimation_factor == 8)
+        if address == 0x800000B8:
+            return self.sample_counter
+        raise AssertionError(address)
 
     def find_device(self, name: str):
         return self.devices.get(name)
@@ -339,6 +380,103 @@ def test_direct_rx_only_rate_control_rejects_tx_data_device(
             iio_module=DirectRateFakeIio(context),
         )
     assert context.source_rate_hz == 2_500_000
+    assert context.closed
+
+
+def test_direct_rx_only_rate_control_attests_signal_path_and_counter_slope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = DirectRateFakeContext("usb:3.49.5")
+    module = DirectRateFakeIio(context)
+    monotonic_values = iter((0, 0, 1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(
+        "pluto_plus.hardware.iio.exact_usb_iio_uri",
+        lambda _path, _serial: "usb:3.49.5",
+    )
+    monkeypatch.setattr(
+        "pluto_plus.hardware.iio.time.monotonic_ns", lambda: next(monotonic_values)
+    )
+    monkeypatch.setattr(
+        "pluto_plus.hardware.iio.time.sleep",
+        lambda seconds: setattr(
+            context,
+            "sample_counter",
+            context.sample_counter + round(context.source_rate_hz * seconds),
+        ),
+    )
+
+    evidence = configure_exact_usb_rx_only_source_locked_rate(
+        serial="SERIAL_A",
+        usb_sysfs_path=Path("/sys/bus/usb/devices/5-2"),
+        expected_rx_layout=setup_target_profile(
+            SetupTarget.AD9363A_1R1T
+        ).rx_layout_expectation,
+        rate_hz=15_000_000,
+        rf_bandwidth_hz=15_000_000,
+        gain_mode=GainMode.SLOW_ATTACK,
+        fir_enabled=False,
+        sample_counter_observation_seconds=1.0,
+        sample_counter_tolerance_ppm=100.0,
+        iio_module=module,
+    )
+
+    assert evidence.signal_path is not None
+    assert evidence.signal_path.receiver_channels == (0,)
+    assert evidence.signal_path.rf_bandwidth_hz == (15_000_000,)
+    assert evidence.signal_path.gain_modes == (GainMode.SLOW_ATTACK,)
+    assert evidence.signal_path.hardware_gain_db == (71.0,)
+    assert evidence.signal_path.fir_enabled == (False,)
+    assert evidence.signal_path.rx_path_rates.endswith("RXSAMP:15000000")
+    assert evidence.signal_path.trx_rate_governor == "nominal"
+    assert evidence.sample_counter_slope is not None
+    assert evidence.sample_counter_slope.counter_delta == 15_000_000
+    assert evidence.sample_counter_slope.measured_rate_hz == 15_000_000
+    assert evidence.sample_counter_slope.error_ppm == 0
+    assert evidence.sample_counter_slope.within_tolerance
+    assert context.closed
+
+
+def test_direct_rx_only_signal_path_request_is_all_or_nothing() -> None:
+    with pytest.raises(ValueError, match="must be requested together"):
+        configure_exact_usb_rx_only_source_locked_rate(
+            serial="SERIAL_A",
+            usb_sysfs_path=Path("/sys/bus/usb/devices/5-2"),
+            expected_rx_layout=setup_target_profile(
+                SetupTarget.AD9363A_1R1T
+            ).rx_layout_expectation,
+            rate_hz=15_000_000,
+            rf_bandwidth_hz=15_000_000,
+            iio_module=DirectRateFakeIio(DirectRateFakeContext("usb:3.49.5")),
+        )
+
+
+def test_direct_rx_only_counter_slope_fails_closed_and_closes_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = DirectRateFakeContext("usb:3.49.5")
+    monotonic_values = iter((0, 0, 1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(
+        "pluto_plus.hardware.iio.exact_usb_iio_uri",
+        lambda _path, _serial: "usb:3.49.5",
+    )
+    monkeypatch.setattr(
+        "pluto_plus.hardware.iio.time.monotonic_ns", lambda: next(monotonic_values)
+    )
+    monkeypatch.setattr("pluto_plus.hardware.iio.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(RadioConfigurationError, match="outside tolerance"):
+        configure_exact_usb_rx_only_source_locked_rate(
+            serial="SERIAL_A",
+            usb_sysfs_path=Path("/sys/bus/usb/devices/5-2"),
+            expected_rx_layout=setup_target_profile(
+                SetupTarget.AD9363A_1R1T
+            ).rx_layout_expectation,
+            rate_hz=15_000_000,
+            sample_counter_observation_seconds=1.0,
+            sample_counter_tolerance_ppm=100.0,
+            iio_module=DirectRateFakeIio(context),
+        )
+
     assert context.closed
 
 

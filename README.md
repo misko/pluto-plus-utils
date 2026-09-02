@@ -588,6 +588,44 @@ rejects a single RX allocation above 32 MiB: half of the supported firmware's 64
 CMA pool. Use repeated/streaming buffers for longer captures. This avoids relying on a
 nearly pristine contiguous CMA region even when `CmaFree` is high.
 
+### Direct RX-only path attestation
+
+Experimental RX-only images may intentionally omit every TX/DDS facade. The public
+`configure_exact_usb_rx_only_source_locked_rate` helper binds direct libiio access to
+one serial and USB sysfs path, rejects TX or tandem data devices, and proves independent
+PHY/capture rate readbacks with factor-one FPGA decimation. Callers may also request a
+complete receive-path attestation:
+
+```python
+from dataclasses import asdict
+from pathlib import Path
+
+from pluto_plus.hardware import configure_exact_usb_rx_only_source_locked_rate
+from pluto_plus.models import GainMode
+from pluto_plus.setup_profiles import SetupTarget, setup_target_profile
+
+evidence = configure_exact_usb_rx_only_source_locked_rate(
+    serial="RADIO_SERIAL",
+    usb_sysfs_path=Path("/sys/bus/usb/devices/USB_PATH"),
+    expected_rx_layout=setup_target_profile(
+        SetupTarget.AD9363A_1R1T
+    ).rx_layout_expectation,
+    rate_hz=15_000_000,
+    rf_bandwidth_hz=15_000_000,
+    gain_mode=GainMode.SLOW_ATTACK,
+    fir_enabled=False,
+    sample_counter_observation_seconds=1.0,
+    sample_counter_tolerance_ppm=5_000,
+)
+receipt = asdict(evidence)
+```
+
+RF bandwidth, gain mode, and FIR state are an all-or-nothing request. Manual mode also
+requires one gain value per physical receiver. The returned evidence records exact
+readbacks, AD936x path-rate/governor text, observed hardware gain, and a host-monotonic
+slope of the FPGA capture counter including both MMIO read spans. Any identity, layout,
+readback, decimation, or slope mismatch fails closed and the direct context is closed.
+
 For read-only bottleneck work on a unique physical-LAN endpoint, `data-plane-status`
 attests the exact gadget serial over pinned SSH and reports iiOD process generation,
 per-thread `/proc` CPU counters and CPU masks, RX-buffer/CMA state, DMA devices,
