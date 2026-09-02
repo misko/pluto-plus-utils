@@ -36,6 +36,60 @@ class FakeRxAdc:
         return self.counter
 
 
+class FakeIioAttribute:
+    def __init__(self, reader, writer=None) -> None:
+        self._reader = reader
+        self._writer = writer
+
+    @property
+    def value(self) -> str:
+        return str(self._reader())
+
+    @value.setter
+    def value(self, value: str) -> None:
+        if self._writer is None:
+            raise OSError("attribute is read-only")
+        self._writer(value)
+
+
+class CaptureRateFakeRxAdc(FakeRxAdc):
+    def __init__(self, device: FakeAd9361, *, stuck_decimation: bool = False) -> None:
+        super().__init__()
+        self.device = device
+        self.decimation_factor = 8 if stuck_decimation else 1
+        self.stuck_decimation = stuck_decimation
+        self.channel = SimpleNamespace(
+            attrs={
+                "sampling_frequency": FakeIioAttribute(
+                    lambda: self.device.sample_rate // self.decimation_factor,
+                    self._set_sampling_frequency,
+                ),
+                "sampling_frequency_available": FakeIioAttribute(
+                    lambda: f"{self.device.sample_rate} {self.device.sample_rate // 8} "
+                ),
+            }
+        )
+
+    def _set_sampling_frequency(self, value: str) -> None:
+        requested = int(value)
+        if requested == self.device.sample_rate:
+            if not self.stuck_decimation:
+                self.decimation_factor = 1
+            return
+        if requested == self.device.sample_rate // 8:
+            self.decimation_factor = 8
+            return
+        raise OSError("unsupported capture rate")
+
+    def find_channel(self, name: str, output: bool = False):
+        return self.channel if name == "voltage0" and not output else None
+
+    def reg_read(self, address: int) -> int:
+        if address == 0x800000BC:
+            return int(self.decimation_factor == 8)
+        return super().reg_read(address)
+
+
 class FakeAd9361:
     def __init__(self, uri: str, serial: str = "SERIAL_A") -> None:
         self.uri = uri
@@ -84,6 +138,18 @@ class FakeAd9361:
         )
 
 
+class CaptureRateFakeAd9361(FakeAd9361):
+    def __init__(
+        self,
+        uri: str,
+        serial: str = "SERIAL_A",
+        *,
+        stuck_decimation: bool = False,
+    ) -> None:
+        super().__init__(uri, serial)
+        self._rxadc = CaptureRateFakeRxAdc(self, stuck_decimation=stuck_decimation)
+
+
 class FakeAdi:
     def __init__(self, serial: str = "SERIAL_A") -> None:
         self.serial = serial
@@ -98,6 +164,63 @@ class FakeAdi:
     def ad9364(self, uri: str) -> FakeAd9361:
         self.facades.append("ad9364")
         return self.ad9361(uri)
+
+
+class CaptureRateFakeAdi(FakeAdi):
+    def __init__(self, *, stuck_decimation: bool = False) -> None:
+        super().__init__()
+        self.stuck_decimation = stuck_decimation
+
+    def ad9361(self, uri: str) -> FakeAd9361:
+        self.facades.append("ad9361")
+        self.device = CaptureRateFakeAd9361(
+            uri,
+            self.serial,
+            stuck_decimation=self.stuck_decimation,
+        )
+        return self.device
+
+
+def test_iio_adapter_configures_and_attests_source_locked_capture_rate() -> None:
+    module = CaptureRateFakeAdi()
+    radio = IioRadioDevice("usb:3.49.5", serial="SERIAL_A", adi_module=module)
+    radio.open()
+    try:
+        attestation = radio.configure_source_locked_rx_rate(15_000_000)
+        assert attestation.requested_rate_hz == 15_000_000
+        assert attestation.phy_rate_hz == 15_000_000
+        assert attestation.capture_rate_hz == 15_000_000
+        assert attestation.capture_rates_available_hz == (15_000_000, 1_875_000)
+        assert attestation.fpga_decimation_factor == 1
+        assert attestation.fpga_decimation_bypass
+        assert attestation.adc_gp_control == 0
+    finally:
+        radio.close()
+
+
+def test_iio_adapter_rejects_stuck_capture_decimation() -> None:
+    radio = IioRadioDevice(
+        "usb:3.49.5",
+        serial="SERIAL_A",
+        adi_module=CaptureRateFakeAdi(stuck_decimation=True),
+    )
+    radio.open()
+    try:
+        with pytest.raises(RadioConfigurationError, match="factor-one capture path"):
+            radio.configure_source_locked_rx_rate(15_000_000)
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize("rate_hz", [0, -1, True, 15_000_000.0])
+def test_iio_adapter_rejects_nonpositive_or_noninteger_source_rate(rate_hz: object) -> None:
+    radio = IioRadioDevice("usb:3.49.5", serial="SERIAL_A", adi_module=FakeAdi())
+    radio.open()
+    try:
+        with pytest.raises(ValueError, match="positive integer"):
+            radio.configure_source_locked_rx_rate(rate_hz)  # type: ignore[arg-type]
+    finally:
+        radio.close()
 
 
 def test_opt_in_raw_decoder_returns_owned_complex64_and_resets_on_failure(

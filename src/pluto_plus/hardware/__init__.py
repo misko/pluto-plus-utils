@@ -17,7 +17,7 @@ from .base import (
 from .direct_ip import DirectIpRadioDevice
 from .direct_usb import DirectUsbRadioDevice
 from .fake import FakeRadioDevice
-from .iio import IioRadioDevice, discover_usb_serials
+from .iio import IioCaptureRateAttestation, IioRadioDevice, discover_usb_serials
 from .preflight import MetadataRuntimeVerification, verify_metadata_runtime
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     "DirectIpRadioDevice",
     "DirectUsbRadioDevice",
     "IioRadioDevice",
+    "IioCaptureRateAttestation",
     "ExactSettingsApplication",
     "ExactSettingsApplicationError",
     "MetadataCapture",

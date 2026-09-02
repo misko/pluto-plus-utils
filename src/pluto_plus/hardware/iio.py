@@ -54,6 +54,7 @@ PLUTO_USB_VENDOR = "0456"
 PLUTO_RUNTIME_PRODUCT = "b673"
 PLUTO_USB_ROOT = Path("/sys/bus/usb/devices")
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
+ADC_GP_CONTROL_REG = 0x800000BC
 AD9361_FASTLOCK_PROFILE_COUNT = 8
 _CONCRETE_USB_URI = re.compile(r"^usb:[0-9]+[.][0-9]+[.][0-9]+$")
 _SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -67,6 +68,19 @@ class IioReceiverSettingsReadback:
     channels: tuple[int, ...]
     gain_modes: tuple[GainMode, ...]
     gain_db: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IioCaptureRateAttestation:
+    """Independent RFIC/capture readbacks for a factor-one receive stream."""
+
+    requested_rate_hz: int
+    phy_rate_hz: int
+    capture_rate_hz: int
+    capture_rates_available_hz: tuple[int, ...]
+    fpga_decimation_factor: int
+    fpga_decimation_bypass: bool
+    adc_gp_control: int
 
 
 def _receiver_settings_restored(
@@ -705,6 +719,71 @@ class IioRadioDevice:
             return int(reader(ADC_SAMPLE_COUNTER_LOW_REG)) & 0xFFFFFFFF
         except (AttributeError, OSError, TypeError, ValueError) as error:
             raise RadioConfigurationError("FPGA sample-counter register read failed") from error
+
+    def configure_source_locked_rx_rate(self, rate_hz: int) -> IioCaptureRateAttestation:
+        """Program the RFIC source and prove the FPGA capture path is factor one.
+
+        Pluto device trees can advertise a fixed /8 receive filter. In that
+        configuration, writing only the capture device's sampling frequency
+        selects either parent or parent/8; it does not program the AD936x
+        source. Program the RFIC first, explicitly select the parent rate on
+        the capture device, and require independent rate and bypass readbacks.
+        """
+
+        if not isinstance(rate_hz, int) or isinstance(rate_hz, bool) or rate_hz <= 0:
+            raise ValueError("source-locked RX rate must be a positive integer")
+        device = self._require_device()
+        self.reset_receive_buffer()
+        device.sample_rate = rate_hz
+        try:
+            phy_rate_hz = int(device.sample_rate)
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise RadioConfigurationError("AD936x source-rate readback failed") from error
+        if phy_rate_hz != rate_hz:
+            raise RadioConfigurationError(
+                f"AD936x source rate read back {phy_rate_hz}, expected {rate_hz}"
+            )
+
+        capture = _capture_rate_channel(device)
+        sampling_frequency = capture.attrs["sampling_frequency"]
+        sampling_frequency_available = capture.attrs["sampling_frequency_available"]
+        try:
+            sampling_frequency.value = str(rate_hz)
+            capture_rate_hz = int(sampling_frequency.value)
+            capture_rates_available_hz = tuple(
+                int(value)
+                for value in str(sampling_frequency_available.value)
+                .strip()
+                .replace("[", "")
+                .replace("]", "")
+                .split()
+            )
+            adc_gp_control = int(device._rxadc.reg_read(ADC_GP_CONTROL_REG)) & 0xFFFFFFFF
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise RadioConfigurationError("FPGA capture-rate attestation failed") from error
+
+        fpga_decimation_factor = 8 if adc_gp_control & 1 else 1
+        attestation = IioCaptureRateAttestation(
+            requested_rate_hz=rate_hz,
+            phy_rate_hz=phy_rate_hz,
+            capture_rate_hz=capture_rate_hz,
+            capture_rates_available_hz=capture_rates_available_hz,
+            fpga_decimation_factor=fpga_decimation_factor,
+            fpga_decimation_bypass=fpga_decimation_factor == 1,
+            adc_gp_control=adc_gp_control,
+        )
+        expected_available = (rate_hz, rate_hz // 8)
+        if (
+            capture_rate_hz != rate_hz
+            or capture_rates_available_hz != expected_available
+            or not attestation.fpga_decimation_bypass
+        ):
+            raise RadioConfigurationError(
+                "source-locked RX rate did not produce an exact factor-one capture path: "
+                f"{attestation!r}"
+            )
+        _mute_transmit(device)
+        return attestation
 
     def store_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
         """Store the current RX synthesizer state in one volatile AD9361 profile."""
@@ -1428,6 +1507,21 @@ def _rx_fastlock_channel(device: Any) -> Any:
         raise RadioConfigurationError(
             "AD9361 RX LO channel does not expose the required Fast Lock attributes"
         )
+    return channel
+
+
+def _capture_rate_channel(device: Any) -> Any:
+    capture = getattr(device, "_rxadc", None)
+    find_channel = getattr(capture, "find_channel", None)
+    channel = find_channel("voltage0", False) if callable(find_channel) else None
+    required = {"sampling_frequency", "sampling_frequency_available"}
+    attributes = getattr(channel, "attrs", {}) if channel is not None else {}
+    if channel is None or not required.issubset(attributes):
+        raise RadioConfigurationError(
+            "FPGA capture channel does not expose sampling-frequency controls"
+        )
+    if not callable(getattr(capture, "reg_read", None)):
+        raise RadioConfigurationError("FPGA capture device does not expose register readback")
     return channel
 
 
