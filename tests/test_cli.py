@@ -1153,6 +1153,23 @@ def test_command_routes(
         assert _body(request) == expected_body
 
 
+def test_setup_execute_allows_two_profile_reboot_window(api_transport: Any) -> None:
+    requests, _ = api_transport
+
+    result = runner.invoke(
+        app,
+        ["setup", "execute", "setup-plan-1", "--token", "secret"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert requests[-1].extensions["timeout"] == {
+        "connect": 180.0,
+        "read": 180.0,
+        "write": 180.0,
+        "pool": 180.0,
+    }
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

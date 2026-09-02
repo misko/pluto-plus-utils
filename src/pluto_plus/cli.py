@@ -137,6 +137,8 @@ DEFAULT_ENVIRONMENT_SURVEY_REPORTS = (
     Path.home() / ".local/state/pluto-plus-utils/environment-surveys"
 )
 API_PREFIX = "api/v1"
+DEFAULT_API_REQUEST_TIMEOUT_S = 30.0
+SETUP_EXECUTION_REQUEST_TIMEOUT_S = 180.0
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -276,6 +278,7 @@ class ApiClient:
         *,
         json_body: Any = None,
         content: bytes | None = None,
+        timeout_s: float = DEFAULT_API_REQUEST_TIMEOUT_S,
     ) -> Any:
         try:
             response = self._client.request(
@@ -283,6 +286,7 @@ class ApiClient:
                 path.lstrip("/"),
                 json=json_body,
                 content=content,
+                timeout=timeout_s,
             )
         except httpx.RequestError as error:
             _fail("daemon_unavailable", str(error), 3)
@@ -6785,6 +6789,7 @@ def setup_execute(
                 "plan_id": plan_id,
                 "confirmation_token": confirmation_token,
             },
+            timeout_s=SETUP_EXECUTION_REQUEST_TIMEOUT_S,
         )
     )
 
