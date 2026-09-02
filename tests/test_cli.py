@@ -1555,14 +1555,22 @@ def test_usb_ssh_enrollment_can_lease_one_exact_route(
         def __enter__(self) -> None:
             events.append("route_added")
 
+        def verify(self) -> None:
+            events.append("route_verified")
+
         def __exit__(self, *args: object) -> None:
             events.append(("route_removed", args[0]))
 
     monkeypatch.setattr("pluto_plus.cli.scan_local_usb_plutos", lambda: (_recovery_usb(),))
     monkeypatch.setattr("pluto_plus.cli.ExactUsbSshRouteLease", Lease)
+    def enroll(**kwargs: Any) -> dict[str, str]:
+        events.append(("enroll", kwargs))
+        kwargs["route_preflight"]()
+        return {"serial": "SERIAL_A"}
+
     monkeypatch.setattr(
         "pluto_plus.bootstrap_firmware.enroll_bound_usb_ssh_host_key",
-        lambda **kwargs: events.append(("enroll", kwargs)) or {"serial": "SERIAL_A"},
+        enroll,
     )
     password = tmp_path / "password"
     password.write_text("analog\n")
@@ -1595,7 +1603,8 @@ def test_usb_ssh_enrollment_can_lease_one_exact_route(
     )
     assert events[1] == "route_added"
     assert events[2][0] == "enroll"  # type: ignore[index]
-    assert events[3] == ("route_removed", None)
+    assert events[3] == "route_verified"
+    assert events[4] == ("route_removed", None)
 
 
 def test_standard_iio_ip_targets_support_observed_or_pinned_serials() -> None:

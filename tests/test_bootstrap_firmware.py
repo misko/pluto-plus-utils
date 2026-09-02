@@ -223,7 +223,12 @@ def test_usb_ssh_enrollment_for_path_a_never_accepts_serial_b(
         "_one_local_target",
         lambda path: _local(target, serial="SERIAL_A"),
     )
-    monkeypatch.setattr(bootstrap, "_require_usb_ssh_route", lambda interface, host: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_require_usb_ssh_route",
+        lambda interface, host: pytest.fail("legacy route preflight must not run"),
+    )
+    route_preflights: list[str] = []
 
     class WrongRadioChild:
         before = b"serial=SERIAL_B\n"
@@ -261,9 +266,11 @@ def test_usb_ssh_enrollment_for_path_a_never_accepts_serial_b(
             usb_sysfs_path=target,
             known_hosts_file=destination,
             password="unused",
+            route_preflight=lambda: route_preflights.append("verified"),
         )
 
     assert not destination.exists()
+    assert route_preflights == ["verified"]
     assert "GlobalKnownHostsFile=/dev/null" in spawned_arguments
 
 

@@ -4585,23 +4585,27 @@ def firmware_enroll_usb_ssh(
         enroll_bound_usb_ssh_host_key,
     )
 
-    def enrollment_action() -> dict[str, str]:
+    def enrollment_action(
+        route_preflight: Callable[[], None] | None = None,
+    ) -> dict[str, str]:
         return enroll_bound_usb_ssh_host_key(
             serial=serial,
             usb_sysfs_path=usb_sysfs_path,
             known_hosts_file=known_hosts_file,
             password=password,
             host=ssh_host,
+            route_preflight=route_preflight,
         )
 
     try:
         isolation_receipt = None
         if exact_route_lease:
-            with ExactUsbSshRouteLease(
+            lease = ExactUsbSshRouteLease(
                 interface=matches[0].host_network_interfaces[0].name,
                 host=ssh_host,
-            ).session():
-                result = enrollment_action()
+            )
+            with lease.session():
+                result = enrollment_action(lease.verify)
         elif isolation_plan is not None:
             from pluto_plus.host_isolation import (
                 HostIsolationError,

@@ -857,6 +857,7 @@ def enroll_bound_usb_ssh_host_key(
     password: str,
     host: str = "192.168.2.1",
     timeout_s: float = 15,
+    route_preflight: Callable[[], None] | None = None,
 ) -> dict[str, str]:
     """Pin one host key only after a USB-selected serial attestation."""
 
@@ -873,8 +874,15 @@ def enroll_bound_usb_ssh_host_key(
     if address.version != 4 or not address.is_private:
         raise BootstrapFirmwareError("SSH host must be a private IPv4 address")
     interface = local.host_network_interfaces[0].name if host == "192.168.2.1" else None
+    if route_preflight is not None and interface is None:
+        raise BootstrapFirmwareError(
+            "a custom USB route preflight requires the default gadget endpoint"
+        )
     if interface is not None:
-        _require_usb_ssh_route(interface, host)
+        if route_preflight is None:
+            _require_usb_ssh_route(interface, host)
+        else:
+            route_preflight()
     destination = known_hosts_file.expanduser().resolve()
     if destination.exists():
         raise BootstrapFirmwareError("known-hosts destination already exists; refusing overwrite")
