@@ -12,7 +12,7 @@ not make continuity observable and must not be accepted as a fallback.
 | `iio,buffer-metadata=1` | strict `RadioMetadataV3` | `spf-frame-metadata-source/v0.25-final-v3` | `c26258bfa33098c2b215e19cf85d448e89499b1a` |
 | `iio,buffer-metadata=2` | strict `RadioMetadataV5` | `tandem-agc-v8-rc2-source/libiio-v1` | `6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7` |
 | `iio,buffer-metadata=3`, exact DMA admission absent | strict `RadioMetadataV6` | `iq-direct-async-v3-source/libiio-v1` | `0d323080a0a1067da8c7adbadfd03ee186a40ec2` |
-| `iio,buffer-metadata=3` plus `iio,buffer-direct-async-exact-kernel-queue=1` | strict `RadioMetadataV6` | `iq-direct-async-v4-source/libiio-v1` | `5cb2389719d46d12463daa0371d1fda19eb25fa7` |
+| `iio,buffer-metadata=3` plus `iio,buffer-direct-async-exact-kernel-queue=1` | strict `RadioMetadataV6`; additive persistent-hop client when advertised | `persistent-hop-duty-v1-source/libiio-v1` | `f6c450eada95ce99fe8756ebc244bfcf6ddcc72a` |
 | `iio,buffer-metadata=3` plus `iio,buffer-metadata-abi-versions=1,2,3,4` | strict `RadioMetadataV7` selected as ABI 4 | gain-timeline v8 release source | frozen by the release candidate plan |
 
 The released direct-async v4 firmware advertises ABI 3 plus authoritative DMA
@@ -105,12 +105,13 @@ radio-side overrun handling explicit. The hardware-test package set is:
 | persistent firmware | `v0.49-plutoplus-spf-iq-direct-async-v4` | protected build `bc00edb8c340dd4f9b04361398cbd2c8edcc9cae`, run `33535095284` |
 | firmware Buildroot/rootfs | `iq-direct-async-v4-source/buildroot-v1` | `2e146948a52eaf7c7f675c5e6ac746eeff4aacac` |
 | firmware Linux / CMA geometry | `iq-direct-async-v4-source/linux-v1` | `7176508dd84bde78c62d8790bbd17957fdda12d7` |
-| radio iiOD and host libiio | 0.25 / `iq-direct-async-v4-source/libiio-v1` | `5cb2389719d46d12463daa0371d1fda19eb25fa7` |
+| released radio iiOD | 0.25 / `iq-direct-async-v4-source/libiio-v1` | `5cb2389719d46d12463daa0371d1fda19eb25fa7` |
+| current compatible host libiio | 0.25 / `persistent-hop-duty-v1-source/libiio-v1` | `f6c450eada95ce99fe8756ebc244bfcf6ddcc72a` |
 | radio metadata provider | ABI 3 / `RadioMetadataV6` | `3294365ff44da26b261be4a2ccb241b7896d23ad` |
 | Pluto Plus Utils | 0.1.0, Python 3.11+ | persistent v4 profile `35a827c0f8d6255fa29646c75ea191492e403b69` or later |
 
 Both the native host library and Python binding must be generated from the
-same `5cb2389` tree. The ABI-3 runtime receipt deliberately rejects older
+same `f6c450e` tree. The ABI-3 runtime receipt deliberately rejects older
 ABI-3 libiio commits, upstream libiio, and a PyPI-only binding. Direct capture
 also fails before allocation unless the context advertises
 `iio,buffer-direct-async-exact-kernel-queue=1`; a successful open reports the
