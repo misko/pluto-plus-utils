@@ -1213,39 +1213,35 @@ class IioRawSidecarCaptureSession:
         buffer = self._buffer
         if buffer is None:
             raise RuntimeError("raw sidecar metadata capture is not open")
-        try:
-            buffer.refill()
-            iq_payload = bytes(buffer.read())
-            raw_metadata = buffer.metadata
-            if raw_metadata is None:
-                raise RuntimeError("raw sidecar refill returned no metadata")
-            raw = bytes(raw_metadata)
-            if len(raw) < 8:
-                raise RuntimeError("raw sidecar metadata is shorter than its ABI header")
-            base_bytes = struct.unpack_from("<H", raw, 6)[0]
-            if not 8 <= base_bytes < len(raw):
-                raise RuntimeError("raw sidecar metadata does not contain an appended record")
-            parsed = RadioMetadataV6.unpack(raw[:base_bytes])
-            base = parsed.base
-            if (
-                base.samples_per_channel != self._samples_per_channel
-                or base.iq_payload_bytes != self._samples_per_channel * 8
-                or base.enabled_scan_mask != 0x0F
-                or base.channel_count != 2
-            ):
-                raise RuntimeError("raw sidecar ABI-3 geometry is not paired RX CI16")
-            if not base.flags & MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID:
-                raise RuntimeError("raw sidecar ABI-3 header lacks a hardware counter")
-            if len(iq_payload) != base.iq_payload_bytes:
-                raise RuntimeError("raw sidecar IQ bytes disagree with the ABI-3 header")
-            return IioRawSidecarBlock(
-                metadata_header=raw[:base_bytes],
-                sidecar=raw[base_bytes:],
-                iq_payload=iq_payload,
-            )
-        except BaseException:
-            self.close()
-            raise
+        buffer.refill()
+        iq_payload = bytes(buffer.read())
+        raw_metadata = buffer.metadata
+        if raw_metadata is None:
+            raise RuntimeError("raw sidecar refill returned no metadata")
+        raw = bytes(raw_metadata)
+        if len(raw) < 8:
+            raise RuntimeError("raw sidecar metadata is shorter than its ABI header")
+        base_bytes = struct.unpack_from("<H", raw, 6)[0]
+        if not 8 <= base_bytes < len(raw):
+            raise RuntimeError("raw sidecar metadata does not contain an appended record")
+        parsed = RadioMetadataV6.unpack(raw[:base_bytes])
+        base = parsed.base
+        if (
+            base.samples_per_channel != self._samples_per_channel
+            or base.iq_payload_bytes != self._samples_per_channel * 8
+            or base.enabled_scan_mask != 0x0F
+            or base.channel_count != 2
+        ):
+            raise RuntimeError("raw sidecar ABI-3 geometry is not paired RX CI16")
+        if not base.flags & MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID:
+            raise RuntimeError("raw sidecar ABI-3 header lacks a hardware counter")
+        if len(iq_payload) != base.iq_payload_bytes:
+            raise RuntimeError("raw sidecar IQ bytes disagree with the ABI-3 header")
+        return IioRawSidecarBlock(
+            metadata_header=raw[:base_bytes],
+            sidecar=raw[base_bytes:],
+            iq_payload=iq_payload,
+        )
 
     def read_status(self) -> bytes:
         if self._buffer is None:

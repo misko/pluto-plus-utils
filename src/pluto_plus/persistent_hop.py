@@ -151,11 +151,25 @@ _TERMINAL_STATES = {
 
 
 def require_physical_lan_uri(uri: str) -> str:
-    """Require one canonical literal ``ip:192.168.1.1..254`` endpoint."""
+    """Require a canonical physical-LAN endpoint, optionally with an IIO port."""
 
     if not isinstance(uri, str) or uri != uri.strip() or not uri.startswith("ip:"):
         raise ValueError("persistent hopping requires a literal ip:192.168.1.* URI")
-    literal = uri.removeprefix("ip:")
+    endpoint = uri.removeprefix("ip:")
+    if endpoint.count(":") > 1:
+        raise ValueError("persistent hopping requires a literal ip:192.168.1.* URI")
+    if ":" in endpoint:
+        literal, raw_port = endpoint.split(":", maxsplit=1)
+        try:
+            port = int(raw_port)
+        except ValueError as error:
+            raise ValueError(
+                "persistent hopping requires a canonical numeric IIO port"
+            ) from error
+        if not raw_port or str(port) != raw_port or not 1 <= port <= 65_535:
+            raise ValueError("persistent hopping requires a canonical numeric IIO port")
+    else:
+        literal = endpoint
     try:
         address = ipaddress.IPv4Address(literal)
     except ipaddress.AddressValueError as error:
@@ -803,9 +817,23 @@ class PersistentHopStatusV1:
         if self.flags & PersistentHopStatusFlag.TERMINAL:
             if self.final_counter < self.first_counter:
                 raise PersistentHopProtocolError("HOPT terminal counter interval regressed")
-            if self.last_block_end_counter > self.final_counter:
+            if (
+                self.state is PersistentHopSessionState.COMPLETED
+                and self.final_counter > self.last_block_end_counter
+            ):
+                raise PersistentHopProtocolError(
+                    "HOPT completion extends beyond the last delivered block"
+                )
+            if (
+                self.state is not PersistentHopSessionState.COMPLETED
+                and self.last_block_end_counter > self.final_counter
+            ):
                 raise PersistentHopProtocolError("HOPT final counter precedes the last block")
-            if attempted and self.restore_before_counter < self.final_counter:
+            required_restore_counter = max(
+                self.final_counter,
+                self.last_block_end_counter,
+            )
+            if attempted and self.restore_before_counter < required_restore_counter:
                 raise PersistentHopProtocolError(
                     "HOPT restoration begins before the terminal counter"
                 )
@@ -1417,12 +1445,18 @@ class PersistentHopSession:
         )
         if evidence.buffer_sequence != expected_sequence:
             raise PersistentHopClientError("persistent-hop buffer sequence is not contiguous")
-        expected_first = (
-            self._initial_status.first_counter
-            if self._previous_block_end is None
-            else self._previous_block_end
-        )
-        if evidence.block_first_counter != expected_first:
+        if self._previous_block_end is None:
+            # OPEN can return before the first refill has anchored the
+            # userspace scheduler's low-32 transition counter to the IQ
+            # timestamp epoch.  The first HOPS event supplies that proof; only
+            # subsequent block boundaries must be exactly contiguous.
+            counter_gap = (
+                bool(self._initial_status.first_counter)
+                and evidence.block_first_counter < self._initial_status.first_counter
+            )
+        else:
+            counter_gap = evidence.block_first_counter != self._previous_block_end
+        if counter_gap:
             raise PersistentHopClientError("persistent-hop device sample counter has a gap")
         self._previous_block_sequence = evidence.buffer_sequence
         self._previous_block_end = evidence.block_end_counter_exclusive
@@ -1538,8 +1572,15 @@ class PersistentHopSession:
         maximum_overshoot = self.request.dwell_samples + final_transition_invalid_samples
         if denominator - self.request.capture_span_samples > maximum_overshoot:
             raise PersistentHopClientError("persistent-hop session exceeded its bounded overshoot")
-        if status.last_block_end_counter != status.final_counter:
+        if status.last_block_end_counter < status.final_counter:
             raise PersistentHopClientError("persistent-hop completion did not deliver final IQ")
+        if (
+            status.last_block_end_counter - status.final_counter
+            > self.plan.samples_per_block
+        ):
+            raise PersistentHopClientError(
+                "persistent-hop completion retained more than one terminal refill"
+            )
         startup = self._visits[0].transition_invalid_before
         if (
             status.first_counter != startup.device_sample_counter
