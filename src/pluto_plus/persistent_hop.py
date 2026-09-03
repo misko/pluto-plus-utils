@@ -16,7 +16,9 @@ from __future__ import annotations
 import dataclasses
 import enum
 import ipaddress
+import math
 import struct
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from typing import Final, Protocol
 
@@ -44,6 +46,7 @@ PERSISTENT_HOP_CAPABILITIES: Final = (
     "iio,buffer-persistent-hop-request",
     "iio,buffer-persistent-hop-event",
     "iio,buffer-persistent-hop-status",
+    "iio,buffer-persistent-hop-cancel",
 )
 
 _REQUEST_MAGIC: Final = 0x52504F48  # b"HOPR"
@@ -383,6 +386,7 @@ class PersistentHopPlanV1:
     samples_per_block: int
     kernel_buffers: int
     minimum_valid_duty_ppm: int
+    manual_gain_db: float
     profiles: tuple[PersistentHopProfileV1, ...]
 
     def __post_init__(self) -> None:
@@ -400,8 +404,31 @@ class PersistentHopPlanV1:
             raise ValueError("persistent-hop transition guard is outside the visit")
         if not 1 <= self.minimum_valid_duty_ppm <= 1_000_000:
             raise ValueError("minimum persistent-hop duty must be within 1..1,000,000 ppm")
-        # Reuse the frozen request validation, including profile order and tuning relations.
-        self.request(session_id=1)._validate()
+        if (
+            isinstance(self.manual_gain_db, bool)
+            or not isinstance(self.manual_gain_db, (int, float))
+            or not math.isfinite(self.manual_gain_db)
+            or not -3 <= self.manual_gain_db <= 73
+        ):
+            raise ValueError("persistent-hop manual gain must be finite and within -3..73 dB")
+        profile_crcs = tuple(profile.profile_crc32 for profile in self.profiles)
+        if any(profile_crcs) and not all(profile_crcs):
+            raise ValueError(
+                "persistent-hop plan profile CRCs must be all hardware-compiled or all zero"
+            )
+        # A host-only plan may carry all-zero CRC placeholders until a concrete
+        # bufferless hardware preparer saves the volatile Fast Lock words. The
+        # HOPR request itself remains strict and never permits a zero CRC.
+        validation_request = self.request(session_id=1)
+        if not any(profile_crcs):
+            validation_request = dataclasses.replace(
+                validation_request,
+                profiles=tuple(
+                    dataclasses.replace(profile, profile_crc32=1)
+                    for profile in validation_request.profiles
+                ),
+            )
+        validation_request._validate()
         if self.planned_valid_duty_ppm < self.minimum_valid_duty_ppm:
             raise ValueError("persistent-hop plan cannot meet its minimum valid duty")
 
@@ -499,8 +526,10 @@ class PersistentHopEventV1:
             )
         if self.transition_after_counter < self.transition_before_counter:
             raise PersistentHopProtocolError("hop transition counter interval regressed")
-        if self.invalid_start_counter != self.transition_before_counter:
-            raise PersistentHopProtocolError("hop invalid span does not start at transition-before")
+        if self.invalid_start_counter > self.transition_before_counter:
+            raise PersistentHopProtocolError(
+                "hop invalid span does not include scheduler lead time"
+            )
         if (
             self.invalid_end_counter_exclusive < self.transition_after_counter
             or self.invalid_end_counter_exclusive <= self.invalid_start_counter
@@ -913,12 +942,30 @@ def _validate_state_reason_flags(
 class PersistentHopWireBlock:
     evidence: bytes
     iq_payload: bytes
+    stream_generation: int | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class PersistentHopDecodedBlockV1:
     evidence: PersistentHopEvidenceV1
     samples: npt.NDArray[np.complex64]
+    stream_generation: int | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PersistentHopSampledVisitV1:
+    """One device-attested valid dwell and only its dual-RX IQ samples."""
+
+    visit: PersistentHopVisitV1
+    samples: npt.NDArray[np.complex64]
+
+    def __post_init__(self) -> None:
+        if (
+            self.samples.dtype != np.complex64
+            or self.samples.ndim != 2
+            or self.samples.shape != (2, self.visit.valid_sample_count)
+        ):
+            raise ValueError("persistent-hop visit IQ does not match its attested span")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -976,6 +1023,24 @@ class PersistentHopRestorationReceiptV1:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class PersistentHopReceiverSettingsV1:
+    center_frequency_hz: float
+    sample_rate_hz: float
+    bandwidth_hz: float
+    channels: tuple[int, ...]
+    gain_modes: tuple[str, ...]
+    gain_db: tuple[float, ...]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PersistentHopHostLifecycleReceiptV1:
+    original_settings: PersistentHopReceiverSettingsV1
+    restored_settings: PersistentHopReceiverSettingsV1
+    receive_buffer_closed: bool
+    fastlock_inactive: bool
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class PersistentHopCancellationReceiptV1:
     session_id: int
     reason: PersistentHopTerminalReason
@@ -983,6 +1048,7 @@ class PersistentHopCancellationReceiptV1:
     events_emitted: int
     final_counter: int
     restoration: PersistentHopRestorationReceiptV1
+    host_lifecycle: PersistentHopHostLifecycleReceiptV1 | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1004,6 +1070,15 @@ class PersistentHopSessionReceiptV1:
     continuity_attested: bool
     duty_target_met: bool
     restoration: PersistentHopRestorationReceiptV1
+    incomplete_visit_sample_count: int = 0
+    incomplete_visit_device_sample_counter: int | None = None
+    incomplete_visit_device_sample_counter_end_exclusive: int | None = None
+    host_lifecycle: PersistentHopHostLifecycleReceiptV1 | None = None
+    radio_id: str | None = None
+    metadata_abi_version: int = 3
+    stream_generation: int | None = None
+    kernel_buffers_requested: int | None = None
+    kernel_buffers_readback: int | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1012,6 +1087,14 @@ class PersistentHopTargetCoverageV1:
     target: PersistentHopTarget
     visit_count: int
     valid_sample_count: int
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _PersistentHopBackendReceiptFacts:
+    radio_id: str | None
+    stream_generation: int | None
+    kernel_buffers_requested: int
+    kernel_buffers_readback: int | None
 
 
 class PersistentHopBackend(Protocol):
@@ -1038,7 +1121,13 @@ class PersistentHopBackend(Protocol):
 
     def read_status(self) -> bytes: ...
 
-    def close(self) -> None: ...
+    def close(self) -> PersistentHopHostLifecycleReceiptV1 | None: ...
+
+
+class PersistentHopPlanPreparer(Protocol):
+    """Optional bufferless hardware compiler for volatile Fast Lock profiles."""
+
+    def prepare_plan(self, plan: PersistentHopPlanV1) -> PersistentHopPlanV1: ...
 
 
 class PersistentHopClient:
@@ -1065,7 +1154,6 @@ class PersistentHopClient:
     ) -> PersistentHopSession:
         if self._active:
             raise PersistentHopClientError("persistent-hop client already owns a session")
-        request = plan.request(session_id=session_id)
         backend = self._backend_factory(self.uri)
         if backend.uri != self.uri:
             raise PersistentHopClientError("persistent-hop backend URI does not match the client")
@@ -1093,6 +1181,16 @@ class PersistentHopClient:
                 raise PersistentHopClientError(
                     "persistent-hop exact capability negotiation failed: " + ", ".join(missing)
                 )
+            prepare_plan = getattr(backend, "prepare_plan", None)
+            if callable(prepare_plan):
+                prepared_plan = prepare_plan(plan)
+                _require_same_plan_except_profile_crcs(plan, prepared_plan)
+                plan = prepared_plan
+            if any(not profile.profile_crc32 for profile in plan.profiles):
+                raise PersistentHopClientError(
+                    "persistent-hop plan requires hardware-compiled Fast Lock CRCs"
+                )
+            request = plan.request(session_id=session_id)
             payload = request.append_to_tandem_request(
                 tandem_request,
                 plan.samples_per_block,
@@ -1146,6 +1244,7 @@ class PersistentHopSession:
         self._previous_block_sequence: int | None = None
         self._previous_block_end: int | None = None
         self._previous_event: PersistentHopEventV1 | None = None
+        self._stream_generation: int | None = None
         self._visits: list[PersistentHopVisitV1] = []
         self._receipt: PersistentHopSessionReceiptV1 | None = None
         self._initial_status = initial_status
@@ -1161,15 +1260,80 @@ class PersistentHopSession:
         return self._receipt
 
     def blocks(self) -> Iterator[PersistentHopDecodedBlockV1]:
+        self._claim_iterator()
+        yield from self._decoded_blocks()
+
+    def visits(self) -> Iterator[PersistentHopSampledVisitV1]:
+        """Yield valid per-target IQ, excluding every attested transition span.
+
+        Device events may cross arbitrary refill boundaries. The assembler
+        therefore retains the current not-yet-attested visit, emits only after
+        its closing counter is proven, and fails closed if event delivery would
+        require retaining more than one dwell plus one boundary refill.
+        """
+
+        self._claim_iterator()
+        segments: deque[tuple[int, int, npt.NDArray[np.complex64]]] = deque()
+        emitted = 0
+        for block in self._decoded_blocks():
+            segments.append(
+                (
+                    block.evidence.block_first_counter,
+                    block.evidence.block_end_counter_exclusive,
+                    block.samples,
+                )
+            )
+            while emitted < len(self._visits):
+                visit = self._visits[emitted]
+                if (
+                    not segments
+                    or segments[-1][1]
+                    < visit.valid_device_sample_counter_end_exclusive
+                ):
+                    break
+                sampled = _sampled_visit_from_segments(visit, segments)
+                emitted += 1
+                _trim_sample_segments(
+                    segments, visit.valid_device_sample_counter_end_exclusive
+                )
+                yield sampled
+            retain_from = (
+                self._visits[emitted].valid_device_sample_counter
+                if emitted < len(self._visits)
+                else (
+                    self._previous_event.invalid_end_counter_exclusive
+                    if self._previous_event is not None
+                    else self._initial_status.first_counter
+                )
+            )
+            _trim_sample_segments(segments, retain_from)
+            retained = sum(end - start for start, end, _samples in segments)
+            if retained > self.request.dwell_samples + self.plan.samples_per_block:
+                raise PersistentHopClientError(
+                    "persistent-hop event delivery exceeded the bounded visit IQ window"
+                )
+        while emitted < len(self._visits):
+            visit = self._visits[emitted]
+            sampled = _sampled_visit_from_segments(visit, segments)
+            emitted += 1
+            _trim_sample_segments(segments, visit.valid_device_sample_counter_end_exclusive)
+            yield sampled
+        if emitted != len(self._visits):  # pragma: no cover - loop invariant
+            raise PersistentHopClientError("persistent-hop visit IQ assembly was incomplete")
+
+    def _claim_iterator(self) -> None:
         if self._closed:
             raise PersistentHopClientError("persistent-hop session is closed")
         if self._iterated:
-            raise PersistentHopClientError("persistent-hop block iterator is single-use")
+            raise PersistentHopClientError("persistent-hop IQ iterator is single-use")
         self._iterated = True
+
+    def _decoded_blocks(self) -> Iterator[PersistentHopDecodedBlockV1]:
         try:
             for wire in self._backend.blocks():
                 evidence = PersistentHopEvidenceV1.unpack(wire.evidence)
                 self._validate_evidence(evidence)
+                self._accept_stream_generation(wire.stream_generation)
                 expected_bytes = (
                     evidence.block_end_counter_exclusive - evidence.block_first_counter
                 ) * 8
@@ -1181,7 +1345,11 @@ class PersistentHopSession:
                     samples = ci16_dual_rx(wire.iq_payload)
                 except ValueError as error:
                     raise PersistentHopClientError(str(error)) from error
-                yield PersistentHopDecodedBlockV1(evidence=evidence, samples=samples)
+                yield PersistentHopDecodedBlockV1(
+                    evidence=evidence,
+                    samples=samples,
+                    stream_generation=wire.stream_generation,
+                )
             self._finish_completed()
         except BaseException as error:
             cleanup_error = self._cancel_after_failure()
@@ -1192,11 +1360,14 @@ class PersistentHopSession:
     def cancel(self) -> PersistentHopCancellationReceiptV1:
         if self._closed:
             raise PersistentHopClientError("persistent-hop session is already closed")
+        receipt: PersistentHopCancellationReceiptV1 | None = None
+        full_receipt: PersistentHopSessionReceiptV1 | None = None
+        host_lifecycle: PersistentHopHostLifecycleReceiptV1 | None = None
         try:
             self._backend.cancel()
             status = PersistentHopStatusV1.unpack(self._backend.read_status())
             self._require_terminal_status(status, PersistentHopSessionState.CANCELLED)
-            return PersistentHopCancellationReceiptV1(
+            receipt = PersistentHopCancellationReceiptV1(
                 session_id=status.session_id,
                 reason=status.reason,
                 visits_started=status.visits_started,
@@ -1204,8 +1375,15 @@ class PersistentHopSession:
                 final_counter=status.final_counter,
                 restoration=_restoration_receipt(status),
             )
+            full_receipt = self._cancelled_full_receipt(status)
         finally:
-            self._release()
+            host_lifecycle = self._release()
+        assert receipt is not None and full_receipt is not None
+        self._receipt = dataclasses.replace(
+            full_receipt,
+            host_lifecycle=host_lifecycle,
+        )
+        return dataclasses.replace(receipt, host_lifecycle=host_lifecycle)
 
     def close(self) -> PersistentHopCancellationReceiptV1 | None:
         if self._closed:
@@ -1280,8 +1458,13 @@ class PersistentHopSession:
             self.request.transition_guard_samples,
         ):
             raise PersistentHopClientError("persistent-hop event guard does not match the request")
-        if event.actual_lo_frequency_hz + event.actual_if_offset_hz != profile.center_hz:
-            raise PersistentHopClientError("persistent-hop event actual tuning misses its target")
+        if (
+            event.actual_lo_frequency_hz != profile.lo_hz
+            or event.actual_if_offset_hz != self.request.if_offset_hz
+        ):
+            raise PersistentHopClientError(
+                "persistent-hop event actual LO or IF differs from the request"
+            )
         if self._previous_event is not None:
             self._visits.append(self._visit_from(self._previous_event, event.invalid_start_counter))
         self._previous_event = event
@@ -1376,7 +1559,8 @@ class PersistentHopSession:
             )
             for index in range(PERSISTENT_HOP_PROFILE_COUNT)
         )
-        self._receipt = PersistentHopSessionReceiptV1(
+        backend_facts = self._backend_receipt_facts()
+        receipt = PersistentHopSessionReceiptV1(
             session_id=status.session_id,
             radio_serial=self._owner.expected_serial,
             radio_uri=self._owner.uri,
@@ -1394,10 +1578,167 @@ class PersistentHopSession:
             continuity_attested=True,
             duty_target_met=duty >= self.plan.minimum_valid_duty_ppm,
             restoration=restoration,
+            incomplete_visit_sample_count=0,
+            incomplete_visit_device_sample_counter=None,
+            incomplete_visit_device_sample_counter_end_exclusive=None,
+            radio_id=backend_facts.radio_id,
+            metadata_abi_version=3,
+            stream_generation=backend_facts.stream_generation,
+            kernel_buffers_requested=backend_facts.kernel_buffers_requested,
+            kernel_buffers_readback=backend_facts.kernel_buffers_readback,
         )
-        if not self._receipt.duty_target_met:
+        if not receipt.duty_target_met:
             raise PersistentHopClientError("persistent-hop session missed its minimum valid duty")
-        self._release()
+        self._receipt = dataclasses.replace(
+            receipt,
+            host_lifecycle=self._release(),
+        )
+
+    def _cancelled_full_receipt(
+        self,
+        status: PersistentHopStatusV1,
+    ) -> PersistentHopSessionReceiptV1:
+        accepted_events = (
+            0 if self._previous_event is None else self._previous_event.event_sequence + 1
+        )
+        if (
+            status.events_emitted != accepted_events
+            or status.visits_started != accepted_events
+        ):
+            raise PersistentHopClientError(
+                "persistent-hop cancellation has undelivered device events"
+            )
+        if self._previous_block_sequence is not None and (
+            status.last_block_sequence != self._previous_block_sequence
+            or status.last_block_end_counter != self._previous_block_end
+        ):
+            raise PersistentHopClientError(
+                "persistent-hop cancellation status disagrees with delivered IQ"
+            )
+        first = status.first_counter
+        final = status.final_counter
+        if final < first or (
+            self._previous_block_end is not None and final < self._previous_block_end
+        ):
+            raise PersistentHopClientError(
+                "persistent-hop cancellation counter envelope regressed"
+            )
+        valid_samples = sum(visit.valid_sample_count for visit in self._visits)
+        invalid_intervals = [
+            (
+                visit.transition_invalid_before.device_sample_counter,
+                visit.transition_invalid_before.device_sample_counter_end_exclusive,
+            )
+            for visit in self._visits
+        ]
+        if self._previous_event is not None:
+            invalid_intervals.append(
+                (
+                    self._previous_event.invalid_start_counter,
+                    self._previous_event.invalid_end_counter_exclusive,
+                )
+            )
+        invalid_samples = sum(
+            max(0, min(final, end) - max(first, start))
+            for start, end in invalid_intervals
+        )
+        incomplete_start = (
+            first
+            if self._previous_event is None
+            else max(first, min(final, self._previous_event.invalid_end_counter_exclusive))
+        )
+        incomplete_samples = final - incomplete_start
+        denominator = final - first
+        if valid_samples + invalid_samples + incomplete_samples != denominator:
+            raise PersistentHopClientError(
+                "persistent-hop cancellation spans do not partition the session"
+            )
+        coverage = tuple(
+            PersistentHopTargetCoverageV1(
+                target_index=index,
+                target=PersistentHopTarget(index),
+                visit_count=sum(visit.target_index == index for visit in self._visits),
+                valid_sample_count=sum(
+                    visit.valid_sample_count
+                    for visit in self._visits
+                    if visit.target_index == index
+                ),
+            )
+            for index in range(PERSISTENT_HOP_PROFILE_COUNT)
+        )
+        backend_facts = self._backend_receipt_facts()
+        return PersistentHopSessionReceiptV1(
+            session_id=status.session_id,
+            radio_serial=self._owner.expected_serial,
+            radio_uri=self._owner.uri,
+            status=status,
+            visits=tuple(self._visits),
+            target_coverage=coverage,
+            capture_outcome="cancelled",
+            valid_sample_count=valid_samples,
+            transition_invalid_sample_count=invalid_samples,
+            missing_sample_count=0,
+            overflow_count=0,
+            hop_event_sequence_gap_count=0,
+            duty_denominator_sample_count=denominator,
+            valid_duty_ppm=(
+                0 if denominator == 0 else valid_samples * 1_000_000 // denominator
+            ),
+            continuity_attested=True,
+            duty_target_met=False,
+            restoration=_restoration_receipt(status),
+            incomplete_visit_sample_count=incomplete_samples,
+            incomplete_visit_device_sample_counter=(
+                incomplete_start if incomplete_samples else None
+            ),
+            incomplete_visit_device_sample_counter_end_exclusive=(
+                final if incomplete_samples else None
+            ),
+            radio_id=backend_facts.radio_id,
+            metadata_abi_version=3,
+            stream_generation=backend_facts.stream_generation,
+            kernel_buffers_requested=backend_facts.kernel_buffers_requested,
+            kernel_buffers_readback=backend_facts.kernel_buffers_readback,
+        )
+
+    def _accept_stream_generation(self, generation: int | None) -> None:
+        if generation is None:
+            if self._stream_generation is not None:
+                raise PersistentHopClientError(
+                    "persistent-hop ABI-3 stream generation disappeared"
+                )
+            return
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+            raise PersistentHopClientError(
+                "persistent-hop ABI-3 stream generation is invalid"
+            )
+        if self._stream_generation is None:
+            self._stream_generation = generation
+        elif generation != self._stream_generation:
+            raise PersistentHopClientError(
+                "persistent-hop ABI-3 stream generation changed"
+            )
+
+    def _backend_receipt_facts(self) -> _PersistentHopBackendReceiptFacts:
+        requested = getattr(self._backend, "kernel_buffers_requested", None)
+        readback = getattr(self._backend, "kernel_buffers_readback", None)
+        radio_id = getattr(self._backend, "radio_id", None)
+        if requested is not None and requested != self.plan.kernel_buffers:
+            raise PersistentHopClientError(
+                "persistent-hop kernel-buffer request changed"
+            )
+        if readback is not None and readback != self.plan.kernel_buffers:
+            raise PersistentHopClientError(
+                "persistent-hop kernel-buffer readback changed"
+            )
+        return _PersistentHopBackendReceiptFacts(
+            radio_id=radio_id if isinstance(radio_id, str) and radio_id else None,
+            stream_generation=self._stream_generation,
+            kernel_buffers_requested=(
+                requested if isinstance(requested, int) else self.plan.kernel_buffers
+            ),
+            kernel_buffers_readback=(readback if isinstance(readback, int) else None),
+        )
 
     def _require_terminal_status(
         self,
@@ -1432,13 +1773,14 @@ class PersistentHopSession:
             self._release()
         return None
 
-    def _release(self) -> None:
+    def _release(self) -> PersistentHopHostLifecycleReceiptV1 | None:
         if not self._closed:
             try:
-                self._backend.close()
+                return self._backend.close()
             finally:
                 self._closed = True
                 self._owner._released()
+        return None
 
 
 def _restoration_receipt(status: PersistentHopStatusV1) -> PersistentHopRestorationReceiptV1:
@@ -1454,3 +1796,66 @@ def _restoration_receipt(status: PersistentHopStatusV1) -> PersistentHopRestorat
         active_profile_index=status.active_profile_index,
         error_code=status.restore_error_code,
     )
+
+
+def _sampled_visit_from_segments(
+    visit: PersistentHopVisitV1,
+    segments: deque[tuple[int, int, npt.NDArray[np.complex64]]],
+) -> PersistentHopSampledVisitV1:
+    start = visit.valid_device_sample_counter
+    end = visit.valid_device_sample_counter_end_exclusive
+    pieces = tuple(
+        samples[
+            :,
+            max(start, segment_start) - segment_start : min(end, segment_end)
+            - segment_start,
+        ]
+        for segment_start, segment_end, samples in segments
+        if segment_end > start and segment_start < end
+    )
+    covered = sum(piece.shape[1] for piece in pieces)
+    if covered != visit.valid_sample_count:
+        raise PersistentHopClientError(
+            "persistent-hop IQ blocks do not cover the attested valid visit"
+        )
+    output = (
+        pieces[0].copy()
+        if len(pieces) == 1
+        else np.concatenate(pieces, axis=1, dtype=np.complex64)
+    )
+    return PersistentHopSampledVisitV1(visit=visit, samples=output)
+
+
+def _trim_sample_segments(
+    segments: deque[tuple[int, int, npt.NDArray[np.complex64]]],
+    retain_from: int,
+) -> None:
+    while segments and segments[0][1] <= retain_from:
+        segments.popleft()
+    if segments and segments[0][0] < retain_from:
+        start, end, samples = segments[0]
+        segments[0] = (retain_from, end, samples[:, retain_from - start :])
+
+
+def _require_same_plan_except_profile_crcs(
+    requested: PersistentHopPlanV1,
+    prepared: PersistentHopPlanV1,
+) -> None:
+    """Prevent a hardware compiler from silently changing the requested scan."""
+
+    requested_without_crcs = dataclasses.replace(
+        requested,
+        profiles=tuple(
+            dataclasses.replace(profile, profile_crc32=1) for profile in requested.profiles
+        ),
+    )
+    prepared_without_crcs = dataclasses.replace(
+        prepared,
+        profiles=tuple(
+            dataclasses.replace(profile, profile_crc32=1) for profile in prepared.profiles
+        ),
+    )
+    if prepared_without_crcs != requested_without_crcs:
+        raise PersistentHopClientError(
+            "persistent-hop hardware preparation changed the requested plan"
+        )

@@ -26,6 +26,7 @@ from pluto_plus.persistent_hop import (
     PersistentHopProfileV1,
     PersistentHopProtocolError,
     PersistentHopRequestV1,
+    PersistentHopSession,
     PersistentHopSessionState,
     PersistentHopStatusFlag,
     PersistentHopStatusV1,
@@ -65,6 +66,7 @@ def _plan() -> PersistentHopPlanV1:
         samples_per_block=1_024,
         kernel_buffers=2,
         minimum_valid_duty_ppm=900_000,
+        manual_gain_db=40.0,
         profiles=_profiles(),
     )
 
@@ -250,6 +252,17 @@ class _Backend(PersistentHopBackend):
         self.closed = True
 
 
+class _PreparingBackend(_Backend):
+    def prepare_plan(self, plan: PersistentHopPlanV1) -> PersistentHopPlanV1:
+        return dataclasses.replace(
+            plan,
+            profiles=tuple(
+                dataclasses.replace(profile, profile_crc32=index + 101)
+                for index, profile in enumerate(plan.profiles)
+            ),
+        )
+
+
 def _client(backend: _Backend, *, expected_serial: str = SERIAL) -> PersistentHopClient:
     return PersistentHopClient(
         URI,
@@ -338,6 +351,11 @@ def test_hops_event_and_status_codecs_reject_malformed_order() -> None:
     with pytest.raises(PersistentHopProtocolError, match="out of order"):
         PersistentHopEvidenceV1.unpack(out_of_order)
 
+    zero_device_event_id = bytearray(first.pack())
+    struct.pack_into("<Q", zero_device_event_id, 72, 0)
+    with pytest.raises(PersistentHopProtocolError, match="device identity"):
+        PersistentHopEventV1.unpack(zero_device_event_id)
+
 
 def test_hops_event_delivery_is_not_synthesized_from_attached_block_bounds() -> None:
     evidence = PersistentHopEvidenceV1(
@@ -353,6 +371,15 @@ def test_hops_event_delivery_is_not_synthesized_from_attached_block_bounds() -> 
     )
 
     assert PersistentHopEvidenceV1.unpack(evidence.pack()) == evidence
+
+
+def test_hops_event_permits_conservative_scheduler_lead_time() -> None:
+    event = dataclasses.replace(
+        _event(),
+        invalid_start_counter=990,
+    )
+
+    assert PersistentHopEventV1.unpack(event.pack()) == event
 
 
 @pytest.mark.parametrize(
@@ -417,6 +444,42 @@ def test_client_requires_every_exact_capability_literal() -> None:
     assert backend.started_request is None and backend.closed
 
 
+def test_client_compiles_zero_crc_plan_before_composing_hopr() -> None:
+    plan = dataclasses.replace(
+        _plan(),
+        profiles=tuple(
+            dataclasses.replace(profile, profile_crc32=0)
+            for profile in _plan().profiles
+        ),
+    )
+    backend = _PreparingBackend(URI)
+    backend.statuses[1] = dataclasses.replace(
+        _cancelled_status(),
+        visits_started=0,
+        events_emitted=0,
+        next_event_sequence=0,
+        last_block_end_counter=0,
+        final_counter=1_000,
+        restore_before_counter=1_000,
+        restore_after_counter=1_001,
+        startup_invalid_start_counter=0,
+        startup_invalid_end_counter_exclusive=0,
+    )
+
+    session = _client(backend).start(
+        plan,
+        session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+
+    assert backend.started_request is not None
+    request = PersistentHopRequestV1.unpack(backend.started_request[-288:])
+    assert tuple(profile.profile_crc32 for profile in request.profiles) == tuple(
+        range(101, 109)
+    )
+    session.close()
+
+
 def test_continuous_client_yields_dual_rx_and_cancel_restore_receipts() -> None:
     backend = _Backend(URI, blocks=(_wire_block(),))
     session = _client(backend).start(
@@ -439,6 +502,156 @@ def test_continuous_client_yields_dual_rx_and_cancel_restore_receipts() -> None:
     assert receipt.restoration.status == "restored"
     assert receipt.restoration.restored_lo_frequency_hz == 915_000_000
     assert backend.cancelled and backend.closed
+    assert session.receipt.capture_outcome == "cancelled"
+    assert session.receipt.valid_sample_count == 0
+    assert session.receipt.transition_invalid_sample_count == 11
+    assert session.receipt.incomplete_visit_sample_count == 1_013
+    assert (
+        session.receipt.valid_sample_count
+        + session.receipt.transition_invalid_sample_count
+        + session.receipt.incomplete_visit_sample_count
+        == session.receipt.duty_denominator_sample_count
+    )
+
+
+def test_visit_iterator_slices_split_boundaries_and_emits_final_visit() -> None:
+    plan = _plan()
+    request = dataclasses.replace(
+        plan.request(session_id=SESSION_ID),
+        dwell_count=2,
+        capture_span_samples=600_000,
+    )
+    first_event = _event()
+    second_event = _event(sequence=1, dwell=1, invalid_start=301_011)
+    terminal_flags = (
+        PersistentHopStatusFlag.TERMINAL
+        | PersistentHopStatusFlag.RESTORE_ATTEMPTED
+        | PersistentHopStatusFlag.RESTORE_SUCCEEDED
+        | PersistentHopStatusFlag.RESTORE_REQUIRED
+    )
+
+    def block(
+        sequence: int,
+        start: int,
+        end: int,
+        *,
+        events: tuple[PersistentHopEventV1, ...] = (),
+        terminal: bool = False,
+    ) -> PersistentHopWireBlock:
+        evidence = PersistentHopEvidenceV1(
+            flags=terminal_flags if terminal else PersistentHopStatusFlag.RESTORE_REQUIRED,
+            session_id=SESSION_ID,
+            buffer_sequence=sequence,
+            block_first_counter=start,
+            block_end_counter_exclusive=end,
+            state=(
+                PersistentHopSessionState.COMPLETED
+                if terminal
+                else PersistentHopSessionState.RUNNING
+            ),
+            reason=(
+                PersistentHopTerminalReason.PLAN_COMPLETE
+                if terminal
+                else PersistentHopTerminalReason.NONE
+            ),
+            error_code=0,
+            events=events,
+        )
+        components = np.zeros((end - start, 4), dtype="<i2")
+        components[:, 0] = sequence + 1
+        components[:, 2] = sequence + 11
+        return PersistentHopWireBlock(evidence.pack(), components.tobytes())
+
+    final_counter = 601_022
+    backend = _Backend(
+        URI,
+        blocks=(
+            block(0, 1_000, 150_000, events=(first_event,)),
+            block(1, 150_000, 400_000, events=(second_event,)),
+            block(2, 400_000, final_counter, terminal=True),
+        ),
+    )
+    completed = dataclasses.replace(
+        _cancelled_status(),
+        state=PersistentHopSessionState.COMPLETED,
+        reason=PersistentHopTerminalReason.PLAN_COMPLETE,
+        planned_dwells=2,
+        visits_started=2,
+        events_emitted=2,
+        next_event_sequence=2,
+        last_block_sequence=2,
+        last_block_end_counter=final_counter,
+        final_counter=final_counter,
+        restore_before_counter=final_counter,
+        restore_after_counter=final_counter + 1,
+    )
+    backend.statuses = [completed]
+    initial = dataclasses.replace(_active_status(), planned_dwells=2)
+    session = PersistentHopSession(_client(backend), backend, plan, request, initial)
+
+    visits = list(session.visits())
+
+    assert len(visits) == 2
+    assert tuple(item.visit.target_index for item in visits) == (0, 1)
+    assert tuple(item.samples.shape for item in visits) == ((2, 300_000), (2, 300_000))
+    # Visit zero crosses the first refill boundary; the final visit crosses
+    # the last and is emitted only after HOPT supplies final_counter.
+    assert visits[0].samples[0, 0] == 1 + 0j
+    assert visits[0].samples[0, 148_988] == 1 + 0j
+    assert visits[0].samples[0, 148_989] == 2 + 0j
+    assert visits[1].samples[0, -1] == 3 + 0j
+    assert session.receipt.visits[-1].valid_device_sample_counter_end_exclusive == (
+        final_counter
+    )
+    assert backend.closed
+
+
+def test_cancelled_full_receipt_keeps_only_completed_visits_and_partial_span() -> None:
+    second_event = _event(sequence=1, dwell=1, invalid_start=301_011)
+    backend = _Backend(
+        URI,
+        blocks=(
+            _wire_block(end_counter=150_000),
+            _wire_block(
+                buffer_sequence=1,
+                first_counter=150_000,
+                end_counter=400_000,
+                events=(second_event,),
+            ),
+        ),
+    )
+    backend.statuses[1] = dataclasses.replace(
+        _cancelled_status(),
+        visits_started=2,
+        events_emitted=2,
+        next_event_sequence=2,
+        last_block_sequence=1,
+        last_block_end_counter=400_000,
+        final_counter=400_100,
+        restore_before_counter=400_100,
+        restore_after_counter=400_101,
+    )
+    session = _client(backend).start(
+        _plan(),
+        session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+    blocks = session.blocks()
+    next(blocks)
+    next(blocks)
+
+    session.cancel()
+    receipt = session.receipt
+
+    assert receipt.capture_outcome == "cancelled"
+    assert len(receipt.visits) == 1
+    assert receipt.target_coverage[0].visit_count == 1
+    assert receipt.valid_sample_count == 300_000
+    assert receipt.transition_invalid_sample_count == 22
+    assert receipt.incomplete_visit_sample_count == 99_078
+    assert receipt.incomplete_visit_device_sample_counter == 301_022
+    assert receipt.incomplete_visit_device_sample_counter_end_exclusive == 400_100
+    assert receipt.valid_duty_ppm == 751_691
 
 
 @pytest.mark.parametrize(
@@ -458,6 +671,18 @@ def test_continuous_client_yields_dual_rx_and_cancel_restore_receipts() -> None:
             _wire_block(events=(dataclasses.replace(_event(), event_sequence=1),)),
             "event sequence",
         ),
+        (
+            _wire_block(
+                events=(
+                    dataclasses.replace(
+                        _event(),
+                        actual_lo_frequency_hz=_event().actual_lo_frequency_hz + 1,
+                        actual_if_offset_hz=_event().actual_if_offset_hz - 1,
+                    ),
+                )
+            ),
+            "actual LO or IF",
+        ),
     ),
 )
 def test_client_fails_closed_on_gaps_overflow_and_out_of_order_events(
@@ -472,5 +697,32 @@ def test_client_fails_closed_on_gaps_overflow_and_out_of_order_events(
     )
 
     with pytest.raises(PersistentHopClientError, match=message):
+        list(session.blocks())
+    assert backend.cancelled and backend.closed
+
+
+def test_client_rejects_abi3_stream_generation_change() -> None:
+    backend = _Backend(
+        URI,
+        blocks=(
+            dataclasses.replace(_wire_block(), stream_generation=41),
+            dataclasses.replace(
+                _wire_block(
+                    buffer_sequence=1,
+                    first_counter=2_024,
+                    end_counter=3_048,
+                    events=(),
+                ),
+                stream_generation=42,
+            ),
+        ),
+    )
+    session = _client(backend).start(
+        _plan(),
+        session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+
+    with pytest.raises(PersistentHopClientError, match="stream generation changed"):
         list(session.blocks())
     assert backend.cancelled and backend.closed

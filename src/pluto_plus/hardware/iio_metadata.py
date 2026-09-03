@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import errno
 import gc
+import struct
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any
@@ -86,6 +87,15 @@ class _PendingMetadataSequence:
     buffer_sequence: int
     sample_end: int
     missing_samples_before: int
+
+
+@dataclass(frozen=True, slots=True)
+class IioRawSidecarBlock:
+    """One exact ABI-3 header/sidecar/IQ generation from MetadataBuffer."""
+
+    metadata_header: bytes
+    sidecar: bytes
+    iq_payload: bytes
 
 
 ABI3_METADATA_LAYOUTS = (
@@ -1047,6 +1057,178 @@ class IioMetadataCaptureSession:
     def __enter__(self) -> IioMetadataCaptureSession:
         if not self.is_open:
             raise RuntimeError("IIO metadata capture is not open")
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+class IioRawSidecarCaptureSession:
+    """Minimal raw ABI-3 session for an additive device-owned sidecar protocol.
+
+    This path deliberately does not reinterpret IQ through pyadi or admit a
+    legacy metadata record.  The caller owns the sidecar codec and supplies
+    the binding-specific status and in-band cancellation operations.
+    """
+
+    def __init__(
+        self,
+        sdr: Any,
+        metadata_buffer_type: Any,
+        *,
+        request: bytes,
+        samples_per_channel: int,
+        kernel_buffers: int,
+        metadata_status_reader: Callable[[Any, int], bytes],
+        metadata_canceller: Callable[[Any], None],
+        status_capacity: int,
+        metadata_capacity: int = DEFAULT_METADATA_CAPACITY,
+    ) -> None:
+        if not request:
+            raise ValueError("raw sidecar metadata request must be nonempty")
+        if samples_per_channel <= 0:
+            raise ValueError("raw sidecar sample count must be positive")
+        if not 2 <= kernel_buffers <= 64:
+            raise ValueError("raw sidecar kernel buffer count must be within 2..64")
+        if metadata_capacity <= 0 or status_capacity <= 0:
+            raise ValueError("raw sidecar metadata/status capacities must be positive")
+        self._sdr = sdr
+        self._metadata_buffer_type = metadata_buffer_type
+        self._request = bytes(request)
+        self._samples_per_channel = samples_per_channel
+        self._kernel_buffers = kernel_buffers
+        self._metadata_status_reader = metadata_status_reader
+        self._metadata_canceller = metadata_canceller
+        self._status_capacity = status_capacity
+        self._metadata_capacity = metadata_capacity
+        self._buffer: Any | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self._buffer is not None
+
+    def open(self) -> None:
+        if self._buffer is not None:
+            raise RuntimeError("raw sidecar metadata capture is already open")
+        self._prime_dual_rx_layout()
+        actual = getattr(self._sdr._rxadc, "kernel_buffers_count", None)
+        if actual is None or int(actual) != self._kernel_buffers:
+            raise RuntimeError("raw sidecar kernel-buffer readback changed before OPEN")
+        try:
+            self._buffer = self._metadata_buffer_type(
+                self._sdr._rxadc,
+                self._samples_per_channel,
+                self._request,
+                self._metadata_capacity,
+            )
+            self._sdr._rxbuf = self._buffer
+        except BaseException:
+            self.close()
+            raise
+
+    def _prime_dual_rx_layout(self) -> None:
+        if tuple(int(item) for item in self._sdr.rx_enabled_channels) != (0, 1):
+            raise RuntimeError("raw sidecar capture requires paired RX channels")
+        self._sdr.rx_destroy_buffer()
+        self._sdr.rx_buffer_size = self._samples_per_channel
+        setter = getattr(self._sdr._rxadc, "set_kernel_buffers_count", None)
+        if not callable(setter):
+            raise RuntimeError("raw sidecar kernel-buffer count is not configurable")
+        prime_count = min(self._kernel_buffers, _PRIME_KERNEL_BUFFERS)
+        if prime_count != self._kernel_buffers:
+            result = setter(prime_count)
+            if isinstance(result, int) and result < 0:
+                raise RuntimeError("raw sidecar prime kernel-buffer configuration failed")
+        ordinary_buffer = None
+        try:
+            signal = np.asarray(self._sdr.rx())
+            if signal.shape != (2, self._samples_per_channel) or not np.iscomplexobj(signal):
+                raise RuntimeError("raw sidecar prime did not establish paired complex RX")
+            ordinary_buffer = getattr(self._sdr, "_rxbuf", None)
+        finally:
+            self._sdr.rx_destroy_buffer()
+            try:
+                _close_buffer(ordinary_buffer)
+            finally:
+                del ordinary_buffer
+                gc.collect()
+                if prime_count != self._kernel_buffers:
+                    result = setter(self._kernel_buffers)
+                    if isinstance(result, int) and result < 0:
+                        raise RuntimeError(
+                            "raw sidecar final kernel-buffer configuration failed"
+                        )
+
+    def read_block(self) -> IioRawSidecarBlock:
+        buffer = self._buffer
+        if buffer is None:
+            raise RuntimeError("raw sidecar metadata capture is not open")
+        try:
+            buffer.refill()
+            iq_payload = bytes(buffer.read())
+            raw_metadata = buffer.metadata
+            if raw_metadata is None:
+                raise RuntimeError("raw sidecar refill returned no metadata")
+            raw = bytes(raw_metadata)
+            if len(raw) < 8:
+                raise RuntimeError("raw sidecar metadata is shorter than its ABI header")
+            base_bytes = struct.unpack_from("<H", raw, 6)[0]
+            if not 8 <= base_bytes < len(raw):
+                raise RuntimeError("raw sidecar metadata does not contain an appended record")
+            parsed = RadioMetadataV6.unpack(raw[:base_bytes])
+            base = parsed.base
+            if (
+                base.samples_per_channel != self._samples_per_channel
+                or base.iq_payload_bytes != self._samples_per_channel * 8
+                or base.enabled_scan_mask != 0x0F
+                or base.channel_count != 2
+            ):
+                raise RuntimeError("raw sidecar ABI-3 geometry is not paired RX CI16")
+            if not base.flags & MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID:
+                raise RuntimeError("raw sidecar ABI-3 header lacks a hardware counter")
+            if len(iq_payload) != base.iq_payload_bytes:
+                raise RuntimeError("raw sidecar IQ bytes disagree with the ABI-3 header")
+            return IioRawSidecarBlock(
+                metadata_header=raw[:base_bytes],
+                sidecar=raw[base_bytes:],
+                iq_payload=iq_payload,
+            )
+        except BaseException:
+            self.close()
+            raise
+
+    def read_status(self) -> bytes:
+        if self._buffer is None:
+            raise RuntimeError("raw sidecar metadata capture is not open")
+        result = self._metadata_status_reader(self._buffer, self._status_capacity)
+        if len(result) != self._status_capacity:
+            raise RuntimeError("raw sidecar status response has the wrong size")
+        return result
+
+    def request_cancel(self) -> None:
+        if self._buffer is None:
+            raise RuntimeError("raw sidecar metadata capture is not open")
+        self._metadata_canceller(self._buffer)
+
+    def close(self) -> None:
+        buffer = self._buffer
+        self._buffer = None
+        if getattr(self._sdr, "_rxbuf", None) is buffer:
+            self._sdr._rxbuf = None
+        try:
+            _close_buffer(buffer)
+        finally:
+            del buffer
+            gc.collect()
+
+    def __enter__(self) -> IioRawSidecarCaptureSession:
+        if not self.is_open:
+            raise RuntimeError("raw sidecar metadata capture is not open")
         return self
 
     def __exit__(

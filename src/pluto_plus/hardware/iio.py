@@ -34,6 +34,7 @@ from pluto_plus.hardware.iio_metadata import (
     SUPPORTED_METADATA_ABIS,
     SUPPORTED_METADATA_STATUS_VERSIONS,
     IioMetadataCaptureSession,
+    IioRawSidecarCaptureSession,
     configure_iio_context_timeout,
     metadata_iio_context_timeout_ms,
     parse_metadata_layout_capabilities,
@@ -326,7 +327,9 @@ class IioRadioDevice:
         self._device: Any | None = None
         self._rx_layout_expectation: RxLayoutExpectation | None = None
         self._buffer_size: int | None = None
-        self._metadata_capture: IioMetadataCaptureSession | None = None
+        self._metadata_capture: (
+            IioMetadataCaptureSession | IioRawSidecarCaptureSession | None
+        ) = None
         self._kernel_buffer_configuration_basis: Literal[
             "not_configured", "setter_accepted", "readback"
         ] = "not_configured"
@@ -957,6 +960,41 @@ class IioRadioDevice:
         _mute_transmit(device)
         return attestation
 
+    def configure_source_locked_receiver_geometry(
+        self,
+        *,
+        sample_rate_hz: int,
+        rf_bandwidth_hz: int,
+        channels: tuple[int, ...],
+        manual_gain_db: float,
+    ) -> IioReceiverSettingsReadback:
+        """Apply and attest exact rate/bandwidth/layout/manual-gain state."""
+
+        if rf_bandwidth_hz != sample_rate_hz:
+            raise ValueError("source-locked receiver bandwidth must equal sample rate")
+        if channels != (0, 1):
+            raise ValueError("persistent sidecar capture requires paired RX channels")
+        self.configure_source_locked_rx_rate(sample_rate_hz)
+        device = self._require_bufferless_device()
+        device.rx_rf_bandwidth = rf_bandwidth_hz
+        device.rx_enabled_channels = list(channels)
+        for channel in channels:
+            setattr(device, f"gain_control_mode_chan{channel}", GainMode.MANUAL.value)
+            setattr(device, f"rx_hardwaregain_chan{channel}", manual_gain_db)
+        _mute_transmit(device)
+        readback = self.read_receiver_settings_readback()
+        if (
+            round(readback.sample_rate_hz) != sample_rate_hz
+            or round(readback.bandwidth_hz) != rf_bandwidth_hz
+            or readback.channels != channels
+            or readback.gain_modes != (GainMode.MANUAL, GainMode.MANUAL)
+            or readback.gain_db != (manual_gain_db, manual_gain_db)
+        ):
+            raise RadioConfigurationError(
+                "source-locked receiver geometry did not read back exactly"
+            )
+        return readback
+
     def store_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
         """Store the current RX synthesizer state in one volatile AD9361 profile."""
 
@@ -1264,6 +1302,93 @@ class IioRadioDevice:
             raise
         self._metadata_capture = session
         return session
+
+    def begin_raw_sidecar_metadata_capture(
+        self,
+        sample_count: int,
+        *,
+        kernel_buffers: int,
+        request: bytes,
+        status_capacity: int,
+        metadata_status_reader: Callable[[Any, int], bytes],
+        metadata_canceller: Callable[[Any], None],
+    ) -> IioRawSidecarCaptureSession:
+        """Arm one exact dual-RX ABI-3 buffer with an additive raw sidecar."""
+
+        from pluto_plus.data_plane import require_safe_iio_buffer
+
+        if sample_count <= 0:
+            raise ValueError("raw sidecar sample count must be positive")
+        if not request:
+            raise ValueError("raw sidecar request must be nonempty")
+        device = self._require_device()
+        self.reset_receive_buffer()
+        channels = tuple(int(item) for item in device.rx_enabled_channels)
+        if channels != (0, 1):
+            raise RadioConfigurationError("raw sidecar metadata requires paired RX channels")
+        require_safe_iio_buffer(sample_count, 2)
+        facts = context_facts(device.ctx)
+        metadata_abi = _select_context_metadata_abi(
+            facts, expected=self._expected_metadata_abi
+        )
+        if metadata_abi != 3 or self._selected_metadata_abi != 3:
+            raise RadioConfigurationError("raw sidecar metadata requires exact ABI 3")
+        if facts.get("buffer_metadata_layouts") != ABI3_METADATA_LAYOUTS:
+            raise RadioConfigurationError(
+                "raw sidecar metadata requires canonical ABI-3 RX layouts"
+            )
+        if not facts.get("tandem_agc"):
+            raise RadioConfigurationError("raw sidecar metadata requires tandem-agc")
+        if not (
+            self._capabilities.supports_device_sample_counter
+            and self._capabilities.supports_continuity_sequence
+        ):
+            raise RadioConfigurationError(
+                "raw sidecar metadata requires the continuity-observable runtime"
+            )
+        sample_rate_hz = round(float(device.sample_rate))
+        configure_iio_context_timeout(
+            device.ctx,
+            timeout_ms=metadata_iio_context_timeout_ms(sample_rate_hz, sample_count),
+        )
+        module = self._iio_module
+        if module is None:
+            raise RadioConfigurationError(
+                "metadata capture runtime was not loaded before the IIO context"
+            )
+        metadata_buffer_type = getattr(module, "MetadataBuffer", None)
+        if metadata_buffer_type is None:
+            raise RadioConfigurationError("installed pylibiio does not expose MetadataBuffer")
+        actual_kernel_buffers = self.configure_kernel_buffers(kernel_buffers)
+        session = IioRawSidecarCaptureSession(
+            device,
+            metadata_buffer_type,
+            request=request,
+            samples_per_channel=sample_count,
+            kernel_buffers=actual_kernel_buffers,
+            metadata_status_reader=metadata_status_reader,
+            metadata_canceller=metadata_canceller,
+            status_capacity=status_capacity,
+        )
+        try:
+            session.open()
+        except BaseException:
+            session.close()
+            self.reset_receive_buffer()
+            raise
+        self._metadata_capture = session
+        return session
+
+    def iio_context_attributes(self) -> Mapping[str, str]:
+        """Return the exact string-valued attributes of the opened context."""
+
+        raw = dict(getattr(self._require_device().ctx, "attrs", {}) or {})
+        if any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in raw.items()
+        ):
+            raise RadioConfigurationError("IIO context attributes are not canonical strings")
+        return raw
 
     def diagnostic_facts(self) -> Mapping[str, object]:
         """Return passive facts captured when the exact IIO context was opened."""

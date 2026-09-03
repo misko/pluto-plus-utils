@@ -497,6 +497,26 @@ def test_iio_adapter_configures_and_attests_source_locked_capture_rate() -> None
         radio.close()
 
 
+def test_iio_adapter_attests_paired_manual_gain_geometry() -> None:
+    module = CaptureRateFakeAdi()
+    radio = IioRadioDevice("ip:192.168.1.18", serial="SERIAL_A", adi_module=module)
+    radio.open()
+    try:
+        readback = radio.configure_source_locked_receiver_geometry(
+            sample_rate_hz=5_000_000,
+            rf_bandwidth_hz=5_000_000,
+            channels=(0, 1),
+            manual_gain_db=40.0,
+        )
+        assert readback.sample_rate_hz == 5_000_000
+        assert readback.bandwidth_hz == 5_000_000
+        assert readback.channels == (0, 1)
+        assert readback.gain_modes == (GainMode.MANUAL, GainMode.MANUAL)
+        assert readback.gain_db == (40.0, 40.0)
+    finally:
+        radio.close()
+
+
 def test_iio_adapter_rejects_stuck_capture_decimation() -> None:
     radio = IioRadioDevice(
         "usb:3.49.5",
