@@ -134,7 +134,6 @@ class IioPersistentHopBackend(PersistentHopBackend):
             channels=(0, 1),
             manual_gain_db=plan.manual_gain_db,
         )
-        prepared_profiles = []
         for profile in plan.profiles:
             radio.write_center_frequency_bufferless(profile.lo_hz)
             if round(radio.read_center_frequency()) != profile.lo_hz:
@@ -148,19 +147,11 @@ class IioPersistentHopBackend(PersistentHopBackend):
                 raise RadioConfigurationError(
                     f"Fast Lock profile {profile.fastlock_profile_index} save readback changed"
                 )
-            profile_crc32 = zlib.crc32(bytes(saved_words)) & 0xFFFFFFFF
-            if not profile_crc32:
-                raise RadioConfigurationError(
-                    f"Fast Lock profile {profile.fastlock_profile_index} has zero CRC32"
-                )
             radio.recall_rx_fastlock_profile(profile.fastlock_profile_index)
             if radio.read_active_rx_fastlock_profile() != profile.fastlock_profile_index:
                 raise RadioConfigurationError(
                     f"Fast Lock profile {profile.fastlock_profile_index} recall was not attested"
                 )
-            prepared_profiles.append(
-                dataclasses.replace(profile, profile_crc32=profile_crc32)
-            )
 
         # A conventional LO write exits Fast Lock before OPEN. The provider
         # then owns all recalls and can attest its own initial transition.
@@ -170,6 +161,30 @@ class IioPersistentHopBackend(PersistentHopBackend):
             or round(radio.read_center_frequency()) != plan.profiles[0].lo_hz
         ):
             raise RadioConfigurationError("Fast Lock remained active after profile preparation")
+
+        # AD9361 recall may rewrite Fast Lock word 15 as part of its unlock
+        # workaround.  HOPR therefore attests the exact slot contents only
+        # after every verification recall and after the conventional LO write
+        # has exited Fast Lock.  A stable double-read closes the host/provider
+        # race window before the provider independently checks the same bytes.
+        prepared_profiles = []
+        for profile in plan.profiles:
+            saved_words = radio.save_rx_fastlock_profile(
+                profile.fastlock_profile_index
+            )
+            if radio.save_rx_fastlock_profile(profile.fastlock_profile_index) != saved_words:
+                raise RadioConfigurationError(
+                    f"Fast Lock profile {profile.fastlock_profile_index} "
+                    "final save readback changed"
+                )
+            profile_crc32 = zlib.crc32(bytes(saved_words)) & 0xFFFFFFFF
+            if not profile_crc32:
+                raise RadioConfigurationError(
+                    f"Fast Lock profile {profile.fastlock_profile_index} has zero CRC32"
+                )
+            prepared_profiles.append(
+                dataclasses.replace(profile, profile_crc32=profile_crc32)
+            )
         prepared = dataclasses.replace(plan, profiles=tuple(prepared_profiles))
         self._prepared_plan = prepared
         return prepared

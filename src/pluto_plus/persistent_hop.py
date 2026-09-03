@@ -805,6 +805,10 @@ class PersistentHopStatusV1:
                 raise PersistentHopProtocolError("HOPT terminal counter interval regressed")
             if self.last_block_end_counter > self.final_counter:
                 raise PersistentHopProtocolError("HOPT final counter precedes the last block")
+            if attempted and self.restore_before_counter < self.final_counter:
+                raise PersistentHopProtocolError(
+                    "HOPT restoration begins before the terminal counter"
+                )
         elif self.final_counter:
             raise PersistentHopProtocolError("non-terminal HOPT status has a final counter")
 

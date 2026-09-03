@@ -346,6 +346,18 @@ def test_hops_event_and_status_codecs_reject_malformed_order() -> None:
     assert status_payload[126:128] == bytes(2)
     assert status_payload[152:160] == bytes(8)
 
+    delayed_restore = dataclasses.replace(
+        _cancelled_status(),
+        restore_before_counter=2_100,
+        restore_after_counter=2_101,
+    )
+    assert PersistentHopStatusV1.unpack(delayed_restore.pack()) == delayed_restore
+    with pytest.raises(PersistentHopProtocolError, match="before the terminal counter"):
+        dataclasses.replace(
+            _cancelled_status(),
+            restore_before_counter=2_023,
+        ).pack()
+
     out_of_order = bytearray(payload)
     struct.pack_into("<Q", out_of_order, 64 + 80, 3)
     with pytest.raises(PersistentHopProtocolError, match="out of order"):

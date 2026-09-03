@@ -263,6 +263,27 @@ class _FakeRadio:
         return snapshot
 
 
+class _RecallMutatingFastlockRadio(_FakeRadio):
+    """Model the AD9361 unlock workaround rewriting saved word 15 on recall."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved_profiles: dict[int, tuple[int, ...]] = {}
+
+    def store_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
+        saved = tuple((profile + index) & 0xFF for index in range(16))
+        self.saved_profiles[profile] = saved
+        return saved
+
+    def save_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
+        return self.saved_profiles[profile]
+
+    def recall_rx_fastlock_profile(self, profile: int) -> None:
+        super().recall_rx_fastlock_profile(profile)
+        current = self.saved_profiles[profile]
+        self.saved_profiles[profile] = (*current[:-1], current[-1] ^ 0x80)
+
+
 def test_backend_prearm_compiles_profiles_and_composes_exact_open_request() -> None:
     radio = _FakeRadio()
     backend = IioPersistentHopBackend(
@@ -297,6 +318,37 @@ def test_backend_prearm_compiles_profiles_and_composes_exact_open_request() -> N
         zlib.crc32(bytes((slot + index) & 0xFF for index in range(16))) & 0xFFFFFFFF
         for slot in range(8)
     )
+
+
+def test_backend_crc_attests_stable_post_recall_fastlock_words() -> None:
+    radio = _RecallMutatingFastlockRadio()
+    backend = IioPersistentHopBackend(
+        URI,
+        expected_serial=SERIAL,
+        iio_module=SimpleNamespace(),
+        radio_factory=lambda _uri, _serial: radio,  # type: ignore[arg-type]
+    )
+    backend.open()
+    requested = dataclasses.replace(
+        _plan(),
+        profiles=tuple(
+            dataclasses.replace(profile, profile_crc32=0)
+            for profile in _plan().profiles
+        ),
+    )
+
+    prepared = backend.prepare_plan(requested)
+
+    stale_pre_recall_crcs = tuple(
+        zlib.crc32(bytes((slot + index) & 0xFF for index in range(16))) & 0xFFFFFFFF
+        for slot in range(8)
+    )
+    final_crcs = tuple(
+        zlib.crc32(bytes(radio.saved_profiles[slot])) & 0xFFFFFFFF
+        for slot in range(8)
+    )
+    assert tuple(profile.profile_crc32 for profile in prepared.profiles) == final_crcs
+    assert final_crcs != stale_pre_recall_crcs
 
 
 def test_backend_extracts_hops_then_reads_cancelled_hopt_before_close() -> None:
