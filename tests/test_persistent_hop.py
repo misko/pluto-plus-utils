@@ -404,11 +404,22 @@ def test_hops_event_permits_conservative_scheduler_lead_time() -> None:
         "ip:192.168.1.0",
         "ip:192.168.1.255",
         " ip:192.168.1.18",
+        "ip:192.168.1.18:",
+        "ip:192.168.1.18:0",
+        "ip:192.168.1.18:030432",
+        "ip:192.168.1.18:65536",
+        "ip:192.168.1.18:not-a-port",
     ),
 )
 def test_client_rejects_every_nonphysical_or_noncanonical_uri(uri: str) -> None:
     with pytest.raises(ValueError, match="persistent hopping"):
         require_physical_lan_uri(uri)
+
+
+def test_client_accepts_canonical_physical_lan_uri_with_explicit_port() -> None:
+    assert require_physical_lan_uri("ip:192.168.1.18:30432") == (
+        "ip:192.168.1.18:30432"
+    )
 
 
 def test_client_rejects_wrong_and_excluded_serial_before_capture() -> None:
@@ -575,12 +586,18 @@ def test_visit_iterator_slices_split_boundaries_and_emits_final_visit() -> None:
         return PersistentHopWireBlock(evidence.pack(), components.tobytes())
 
     final_counter = 601_022
+    terminal_block_end = final_counter + 500
     backend = _Backend(
         URI,
         blocks=(
-            block(0, 1_000, 150_000, events=(first_event,)),
+            # OPEN may snapshot the scheduler before the first refill has
+            # anchored its counter epoch. Only transition-invalid IQ precedes
+            # the first block here, so no valid visit samples are absent.
+            block(0, 1_005, 150_000, events=(first_event,)),
             block(1, 150_000, 400_000, events=(second_event,)),
-            block(2, 400_000, final_counter, terminal=True),
+            # Completion is observed at refill granularity. The final refill
+            # can therefore contain an ignored tail after the plan boundary.
+            block(2, 400_000, terminal_block_end, terminal=True),
         ),
     )
     completed = dataclasses.replace(
@@ -592,10 +609,10 @@ def test_visit_iterator_slices_split_boundaries_and_emits_final_visit() -> None:
         events_emitted=2,
         next_event_sequence=2,
         last_block_sequence=2,
-        last_block_end_counter=final_counter,
+        last_block_end_counter=terminal_block_end,
         final_counter=final_counter,
-        restore_before_counter=final_counter,
-        restore_after_counter=final_counter + 1,
+        restore_before_counter=terminal_block_end,
+        restore_after_counter=terminal_block_end + 1,
     )
     backend.statuses = [completed]
     initial = dataclasses.replace(_active_status(), planned_dwells=2)
@@ -615,6 +632,8 @@ def test_visit_iterator_slices_split_boundaries_and_emits_final_visit() -> None:
     assert session.receipt.visits[-1].valid_device_sample_counter_end_exclusive == (
         final_counter
     )
+    assert session.receipt.status.last_block_end_counter == terminal_block_end
+    assert session.receipt.status.restore_before_counter >= terminal_block_end
     assert backend.closed
 
 

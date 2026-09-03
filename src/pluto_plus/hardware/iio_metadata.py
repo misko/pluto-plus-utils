@@ -47,6 +47,7 @@ from pluto_plus.tandem import (
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
 DEFAULT_METADATA_CAPACITY = 64 * 1024
 DIRECT_ASYNC_FRAME_TARGET_MAX = 4_096
+METADATA_BATCH_FRAMES_MAX = 64
 # A 262,144-sample dual-RX refill spans about 105 ms at 2.5 MS/s. Five
 # seconds leaves more than 47 refill intervals for transport jitter. Larger
 # safe buffers receive eight native frame intervals, capped at 30 seconds, so
@@ -206,6 +207,7 @@ def metadata_iio_context_timeout_ms(
     sample_rate_hz: int,
     samples_per_channel: int,
     *,
+    batch_frames: int = 1,
     ddr_burst_frames: int = 0,
 ) -> int:
     """Return one bounded timeout with margin for the configured native-rate refill."""
@@ -216,6 +218,14 @@ def metadata_iio_context_timeout_ms(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
+    if (
+        isinstance(batch_frames, bool)
+        or not isinstance(batch_frames, int)
+        or not 1 <= batch_frames <= METADATA_BATCH_FRAMES_MAX
+    ):
+        raise ValueError(
+            f"batch_frames must be in [1, {METADATA_BATCH_FRAMES_MAX}]"
+        )
     for name, value in (("ddr_burst_frames", ddr_burst_frames),):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
@@ -227,7 +237,7 @@ def metadata_iio_context_timeout_ms(
         IIO_CONTEXT_TIMEOUT_MAX_MS,
         max(
             IIO_CONTEXT_TIMEOUT_MS,
-            frame_duration_ms * IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER,
+            frame_duration_ms * batch_frames * IIO_CONTEXT_TIMEOUT_FRAME_MULTIPLIER,
         ),
     )
 
@@ -283,6 +293,7 @@ class IioMetadataCaptureSession:
         kernel_buffers: int,
         metadata_abi: int,
         metadata_capacity: int = DEFAULT_METADATA_CAPACITY,
+        batch_frames: int = 1,
         tandem_request: TandemSessionRequestV1 | None = None,
         ddr_burst_bytes: int = 0,
         ddr_ring_bytes: int = 0,
@@ -303,6 +314,14 @@ class IioMetadataCaptureSession:
             raise ValueError("metadata_abi must be one of the supported ABIs 1, 2, 3, or 4")
         if metadata_capacity <= 0:
             raise ValueError("metadata_capacity must be positive")
+        if (
+            isinstance(batch_frames, bool)
+            or not isinstance(batch_frames, int)
+            or not 1 <= batch_frames <= METADATA_BATCH_FRAMES_MAX
+        ):
+            raise ValueError(
+                f"batch_frames must be in [1, {METADATA_BATCH_FRAMES_MAX}]"
+            )
         if isinstance(ddr_burst_bytes, bool) or not isinstance(ddr_burst_bytes, int):
             raise TypeError("ddr_burst_bytes must be an integer")
         if ddr_burst_bytes < 0:
@@ -335,6 +354,10 @@ class IioMetadataCaptureSession:
             raise ValueError("device DDR burst and DDR ring are mutually exclusive")
         if direct_async_frames and ddr_burst_bytes:
             raise ValueError("direct async capture cannot use the sealed DDR burst")
+        if batch_frames > 1 and (ddr_burst_bytes or ddr_ring_bytes or direct_async_frames):
+            raise ValueError(
+                "metadata refill batching is only supported by ordinary capture"
+            )
         if ddr_ring_bytes:
             if direct_async_frames and (ddr_ring_frames or ddr_ring_continuous):
                 raise ValueError(
@@ -355,6 +378,7 @@ class IioMetadataCaptureSession:
         self._allocated_kernel_buffers = 0
         self._metadata_abi = metadata_abi
         self._metadata_capacity = int(metadata_capacity)
+        self._batch_frames = batch_frames
         self._ddr_burst_requested_bytes = ddr_burst_bytes
         self._ddr_ring_requested_bytes = ddr_ring_bytes
         self._ddr_ring_capture_frames = ddr_ring_frames
@@ -408,6 +432,12 @@ class IioMetadataCaptureSession:
         """DMA blocks attested by successful exact direct-async admission."""
 
         return self._allocated_kernel_buffers
+
+    @property
+    def batch_frames(self) -> int:
+        """Number of ordinary metadata refills prequeued as one transport batch."""
+
+        return self._batch_frames
 
     @property
     def direct_async_frames(self) -> int:
@@ -601,10 +631,17 @@ class IioMetadataCaptureSession:
         for attempt in range(1, _OPEN_MAX_ATTEMPTS + 1):
             try:
                 if self._metadata_abi == 1:
+                    if self._batch_frames == 1:
+                        return self._metadata_buffer_type(
+                            self._sdr._rxadc,
+                            self._samples_per_channel,
+                            self._metadata_capacity,
+                        )
                     return self._metadata_buffer_type(
                         self._sdr._rxadc,
                         self._samples_per_channel,
                         self._metadata_capacity,
+                        batch_frames=self._batch_frames,
                     )
                 if self.ddr_burst_enabled:
                     return self._metadata_buffer_type(
@@ -649,11 +686,19 @@ class IioMetadataCaptureSession:
                         direct_async_frames=self._direct_async_frames,
                         drop_backlog_on_overrun=self._drop_backlog_on_overrun,
                     )
+                if self._batch_frames == 1:
+                    return self._metadata_buffer_type(
+                        self._sdr._rxadc,
+                        self._samples_per_channel,
+                        request,
+                        self._metadata_capacity,
+                    )
                 return self._metadata_buffer_type(
                     self._sdr._rxadc,
                     self._samples_per_channel,
                     request,
                     self._metadata_capacity,
+                    batch_frames=self._batch_frames,
                 )
             except OSError as error:
                 if error.errno != errno.EBUSY or attempt == _OPEN_MAX_ATTEMPTS:
@@ -1168,39 +1213,35 @@ class IioRawSidecarCaptureSession:
         buffer = self._buffer
         if buffer is None:
             raise RuntimeError("raw sidecar metadata capture is not open")
-        try:
-            buffer.refill()
-            iq_payload = bytes(buffer.read())
-            raw_metadata = buffer.metadata
-            if raw_metadata is None:
-                raise RuntimeError("raw sidecar refill returned no metadata")
-            raw = bytes(raw_metadata)
-            if len(raw) < 8:
-                raise RuntimeError("raw sidecar metadata is shorter than its ABI header")
-            base_bytes = struct.unpack_from("<H", raw, 6)[0]
-            if not 8 <= base_bytes < len(raw):
-                raise RuntimeError("raw sidecar metadata does not contain an appended record")
-            parsed = RadioMetadataV6.unpack(raw[:base_bytes])
-            base = parsed.base
-            if (
-                base.samples_per_channel != self._samples_per_channel
-                or base.iq_payload_bytes != self._samples_per_channel * 8
-                or base.enabled_scan_mask != 0x0F
-                or base.channel_count != 2
-            ):
-                raise RuntimeError("raw sidecar ABI-3 geometry is not paired RX CI16")
-            if not base.flags & MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID:
-                raise RuntimeError("raw sidecar ABI-3 header lacks a hardware counter")
-            if len(iq_payload) != base.iq_payload_bytes:
-                raise RuntimeError("raw sidecar IQ bytes disagree with the ABI-3 header")
-            return IioRawSidecarBlock(
-                metadata_header=raw[:base_bytes],
-                sidecar=raw[base_bytes:],
-                iq_payload=iq_payload,
-            )
-        except BaseException:
-            self.close()
-            raise
+        buffer.refill()
+        iq_payload = bytes(buffer.read())
+        raw_metadata = buffer.metadata
+        if raw_metadata is None:
+            raise RuntimeError("raw sidecar refill returned no metadata")
+        raw = bytes(raw_metadata)
+        if len(raw) < 8:
+            raise RuntimeError("raw sidecar metadata is shorter than its ABI header")
+        base_bytes = struct.unpack_from("<H", raw, 6)[0]
+        if not 8 <= base_bytes < len(raw):
+            raise RuntimeError("raw sidecar metadata does not contain an appended record")
+        parsed = RadioMetadataV6.unpack(raw[:base_bytes])
+        base = parsed.base
+        if (
+            base.samples_per_channel != self._samples_per_channel
+            or base.iq_payload_bytes != self._samples_per_channel * 8
+            or base.enabled_scan_mask != 0x0F
+            or base.channel_count != 2
+        ):
+            raise RuntimeError("raw sidecar ABI-3 geometry is not paired RX CI16")
+        if not base.flags & MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID:
+            raise RuntimeError("raw sidecar ABI-3 header lacks a hardware counter")
+        if len(iq_payload) != base.iq_payload_bytes:
+            raise RuntimeError("raw sidecar IQ bytes disagree with the ABI-3 header")
+        return IioRawSidecarBlock(
+            metadata_header=raw[:base_bytes],
+            sidecar=raw[base_bytes:],
+            iq_payload=iq_payload,
+        )
 
     def read_status(self) -> bytes:
         if self._buffer is None:

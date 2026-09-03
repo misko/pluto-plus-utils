@@ -176,6 +176,9 @@ class MetadataCapture(Protocol):
     def allocated_kernel_buffers(self) -> int: ...
 
     @property
+    def batch_frames(self) -> int: ...
+
+    @property
     def direct_async_frames(self) -> int: ...
 
     @property
@@ -384,6 +387,7 @@ class MetadataRadioDevice(RadioDevice, Protocol):
         sample_count: int,
         *,
         kernel_buffers: int,
+        batch_frames: int = 1,
         ddr_burst_bytes: int = 0,
         direct_async_frames: int = 0,
         drop_backlog_on_overrun: bool = True,

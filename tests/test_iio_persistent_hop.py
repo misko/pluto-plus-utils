@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 
 from pluto_plus.direct_radio.usb import MetadataFlags
 from pluto_plus.hardware.iio import IioReceiverSettingsReadback
@@ -284,6 +285,27 @@ class _RecallMutatingFastlockRadio(_FakeRadio):
         self.saved_profiles[profile] = (*current[:-1], current[-1] ^ 0x80)
 
 
+class _QuantizedLoRadio(_FakeRadio):
+    """Model an RFIC that reads two hertz low at the nominal write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_lo_hz = self.lo_hz
+        self.stored_lo_hz: dict[int, int] = {}
+
+    def write_center_frequency_bufferless(self, center_frequency_hz: float) -> None:
+        self.requested_lo_hz = round(center_frequency_hz)
+        self.lo_hz = self.requested_lo_hz - 2
+        self.active_profile = None
+
+    def store_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
+        self.stored_lo_hz[profile] = self.lo_hz
+        return super().store_rx_fastlock_profile(profile)
+
+    def save_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
+        return tuple((profile + index) & 0xFF for index in range(16))
+
+
 def test_backend_prearm_compiles_profiles_and_composes_exact_open_request() -> None:
     radio = _FakeRadio()
     backend = IioPersistentHopBackend(
@@ -349,6 +371,32 @@ def test_backend_crc_attests_stable_post_recall_fastlock_words() -> None:
     )
     assert tuple(profile.profile_crc32 for profile in prepared.profiles) == final_crcs
     assert final_crcs != stale_pre_recall_crcs
+
+
+def test_backend_compensates_bounded_lo_quantization_before_fastlock_store() -> None:
+    radio = _QuantizedLoRadio()
+    backend = IioPersistentHopBackend(
+        URI,
+        expected_serial=SERIAL,
+        iio_module=SimpleNamespace(),
+        radio_factory=lambda _uri, _serial: radio,  # type: ignore[arg-type]
+    )
+    backend.open()
+    requested = dataclasses.replace(
+        _plan(),
+        profiles=tuple(
+            dataclasses.replace(profile, profile_crc32=0)
+            for profile in _plan().profiles
+        ),
+    )
+
+    prepared = backend.prepare_plan(requested)
+
+    assert radio.stored_lo_hz == {
+        profile.fastlock_profile_index: profile.lo_hz for profile in prepared.profiles
+    }
+    assert radio.lo_hz == prepared.profiles[0].lo_hz
+    assert radio.requested_lo_hz == prepared.profiles[0].lo_hz + 2
 
 
 def test_backend_extracts_hops_then_reads_cancelled_hopt_before_close() -> None:
@@ -493,5 +541,47 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     session.request_cancel()
     assert buffer.in_band_cancelled
     assert not buffer.generic_cancelled
+    session.close()
+    assert buffer.closed
+
+
+def test_raw_sidecar_read_failure_preserves_buffer_for_in_band_cleanup() -> None:
+    buffer = _FakeMetadataBuffer(b"", b"", _status(PersistentHopSessionState.RUNNING))
+
+    def fail_refill() -> None:
+        raise OSError("injected refill failure")
+
+    buffer.refill = fail_refill
+    sdr = SimpleNamespace(
+        _rxadc=_FakeRxAdc(),
+        _rxbuf=None,
+        rx_enabled_channels=[0, 1],
+        rx_buffer_size=0,
+    )
+    sdr.rx_destroy_buffer = lambda: setattr(sdr, "_rxbuf", None)
+    sdr.rx = lambda: np.zeros((2, SAMPLES), dtype=np.complex64)
+    session = IioRawSidecarCaptureSession(
+        sdr,
+        lambda *_args: buffer,
+        request=bytes(range(256)) + bytes(range(136)),
+        samples_per_channel=SAMPLES,
+        kernel_buffers=2,
+        metadata_status_reader=lambda item, capacity: _read_metadata_status(
+            SimpleNamespace(), item, capacity
+        ),
+        metadata_canceller=lambda item: _cancel_metadata_session(
+            SimpleNamespace(), item
+        ),
+        status_capacity=160,
+    )
+    session.open()
+
+    with pytest.raises(OSError, match="injected refill failure"):
+        session.read_block()
+
+    assert session.is_open
+    assert not buffer.closed
+    session.request_cancel()
+    assert buffer.in_band_cancelled
     session.close()
     assert buffer.closed

@@ -11,6 +11,7 @@ from types import ModuleType
 from typing import Any
 
 from pluto_plus.errors import RadioConfigurationError
+from pluto_plus.hardware.base import DEFAULT_RESTORE_LO_SEARCH_HZ
 from pluto_plus.hardware.iio import IioRadioDevice, IioReceiverSettingsReadback
 from pluto_plus.hardware.iio_metadata import IioRawSidecarCaptureSession
 from pluto_plus.models import Transport
@@ -135,11 +136,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
             manual_gain_db=plan.manual_gain_db,
         )
         for profile in plan.profiles:
-            radio.write_center_frequency_bufferless(profile.lo_hz)
-            if round(radio.read_center_frequency()) != profile.lo_hz:
-                raise RadioConfigurationError(
-                    f"Fast Lock profile {profile.fastlock_profile_index} LO did not read back"
-                )
+            _write_exact_center_frequency(radio, profile.lo_hz)
             saved_words = radio.store_rx_fastlock_profile(
                 profile.fastlock_profile_index
             )
@@ -155,7 +152,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
 
         # A conventional LO write exits Fast Lock before OPEN. The provider
         # then owns all recalls and can attest its own initial transition.
-        radio.write_center_frequency_bufferless(plan.profiles[0].lo_hz)
+        _write_exact_center_frequency(radio, plan.profiles[0].lo_hz)
         if (
             radio.read_active_rx_fastlock_profile() is not None
             or round(radio.read_center_frequency()) != plan.profiles[0].lo_hz
@@ -340,6 +337,36 @@ def iio_persistent_hop_client(
             adi_module=adi_module,
             iio_module=iio_module,
         ),
+    )
+
+
+def _write_exact_center_frequency(
+    radio: IioRadioDevice,
+    center_frequency_hz: int,
+    *,
+    maximum_offset_hz: int = DEFAULT_RESTORE_LO_SEARCH_HZ,
+) -> None:
+    """Compensate bounded AD936x integer-Hz tuning quantization exactly."""
+
+    if maximum_offset_hz < 0:
+        raise ValueError("maximum Fast Lock LO offset cannot be negative")
+    offsets = (
+        0,
+        *tuple(
+            value
+            for step in range(1, maximum_offset_hz + 1)
+            for value in (-step, step)
+        ),
+    )
+    last = 0
+    for offset in offsets:
+        radio.write_center_frequency_bufferless(center_frequency_hz + offset)
+        last = round(radio.read_center_frequency())
+        if last == center_frequency_hz:
+            return
+    raise RadioConfigurationError(
+        f"Fast Lock LO {center_frequency_hz} Hz did not read back exactly; "
+        f"last readback was {last} Hz"
     )
 
 
