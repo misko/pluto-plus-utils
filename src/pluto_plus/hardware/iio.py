@@ -31,6 +31,7 @@ from pluto_plus.hardware.iio_metadata import (
     ABI4_METADATA_LAYOUTS,
     ABI4_METADATA_RECORD,
     DIRECT_ASYNC_FRAME_TARGET_MAX,
+    METADATA_BATCH_FRAMES_MAX,
     SUPPORTED_METADATA_ABIS,
     SUPPORTED_METADATA_STATUS_VERSIONS,
     IioMetadataCaptureSession,
@@ -1065,6 +1066,7 @@ class IioRadioDevice:
         sample_count: int,
         *,
         kernel_buffers: int,
+        batch_frames: int = 1,
         tandem_request: TandemSessionRequestV1 | None = None,
         ddr_burst_bytes: int = 0,
         ddr_ring_bytes: int = 0,
@@ -1079,6 +1081,14 @@ class IioRadioDevice:
 
         if sample_count <= 0:
             raise ValueError("sample_count must be positive")
+        if (
+            isinstance(batch_frames, bool)
+            or not isinstance(batch_frames, int)
+            or not 1 <= batch_frames <= METADATA_BATCH_FRAMES_MAX
+        ):
+            raise ValueError(
+                f"batch_frames must be in [1, {METADATA_BATCH_FRAMES_MAX}]"
+            )
         if isinstance(ddr_burst_bytes, bool) or not isinstance(ddr_burst_bytes, int):
             raise TypeError("ddr_burst_bytes must be an integer")
         if ddr_burst_bytes < 0:
@@ -1111,6 +1121,10 @@ class IioRadioDevice:
             raise ValueError("device DDR burst and DDR ring are mutually exclusive")
         if direct_async_frames and ddr_burst_bytes:
             raise ValueError("direct async capture cannot use the sealed DDR burst")
+        if batch_frames > 1 and (ddr_burst_bytes or ddr_ring_bytes or direct_async_frames):
+            raise ValueError(
+                "metadata refill batching is only supported by ordinary capture"
+            )
         if ddr_ring_bytes:
             if direct_async_frames and (ddr_ring_frames or ddr_ring_continuous):
                 raise ValueError(
@@ -1264,6 +1278,7 @@ class IioRadioDevice:
             timeout_ms=metadata_iio_context_timeout_ms(
                 sample_rate_hz,
                 sample_count,
+                batch_frames=batch_frames,
                 ddr_burst_frames=(
                     0 if not ddr_burst_bytes else ddr_burst_bytes // (sample_count * 4)
                 ),
@@ -1285,6 +1300,7 @@ class IioRadioDevice:
             samples_per_channel=sample_count,
             kernel_buffers=actual_kernel_buffers,
             metadata_abi=int(metadata_abi),
+            batch_frames=batch_frames,
             tandem_request=tandem_request,
             ddr_burst_bytes=ddr_burst_bytes,
             ddr_ring_bytes=ddr_ring_bytes,

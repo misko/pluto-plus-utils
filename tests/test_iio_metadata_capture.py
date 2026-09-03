@@ -33,6 +33,7 @@ from pluto_plus.hardware.iio_metadata import (
     IIO_CONTEXT_TIMEOUT_MAX_MS,
     IIO_CONTEXT_TIMEOUT_MS,
     IIO_DDR_BURST_TIMEOUT_MAX_MS,
+    METADATA_BATCH_FRAMES_MAX,
     metadata_iio_context_timeout_ms,
     parse_metadata_version_capabilities,
     require_metadata_abi_capability,
@@ -1071,6 +1072,20 @@ def test_metadata_context_timeout_covers_complete_ddr_burst() -> None:
     )
 
 
+def test_metadata_context_timeout_covers_complete_ordinary_batch() -> None:
+    assert metadata_iio_context_timeout_ms(
+        1_000_000,
+        1_000_000,
+        batch_frames=4,
+    ) == 30_000
+
+
+@pytest.mark.parametrize("batch_frames", [0, METADATA_BATCH_FRAMES_MAX + 1, True])
+def test_metadata_context_timeout_rejects_invalid_batch_depth(batch_frames: object) -> None:
+    with pytest.raises(ValueError, match="batch_frames"):
+        metadata_iio_context_timeout_ms(2_500_000, SAMPLE_COUNT, batch_frames=batch_frames)  # type: ignore[arg-type]
+
+
 def test_metadata_context_timeout_treats_ddr_ring_as_streaming() -> None:
     assert metadata_iio_context_timeout_ms(5_000_000, 1_000_000) == 5_000
     assert metadata_iio_context_timeout_ms(20_000_000, 1_000_000) == 5_000
@@ -1850,6 +1865,58 @@ def test_abi3_single_rx_capture_preserves_exact_sub_refill_gap() -> None:
         assert second.buffer_sequence == 1
         assert len(factory.instances[0].signature) == 3
         assert factory.instances[0].signature[0] == SAMPLE_COUNT
+    finally:
+        radio.close()
+
+
+def test_abi3_ordinary_capture_prequeues_and_replays_a_bounded_batch() -> None:
+    headers = [
+        _metadata_v6(
+            buffer_sequence=sequence,
+            first_sample_sequence=1_000 + sequence * SAMPLE_COUNT,
+        )
+        for sequence in range(3)
+    ]
+    radio, _adi, factory = _open_radio(headers, metadata_abi=3)
+    try:
+        with radio.begin_metadata_capture(
+            SAMPLE_COUNT,
+            kernel_buffers=8,
+            batch_frames=3,
+        ) as capture:
+            assert capture.batch_frames == 3
+            blocks = [capture.read_block() for _ in range(3)]
+        assert [block.buffer_sequence for block in blocks] == [0, 1, 2]
+        assert [block.first_sample_sequence for block in blocks] == [1_000, 1_004, 1_008]
+        assert factory.instances[0].keywords == {"batch_frames": 3}
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize("batch_frames", [0, METADATA_BATCH_FRAMES_MAX + 1, True])
+def test_metadata_capture_rejects_invalid_batch_depth(batch_frames: object) -> None:
+    radio, _adi, _factory = _open_radio([], metadata_abi=3)
+    try:
+        with pytest.raises(ValueError, match="batch_frames"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=8,
+                batch_frames=batch_frames,  # type: ignore[arg-type]
+            )
+    finally:
+        radio.close()
+
+
+def test_metadata_capture_rejects_batching_with_nonordinary_transport() -> None:
+    radio, _adi, _factory = _open_radio([], metadata_abi=3)
+    try:
+        with pytest.raises(ValueError, match="only supported by ordinary capture"):
+            radio.begin_metadata_capture(
+                SAMPLE_COUNT,
+                kernel_buffers=8,
+                batch_frames=2,
+                ddr_burst_bytes=SAMPLE_COUNT * 8,
+            )
     finally:
         radio.close()
 
