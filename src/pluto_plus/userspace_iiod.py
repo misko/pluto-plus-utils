@@ -32,6 +32,7 @@ USERSPACE_IIOD_PORT: Final[Literal[30432]] = 30_432
 STOCK_IIOD_PORT: Final[Literal[30431]] = 30_431
 _MAX_BINARY_BYTES = 64 * 1024 * 1024
 _MAX_CREDENTIAL_BYTES = 4_096
+_SYSTEMD_CREDENTIALS_ROOT = Path("/run/credentials")
 _TOKEN = re.compile(r"^[0-9a-f]{32}$")
 _SERIAL = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1181,12 +1182,13 @@ def _read_private_file(path: Path, *, label: str) -> tuple[bytes, _PrivateFileId
             raise ValueError(f"{label} changed while opening")
         if (
             not stat.S_ISREG(opened.st_mode)
-            or opened.st_uid != os.geteuid()
-            or stat.S_IMODE(opened.st_mode) not in {0o400, 0o600}
+            or not _is_private_credential(selected, opened)
             or opened.st_nlink != 1
             or not 0 < opened.st_size <= _MAX_CREDENTIAL_BYTES
         ):
-            raise ValueError(f"{label} must be one owned mode-0400/0600 regular file")
+            raise ValueError(
+                f"{label} must be one private regular file or root-owned systemd credential"
+            )
         payload = os.read(descriptor, opened.st_size + 1)
         if len(payload) != opened.st_size or os.read(descriptor, 1):
             raise ValueError(f"{label} changed during read")
@@ -1213,6 +1215,18 @@ def _stable_file_facts(value: os.stat_result) -> tuple[int, int, int, int, int]:
         value.st_mtime_ns,
         value.st_ctime_ns,
     )
+
+
+def _is_private_credential(path: Path, opened: os.stat_result) -> bool:
+    mode = stat.S_IMODE(opened.st_mode)
+    process_owned = opened.st_uid == os.geteuid() and mode in {0o400, 0o600}
+    systemd_managed = (
+        path.is_relative_to(_SYSTEMD_CREDENTIALS_ROOT)
+        and opened.st_uid == 0
+        and opened.st_gid == 0
+        and mode == 0o440
+    )
+    return process_owned or systemd_managed
 
 
 def _require_exact_known_host(payload: bytes, host: str) -> None:

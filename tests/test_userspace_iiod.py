@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 import subprocess
 from collections.abc import Sequence
 from dataclasses import FrozenInstanceError, replace
@@ -440,7 +442,9 @@ def test_context_preserves_primary_error_and_attests_cleanup(tmp_path: Path) -> 
     assert transport.events[-2:] == ["terminate", "cleanup"]
 
 
-def test_credentials_accept_0400_and_0600_but_reject_public_or_symlink(tmp_path: Path) -> None:
+def test_credentials_accept_private_owner_modes_but_reject_public_or_symlink(
+    tmp_path: Path,
+) -> None:
     for index, mode in enumerate((0o400, 0o600)):
         root = tmp_path / str(index)
         known_hosts, password = _credentials(root, mode=mode)
@@ -453,7 +457,7 @@ def test_credentials_accept_0400_and_0600_but_reject_public_or_symlink(tmp_path:
         )
 
     known_hosts, password = _credentials(tmp_path / "public", mode=0o644)
-    with pytest.raises(ValueError, match="0400/0600"):
+    with pytest.raises(ValueError, match="private regular file"):
         PinnedPasswordSshIiodTransport(
             host=HOST,
             expected_serial=SERIAL,
@@ -473,6 +477,34 @@ def test_credentials_accept_0400_and_0600_but_reject_public_or_symlink(tmp_path:
             password_file=target_password,
             runner=_NeverRunner(),
         )
+
+
+def test_only_root_owned_0440_systemd_credentials_are_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def identity(*, uid: int, gid: int, mode: int) -> os.stat_result:
+        values = [0] * 10
+        values[stat.ST_MODE] = stat.S_IFREG | mode
+        values[stat.ST_UID] = uid
+        values[stat.ST_GID] = gid
+        return os.stat_result(values)
+
+    monkeypatch.setattr(lifecycle_module.os, "geteuid", lambda: 991)
+    credential = Path("/run/credentials/leo-acquisition.service/password")
+
+    assert lifecycle_module._is_private_credential(credential, identity(uid=0, gid=0, mode=0o440))
+    assert not lifecycle_module._is_private_credential(
+        Path("/tmp/password"), identity(uid=0, gid=0, mode=0o440)
+    )
+    assert not lifecycle_module._is_private_credential(
+        credential, identity(uid=991, gid=0, mode=0o440)
+    )
+    assert not lifecycle_module._is_private_credential(
+        credential, identity(uid=0, gid=991, mode=0o440)
+    )
+    assert not lifecycle_module._is_private_credential(
+        credential, identity(uid=0, gid=0, mode=0o640)
+    )
 
 
 class _NeverRunner:
