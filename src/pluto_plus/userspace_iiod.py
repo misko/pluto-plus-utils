@@ -389,6 +389,7 @@ printf 'PPU\\tserial\\t%s\\n' "$serial"
 """
 
 _START_SCRIPT = b"""set -eu
+umask 077
 binary=$1
 pidfile=$2
 log=$3
