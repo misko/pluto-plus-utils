@@ -152,7 +152,8 @@ def _lifecycle(
 
     def port_probe(host: str, port: int, timeout_s: float) -> bool:
         nonlocal port_calls
-        assert (host, port, timeout_s) == (HOST, USERSPACE_IIOD_PORT, 10)
+        assert (host, port) == (HOST, USERSPACE_IIOD_PORT)
+        assert 0 < timeout_s <= 10
         port_calls += 1
         if occupied_before_start and port_calls == 1:
             return True
@@ -260,6 +261,42 @@ def test_failed_readiness_terminates_before_removing_exact_artifacts(tmp_path: P
 
     assert transport.events[-3:] == ["inspect", "terminate", "cleanup"]
     assert not transport.alive
+
+
+def test_start_waits_for_listener_before_capability_probe(tmp_path: Path) -> None:
+    transport = _FakeTransport()
+    known_hosts, password = _credentials(tmp_path)
+    port_calls = 0
+    endpoint_calls: list[int] = []
+
+    def delayed_port(_host: str, _port: int, _timeout_s: float) -> bool:
+        nonlocal port_calls
+        port_calls += 1
+        # First call is the pre-stage vacancy check. The process then exists,
+        # but its listener accepts only on the third observation.
+        return transport.alive and port_calls >= 3
+
+    def endpoint(_host: str, port: int, _serial: str, _timeout_s: float) -> bool:
+        endpoint_calls.append(port)
+        return port == STOCK_IIOD_PORT or port_calls >= 3
+
+    lifecycle = UserspaceIiodLifecycle(
+        host=HOST,
+        expected_serial=SERIAL,
+        known_hosts_file=known_hosts,
+        password_file=password,
+        port_probe=delayed_port,
+        serial_probe=endpoint,
+        transport=transport,
+        session_id_factory=lambda: SESSION,
+    )
+
+    started = lifecycle.start(PAYLOAD)
+
+    assert started.alternate_endpoint_ready
+    assert port_calls == 3
+    assert endpoint_calls == [STOCK_IIOD_PORT, USERSPACE_IIOD_PORT]
+    lifecycle.stop()
 
 
 def test_failed_start_exposes_immutable_cleanup_receipt_on_lifecycle_error(

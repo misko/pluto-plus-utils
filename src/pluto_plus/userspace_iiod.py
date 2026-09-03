@@ -16,6 +16,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -776,6 +777,13 @@ class UserspaceIiodLifecycle:
                 raise UserspaceIiodLifecycleError("remote staged iiOD bytes changed")
             process = self._transport.start(paths, staged)
             _require_exact_process(process, staged, self.expected_serial)
+            if not _wait_for_open_port(
+                self._port_probe,
+                self.host,
+                USERSPACE_IIOD_PORT,
+                self._probe_timeout_s,
+            ):
+                raise UserspaceIiodLifecycleError("alternate iiOD listener did not become ready")
             if not self._serial_probe(
                 self.host,
                 USERSPACE_IIOD_PORT,
@@ -1060,6 +1068,22 @@ class UserspaceIiodDeployment:
 
 def _random_session_id() -> str:
     return os.urandom(16).hex()
+
+
+def _wait_for_open_port(
+    probe: PortProbe,
+    host: str,
+    port: int,
+    timeout_s: float,
+) -> bool:
+    """Wait within one deadline for a newly spawned listener to accept TCP."""
+
+    deadline = time.monotonic() + timeout_s
+    while (remaining := deadline - time.monotonic()) > 0:
+        if probe(host, port, remaining):
+            return True
+        time.sleep(min(0.05, remaining))
+    return False
 
 
 def _session_paths(session_id: str) -> RemoteIiodPaths:
