@@ -402,7 +402,7 @@ test "$(sha256sum "$binary" | awk '{print $1}')" = "$expected_sha"
 test ! -e "$pidfile" && test ! -e "$log"
 serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
 test "$serial" = "$expected_serial"
-nohup "$binary" -p 30432 >"$log" 2>&1 </dev/null &
+nohup "$binary" -u local: -p 30432 >"$log" 2>&1 </dev/null &
 pid=$!
 printf '%s\\n' "$pid" >"$pidfile"
 attempt=0

@@ -525,7 +525,7 @@ def test_pinned_ssh_transport_has_only_fixed_semantic_commands(tmp_path: Path) -
     assert transport.cleanup(paths, binary) == (paths.binary, paths.pid, paths.log)
 
     assert runner.calls[1][1] is PAYLOAD
-    assert b'nohup "$binary" -p 30432' in lifecycle_module._START_SCRIPT
+    assert b'nohup "$binary" -u local: -p 30432' in lifecycle_module._START_SCRIPT
     assert b'nohup "$binary" -i' not in lifecycle_module._START_SCRIPT
     assert b"umask 077" in lifecycle_module._START_SCRIPT
     for argv, _stdin, timeout in runner.calls:
