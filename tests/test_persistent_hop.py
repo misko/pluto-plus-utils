@@ -666,6 +666,49 @@ def test_cancelled_full_receipt_keeps_only_completed_visits_and_partial_span() -
     assert receipt.valid_duty_ppm == 751_691
 
 
+def test_cancelled_receipt_reports_attained_duty_independently_of_completion() -> None:
+    second_event = _event(sequence=1, dwell=1, invalid_start=301_011)
+    final_counter = second_event.invalid_end_counter_exclusive
+    backend = _Backend(
+        URI,
+        blocks=(
+            _wire_block(end_counter=150_000),
+            _wire_block(
+                buffer_sequence=1,
+                first_counter=150_000,
+                end_counter=final_counter,
+                events=(second_event,),
+            ),
+        ),
+    )
+    backend.statuses[1] = dataclasses.replace(
+        _cancelled_status(),
+        visits_started=2,
+        events_emitted=2,
+        next_event_sequence=2,
+        last_block_sequence=1,
+        last_block_end_counter=final_counter,
+        final_counter=final_counter,
+        restore_before_counter=final_counter,
+        restore_after_counter=final_counter + 1,
+    )
+    session = _client(backend).start(
+        _plan(),
+        session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+    blocks = session.blocks()
+    next(blocks)
+    next(blocks)
+
+    session.cancel()
+    receipt = session.receipt
+
+    assert receipt.capture_outcome == "cancelled"
+    assert receipt.valid_duty_ppm == 999_926
+    assert receipt.duty_target_met
+
+
 @pytest.mark.parametrize(
     ("block", "message"),
     (

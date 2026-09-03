@@ -1657,6 +1657,7 @@ class PersistentHopSession:
             raise PersistentHopClientError(
                 "persistent-hop cancellation spans do not partition the session"
             )
+        duty = 0 if denominator == 0 else valid_samples * 1_000_000 // denominator
         coverage = tuple(
             PersistentHopTargetCoverageV1(
                 target_index=index,
@@ -1685,11 +1686,9 @@ class PersistentHopSession:
             overflow_count=0,
             hop_event_sequence_gap_count=0,
             duty_denominator_sample_count=denominator,
-            valid_duty_ppm=(
-                0 if denominator == 0 else valid_samples * 1_000_000 // denominator
-            ),
+            valid_duty_ppm=duty,
             continuity_attested=True,
-            duty_target_met=False,
+            duty_target_met=duty >= self.plan.minimum_valid_duty_ppm,
             restoration=_restoration_receipt(status),
             incomplete_visit_sample_count=incomplete_samples,
             incomplete_visit_device_sample_counter=(
