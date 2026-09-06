@@ -1131,7 +1131,7 @@ class _PersistentHopBackendReceiptFacts:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class PersistentHopStartClockBracketV1:
-    """Host clocks measured immediately around the capture OPEN request."""
+    """Host-clock bounds for the first captured device sample."""
 
     before_realtime_ns: int
     before_monotonic_ns: int
@@ -1320,7 +1320,18 @@ class PersistentHopSession:
         self._visits: list[PersistentHopVisitV1] = []
         self._receipt: PersistentHopSessionReceiptV1 | None = None
         self._initial_status = initial_status
-        self.start_clock_bracket = start_clock_bracket
+        self._start_clock_bracket = start_clock_bracket
+
+    @property
+    def start_clock_bracket(self) -> PersistentHopStartClockBracketV1 | None:
+        bracket = getattr(self._backend, "start_clock_bracket", None)
+        if bracket is not None:
+            if not isinstance(bracket, PersistentHopStartClockBracketV1):
+                raise PersistentHopClientError(
+                    "persistent-hop backend returned an invalid start clock bracket"
+                )
+            self._start_clock_bracket = bracket
+        return self._start_clock_bracket
 
     @property
     def completed_visits(self) -> tuple[PersistentHopVisitV1, ...]:

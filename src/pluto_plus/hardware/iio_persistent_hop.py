@@ -65,6 +65,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
         self._prepared_plan: PersistentHopPlanV1 | None = None
         self._kernel_buffers_requested: int | None = None
         self._kernel_buffers_readback: int | None = None
+        self._start_clock_bracket: PersistentHopStartClockBracketV1 | None = None
 
     @property
     def uri(self) -> str:
@@ -84,16 +85,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
 
     @property
     def start_clock_bracket(self) -> PersistentHopStartClockBracketV1 | None:
-        capture = self._capture
-        if capture is None:
-            return None
-        bracket = capture.open_clock_bracket
-        return PersistentHopStartClockBracketV1(
-            before_realtime_ns=bracket.before_realtime_ns,
-            before_monotonic_ns=bracket.before_monotonic_ns,
-            after_realtime_ns=bracket.after_realtime_ns,
-            after_monotonic_ns=bracket.after_monotonic_ns,
-        )
+        return self._start_clock_bracket
 
     def open(self) -> None:
         if self._radio is not None:
@@ -246,12 +238,23 @@ class IioPersistentHopBackend(PersistentHopBackend):
         self._kernel_buffers_requested = kernel_buffers
         self._kernel_buffers_readback = readback
         self._capture = capture
+        self._start_clock_bracket = _map_start_clock_bracket(capture.open_clock_bracket)
 
     def blocks(self) -> Iterator[PersistentHopWireBlock]:
         capture = self._require_capture()
         while True:
             raw = capture.read_block()
             evidence = PersistentHopEvidenceV1.unpack(raw.sidecar)
+            if self._start_clock_bracket is not None and evidence.buffer_sequence == 0:
+                plan = self._prepared_plan
+                if plan is None:
+                    raise RuntimeError("persistent-hop plan disappeared during capture")
+                self._start_clock_bracket = _map_start_clock_bracket(
+                    capture.first_sample_clock_bracket(
+                        evidence.block_first_counter,
+                        sample_rate_hz=plan.sample_rate_hz,
+                    )
+                )
             # HOPS and the established ABI-3 prefix independently describe the
             # same refill. Reject disagreement before exposing any IQ.
             stream_generation, *base = _base_block_identity(raw.metadata_header)
@@ -319,7 +322,6 @@ class IioPersistentHopBackend(PersistentHopBackend):
             receive_buffer_closed=capture is None or not capture.is_open,
             fastlock_inactive=fastlock_inactive,
         )
-
     def _require_radio(self) -> IioRadioDevice:
         if self._radio is None:
             raise RuntimeError("persistent-hop IIO backend is not open")
@@ -329,6 +331,15 @@ class IioPersistentHopBackend(PersistentHopBackend):
         if self._capture is None:
             raise RuntimeError("persistent-hop IIO capture is not open")
         return self._capture
+
+
+def _map_start_clock_bracket(bracket: Any) -> PersistentHopStartClockBracketV1:
+    return PersistentHopStartClockBracketV1(
+        before_realtime_ns=bracket.before_realtime_ns,
+        before_monotonic_ns=bracket.before_monotonic_ns,
+        after_realtime_ns=bracket.after_realtime_ns,
+        after_monotonic_ns=bracket.after_monotonic_ns,
+    )
 
 
 def iio_persistent_hop_client(

@@ -30,6 +30,7 @@ from pluto_plus.hardware.iio_iq_decode import (
 )
 from pluto_plus.hardware.sample_clock import (
     DEFAULT_SAMPLE_CLOCK_RATE_TOLERANCE_PPM,
+    HostRealtimeMapping,
     HostTimeAnchorMeasurement,
     capture_host_realtime_mapping,
     fit_sample_clock,
@@ -1174,6 +1175,9 @@ class IioRawSidecarCaptureSession:
         self._metadata_capacity = metadata_capacity
         self._buffer: Any | None = None
         self._open_clock_bracket: IioBufferOpenClockBracket | None = None
+        self._start_time_anchors: list[HostTimeAnchorMeasurement] = []
+        self._start_realtime_mapping: HostRealtimeMapping | None = None
+        self._next_anchor_request_id = 1
 
     @property
     def is_open(self) -> bool:
@@ -1186,10 +1190,46 @@ class IioRawSidecarCaptureSession:
             raise RuntimeError("raw sidecar metadata capture has no OPEN clock bracket")
         return bracket
 
+    def first_sample_clock_bracket(
+        self,
+        first_sample_counter: int,
+        *,
+        sample_rate_hz: int,
+    ) -> IioBufferOpenClockBracket:
+        """Bound the first sample using host-bracketed FPGA counter reads."""
+
+        if not self._start_time_anchors or self._start_realtime_mapping is None:
+            return self.open_clock_bracket
+        extended = [
+            item.extend_near(first_sample_counter) for item in self._start_time_anchors
+        ]
+        fit = fit_sample_clock(
+            extended,
+            nominal_sample_rate_hz=sample_rate_hz,
+            maximum_rate_error_ppm=DEFAULT_SAMPLE_CLOCK_RATE_TOLERANCE_PPM,
+        )
+        estimate_monotonic_ns = fit.host_monotonic_ns(first_sample_counter)
+        uncertainty_ns = (
+            fit.uncertainty_ns_at(first_sample_counter)
+            + self._start_realtime_mapping.uncertainty_ns
+        )
+        before_monotonic_ns = estimate_monotonic_ns - uncertainty_ns
+        after_monotonic_ns = estimate_monotonic_ns + uncertainty_ns
+        return IioBufferOpenClockBracket(
+            before_realtime_ns=self._start_realtime_mapping.realtime_ns(
+                before_monotonic_ns
+            ),
+            before_monotonic_ns=before_monotonic_ns,
+            after_realtime_ns=self._start_realtime_mapping.realtime_ns(after_monotonic_ns),
+            after_monotonic_ns=after_monotonic_ns,
+        )
+
     def open(self) -> None:
         if self._buffer is not None:
             raise RuntimeError("raw sidecar metadata capture is already open")
         self._open_clock_bracket = None
+        self._start_time_anchors = []
+        self._start_realtime_mapping = None
         self._prime_dual_rx_layout()
         actual = getattr(self._sdr._rxadc, "kernel_buffers_count", None)
         if actual is None or int(actual) != self._kernel_buffers:
@@ -1212,9 +1252,43 @@ class IioRawSidecarCaptureSession:
                 after_monotonic_ns=after_monotonic_ns,
             )
             self._sdr._rxbuf = self._buffer
+            self._capture_start_time_anchors()
         except BaseException:
             self.close()
             raise
+
+    def _capture_start_time_anchors(self) -> None:
+        reader = getattr(self._sdr._rxadc, "reg_read", None)
+        if not callable(reader):
+            return
+        for index in range(INITIAL_TIME_ANCHOR_COUNT):
+            request_id = self._next_anchor_request_id
+            self._next_anchor_request_id += 1
+            host_before_ns = time.monotonic_ns()
+            counter = int(reader(ADC_SAMPLE_COUNTER_LOW_REG)) & 0xFFFFFFFF
+            host_after_ns = time.monotonic_ns()
+            self._start_time_anchors.append(
+                HostTimeAnchorMeasurement(
+                    anchor=TimeAnchorV1(
+                        flags=(
+                            TimeAnchorFlags.COUNTER_INTERVAL_VALID
+                            | TimeAnchorFlags.MONOTONIC_INTERVAL_VALID
+                            | TimeAnchorFlags.COUNTER_LOW32
+                        ),
+                        request_id=request_id,
+                        radio_monotonic_before_ns=0,
+                        sample_counter_before=counter,
+                        sample_counter_after=counter,
+                        radio_monotonic_after_ns=0,
+                    ),
+                    host_monotonic_before_ns=host_before_ns,
+                    host_monotonic_after_ns=host_after_ns,
+                    transport="iio",
+                )
+            )
+            if index + 1 < INITIAL_TIME_ANCHOR_COUNT:
+                time.sleep(0.005)
+        self._start_realtime_mapping = capture_host_realtime_mapping()
 
     def _prime_dual_rx_layout(self) -> None:
         if tuple(int(item) for item in self._sdr.rx_enabled_channels) != (0, 1):

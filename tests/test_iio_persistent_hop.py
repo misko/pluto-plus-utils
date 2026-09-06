@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from pluto_plus.direct_radio.usb import MetadataFlags
+from pluto_plus.direct_radio.usb import MetadataFlags, TimeAnchorFlags, TimeAnchorV1
 from pluto_plus.hardware.iio import IioReceiverSettingsReadback
 from pluto_plus.hardware.iio_metadata import (
     IioBufferOpenClockBracket,
@@ -21,6 +21,7 @@ from pluto_plus.hardware.iio_persistent_hop import (
     _cancel_metadata_session,
     _read_metadata_status,
 )
+from pluto_plus.hardware.sample_clock import HostRealtimeMapping, HostTimeAnchorMeasurement
 from pluto_plus.models import GainMode, RadioIdentity, Transport
 from pluto_plus.persistent_hop import (
     PERSISTENT_HOP_CAPABILITIES,
@@ -151,6 +152,12 @@ class _FakeCapture:
             after_realtime_ns=1_002_000_000,
             after_monotonic_ns=102_000_000,
         )
+        self.refined_clock_bracket = IioBufferOpenClockBracket(
+            before_realtime_ns=1_000_900_000,
+            before_monotonic_ns=100_900_000,
+            after_realtime_ns=1_001_100_000,
+            after_monotonic_ns=101_100_000,
+        )
 
     @property
     def is_open(self) -> bool:
@@ -158,6 +165,13 @@ class _FakeCapture:
 
     def read_block(self) -> IioRawSidecarBlock:
         return self._blocks.pop(0)
+
+    def first_sample_clock_bracket(
+        self, first_sample_counter: int, *, sample_rate_hz: int
+    ) -> IioBufferOpenClockBracket:
+        assert first_sample_counter == 100
+        assert sample_rate_hz == 2_500_000
+        return self.refined_clock_bracket
 
     def read_status(self) -> bytes:
         return self.statuses.pop(0)
@@ -437,6 +451,12 @@ def test_backend_extracts_hops_then_reads_cancelled_hopt_before_close() -> None:
     block = next(blocks)
     assert block.evidence.block_first_counter == 100
     assert block.samples.shape == (2, 24)
+    assert session.start_clock_bracket == PersistentHopStartClockBracketV1(
+        before_realtime_ns=1_000_900_000,
+        before_monotonic_ns=100_900_000,
+        after_realtime_ns=1_001_100_000,
+        after_monotonic_ns=101_100_000,
+    )
     receipt = session.cancel()
     assert radio.capture.cancelled
     assert radio.capture.closed and radio.closed
@@ -574,6 +594,64 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert not buffer.generic_cancelled
     session.close()
     assert buffer.closed
+
+
+def test_raw_binding_projects_first_sample_from_fpga_counter_anchor() -> None:
+    sdr = SimpleNamespace(
+        _rxadc=_FakeRxAdc(),
+        _rxbuf=None,
+        rx_enabled_channels=[0, 1],
+        rx_buffer_size=0,
+    )
+    session = IioRawSidecarCaptureSession(
+        sdr,
+        object,
+        request=b"request",
+        samples_per_channel=SAMPLES,
+        kernel_buffers=2,
+        metadata_status_reader=lambda _item, _capacity: b"",
+        metadata_canceller=lambda _item: None,
+        status_capacity=160,
+    )
+    session._open_clock_bracket = IioBufferOpenClockBracket(  # noqa: SLF001
+        before_realtime_ns=900_000_000,
+        before_monotonic_ns=1,
+        after_realtime_ns=1_100_000_000,
+        after_monotonic_ns=200_000_000,
+    )
+    session._start_time_anchors = [  # noqa: SLF001
+        HostTimeAnchorMeasurement(
+            anchor=TimeAnchorV1(
+                flags=(
+                    TimeAnchorFlags.COUNTER_INTERVAL_VALID
+                    | TimeAnchorFlags.MONOTONIC_INTERVAL_VALID
+                    | TimeAnchorFlags.COUNTER_LOW32
+                ),
+                request_id=1,
+                radio_monotonic_before_ns=0,
+                sample_counter_before=251_000,
+                sample_counter_after=251_000,
+                radio_monotonic_after_ns=0,
+            ),
+            host_monotonic_before_ns=200_000_000,
+            host_monotonic_after_ns=202_000_000,
+            transport="iio",
+        )
+    ]
+    session._start_realtime_mapping = HostRealtimeMapping(  # noqa: SLF001
+        monotonic_midpoint_ns=201_000_000,
+        realtime_ns_at_midpoint=1_101_000_000,
+        uncertainty_ns=100,
+    )
+
+    assert session.first_sample_clock_bracket(
+        1_000, sample_rate_hz=2_500_000
+    ) == IioBufferOpenClockBracket(
+        before_realtime_ns=999_989_900,
+        before_monotonic_ns=99_989_900,
+        after_realtime_ns=1_002_010_100,
+        after_monotonic_ns=102_010_100,
+    )
 
 
 def test_raw_sidecar_read_failure_preserves_buffer_for_in_band_cleanup() -> None:
