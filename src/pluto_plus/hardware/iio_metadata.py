@@ -99,6 +99,27 @@ class IioRawSidecarBlock:
     iq_payload: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class IioBufferOpenClockBracket:
+    """Host clocks immediately bracketing the metadata-buffer OPEN."""
+
+    before_realtime_ns: int
+    before_monotonic_ns: int
+    after_realtime_ns: int
+    after_monotonic_ns: int
+
+    def __post_init__(self) -> None:
+        if min(
+            self.before_realtime_ns,
+            self.before_monotonic_ns,
+            self.after_realtime_ns,
+            self.after_monotonic_ns,
+        ) <= 0:
+            raise ValueError("metadata-buffer OPEN clocks must be positive")
+        if self.after_monotonic_ns < self.before_monotonic_ns:
+            raise ValueError("metadata-buffer OPEN monotonic bracket regressed")
+
+
 ABI3_METADATA_LAYOUTS = (
     MetadataLayoutCapability(0x03, 1, 4, 2),
     MetadataLayoutCapability(0x0C, 1, 4, 2),
@@ -1152,24 +1173,43 @@ class IioRawSidecarCaptureSession:
         self._status_capacity = status_capacity
         self._metadata_capacity = metadata_capacity
         self._buffer: Any | None = None
+        self._open_clock_bracket: IioBufferOpenClockBracket | None = None
 
     @property
     def is_open(self) -> bool:
         return self._buffer is not None
 
+    @property
+    def open_clock_bracket(self) -> IioBufferOpenClockBracket:
+        bracket = self._open_clock_bracket
+        if bracket is None:
+            raise RuntimeError("raw sidecar metadata capture has no OPEN clock bracket")
+        return bracket
+
     def open(self) -> None:
         if self._buffer is not None:
             raise RuntimeError("raw sidecar metadata capture is already open")
+        self._open_clock_bracket = None
         self._prime_dual_rx_layout()
         actual = getattr(self._sdr._rxadc, "kernel_buffers_count", None)
         if actual is None or int(actual) != self._kernel_buffers:
             raise RuntimeError("raw sidecar kernel-buffer readback changed before OPEN")
         try:
+            before_monotonic_ns = time.monotonic_ns()
+            before_realtime_ns = time.time_ns()
             self._buffer = self._metadata_buffer_type(
                 self._sdr._rxadc,
                 self._samples_per_channel,
                 self._request,
                 self._metadata_capacity,
+            )
+            after_realtime_ns = time.time_ns()
+            after_monotonic_ns = time.monotonic_ns()
+            self._open_clock_bracket = IioBufferOpenClockBracket(
+                before_realtime_ns=before_realtime_ns,
+                before_monotonic_ns=before_monotonic_ns,
+                after_realtime_ns=after_realtime_ns,
+                after_monotonic_ns=after_monotonic_ns,
             )
             self._sdr._rxbuf = self._buffer
         except BaseException:

@@ -28,6 +28,7 @@ from pluto_plus.persistent_hop import (
     PersistentHopReceiverSettingsV1,
     PersistentHopRequestV1,
     PersistentHopSessionState,
+    PersistentHopStartClockBracketV1,
     PersistentHopWireBlock,
     require_allowed_serial,
     require_physical_lan_uri,
@@ -80,6 +81,19 @@ class IioPersistentHopBackend(PersistentHopBackend):
     @property
     def kernel_buffers_requested(self) -> int | None:
         return self._kernel_buffers_requested
+
+    @property
+    def start_clock_bracket(self) -> PersistentHopStartClockBracketV1 | None:
+        capture = self._capture
+        if capture is None:
+            return None
+        bracket = capture.open_clock_bracket
+        return PersistentHopStartClockBracketV1(
+            before_realtime_ns=bracket.before_realtime_ns,
+            before_monotonic_ns=bracket.before_monotonic_ns,
+            after_realtime_ns=bracket.after_realtime_ns,
+            after_monotonic_ns=bracket.after_monotonic_ns,
+        )
 
     def open(self) -> None:
         if self._radio is not None:

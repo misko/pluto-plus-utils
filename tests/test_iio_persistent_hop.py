@@ -12,6 +12,7 @@ import pytest
 from pluto_plus.direct_radio.usb import MetadataFlags
 from pluto_plus.hardware.iio import IioReceiverSettingsReadback
 from pluto_plus.hardware.iio_metadata import (
+    IioBufferOpenClockBracket,
     IioRawSidecarBlock,
     IioRawSidecarCaptureSession,
 )
@@ -30,6 +31,7 @@ from pluto_plus.persistent_hop import (
     PersistentHopProfileV1,
     PersistentHopRequestV1,
     PersistentHopSessionState,
+    PersistentHopStartClockBracketV1,
     PersistentHopStatusFlag,
     PersistentHopStatusV1,
     PersistentHopTarget,
@@ -143,6 +145,12 @@ class _FakeCapture:
             )
         ]
         self.statuses = [_status(PersistentHopSessionState.RUNNING)]
+        self.open_clock_bracket = IioBufferOpenClockBracket(
+            before_realtime_ns=1_000_000_000,
+            before_monotonic_ns=100_000_000,
+            after_realtime_ns=1_002_000_000,
+            after_monotonic_ns=102_000_000,
+        )
 
     @property
     def is_open(self) -> bool:
@@ -418,6 +426,13 @@ def test_backend_extracts_hops_then_reads_cancelled_hopt_before_close() -> None:
         tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
     )
 
+    assert session.start_clock_bracket == PersistentHopStartClockBracketV1(
+        before_realtime_ns=1_000_000_000,
+        before_monotonic_ns=100_000_000,
+        after_realtime_ns=1_002_000_000,
+        after_monotonic_ns=102_000_000,
+    )
+
     blocks = session.blocks()
     block = next(blocks)
     assert block.evidence.block_first_counter == 100
@@ -517,6 +532,16 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         "pluto_plus.hardware.iio_metadata.RadioMetadataV6.unpack",
         lambda raw: SimpleNamespace(base=parsed_base),
     )
+    monotonic_values = iter((100_000_000, 102_000_000))
+    realtime_values = iter((1_000_000_000, 1_002_000_000))
+    monkeypatch.setattr(
+        "pluto_plus.hardware.iio_metadata.time.monotonic_ns",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(
+        "pluto_plus.hardware.iio_metadata.time.time_ns",
+        lambda: next(realtime_values),
+    )
     request = bytes(range(256)) + bytes(range(136))
     session = IioRawSidecarCaptureSession(
         sdr,
@@ -533,6 +558,12 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         status_capacity=160,
     )
     session.open()
+    assert session.open_clock_bracket == IioBufferOpenClockBracket(
+        before_realtime_ns=1_000_000_000,
+        before_monotonic_ns=100_000_000,
+        after_realtime_ns=1_002_000_000,
+        after_monotonic_ns=102_000_000,
+    )
     block = session.read_block()
     assert calls == [(sdr._rxadc, SAMPLES, request, 64 * 1024)]
     assert block.sidecar == _sidecar()

@@ -1129,11 +1129,35 @@ class _PersistentHopBackendReceiptFacts:
     kernel_buffers_readback: int | None
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class PersistentHopStartClockBracketV1:
+    """Host clocks measured immediately around the capture OPEN request."""
+
+    before_realtime_ns: int
+    before_monotonic_ns: int
+    after_realtime_ns: int
+    after_monotonic_ns: int
+
+    def __post_init__(self) -> None:
+        if min(
+            self.before_realtime_ns,
+            self.before_monotonic_ns,
+            self.after_realtime_ns,
+            self.after_monotonic_ns,
+        ) <= 0:
+            raise ValueError("persistent-hop start clocks must be positive")
+        if self.after_monotonic_ns < self.before_monotonic_ns:
+            raise ValueError("persistent-hop start monotonic bracket regressed")
+
+
 class PersistentHopBackend(Protocol):
     """Injected IIO/provider adapter; implementations own all actual I/O."""
 
     @property
     def uri(self) -> str: ...
+
+    @property
+    def start_clock_bracket(self) -> PersistentHopStartClockBracketV1 | None: ...
 
     def open(self) -> None: ...
 
@@ -1233,6 +1257,13 @@ class PersistentHopClient:
                 samples_per_block=plan.samples_per_block,
                 kernel_buffers=plan.kernel_buffers,
             )
+            start_clock_bracket = getattr(backend, "start_clock_bracket", None)
+            if start_clock_bracket is not None and not isinstance(
+                start_clock_bracket, PersistentHopStartClockBracketV1
+            ):
+                raise PersistentHopClientError(
+                    "persistent-hop backend returned an invalid start clock bracket"
+                )
             initial_status = PersistentHopStatusV1.unpack(backend.read_status())
             if initial_status.session_id != session_id or initial_status.state not in {
                 PersistentHopSessionState.ARMED,
@@ -1250,7 +1281,14 @@ class PersistentHopClient:
                 backend.close()
             raise
         self._active = True
-        return PersistentHopSession(self, backend, plan, request, initial_status)
+        return PersistentHopSession(
+            self,
+            backend,
+            plan,
+            request,
+            initial_status,
+            start_clock_bracket=start_clock_bracket,
+        )
 
     def _released(self) -> None:
         self._active = False
@@ -1266,6 +1304,8 @@ class PersistentHopSession:
         plan: PersistentHopPlanV1,
         request: PersistentHopRequestV1,
         initial_status: PersistentHopStatusV1,
+        *,
+        start_clock_bracket: PersistentHopStartClockBracketV1 | None = None,
     ) -> None:
         self._owner = owner
         self._backend = backend
@@ -1280,6 +1320,7 @@ class PersistentHopSession:
         self._visits: list[PersistentHopVisitV1] = []
         self._receipt: PersistentHopSessionReceiptV1 | None = None
         self._initial_status = initial_status
+        self.start_clock_bracket = start_clock_bracket
 
     @property
     def completed_visits(self) -> tuple[PersistentHopVisitV1, ...]:
