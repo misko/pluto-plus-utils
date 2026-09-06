@@ -439,6 +439,8 @@ def test_linux_postboot_attestor_retries_incomplete_udev_iio_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     incomplete = FakeContext([], firmware="candidate")
+    incomplete.close = None  # type: ignore[method-assign]
+    incomplete._context = "legacy-native-context"  # type: ignore[attr-defined]
     phy = FakeDevice(
         "ad9361-phy",
         [
@@ -451,6 +453,7 @@ def test_linux_postboot_attestor_retries_incomplete_udev_iio_context(
         [phy, FakeDevice("cf-ad9361-lpc")], firmware="candidate"
     )
     contexts = iter((incomplete, settled))
+    destroyed: list[object] = []
     monkeypatch.setattr(
         hardware_iio,
         "context_facts",
@@ -462,7 +465,10 @@ def test_linux_postboot_attestor_retries_incomplete_udev_iio_context(
     )
     monkeypatch.setattr(
         "pluto_plus.release_candidate_rx_only_linux.importlib.import_module",
-        lambda name: SimpleNamespace(Context=lambda uri: next(contexts)),
+        lambda name: SimpleNamespace(
+            Context=lambda uri: next(contexts),
+            _destroy=destroyed.append,
+        ),
     )
     backend, password, route = _attestation_inputs(tmp_path)
     delays: list[float] = []
@@ -491,7 +497,8 @@ def test_linux_postboot_attestor_retries_incomplete_udev_iio_context(
 
     assert observed.layout.kind == "rx-only"
     assert delays == [0.25]
-    assert incomplete.closed
+    assert destroyed == ["legacy-native-context"]
+    assert incomplete._context is None  # type: ignore[attr-defined]
     assert settled.closed
 
 

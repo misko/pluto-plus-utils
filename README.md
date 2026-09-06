@@ -967,8 +967,10 @@ to manufacture two-channel evidence.
 
 USB arrival may also trigger a distribution libiio udev discovery probe. The
 v2 attestor therefore retries an incomplete IIO identity/core-device inventory
-within the existing lifecycle timeout, closing every partial context between
-attempts. A complete but wrong serial or firmware still fails immediately.
+within the existing lifecycle timeout, deterministically destroying every
+partial context between attempts even with legacy pylibiio bindings that expose
+no public `close()`. A complete but wrong serial or firmware still fails
+immediately.
 
 Every passing v2 RAM trial must be deliberately rolled back before the next
 trial. A route-released PASS receipt is the normal rollback source; a

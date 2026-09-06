@@ -535,9 +535,7 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
             ) from error
         finally:
             if context is not None:
-                close = getattr(context, "close", None)
-                if callable(close):
-                    close()
+                _close_iio_context(iio, context)
                 context = None
                 gc.collect()
 
@@ -595,9 +593,7 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
                 last_error = f"USB-IIO context open failed: {error}"
             finally:
                 if context is not None:
-                    close = getattr(context, "close", None)
-                    if callable(close):
-                        close()
+                    _close_iio_context(iio, context)
                     context = None
                     gc.collect()
 
@@ -679,6 +675,25 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
 
 def _named_devices(context: Any, name: str) -> tuple[Any, ...]:
     return tuple(device for device in context.devices if str(device.name) == name)
+
+
+def _close_iio_context(iio: Any, context: Any) -> None:
+    """Release both modern and legacy pylibiio contexts deterministically."""
+
+    close = getattr(context, "close", None)
+    if callable(close):
+        close()
+        return
+    native = getattr(context, "_context", None)
+    destroy = getattr(iio, "_destroy", None)
+    if native is None or not callable(destroy):
+        raise ReleaseCandidateLifecycleError(
+            "pylibiio context exposes no deterministic close operation"
+        )
+    # Clear the Python wrapper first so its later __del__ cannot double-destroy
+    # the native context if the ctypes call raises.
+    context._context = None
+    destroy(native)
 
 
 def _one_named_device(context: Any, name: str) -> Any:
