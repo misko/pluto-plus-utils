@@ -965,6 +965,11 @@ absent. Absence is accepted only with the exact reviewed root device-tree marker
 must contain one real TX gain and the one shared TX LO; values are never cloned
 to manufacture two-channel evidence.
 
+USB arrival may also trigger a distribution libiio udev discovery probe. The
+v2 attestor therefore retries an incomplete IIO identity/core-device inventory
+within the existing lifecycle timeout, closing every partial context between
+attempts. A complete but wrong serial or firmware still fails immediately.
+
 Every passing v2 RAM trial must be deliberately rolled back before the next
 trial. A route-released PASS receipt is the normal rollback source; a
 route-released UNKNOWN is also eligible only when its sealed transition started.

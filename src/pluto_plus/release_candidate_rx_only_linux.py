@@ -116,6 +116,7 @@ printf "$format" \
 """
 
 _V2_LAYOUT = Literal["tx-capable", "rx-only"]
+_IIO_SETTLE_RETRY_SECONDS = 0.25
 RxOnlyRuntimeAttestor = Callable[
     [
         Any,
@@ -412,21 +413,16 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
         uri = f"usb:{target.bus_number}.{target.device_number}.5"
         context: Any = None
         try:
-            context = iio.Context(uri)
-            setter = getattr(context, "set_timeout", None)
-            if not callable(setter):
-                raise ReleaseCandidateLifecycleError("USB-IIO context cannot set timeout")
-            setter(round(self.timeout_s * 1000))
-            attrs = {str(key): str(value) for key, value in context.attrs.items()}
-            serial = attrs.get("hw_serial", attrs.get("usb,serial", attrs.get("serial", "")))
-            firmware = attrs.get("fw_version", "")
-            model = attrs.get("hw_model", "")
-            if serial != target.serial or firmware != expected_firmware or not model:
-                raise ReleaseCandidateLifecycleError(
-                    "USB-IIO serial, firmware, or model differs from expected runtime"
-                )
+            context, attrs = self._open_settled_runtime_iio_context(
+                iio,
+                uri=uri,
+                target=target,
+                expected_firmware=expected_firmware,
+            )
+            serial = attrs["serial"]
+            firmware = attrs["firmware"]
+            model = attrs["model"]
             phy = _one_named_device(context, "ad9361-phy")
-            _one_named_device(context, RX_DMA_DEVICE)
             dds = _optional_named_device(context, DDS_DEVICE)
             tandem = _optional_named_device(context, TANDEM_DEVICE)
             remote = self._remote_identity_rx_only(target, password, route)
@@ -544,6 +540,73 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
                     close()
                 context = None
                 gc.collect()
+
+    def _open_settled_runtime_iio_context(
+        self,
+        iio: Any,
+        *,
+        uri: str,
+        target: UsbInventoryTarget,
+        expected_firmware: str,
+    ) -> tuple[Any, dict[str, str]]:
+        """Wait out bounded udev/libiio discovery claims after USB arrival."""
+
+        deadline = self.monotonic() + self.timeout_s
+        last_error = "USB-IIO runtime has not settled"
+        while True:
+            context: Any = None
+            try:
+                context = iio.Context(uri)
+                setter = getattr(context, "set_timeout", None)
+                if not callable(setter):
+                    raise ReleaseCandidateLifecycleError(
+                        "USB-IIO context cannot set timeout"
+                    )
+                setter(round(self.timeout_s * 1000))
+                raw = {str(key): str(value) for key, value in context.attrs.items()}
+                attrs = {
+                    "serial": raw.get(
+                        "hw_serial", raw.get("usb,serial", raw.get("serial", ""))
+                    ),
+                    "firmware": raw.get("fw_version", ""),
+                    "model": raw.get("hw_model", ""),
+                }
+                if all(attrs.values()) and (
+                    attrs["serial"] != target.serial
+                    or attrs["firmware"] != expected_firmware
+                ):
+                    raise ReleaseCandidateLifecycleError(
+                        "USB-IIO serial or firmware differs from expected runtime"
+                    )
+                counts = {
+                    name: len(_named_devices(context, name))
+                    for name in ("ad9361-phy", RX_DMA_DEVICE)
+                }
+                if all(attrs.values()) and all(count == 1 for count in counts.values()):
+                    settled = context
+                    context = None
+                    return settled, attrs
+                last_error = (
+                    "USB-IIO identity or required-device inventory is incomplete: "
+                    f"serial={bool(attrs['serial'])} firmware={bool(attrs['firmware'])} "
+                    f"model={bool(attrs['model'])} devices={counts!r}"
+                )
+            except OSError as error:
+                last_error = f"USB-IIO context open failed: {error}"
+            finally:
+                if context is not None:
+                    close = getattr(context, "close", None)
+                    if callable(close):
+                        close()
+                    context = None
+                    gc.collect()
+
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                raise ReleaseCandidateLifecycleError(
+                    f"timed out waiting for settled USB-IIO runtime: {last_error}"
+                )
+            self.sleep(min(_IIO_SETTLE_RETRY_SECONDS, remaining))
 
     def _remote_identity_rx_only(
         self,

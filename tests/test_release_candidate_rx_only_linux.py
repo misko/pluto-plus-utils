@@ -435,6 +435,139 @@ def test_linux_postboot_attestor_requires_marker_and_tx_devices_absent(
     assert observed.capabilities == ()
 
 
+def test_linux_postboot_attestor_retries_incomplete_udev_iio_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    incomplete = FakeContext([], firmware="candidate")
+    phy = FakeDevice(
+        "ad9361-phy",
+        [
+            FakeChannel("voltage0", hardwaregain="-80"),
+            FakeChannel("altvoltage0", powerdown="0"),
+            FakeChannel("altvoltage1", powerdown="1"),
+        ],
+    )
+    settled = FakeContext(
+        [phy, FakeDevice("cf-ad9361-lpc")], firmware="candidate"
+    )
+    contexts = iter((incomplete, settled))
+    monkeypatch.setattr(
+        hardware_iio,
+        "context_facts",
+        lambda value: {
+            "phy_model": "ad9361",
+            "rx_scan_channels": ("voltage0", "voltage1"),
+            "buffer_metadata_abi": None,
+        },
+    )
+    monkeypatch.setattr(
+        "pluto_plus.release_candidate_rx_only_linux.importlib.import_module",
+        lambda name: SimpleNamespace(Context=lambda uri: next(contexts)),
+    )
+    backend, password, route = _attestation_inputs(tmp_path)
+    delays: list[float] = []
+    backend.sleep = delays.append
+    monkeypatch.setattr(
+        backend,
+        "_remote_identity_rx_only",
+        lambda *args: _identity(
+            firmware_version="candidate",
+            boot_id="22222222-2222-4222-8222-222222222222",
+            root_marker_present="1",
+            dds_dt_state="disabled",
+            tx_dma_dt_state="disabled",
+            tandem_dt_state="disabled",
+        ),
+    )
+
+    observed = backend._attest_runtime_rx_only_linux(
+        _target(),
+        "candidate",
+        password,
+        route,
+        "ad9361-1r1t",
+        "rx-only",
+    )
+
+    assert observed.layout.kind == "rx-only"
+    assert delays == [0.25]
+    assert incomplete.closed
+    assert settled.closed
+
+
+def test_linux_runtime_attestor_bounds_persistently_incomplete_iio_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contexts: list[FakeContext] = []
+
+    def context_factory(uri: str) -> FakeContext:
+        context = FakeContext([], firmware="candidate")
+        contexts.append(context)
+        return context
+
+    monkeypatch.setattr(
+        "pluto_plus.release_candidate_rx_only_linux.importlib.import_module",
+        lambda name: SimpleNamespace(Context=context_factory),
+    )
+    backend, password, route = _attestation_inputs(tmp_path)
+    times = iter((0.0, 1.0))
+    backend.timeout_s = 0.5
+    backend.monotonic = lambda: next(times)
+
+    with pytest.raises(
+        ReleaseCandidateLifecycleError,
+        match="timed out waiting for settled USB-IIO runtime",
+    ):
+        backend._attest_runtime_rx_only_linux(
+            _target(),
+            "candidate",
+            password,
+            route,
+            "ad9361-1r1t",
+            "rx-only",
+        )
+
+    assert len(contexts) == 1
+    assert contexts[0].closed
+
+
+def test_linux_runtime_attestor_does_not_retry_complete_wrong_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = FakeContext(
+        [FakeDevice("ad9361-phy"), FakeDevice("cf-ad9361-lpc")],
+        firmware="unexpected",
+    )
+    opens: list[str] = []
+
+    def context_factory(uri: str) -> FakeContext:
+        opens.append(uri)
+        return context
+
+    monkeypatch.setattr(
+        "pluto_plus.release_candidate_rx_only_linux.importlib.import_module",
+        lambda name: SimpleNamespace(Context=context_factory),
+    )
+    backend, password, route = _attestation_inputs(tmp_path)
+    backend.sleep = lambda delay: pytest.fail("identity mismatch must not retry")
+
+    with pytest.raises(
+        ReleaseCandidateLifecycleError,
+        match="serial or firmware differs from expected runtime",
+    ):
+        backend._attest_runtime_rx_only_linux(
+            _target(),
+            "candidate",
+            password,
+            route,
+            "ad9361-1r1t",
+            "rx-only",
+        )
+
+    assert opens == ["usb:5.62.5"]
+    assert context.closed
+
+
 def test_linux_persistent_recovery_waits_for_departure_before_return(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
