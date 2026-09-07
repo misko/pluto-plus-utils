@@ -454,7 +454,7 @@ def test_linux_detector_only_attestor_requires_rx_dma_disabled(
         "context_facts",
         lambda value: {
             "phy_model": "ad9361",
-            "rx_scan_channels": ("voltage0", "voltage1"),
+            "rx_scan_channels": (),
             "buffer_metadata_abi": None,
         },
     )
@@ -489,6 +489,7 @@ def test_linux_detector_only_attestor_requires_rx_dma_disabled(
     assert observed.layout.kind == "detector-only"
     assert observed.layout.rx_adc_device == "cf-ad9361-lpc"
     assert observed.layout.rx_dma_device is None
+    assert observed.single_rx_setup.rx_scan_channels == ()
     assert observed.capabilities == ()
     assert context.closed
 

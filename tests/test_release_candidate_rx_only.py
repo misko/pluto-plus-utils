@@ -160,7 +160,11 @@ def _runtime(*, firmware: str, boot: str, layout: str) -> RuntimeObservationV2:
         boot_id=boot,
         qspi=QspiObservation(bytes=31_457_280, sha256="9" * 64),
         layout=selected_layout,
-        single_rx_setup=_setup(),
+        single_rx_setup=_setup().model_copy(
+            update={"rx_scan_channels": ()}
+        )
+        if layout == "detector-only"
+        else _setup(),
     )
 
 
@@ -455,6 +459,7 @@ def test_detector_only_profile_requires_disabled_rx_dma_layout_and_binds_receipt
     assert receipt.post_runtime.layout.kind == "detector-only"
     assert receipt.post_runtime.layout.rx_adc_device == "cf-ad9361-lpc"
     assert receipt.post_runtime.layout.rx_dma_device is None
+    assert receipt.post_runtime.single_rx_setup.rx_scan_channels == ()
     validate_rx_only_contract_bundle(
         candidate,
         operation,
@@ -472,6 +477,11 @@ def test_detector_only_profile_requires_disabled_rx_dma_layout_and_binds_receipt
         DetectorOnlyLayoutV2.model_validate(
             _payload(receipt.post_runtime.layout, rx_dma_device="cf-ad9361-lpc")
         )
+
+    crossed = receipt.post_runtime.model_dump(mode="python")
+    crossed["single_rx_setup"]["rx_scan_channels"] = ("voltage0", "voltage1")
+    with pytest.raises(ValidationError, match="scan geometry"):
+        RuntimeObservationV2.model_validate(crossed)
 
 
 def test_passing_receipt_requires_same_target_uboot_identity_pre_and_post() -> None:

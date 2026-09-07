@@ -278,7 +278,9 @@ class SingleRxSetupObservation(ApiModel):
     uboot_compatible: Literal["ad9361", "ad9363a"]
     uboot_mode: Literal["1r1t"]
     phy_model: Literal["ad9361", "ad9363a"]
-    rx_scan_channels: tuple[Literal["voltage0"], Literal["voltage1"]]
+    rx_scan_channels: (
+        tuple[Literal["voltage0"], Literal["voltage1"]] | tuple[()]
+    )
 
     @model_validator(mode="after")
     def validate_target(self) -> SingleRxSetupObservation:
@@ -289,6 +291,16 @@ class SingleRxSetupObservation(ApiModel):
         if pair not in {(None, None), ("compatible", expected)}:
             raise ValueError("1R1T attr_name/attr_val pair is not exact for the runtime target")
         return self
+
+
+def same_single_rx_identity(
+    left: SingleRxSetupObservation, right: SingleRxSetupObservation
+) -> bool:
+    """Compare radio setup identity independently of host-stream scan geometry."""
+
+    return left.model_dump(exclude={"rx_scan_channels"}) == right.model_dump(
+        exclude={"rx_scan_channels"}
+    )
 
 
 class TxCapableLayoutV2(ApiModel):
@@ -373,6 +385,13 @@ class RuntimeObservationV2(ApiModel):
     def validate_layout_setup(self) -> RuntimeObservationV2:
         if self.hardware_model != _expected_model(self.single_rx_setup.runtime_target):
             raise ValueError("hardware model does not match its 1R1T runtime target")
+        expected_scan_channels = (
+            () if self.layout.kind == "detector-only" else ("voltage0", "voltage1")
+        )
+        if self.single_rx_setup.rx_scan_channels != expected_scan_channels:
+            raise ValueError(
+                "RX scan geometry does not match the selected runtime layout"
+            )
         return self
 
 
@@ -512,7 +531,7 @@ class ReleaseCandidateRamReceiptV2(ApiModel):
             pre_setup = self.pre_runtime.single_rx_setup
             setup = self.post_runtime.single_rx_setup
             if (
-                pre_setup != setup
+                not same_single_rx_identity(pre_setup, setup)
                 or setup.runtime_target != self.runtime_target
             ):
                 raise ValueError("postboot setup does not match the planned runtime target")
@@ -592,7 +611,9 @@ class ReleaseCandidateRamReceiptV2(ApiModel):
                 or post.firmware_version != self.expected_firmware
                 or post.metadata_abi != self.expected_metadata_abi
                 or post.capabilities != self.required_capabilities
-                or post.single_rx_setup != pre.single_rx_setup
+                or not same_single_rx_identity(
+                    post.single_rx_setup, pre.single_rx_setup
+                )
                 or post.single_rx_setup.runtime_target != self.runtime_target
                 or post.boot_id == pre.boot_id
                 or post.qspi != pre.qspi

@@ -109,7 +109,9 @@ def _target() -> UsbInventoryTarget:
     )
 
 
-def _setup(target: RxOnlyRuntimeTarget = "ad9361-1r1t") -> SingleRxSetupObservation:
+def _setup(
+    target: RxOnlyRuntimeTarget = "ad9361-1r1t", *, host_streaming: bool = True
+) -> SingleRxSetupObservation:
     driver = "ad9361" if target == "ad9361-1r1t" else "ad9363a"
     return SingleRxSetupObservation.model_validate(
         {
@@ -119,7 +121,7 @@ def _setup(target: RxOnlyRuntimeTarget = "ad9361-1r1t") -> SingleRxSetupObservat
             "uboot_compatible": driver,
             "uboot_mode": "1r1t",
             "phy_model": driver,
-            "rx_scan_channels": ("voltage0", "voltage1"),
+            "rx_scan_channels": ("voltage0", "voltage1") if host_streaming else (),
         }
     )
 
@@ -158,7 +160,7 @@ def _runtime(*, firmware: str, boot: str, layout: str) -> RuntimeObservationV2:
         boot_id=boot,
         qspi=QspiObservation(bytes=31_457_280, sha256="9" * 64),
         layout=selected_layout,
-        single_rx_setup=_setup(),
+        single_rx_setup=_setup(host_streaming=layout != "detector-only"),
     )
 
 

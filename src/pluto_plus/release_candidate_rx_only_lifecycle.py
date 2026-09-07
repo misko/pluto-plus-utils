@@ -48,6 +48,7 @@ from pluto_plus.release_candidate_rx_only import (
     RxOnlyAttestationProfile,
     RxOnlyRuntimeTarget,
     expected_postboot_layout,
+    same_single_rx_identity,
     validate_rx_only_contract_bundle,
     validate_rx_only_recovery_bundle,
     validate_rx_only_recovery_source,
@@ -814,7 +815,7 @@ def _validate_post_runtime(
         or post.capabilities != expected.capabilities
         or post.layout.kind
         != expected_postboot_layout(candidate.attestation_policy.profile)
-        or pre.single_rx_setup != post.single_rx_setup
+        or not same_single_rx_identity(pre.single_rx_setup, post.single_rx_setup)
         or post.single_rx_setup.runtime_target != operation.runtime_target
         or post.boot_id == pre.boot_id
         or post.qspi != pre.qspi
