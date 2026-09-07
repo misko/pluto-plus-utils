@@ -43,27 +43,31 @@ def acquire_radio_lock(serial: str, *, root: Path | None = None) -> Iterator[Bin
     descriptor = -1
     stream: BinaryIO | None = None
     try:
-        descriptor = os.open(path, flags, 0o600)
-        opened = os.fstat(descriptor)
-        linked = path.lstat()
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_uid != os.getuid()
-            or opened.st_nlink != 1
-            or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
-        ):
-            raise RadioLockError("radio lock is not one owned regular file")
-        if stat.S_IMODE(opened.st_mode) != 0o600:
-            os.fchmod(descriptor, 0o600)
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RadioLockError(f"radio {serial!r} is already owned by another process") from error
-        stream = os.fdopen(descriptor, "r+b", buffering=0)
-        descriptor = -1
+            descriptor = os.open(path, flags, 0o600)
+            opened = os.fstat(descriptor)
+            linked = path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+            ):
+                raise RadioLockError("radio lock is not one owned regular file")
+            if stat.S_IMODE(opened.st_mode) != 0o600:
+                os.fchmod(descriptor, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RadioLockError(
+                    f"radio {serial!r} is already owned by another process"
+                ) from error
+            stream = os.fdopen(descriptor, "r+b", buffering=0)
+            descriptor = -1
+        except OSError as error:
+            raise RadioLockError(f"cannot acquire radio lock {path}: {error}") from error
+        assert stream is not None
         yield stream
-    except OSError as error:
-        raise RadioLockError(f"cannot acquire radio lock {path}: {error}") from error
     finally:
         if stream is not None:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)

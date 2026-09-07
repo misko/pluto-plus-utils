@@ -22,6 +22,8 @@ from pluto_plus.hardware.pss_iio import (
     PssIioClient,
     PssMapChunk,
     PssMapReassembler,
+    PssPhaseMap,
+    analyze_phase_maps,
     read_ci16_coefficients,
     reassemble_maps,
 )
@@ -134,6 +136,7 @@ class _Device:
 class _Context:
     def __init__(self, tracker: _Device, phase_map: _Device) -> None:
         self.devices = {tracker.name: tracker, phase_map.name: phase_map}
+        self.attrs: dict[str, str] = {}
         self.closed = False
 
     def find_device(self, name: str) -> _Device | None:
@@ -200,6 +203,8 @@ def _client() -> tuple[PssIioClient, _Device, _Device]:
             "reassembly_chunks": 200,
             "fault_flags": 0,
             "acquisition_enable": 0,
+            "acquisition_flush": 0,
+            "maps_delivered": 0,
         },
         [_Channel("chunk_words", PSS_MAP_SCAN_WORDS)],
     )
@@ -254,6 +259,73 @@ def test_client_rejects_nonzero_map_transport_padding() -> None:
     client.close()
 
 
+def test_phase_map_analysis_matches_qualified_drift_and_source_units() -> None:
+    maps = []
+    for tile in range(3):
+        bins = [100] * 20_000
+        bins[1_200 + tile * 12] = 300
+        maps.append(
+            PssPhaseMap(
+                abi_version=PSS_MAP_VERSIONS[60],
+                generation=10 + tile,
+                start_index=5_000_000 + tile * 1_280_000,
+                bins=tuple(bins),
+            )
+        )
+
+    estimate = analyze_phase_maps(maps, rate_msps=60)
+
+    assert estimate.phase_bin == 1_200
+    assert estimate.drift_bins_per_64_frames == 12
+    assert estimate.combined_score == 900
+    assert estimate.combined_median == 300.0
+    assert estimate.median_absolute_deviation == 0.0
+    assert estimate.peak_to_median == 3.0
+    assert estimate.robust_z == float("inf")
+    assert estimate.candidate_start_index_canonical == 5_001_200
+    assert estimate.candidate_start_index_source_center == 20_004_800
+    assert estimate.estimated_frame_period_canonical_samples == 20_000.1875
+    assert estimate.estimated_frame_period_source_samples == 80_000.75
+    assert maps[0].canonical_start_index == 5_000_000
+    assert maps[0].source_start_index(rate_msps=60) == 20_000_000
+
+
+def test_phase_map_analysis_uses_deterministic_tie_order() -> None:
+    flat = tuple([100] * 20_000)
+    maps = tuple(
+        PssPhaseMap(PSS_MAP_VERSIONS[30], 20 + tile, tile * 1_280_000, flat) for tile in range(3)
+    )
+
+    estimate = analyze_phase_maps(maps, rate_msps=30)
+
+    assert estimate.phase_bin == 0
+    assert estimate.drift_bins_per_64_frames == -12
+    assert estimate.peak_to_median == 1.0
+    assert estimate.robust_z == 0.0
+
+
+@pytest.mark.parametrize("mutation", ("count", "generation", "start", "abi", "drift"))
+def test_phase_map_analysis_rejects_invalid_window(mutation: str) -> None:
+    bins = tuple([1] * 20_000)
+    maps = [
+        PssPhaseMap(PSS_MAP_VERSIONS[60], 1 + tile, tile * 1_280_000, bins) for tile in range(3)
+    ]
+    drift = (-12, -8, -4, 0, 4, 8, 12)
+    if mutation == "count":
+        maps.pop()
+    elif mutation == "generation":
+        maps[1] = PssPhaseMap(PSS_MAP_VERSIONS[60], 4, 1_280_000, bins)
+    elif mutation == "start":
+        maps[1] = PssPhaseMap(PSS_MAP_VERSIONS[60], 2, 1_280_001, bins)
+    elif mutation == "abi":
+        maps[1] = PssPhaseMap(PSS_MAP_VERSIONS[30], 2, 1_280_000, bins)
+    else:
+        drift = (-12, -12)
+
+    with pytest.raises(ValueError):
+        analyze_phase_maps(maps, rate_msps=60, drift_bins=drift)
+
+
 def test_client_fails_closed_on_tracker_map_rate_disagreement() -> None:
     client, _, phase_map = _client()
     client.close()
@@ -268,8 +340,15 @@ def test_coefficient_file_decodes_packed_signed_ci16(tmp_path) -> None:
     words = ["f97effc1", *("00010002" for _ in range(263))]
     coefficient_path.write_text("\n".join(words) + "\n", encoding="ascii")
     coefficients = read_ci16_coefficients(coefficient_path, rate_msps=60)
-    assert coefficients[0] == (-63, -1666)
-    assert coefficients[-1] == (2, 1)
+    assert coefficients[0] == (-1666, -63)
+    assert coefficients[-1] == (1, 2)
+
+    client, tracker, _ = _client()
+    client.load_coefficient_file(coefficient_path, generation=7)
+    staged = tracker.attrs["coefficient_words"].value.split(",")
+    assert staged[0] == "0xffc1f97e"
+    assert staged[-1] == "0x00020001"
+    client.close()
 
 
 def test_coefficient_file_rejects_bad_word_or_rate_count(tmp_path) -> None:
@@ -333,6 +412,41 @@ def test_connect_destroys_legacy_context_when_contract_discovery_fails() -> None
     with pytest.raises(RadioConfigurationError, match="lacks required device"):
         PssIioClient.connect("usb:5.1.5", iio_module=module)
     assert destroyed == [native]
+
+
+def test_connect_binds_expected_serial_and_closes_mismatch() -> None:
+    client, tracker, phase_map = _client()
+    context = client.context
+    client.close()
+    context.closed = False
+    context.attrs = {"hw_serial": "SERIAL_A"}
+    module = SimpleNamespace(Context=lambda uri: context, Buffer=_Buffer)
+
+    connected = PssIioClient.connect("ip:192.0.2.1", expected_serial="SERIAL_A", iio_module=module)
+    connected.close()
+    assert context.closed
+
+    mismatch_context = _Context(tracker, phase_map)
+    mismatch_context.attrs = {"hw_serial": "SERIAL_B"}
+    mismatch_module = SimpleNamespace(Context=lambda uri: mismatch_context, Buffer=_Buffer)
+    with pytest.raises(RadioConfigurationError, match="serial does not match"):
+        PssIioClient.connect("ip:192.0.2.1", expected_serial="SERIAL_A", iio_module=mismatch_module)
+    assert mismatch_context.closed
+
+
+def test_map_stream_cannot_restart_in_same_client_or_driver_epoch() -> None:
+    client, _, phase_map = _client()
+    client.open_maps()
+    client.close_maps()
+    with pytest.raises(RadioConfigurationError, match="one continuous session"):
+        client.open_maps()
+    client.close()
+
+    second, _, second_map = _client()
+    second_map.attrs["maps_delivered"].value = "1"
+    with pytest.raises(RadioConfigurationError, match="one continuous session"):
+        second.open_maps()
+    second.close()
 
 
 def test_legacy_buffer_is_destroyed_even_when_cancel_fails() -> None:

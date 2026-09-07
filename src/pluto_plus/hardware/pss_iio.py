@@ -9,6 +9,8 @@ wire ABI can be tested with golden byte strings.
 from __future__ import annotations
 
 import importlib
+import math
+import statistics
 import struct
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -44,6 +46,10 @@ PSS_MAP_CHUNK_WORDS = PSS_MAP_METADATA_WORDS + PSS_MAP_CHUNK_BINS // 2
 PSS_MAP_CHUNK_BYTES = PSS_MAP_CHUNK_WORDS * 4
 PSS_MAP_SCAN_WORDS = 64
 PSS_MAP_SCAN_BYTES = PSS_MAP_SCAN_WORDS * 4
+PSS_MAP_FRAMES = 64
+PSS_MAP_WINDOW_MAPS = 3
+PSS_MAP_CANONICAL_SPAN = PSS_MAP_PHASE_BINS * PSS_MAP_FRAMES
+PSS_MAP_DEFAULT_DRIFT_BINS = (-12, -8, -4, 0, 4, 8, 12)
 
 
 def _signed_16(value: int) -> int:
@@ -59,20 +65,16 @@ def read_ci16_coefficients(path: Path, *, rate_msps: int) -> tuple[tuple[int, in
     coefficients: list[tuple[int, int]] = []
     for line_number, raw in enumerate(path.read_text(encoding="ascii").splitlines(), 1):
         word = raw.strip()
-        if len(word) != 8 or any(
-            character not in "0123456789abcdefABCDEF" for character in word
-        ):
-            raise ValueError(
-                f"PSS coefficient line {line_number} is not one packed CI16 word"
-            )
+        if len(word) != 8 or any(character not in "0123456789abcdefABCDEF" for character in word):
+            raise ValueError(f"PSS coefficient line {line_number} is not one packed CI16 word")
         packed = int(word, 16)
-        coefficients.append(
-            (_signed_16(packed & 0xFFFF), _signed_16(packed >> 16))
-        )
+        # Generator/C-tool memory files encode I in 31:16 and Q in 15:0.
+        # load_coefficients() repacks the tuple for the FPGA register, whose
+        # coefficient I field is 15:0 and Q field is 31:16.
+        coefficients.append((_signed_16(packed >> 16), _signed_16(packed & 0xFFFF)))
     if len(coefficients) != expected:
         raise ValueError(
-            f"{rate_msps} MS/s coefficient file has {len(coefficients)} words, "
-            f"expected {expected}"
+            f"{rate_msps} MS/s coefficient file has {len(coefficients)} words, expected {expected}"
         )
     return tuple(coefficients)
 
@@ -189,10 +191,143 @@ class PssMapChunk:
 
 @dataclass(frozen=True, slots=True)
 class PssPhaseMap:
+    """One phase map whose start index is always in canonical 15 MS/s samples."""
+
     abi_version: int
     generation: int
     start_index: int
     bins: tuple[int, ...]
+
+    @property
+    def canonical_start_index(self) -> int:
+        return self.start_index
+
+    def source_start_index(self, *, rate_msps: int) -> int:
+        if rate_msps not in PSS_MAP_VERSIONS:
+            raise ValueError("PSS map rate must be 15, 30, or 60 MS/s")
+        return self.start_index * (rate_msps // 15)
+
+
+@dataclass(frozen=True, slots=True)
+class PssCoarseEstimate:
+    """C-equivalent candidate extracted from exactly three canonical phase maps."""
+
+    phase_bin: int
+    drift_bins_per_64_frames: int
+    combined_score: int
+    combined_median: float
+    median_absolute_deviation: float
+    peak_to_median: float
+    robust_z: float
+    candidate_start_index_canonical: int
+    candidate_start_index_source_center: int
+    estimated_frame_period_canonical_samples: float
+    estimated_frame_period_source_samples: float
+    reference_generation: int
+    newest_generation: int
+    reference_start_index_canonical: int
+    newest_start_index_canonical: int
+
+
+def analyze_phase_maps(
+    maps: Sequence[PssPhaseMap],
+    *,
+    rate_msps: int,
+    drift_bins: Sequence[int] = PSS_MAP_DEFAULT_DRIFT_BINS,
+) -> PssCoarseEstimate:
+    """Extract one deterministic coarse candidate using the qualified C algorithm.
+
+    Phase-map indexes and drift values are canonical 15 MS/s samples.  Source-rate
+    indexes and periods are returned separately so 30/60 MS/s callers cannot
+    accidentally schedule the full-rate tracker in canonical units.
+    """
+
+    if rate_msps not in PSS_MAP_VERSIONS:
+        raise ValueError("PSS map rate must be 15, 30, or 60 MS/s")
+    if len(maps) != PSS_MAP_WINDOW_MAPS:
+        raise ValueError("exactly three complete phase maps are required")
+    hypotheses = tuple(drift_bins)
+    if (
+        not 1 <= len(hypotheses) <= len(PSS_MAP_DEFAULT_DRIFT_BINS)
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in hypotheses)
+        or any(not -PSS_MAP_PHASE_BINS < value < PSS_MAP_PHASE_BINS for value in hypotheses)
+        or any(right <= left for left, right in zip(hypotheses, hypotheses[1:], strict=False))
+    ):
+        raise ValueError(
+            "drift bank must contain one through seven strictly increasing bounded integers"
+        )
+    expected_abi = PSS_MAP_VERSIONS[rate_msps]
+    for phase_map in maps:
+        if phase_map.abi_version != expected_abi:
+            raise ValueError("phase-map ABI does not match the selected sample rate")
+        if len(phase_map.bins) != PSS_MAP_PHASE_BINS:
+            raise ValueError("phase map must contain exactly 20,000 bins")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFFFF
+            for value in phase_map.bins
+        ):
+            raise ValueError("phase-map bins must be unsigned 16-bit integers")
+    for previous, current in zip(maps, maps[1:], strict=False):
+        if (
+            previous.generation == 0
+            or previous.generation == 0xFFFFFFFF
+            or current.generation != previous.generation + 1
+            or current.start_index != previous.start_index + PSS_MAP_CANONICAL_SPAN
+        ):
+            raise ValueError("phase-map generations or canonical start indexes are discontinuous")
+
+    best_drift = hypotheses[0]
+    best_phase = 0
+    best_score = -1
+    best_combined: list[int] | None = None
+    for drift in hypotheses:
+        combined = [
+            sum(
+                phase_map.bins[(phase + tile * drift) % PSS_MAP_PHASE_BINS]
+                for tile, phase_map in enumerate(maps)
+            )
+            for phase in range(PSS_MAP_PHASE_BINS)
+        ]
+        phase = max(range(PSS_MAP_PHASE_BINS), key=combined.__getitem__)
+        score = combined[phase]
+        if score > best_score:
+            best_drift = drift
+            best_phase = phase
+            best_score = score
+            best_combined = combined
+
+    assert best_combined is not None
+    median = float(statistics.median(best_combined))
+    median_absolute_deviation = float(
+        statistics.median(abs(value - median) for value in best_combined)
+    )
+    robust_sigma = 1.4826 * median_absolute_deviation
+    peak_to_median = best_score / median if median > 0.0 else (math.inf if best_score else 1.0)
+    robust_z = (
+        (best_score - median) / robust_sigma
+        if robust_sigma > 0.0
+        else (math.inf if best_score > median else 0.0)
+    )
+    decimation = rate_msps // 15
+    candidate_canonical = maps[0].start_index + best_phase
+    period_canonical = PSS_MAP_PHASE_BINS + best_drift / PSS_MAP_FRAMES
+    return PssCoarseEstimate(
+        phase_bin=best_phase,
+        drift_bins_per_64_frames=best_drift,
+        combined_score=best_score,
+        combined_median=median,
+        median_absolute_deviation=median_absolute_deviation,
+        peak_to_median=float(peak_to_median),
+        robust_z=float(robust_z),
+        candidate_start_index_canonical=candidate_canonical,
+        candidate_start_index_source_center=candidate_canonical * decimation,
+        estimated_frame_period_canonical_samples=period_canonical,
+        estimated_frame_period_source_samples=period_canonical * decimation,
+        reference_generation=maps[0].generation,
+        newest_generation=maps[-1].generation,
+        reference_start_index_canonical=maps[0].start_index,
+        newest_start_index_canonical=maps[-1].start_index,
+    )
 
 
 class PssMapReassembler:
@@ -294,8 +429,7 @@ def _split_scans(payload: bytes, scan_bytes: int) -> tuple[bytes, ...]:
             f"IIO refill returned {len(payload)} bytes, not whole {scan_bytes}-byte scans"
         )
     return tuple(
-        payload[offset : offset + scan_bytes]
-        for offset in range(0, len(payload), scan_bytes)
+        payload[offset : offset + scan_bytes] for offset in range(0, len(payload), scan_bytes)
     )
 
 
@@ -345,9 +479,7 @@ def _close_iio_context(iio_module: Any, context: Any) -> None:
     native = getattr(context, "_context", None)
     destroy = getattr(iio_module, "_destroy", None)
     if native is None or not callable(destroy):
-        raise RadioConfigurationError(
-            "pylibiio context exposes no deterministic close operation"
-        )
+        raise RadioConfigurationError("pylibiio context exposes no deterministic close operation")
     context._context = None
     destroy(native)
 
@@ -365,13 +497,35 @@ class PssIioClient:
         self._map_buffer: Any | None = None
         self._expected_request: int | None = None
         self._remaining_results: int | None = None
+        self._map_session_consumed = False
         self._closed = False
 
     @classmethod
-    def connect(cls, uri: str, *, iio_module: Any | None = None) -> Self:
+    def connect(
+        cls,
+        uri: str,
+        *,
+        expected_serial: str | None = None,
+        iio_module: Any | None = None,
+    ) -> Self:
         module = iio_module or importlib.import_module("iio")
         context = module.Context(uri)
         try:
+            if expected_serial is not None:
+                normalized = expected_serial.strip()
+                if not normalized:
+                    raise ValueError("expected PSS radio serial must not be empty")
+                try:
+                    attrs = {str(key): str(value) for key, value in context.attrs.items()}
+                except AttributeError as error:
+                    raise RadioConfigurationError(
+                        "IIO context cannot attest the expected PSS radio serial"
+                    ) from error
+                observed = attrs.get("hw_serial") or attrs.get("usb,serial") or attrs.get("serial")
+                if observed != normalized:
+                    raise RadioConfigurationError(
+                        "IIO context serial does not match the expected PSS radio"
+                    )
             return cls(context, module)
         except BaseException:
             _close_iio_context(module, context)
@@ -394,18 +548,24 @@ class PssIioClient:
         if rate not in PSS_TRACK_VERSIONS or map_rate != rate:
             raise RadioConfigurationError("PSS tracker/map sample rates disagree")
         expected = (
-            (self.tracker, {
-                "abi_version": PSS_TRACK_VERSIONS[rate],
-                "geometry": PSS_TRACK_GEOMETRY[rate],
-                "capabilities": PSS_TRACK_CAPABILITIES[rate],
-            }),
-            (self.phase_map, {
-                "abi_version": PSS_MAP_VERSIONS[rate],
-                "tile_geometry": PSS_MAP_TILE_GEOMETRY,
-                "capabilities": PSS_MAP_CAPABILITIES[rate],
-                "phase_bins": PSS_MAP_PHASE_BINS,
-                "reassembly_chunks": PSS_MAP_CHUNKS,
-            }),
+            (
+                self.tracker,
+                {
+                    "abi_version": PSS_TRACK_VERSIONS[rate],
+                    "geometry": PSS_TRACK_GEOMETRY[rate],
+                    "capabilities": PSS_TRACK_CAPABILITIES[rate],
+                },
+            ),
+            (
+                self.phase_map,
+                {
+                    "abi_version": PSS_MAP_VERSIONS[rate],
+                    "tile_geometry": PSS_MAP_TILE_GEOMETRY,
+                    "capabilities": PSS_MAP_CAPABILITIES[rate],
+                    "phase_bins": PSS_MAP_PHASE_BINS,
+                    "reassembly_chunks": PSS_MAP_CHUNKS,
+                },
+            ),
         )
         for device, attributes in expected:
             for name, value in attributes.items():
@@ -433,9 +593,7 @@ class PssIioClient:
             raise RadioConfigurationError("PSS coefficient commit did not become active")
 
     def load_coefficient_file(self, path: Path, *, generation: int) -> None:
-        self.load_coefficients(
-            read_ci16_coefficients(path, rate_msps=self.rate_msps), generation
-        )
+        self.load_coefficients(read_ci16_coefficients(path, rate_msps=self.rate_msps), generation)
 
     def open_fine(
         self,
@@ -500,10 +658,23 @@ class PssIioClient:
         return packets
 
     def open_maps(self, *, refill_chunks: int = 400) -> None:
+        """Open the one continuous coarse-map session for this FPGA reset epoch.
+
+        Keep this stream open and refill it continuously.  Stopping and restarting
+        the producer can turn a rate-change discontinuity into a latched hardware
+        fault, so a second session is rejected until the FPGA has been reset.
+        """
+
         if self._map_buffer is not None:
             raise RadioConfigurationError("PSS phase-map stream is already open")
+        if self._map_session_consumed or _read_int_attr(self.phase_map, "maps_delivered"):
+            raise RadioConfigurationError(
+                "PSS phase-map acquisition is one continuous session per FPGA reset epoch"
+            )
         if refill_chunks < PSS_MAP_CHUNKS:
             raise ValueError(f"phase-map refill must hold at least {PSS_MAP_CHUNKS} chunks")
+        self._map_session_consumed = True
+        _write_attr(self.phase_map, "acquisition_flush", 1)
         _disable_scan_channels(self.phase_map)
         _find_scan_channel(self.phase_map, PSS_MAP_SCAN_WORDS).enabled = True
         self._map_buffer = self._iio.Buffer(self.phase_map, refill_chunks, False)

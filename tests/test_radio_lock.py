@@ -42,6 +42,23 @@ def test_per_serial_lock_is_private_non_sensitive_and_nonblocking(tmp_path: Path
         pass
 
 
+def test_os_error_from_lock_body_is_not_relabelled_and_lock_is_released(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "locks").absolute()
+    body_error = OSError("radio operation failed")
+
+    with (
+        pytest.raises(OSError, match="radio operation failed") as raised,
+        acquire_radio_lock("SERIAL_A", root=root),
+    ):
+        raise body_error
+
+    assert raised.value is body_error
+    with acquire_radio_lock("SERIAL_A", root=root):
+        pass
+
+
 def test_usb_controller_holds_the_same_lock_for_capture_lifetime(tmp_path: Path) -> None:
     root = (tmp_path / "locks").absolute()
     controller = RadioController(
