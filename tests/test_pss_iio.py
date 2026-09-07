@@ -11,9 +11,13 @@ from pluto_plus.hardware.pss_iio import (
     PSS_MAP_CHUNK_MAGIC,
     PSS_MAP_CHUNK_WORDS,
     PSS_MAP_CHUNKS,
+    PSS_MAP_SCAN_BYTES,
+    PSS_MAP_SCAN_WORDS,
     PSS_MAP_VERSIONS,
     PSS_PACKET_HEADER,
     PSS_PACKET_MAGIC,
+    PSS_TRACK_SCAN_BYTES,
+    PSS_TRACK_SCAN_WORDS,
     PssFinePacket,
     PssIioClient,
     PssMapChunk,
@@ -52,6 +56,24 @@ def _map_chunk(index: int, *, generation: int = 5, start: int = 1234) -> bytes:
     )
     bins = tuple((index + offset) & 0xFFFF for offset in range(PSS_MAP_CHUNK_BINS))
     return struct.pack("<9I100H", *metadata, *bins)
+
+
+def _fine_scan(**kwargs: int) -> bytes:
+    payload = _fine_packet(**kwargs)
+    return payload + bytes(PSS_TRACK_SCAN_BYTES - len(payload))
+
+
+def _map_scan(index: int, *, generation: int = 5, start: int = 1234) -> bytes:
+    payload = _map_chunk(index, generation=generation, start=start)
+    return payload + bytes(PSS_MAP_SCAN_BYTES - len(payload))
+
+
+def test_transport_scan_strides_are_power_of_two_envelopes() -> None:
+    assert PSS_TRACK_SCAN_WORDS == 32
+    assert PSS_MAP_SCAN_WORDS == 64
+    assert PSS_MAP_CHUNK_WORDS == 59
+    assert PSS_TRACK_SCAN_BYTES & (PSS_TRACK_SCAN_BYTES - 1) == 0
+    assert PSS_MAP_SCAN_BYTES & (PSS_MAP_SCAN_BYTES - 1) == 0
 
 
 def test_fine_packet_decodes_exact_timing_fields() -> None:
@@ -164,7 +186,7 @@ def _client() -> tuple[PssIioClient, _Device, _Device]:
             "coefficient_words": 0,
             "coefficient_commit": 0,
         },
-        [_Channel("packet_words", 26)],
+        [_Channel("packet_words", PSS_TRACK_SCAN_WORDS)],
     )
     phase_map = _Device(
         "starlink-pss-map",
@@ -179,7 +201,7 @@ def _client() -> tuple[PssIioClient, _Device, _Device]:
             "fault_flags": 0,
             "acquisition_enable": 0,
         },
-        [_Channel("chunk_words", PSS_MAP_CHUNK_WORDS)],
+        [_Channel("chunk_words", PSS_MAP_SCAN_WORDS)],
     )
     context = _Context(tracker, phase_map)
     return PssIioClient(context, SimpleNamespace(Buffer=_Buffer)), tracker, phase_map
@@ -188,8 +210,8 @@ def _client() -> tuple[PssIioClient, _Device, _Device]:
 def test_client_discovers_contract_and_reads_both_native_iio_streams() -> None:
     client, tracker, phase_map = _client()
     _Buffer.payloads = {
-        tracker.name: _fine_packet(),
-        phase_map.name: _map_chunk(0),
+        tracker.name: _fine_scan(),
+        phase_map.name: _map_scan(0),
     }
     client.open_fine(
         first_center=1_000_000,
@@ -203,6 +225,33 @@ def test_client_discovers_contract_and_reads_both_native_iio_streams() -> None:
     client.close()
     assert tracker.attrs["schedule_enable"].value == "0"
     assert phase_map.attrs["acquisition_enable"].value == "0"
+
+
+def test_client_rejects_nonzero_fine_transport_padding() -> None:
+    client, tracker, _ = _client()
+    payload = bytearray(_fine_scan())
+    payload[-1] = 1
+    _Buffer.payloads = {tracker.name: bytes(payload)}
+    client.open_fine(
+        first_center=1_000_000,
+        period_q32_32=80_000 << 32,
+        request_base=3,
+        count=1,
+    )
+    with pytest.raises(RadioConfigurationError, match="padding"):
+        client.read_fine()
+    client.close()
+
+
+def test_client_rejects_nonzero_map_transport_padding() -> None:
+    client, _, phase_map = _client()
+    payload = bytearray(_map_scan(0))
+    payload[-1] = 1
+    _Buffer.payloads = {phase_map.name: bytes(payload)}
+    client.open_maps()
+    with pytest.raises(RadioConfigurationError, match="padding"):
+        client.read_map_chunks()
+    client.close()
 
 
 def test_client_fails_closed_on_tracker_map_rate_disagreement() -> None:

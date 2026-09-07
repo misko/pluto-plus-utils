@@ -28,6 +28,8 @@ PSS_PACKET_MAGIC = 0x31535350
 PSS_PACKET_HEADER = 0x1A010001
 PSS_RESULT_WORDS = 26
 PSS_PACKET_BYTES = PSS_RESULT_WORDS * 4
+PSS_TRACK_SCAN_WORDS = 32
+PSS_TRACK_SCAN_BYTES = PSS_TRACK_SCAN_WORDS * 4
 
 PSS_MAP_ID = 0x50534D41
 PSS_MAP_VERSIONS = {15: 0x00010001, 30: 0x00010002, 60: 0x00010004}
@@ -40,6 +42,8 @@ PSS_MAP_CHUNKS = PSS_MAP_PHASE_BINS // PSS_MAP_CHUNK_BINS
 PSS_MAP_METADATA_WORDS = 9
 PSS_MAP_CHUNK_WORDS = PSS_MAP_METADATA_WORDS + PSS_MAP_CHUNK_BINS // 2
 PSS_MAP_CHUNK_BYTES = PSS_MAP_CHUNK_WORDS * 4
+PSS_MAP_SCAN_WORDS = 64
+PSS_MAP_SCAN_BYTES = PSS_MAP_SCAN_WORDS * 4
 
 
 def _signed_16(value: int) -> int:
@@ -266,8 +270,8 @@ def _find_scan_channel(device: Any, expected_repeat: int) -> Any:
             return channel
     # pylibiio 0.25 does not expose repeat on every build. Names are stable.
     names = {
-        PSS_RESULT_WORDS: "packet_words",
-        PSS_MAP_CHUNK_WORDS: "chunk_words",
+        PSS_TRACK_SCAN_WORDS: "packet_words",
+        PSS_MAP_SCAN_WORDS: "chunk_words",
     }
     wanted = names[expected_repeat]
     for channel in candidates:
@@ -293,6 +297,12 @@ def _split_scans(payload: bytes, scan_bytes: int) -> tuple[bytes, ...]:
         payload[offset : offset + scan_bytes]
         for offset in range(0, len(payload), scan_bytes)
     )
+
+
+def _unpadded_scan(scan: bytes, payload_bytes: int, *, label: str) -> bytes:
+    if any(scan[payload_bytes:]):
+        raise RadioConfigurationError(f"{label} IIO transport padding is nonzero")
+    return scan[:payload_bytes]
 
 
 def _close_iio_buffer(iio_module: Any, buffer: Any) -> None:
@@ -444,7 +454,7 @@ class PssIioClient:
         if not 0 <= count <= 0xFFFFFFFF or not 1 <= queue_target <= 7:
             raise ValueError("PSS fine schedule count or queue target is invalid")
         _disable_scan_channels(self.tracker)
-        _find_scan_channel(self.tracker, PSS_RESULT_WORDS).enabled = True
+        _find_scan_channel(self.tracker, PSS_TRACK_SCAN_WORDS).enabled = True
         _write_attr(self.tracker, "schedule_first_center", first_center)
         _write_attr(self.tracker, "schedule_period_q32_32", period_q32_32)
         _write_attr(self.tracker, "schedule_request_base", request_base)
@@ -464,8 +474,14 @@ class PssIioClient:
         if self._fine_buffer is None:
             raise RadioConfigurationError("PSS fine stream is not open")
         self._fine_buffer.refill()
-        scans = _split_scans(bytes(self._fine_buffer.read()), PSS_PACKET_BYTES)
-        packets = tuple(PssFinePacket.decode(scan, rate_msps=self.rate_msps) for scan in scans)
+        scans = _split_scans(bytes(self._fine_buffer.read()), PSS_TRACK_SCAN_BYTES)
+        packets = tuple(
+            PssFinePacket.decode(
+                _unpadded_scan(scan, PSS_PACKET_BYTES, label="PSS fine packet"),
+                rate_msps=self.rate_msps,
+            )
+            for scan in scans
+        )
         active_generation = _read_int_attr(self.tracker, "active_coefficient_generation")
         for packet in packets:
             if packet.coefficient_generation != active_generation:
@@ -489,7 +505,7 @@ class PssIioClient:
         if refill_chunks < PSS_MAP_CHUNKS:
             raise ValueError(f"phase-map refill must hold at least {PSS_MAP_CHUNKS} chunks")
         _disable_scan_channels(self.phase_map)
-        _find_scan_channel(self.phase_map, PSS_MAP_CHUNK_WORDS).enabled = True
+        _find_scan_channel(self.phase_map, PSS_MAP_SCAN_WORDS).enabled = True
         self._map_buffer = self._iio.Buffer(self.phase_map, refill_chunks, False)
         try:
             _write_attr(self.phase_map, "acquisition_enable", 1)
@@ -501,8 +517,13 @@ class PssIioClient:
         if self._map_buffer is None:
             raise RadioConfigurationError("PSS phase-map stream is not open")
         self._map_buffer.refill()
-        scans = _split_scans(bytes(self._map_buffer.read()), PSS_MAP_CHUNK_BYTES)
-        chunks = tuple(PssMapChunk.decode(scan) for scan in scans)
+        scans = _split_scans(bytes(self._map_buffer.read()), PSS_MAP_SCAN_BYTES)
+        chunks = tuple(
+            PssMapChunk.decode(
+                _unpadded_scan(scan, PSS_MAP_CHUNK_BYTES, label="PSS phase-map chunk")
+            )
+            for scan in scans
+        )
         if _read_int_attr(self.phase_map, "fault_flags"):
             raise RadioConfigurationError("PSS phase-map driver latched a stream fault")
         return chunks
