@@ -45,7 +45,9 @@ from pluto_plus.release_candidate_rx_only import (
     ReleaseCandidateRamReceiptV2,
     ReleaseCandidateRecoveryReceiptV2,
     RuntimeObservationV2,
+    RxOnlyAttestationProfile,
     RxOnlyRuntimeTarget,
+    expected_postboot_layout,
     validate_rx_only_contract_bundle,
     validate_rx_only_recovery_bundle,
     validate_rx_only_recovery_source,
@@ -121,6 +123,7 @@ class RxOnlyReleaseCandidateRamBackend(Protocol):
         *,
         runtime_target: RxOnlyRuntimeTarget,
         expected_firmware: str,
+        attestation_profile: RxOnlyAttestationProfile,
         password: PasswordFileIdentity,
         route: HostRouteReceipt,
     ) -> RuntimeObservationV2: ...
@@ -330,6 +333,7 @@ def execute_rx_only_candidate_ram(
                     returned,
                     runtime_target=operation.runtime_target,
                     expected_firmware=candidate.expected_runtime.firmware_version,
+                    attestation_profile=candidate.attestation_policy.profile,
                     password=password,
                     route=route,
                 )
@@ -715,6 +719,7 @@ def _receipt(
         expected_hardware_model=candidate.expected_runtime.hardware_model,
         expected_metadata_abi=candidate.expected_runtime.metadata_abi,
         required_capabilities=candidate.expected_runtime.capabilities,
+        attestation_profile=candidate.attestation_policy.profile,
         pre_runtime=pre,
         post_runtime=post,
         preboot_quiesce=quiesce,
@@ -807,7 +812,8 @@ def _validate_post_runtime(
         or post.firmware_version != expected.firmware_version
         or post.metadata_abi != expected.metadata_abi
         or post.capabilities != expected.capabilities
-        or post.layout.kind != "rx-only"
+        or post.layout.kind
+        != expected_postboot_layout(candidate.attestation_policy.profile)
         or pre.single_rx_setup != post.single_rx_setup
         or post.single_rx_setup.runtime_target != operation.runtime_target
         or post.boot_id == pre.boot_id

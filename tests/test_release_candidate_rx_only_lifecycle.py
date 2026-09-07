@@ -28,12 +28,15 @@ from pluto_plus.release_candidate import (
 )
 from pluto_plus.release_candidate_lifecycle import PasswordFileIdentity, validate_password_file
 from pluto_plus.release_candidate_rx_only import (
+    DetectorOnlyLayoutV2,
     ExpectedRuntimeV2,
     PrebootQuiesceReceiptV2,
     ReleaseCandidatePlanV2,
     ReleaseCandidateRamReceiptV2,
     ReleaseCandidateRecoveryReceiptV2,
     RuntimeObservationV2,
+    RxOnlyAttestationPolicy,
+    RxOnlyAttestationProfile,
     RxOnlyLayoutV2,
     RxOnlyRuntimeTarget,
     SingleRxSafeStateV2,
@@ -134,6 +137,16 @@ def _tx_safe() -> TxCapableSingleRxSafeStateV2:
 
 
 def _runtime(*, firmware: str, boot: str, layout: str) -> RuntimeObservationV2:
+    if layout == "tx-capable":
+        selected_layout = TxCapableLayoutV2(safe_state=_tx_safe())
+    elif layout == "detector-only":
+        selected_layout = DetectorOnlyLayoutV2(
+            safe_state=SingleRxSafeStateV2(tx_gain_db=(-80.0,))
+        )
+    else:
+        selected_layout = RxOnlyLayoutV2(
+            safe_state=SingleRxSafeStateV2(tx_gain_db=(-80.0,))
+        )
     return RuntimeObservationV2(
         serial=SERIAL,
         topology=TOPOLOGY,
@@ -144,11 +157,7 @@ def _runtime(*, firmware: str, boot: str, layout: str) -> RuntimeObservationV2:
         capabilities=("tandem-agc",) if layout == "tx-capable" else (),
         boot_id=boot,
         qspi=QspiObservation(bytes=31_457_280, sha256="9" * 64),
-        layout=(
-            TxCapableLayoutV2(safe_state=_tx_safe())
-            if layout == "tx-capable"
-            else RxOnlyLayoutV2(safe_state=SingleRxSafeStateV2(tx_gain_db=(-80.0,)))
-        ),
+        layout=selected_layout,
         single_rx_setup=_setup(),
     )
 
@@ -236,6 +245,7 @@ class FakeBackend:
         *,
         runtime_target: RxOnlyRuntimeTarget,
         expected_firmware: str,
+        attestation_profile: RxOnlyAttestationProfile,
         password: PasswordFileIdentity,
         route: HostRouteReceipt,
     ) -> RuntimeObservationV2:
@@ -245,7 +255,11 @@ class FakeBackend:
         return _runtime(
             firmware=expected_firmware,
             boot="22222222-2222-4222-8222-222222222222",
-            layout="rx-only",
+            layout=(
+                "detector-only"
+                if attestation_profile == "rx-detector-only-v1"
+                else "rx-only"
+            ),
         )
 
     def request_ram_mode(
@@ -331,7 +345,11 @@ def _write_private(path: Path, payload: bytes) -> None:
     path.chmod(0o600)
 
 
-def _bundle(tmp_path: Path) -> tuple[Path, Path, str]:
+def _bundle(
+    tmp_path: Path,
+    *,
+    attestation_profile: RxOnlyAttestationProfile = "rx-only-v1",
+) -> tuple[Path, Path, str]:
     root = _private_dir(tmp_path / "private")
     archive = _private_dir(root / "archive")
     credentials = _private_dir(root / "credentials")
@@ -360,6 +378,7 @@ def _bundle(tmp_path: Path) -> tuple[Path, Path, str]:
             firmware_version=CANDIDATE,
             hardware_model=PLUTO_REV_C_AD9361_MODEL,
         ),
+        attestation_policy=RxOnlyAttestationPolicy(profile=attestation_profile),
     )
     candidate_path = archive / "candidate-plan.json"
     write_private_contract(candidate_path, candidate)
@@ -415,6 +434,29 @@ def test_v2_lifecycle_passes_only_after_quiesce_and_exact_postboot(tmp_path: Pat
         ReleaseCandidateRamReceiptV2,
     )
     assert saved == receipt
+
+
+def test_v2_lifecycle_propagates_detector_only_policy_into_receipt(tmp_path: Path) -> None:
+    operation_path, password_path, phrase = _bundle(
+        tmp_path, attestation_profile="rx-detector-only-v1"
+    )
+    ticks = iter((NOW, NOW + timedelta(minutes=1)))
+
+    receipt, _ = execute_rx_only_candidate_ram(
+        operation_path,
+        password_path=password_path,
+        confirmation=phrase,
+        backend=FakeBackend(),
+        tool_repository="misko/pluto-plus-utils",
+        tool_version="0.1.0",
+        tool_source_commit="3" * 40,
+        now=lambda: next(ticks),
+        receipt_id_factory=lambda: "a" * 32,
+    )
+
+    assert receipt.attestation_profile == "rx-detector-only-v1"
+    assert receipt.post_runtime is not None
+    assert receipt.post_runtime.layout.kind == "detector-only"
 
 
 def test_v2_lifecycle_wrong_confirmation_never_touches_backend(tmp_path: Path) -> None:

@@ -64,6 +64,14 @@ target, hardware model, U-Boot/PHY target, and RX scan geometry, plus:
 - a new boot ID; and
 - unchanged byte count and SHA-256 of `qspi-linux`.
 
+The additive `rx-detector-only-v1` policy admits an intentionally narrower
+receive appliance without weakening `rx-only-v1`. It requires the receive
+ADC/IIO core to remain present, requires the RX DMA device-tree node to be
+disabled, and retains every TX-side absence, marker, identity, safe-state, boot,
+and QSPI requirement above. The candidate plan selects the policy explicitly,
+the RAM receipt records it, and validation requires the corresponding one of
+the mutually exclusive `rx-only` or `detector-only` runtime layouts.
+
 Metadata ABI may be null and the capability tuple may be empty, but both remain
 exact candidate-plan fields rather than inferred defaults.
 

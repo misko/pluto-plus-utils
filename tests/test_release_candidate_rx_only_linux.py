@@ -435,6 +435,64 @@ def test_linux_postboot_attestor_requires_marker_and_tx_devices_absent(
     assert observed.capabilities == ()
 
 
+def test_linux_detector_only_attestor_requires_rx_dma_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phy = FakeDevice(
+        "ad9361-phy",
+        [
+            FakeChannel("voltage0", hardwaregain="-80"),
+            FakeChannel("altvoltage0", powerdown="0"),
+            FakeChannel("altvoltage1", powerdown="1"),
+        ],
+    )
+    context = FakeContext(
+        [phy, FakeDevice("cf-ad9361-lpc")], firmware="detector-candidate"
+    )
+    monkeypatch.setattr(
+        hardware_iio,
+        "context_facts",
+        lambda value: {
+            "phy_model": "ad9361",
+            "rx_scan_channels": ("voltage0", "voltage1"),
+            "buffer_metadata_abi": None,
+        },
+    )
+    monkeypatch.setattr(
+        "pluto_plus.release_candidate_rx_only_linux.importlib.import_module",
+        lambda name: SimpleNamespace(Context=lambda uri: context),
+    )
+    backend, password, route = _attestation_inputs(tmp_path)
+    monkeypatch.setattr(
+        backend,
+        "_remote_identity_rx_only",
+        lambda *args: _identity(
+            firmware_version="detector-candidate",
+            boot_id="22222222-2222-4222-8222-222222222222",
+            root_marker_present="1",
+            rx_dma_dt_state="disabled",
+            dds_dt_state="disabled",
+            tx_dma_dt_state="disabled",
+            tandem_dt_state="disabled",
+        ),
+    )
+
+    observed = backend._attest_runtime_rx_only_linux(
+        _target(),
+        "detector-candidate",
+        password,
+        route,
+        "ad9361-1r1t",
+        "detector-only",
+    )
+
+    assert observed.layout.kind == "detector-only"
+    assert observed.layout.rx_adc_device == "cf-ad9361-lpc"
+    assert observed.layout.rx_dma_device is None
+    assert observed.capabilities == ()
+    assert context.closed
+
+
 def test_linux_postboot_attestor_retries_incomplete_udev_iio_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

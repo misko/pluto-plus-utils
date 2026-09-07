@@ -60,6 +60,10 @@ RX_ONLY_RECOVERY_RECEIPT_SCHEMA: Literal[
 ] = "pluto-plus-utils.release-candidate-recovery-receipt.v2"
 
 RX_ONLY_POLICY_PROFILE: Literal["rx-only-v1"] = "rx-only-v1"
+RX_DETECTOR_ONLY_POLICY_PROFILE: Literal["rx-detector-only-v1"] = (
+    "rx-detector-only-v1"
+)
+RxOnlyAttestationProfile = Literal["rx-only-v1", "rx-detector-only-v1"]
 RX_ONLY_ROOT_DT_MARKER: Literal["misko,rx-only-fpga"] = "misko,rx-only-fpga"
 RX_ONLY_RUNTIME_TARGETS: tuple[
     Literal["ad9361-1r1t"], Literal["ad9363a-1r1t"]
@@ -102,7 +106,7 @@ def _expected_model(target: RxOnlyRuntimeTarget) -> str:
 class RxOnlyAttestationPolicy(ApiModel):
     """Reviewed topology policy; changing its marker requires a new profile."""
 
-    profile: Literal["rx-only-v1"] = RX_ONLY_POLICY_PROFILE
+    profile: RxOnlyAttestationProfile = RX_ONLY_POLICY_PROFILE
     supported_runtime_targets: tuple[
         Literal["ad9361-1r1t"], Literal["ad9363a-1r1t"]
     ] = RX_ONLY_RUNTIME_TARGETS
@@ -307,9 +311,31 @@ class RxOnlyLayoutV2(ApiModel):
     safe_state: SingleRxSafeStateV2
 
 
+class DetectorOnlyLayoutV2(ApiModel):
+    """Receive detector topology with the ADC core but no host RX DMA."""
+
+    kind: Literal["detector-only"] = "detector-only"
+    rx_adc_device: Literal["cf-ad9361-lpc"] = RX_DMA_DEVICE
+    rx_dma_device: None = None
+    dds_device: None = None
+    tx_dma_device: None = None
+    tandem_device: None = None
+    root_device_tree_marker: Literal["misko,rx-only-fpga"] = RX_ONLY_ROOT_DT_MARKER
+    safe_state: SingleRxSafeStateV2
+
+
 RuntimeLayoutV2 = Annotated[
-    TxCapableLayoutV2 | RxOnlyLayoutV2, Field(discriminator="kind")
+    TxCapableLayoutV2 | RxOnlyLayoutV2 | DetectorOnlyLayoutV2,
+    Field(discriminator="kind"),
 ]
+
+
+def expected_postboot_layout(
+    profile: RxOnlyAttestationProfile,
+) -> Literal["rx-only", "detector-only"]:
+    """Map an explicit candidate policy to its one admissible postboot layout."""
+
+    return "detector-only" if profile == RX_DETECTOR_ONLY_POLICY_PROFILE else "rx-only"
 
 
 class RuntimeObservationV2(ApiModel):
@@ -414,6 +440,7 @@ class ReleaseCandidateRamReceiptV2(ApiModel):
     expected_hardware_model: HardwareModel
     expected_metadata_abi: MetadataAbi | None
     required_capabilities: tuple[str, ...]
+    attestation_profile: RxOnlyAttestationProfile = RX_ONLY_POLICY_PROFILE
     pre_runtime: RuntimeObservationV2 | None
     post_runtime: RuntimeObservationV2 | None
     preboot_quiesce: PrebootQuiesceReceiptV2 | None
@@ -477,8 +504,11 @@ class ReleaseCandidateRamReceiptV2(ApiModel):
                 raise ValueError("passing receipt requires pre/post runtime observations")
             if self.pre_runtime.layout.kind != "tx-capable":
                 raise ValueError("passing RX-only receipt requires TX-capable preboot proof")
-            if self.post_runtime.layout.kind != "rx-only":
-                raise ValueError("passing RX-only receipt requires RX-only postboot proof")
+            expected_layout = expected_postboot_layout(self.attestation_profile)
+            if self.post_runtime.layout.kind != expected_layout:
+                raise ValueError(
+                    "passing RX-only receipt requires the policy-selected postboot proof"
+                )
             pre_setup = self.pre_runtime.single_rx_setup
             setup = self.post_runtime.single_rx_setup
             if (
@@ -556,7 +586,7 @@ class ReleaseCandidateRamReceiptV2(ApiModel):
         assert self.post_runtime is not None
         pre = self.pre_runtime
         post = self.post_runtime
-        if post.layout.kind == "rx-only":
+        if post.layout.kind == expected_postboot_layout(self.attestation_profile):
             if (
                 post.hardware_model != self.expected_hardware_model
                 or post.firmware_version != self.expected_firmware
@@ -748,6 +778,7 @@ def validate_rx_only_contract_bundle(
         or receipt.expected_hardware_model != expected.hardware_model
         or receipt.expected_metadata_abi != expected.metadata_abi
         or receipt.required_capabilities != expected.capabilities
+        or receipt.attestation_profile != candidate.attestation_policy.profile
     ):
         raise ValueError("receipt expected runtime does not match the candidate plan")
     if receipt.host_route.destination != f"{operation.ssh_host}/32":

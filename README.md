@@ -959,11 +959,14 @@ applied if preflight aborts; the utility never restores them by enabling TX.
 
 Postboot qualification requires the same serial, USB topology, model, 1R1T
 target and U-Boot identity, a new boot ID, byte-identical `qspi-linux`, exact
-`voltage0,voltage1` scan geometry, RX DMA present, and DDS, TX DMA, and tandem
-absent. Absence is accepted only with the exact reviewed root device-tree marker
-`misko,rx-only-fpga` under policy `rx-only-v1`. The postboot control inventory
-must contain one real TX gain and the one shared TX LO; values are never cloned
-to manufacture two-channel evidence.
+`voltage0,voltage1` scan geometry, and DDS, TX DMA, and tandem absent. The
+candidate plan must select one exact topology policy: `rx-only-v1` requires RX
+DMA enabled, while `rx-detector-only-v1` requires the receive ADC/IIO core but
+requires RX DMA disabled. The two layouts cannot satisfy each other's receipt.
+Absence is accepted only with the exact reviewed root device-tree marker
+`misko,rx-only-fpga`. The postboot control inventory must contain one real TX
+gain and the one shared TX LO; values are never cloned to manufacture
+two-channel evidence.
 
 USB arrival may also trigger a distribution libiio udev discovery probe. The
 v2 attestor therefore retries an incomplete IIO identity/core-device inventory

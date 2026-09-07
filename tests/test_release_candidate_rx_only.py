@@ -26,6 +26,7 @@ from pluto_plus.release_candidate_rx_only import (
     RX_ONLY_OPERATION_PLAN_SCHEMA,
     RX_ONLY_RAM_RECEIPT_SCHEMA,
     RX_ONLY_RECOVERY_RECEIPT_SCHEMA,
+    DetectorOnlyLayoutV2,
     ExpectedRuntimeV2,
     PrebootQuiesceReceiptV2,
     ReleaseCandidateOperationPlanV2,
@@ -33,6 +34,8 @@ from pluto_plus.release_candidate_rx_only import (
     ReleaseCandidateRamReceiptV2,
     ReleaseCandidateRecoveryReceiptV2,
     RuntimeObservationV2,
+    RxOnlyAttestationPolicy,
+    RxOnlyAttestationProfile,
     RxOnlyLayoutV2,
     SharedTxLoSafeState,
     SingleRxSafeStateV2,
@@ -42,6 +45,7 @@ from pluto_plus.release_candidate_rx_only import (
     build_rx_only_operation_plan,
     load_candidate_plan_document,
     load_ram_receipt_document,
+    validate_rx_only_contract_bundle,
     validate_rx_only_recovery_bundle,
     validate_rx_only_recovery_source,
 )
@@ -57,7 +61,9 @@ def _file(name: str, fill: str, *, size: int) -> FileIdentity:
     return FileIdentity(path=Path("/evidence") / name, bytes=size, sha256=fill * 64)
 
 
-def _candidate() -> ReleaseCandidatePlanV2:
+def _candidate(
+    profile: RxOnlyAttestationProfile = "rx-only-v1",
+) -> ReleaseCandidatePlanV2:
     return ReleaseCandidatePlanV2(
         candidate_id="1" * 32,
         created_at=NOW,
@@ -75,6 +81,7 @@ def _candidate() -> ReleaseCandidatePlanV2:
             metadata_abi=None,
             capabilities=(),
         ),
+        attestation_policy=RxOnlyAttestationPolicy(profile=profile),
     )
 
 
@@ -90,8 +97,10 @@ def _target() -> UsbInventoryTarget:
     )
 
 
-def _operation() -> ReleaseCandidateOperationPlanV2:
-    candidate = _candidate()
+def _operation(
+    profile: RxOnlyAttestationProfile = "rx-only-v1",
+) -> ReleaseCandidateOperationPlanV2:
+    candidate = _candidate(profile)
     return ReleaseCandidateOperationPlanV2(
         plan_id="7" * 32,
         created_at=NOW,
@@ -130,11 +139,16 @@ def _tx_safe() -> TxCapableSingleRxSafeStateV2:
 
 
 def _runtime(*, firmware: str, boot: str, layout: str) -> RuntimeObservationV2:
-    selected_layout = (
-        TxCapableLayoutV2(safe_state=_tx_safe())
-        if layout == "tx-capable"
-        else RxOnlyLayoutV2(safe_state=SingleRxSafeStateV2(tx_gain_db=(-80.0,)))
-    )
+    if layout == "tx-capable":
+        selected_layout = TxCapableLayoutV2(safe_state=_tx_safe())
+    elif layout == "detector-only":
+        selected_layout = DetectorOnlyLayoutV2(
+            safe_state=SingleRxSafeStateV2(tx_gain_db=(-80.0,))
+        )
+    else:
+        selected_layout = RxOnlyLayoutV2(
+            safe_state=SingleRxSafeStateV2(tx_gain_db=(-80.0,))
+        )
     return RuntimeObservationV2(
         serial=SERIAL,
         topology=TOPOLOGY,
@@ -150,9 +164,11 @@ def _runtime(*, firmware: str, boot: str, layout: str) -> RuntimeObservationV2:
     )
 
 
-def _receipt() -> ReleaseCandidateRamReceiptV2:
-    candidate = _candidate()
-    operation = _operation()
+def _receipt(
+    profile: RxOnlyAttestationProfile = "rx-only-v1",
+) -> ReleaseCandidateRamReceiptV2:
+    candidate = _candidate(profile)
+    operation = _operation(profile)
     return ReleaseCandidateRamReceiptV2(
         receipt_id="a" * 32,
         outcome="pass",
@@ -171,6 +187,7 @@ def _receipt() -> ReleaseCandidateRamReceiptV2:
         expected_hardware_model=PLUTO_REV_C_AD9361_MODEL,
         expected_metadata_abi=None,
         required_capabilities=(),
+        attestation_profile=profile,
         pre_runtime=_runtime(
             firmware=CURRENT,
             boot="11111111-1111-4111-8111-111111111111",
@@ -179,7 +196,9 @@ def _receipt() -> ReleaseCandidateRamReceiptV2:
         post_runtime=_runtime(
             firmware=CANDIDATE,
             boot="22222222-2222-4222-8222-222222222222",
-            layout="rx-only",
+            layout=(
+                "detector-only" if profile == "rx-detector-only-v1" else "rx-only"
+            ),
         ),
         preboot_quiesce=PrebootQuiesceReceiptV2(readback_verified=True),
         host_route=HostRouteReceipt(
@@ -424,6 +443,35 @@ def test_rx_only_layout_requires_absent_tx_devices_and_exact_marker() -> None:
         RxOnlyLayoutV2.model_validate(_payload(layout, dds_device="disabled"))
     with pytest.raises(ValidationError):
         RxOnlyLayoutV2.model_validate(_payload(layout, root_device_tree_marker=None))
+
+
+def test_detector_only_profile_requires_disabled_rx_dma_layout_and_binds_receipt() -> None:
+    profile: RxOnlyAttestationProfile = "rx-detector-only-v1"
+    candidate = _candidate(profile)
+    operation = _operation(profile)
+    receipt = _receipt(profile)
+
+    assert receipt.post_runtime is not None
+    assert receipt.post_runtime.layout.kind == "detector-only"
+    assert receipt.post_runtime.layout.rx_adc_device == "cf-ad9361-lpc"
+    assert receipt.post_runtime.layout.rx_dma_device is None
+    validate_rx_only_contract_bundle(
+        candidate,
+        operation,
+        receipt,
+        candidate_path=Path("/evidence/candidate-plan-v2.json"),
+        operation_path=Path("/evidence/operation-plan-v2.json"),
+    )
+
+    payload = receipt.model_dump(mode="python", by_alias=True)
+    payload["attestation_profile"] = "rx-only-v1"
+    with pytest.raises(ValidationError, match="policy-selected"):
+        ReleaseCandidateRamReceiptV2.model_validate(payload)
+
+    with pytest.raises(ValidationError):
+        DetectorOnlyLayoutV2.model_validate(
+            _payload(receipt.post_runtime.layout, rx_dma_device="cf-ad9361-lpc")
+        )
 
 
 def test_passing_receipt_requires_same_target_uboot_identity_pre_and_post() -> None:

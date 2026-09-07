@@ -38,9 +38,11 @@ from pluto_plus.release_candidate_rx_only import (
     SHARED_TX_LO_CONTROL,
     TANDEM_DEVICE,
     TX_DMA_DEVICE,
+    DetectorOnlyLayoutV2,
     PrebootQuiesceReceiptV2,
     ReleaseCandidatePlanV2,
     RuntimeObservationV2,
+    RxOnlyAttestationProfile,
     RxOnlyLayoutV2,
     RxOnlyRuntimeTarget,
     SharedTxLoSafeState,
@@ -48,6 +50,7 @@ from pluto_plus.release_candidate_rx_only import (
     SingleRxSetupObservation,
     TxCapableLayoutV2,
     TxCapableSingleRxSafeStateV2,
+    expected_postboot_layout,
 )
 from pluto_plus.release_candidate_rx_only_lifecycle import (
     RxOnlyFailureReconciliation,
@@ -115,7 +118,7 @@ printf "$format" \
   "$dds_dt_state" "$tx_dma_dt_state" "$tandem_dt_state"
 """
 
-_V2_LAYOUT = Literal["tx-capable", "rx-only"]
+_V2_LAYOUT = Literal["tx-capable", "rx-only", "detector-only"]
 _IIO_SETTLE_RETRY_SECONDS = 0.25
 RxOnlyRuntimeAttestor = Callable[
     [
@@ -171,6 +174,7 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
         *,
         runtime_target: RxOnlyRuntimeTarget,
         expected_firmware: str,
+        attestation_profile: RxOnlyAttestationProfile,
         password: PasswordFileIdentity,
         route: HostRouteReceipt,
     ) -> RuntimeObservationV2:
@@ -182,7 +186,7 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
             password,
             route,
             runtime_target,
-            "rx-only",
+            expected_postboot_layout(attestation_profile),
         )
 
     def reconcile_failure_v2(
@@ -231,6 +235,7 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
                 returned,
                 runtime_target=runtime_target,
                 expected_firmware=candidate.expected_runtime.firmware_version,
+                attestation_profile=candidate.attestation_policy.profile,
                 password=password,
                 route=route,
             )
@@ -484,18 +489,22 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
                 state = round(_first_float(_read_attr(tandem, "state")))
                 fifo = round(_first_float(_read_attr(tandem, "fifo_level")))
                 faults = round(_first_float(_read_attr(tandem, "fault_flags")))
-                layout: TxCapableLayoutV2 | RxOnlyLayoutV2 = TxCapableLayoutV2(
-                    safe_state=TxCapableSingleRxSafeStateV2.model_validate(
-                        {
-                            "tx_gain_db": gains,
-                            "dds_raw": dds_raw,
-                            "dds_scale": dds_scale,
-                            "dac_selectors": selectors,
-                            "tandem_state": "IDLE" if state == 0 else f"STATE_{state}",
-                            "fifo_level": fifo,
-                            "fault_flags": faults,
-                            "shared_tx_lo": shared_lo,
-                        }
+                layout: TxCapableLayoutV2 | RxOnlyLayoutV2 | DetectorOnlyLayoutV2 = (
+                    TxCapableLayoutV2(
+                        safe_state=TxCapableSingleRxSafeStateV2.model_validate(
+                            {
+                                "tx_gain_db": gains,
+                                "dds_raw": dds_raw,
+                                "dds_scale": dds_scale,
+                                "dac_selectors": selectors,
+                                "tandem_state": (
+                                    "IDLE" if state == 0 else f"STATE_{state}"
+                                ),
+                                "fifo_level": fifo,
+                                "fault_flags": faults,
+                                "shared_tx_lo": shared_lo,
+                            }
+                        )
                     )
                 )
             else:
@@ -503,16 +512,29 @@ class LinuxRxOnlyReleaseCandidateBackend(LinuxReleaseCandidateBackend):
                     raise ReleaseCandidateLifecycleError(
                         "RX-only runtime still exposes DDS or tandem"
                     )
-                if topology != (True, "enabled", "disabled", "disabled", "disabled"):
-                    raise ReleaseCandidateLifecycleError(
-                        "RX-only marker/DMA device-tree topology is not exact"
-                    )
-                layout = RxOnlyLayoutV2(
-                    safe_state=SingleRxSafeStateV2(
-                        tx_gain_db=gains,
-                        shared_tx_lo=shared_lo,
-                    )
+                expected_rx_dma_state = (
+                    "disabled" if expected_layout == "detector-only" else "enabled"
                 )
+                if topology != (
+                    True,
+                    expected_rx_dma_state,
+                    "disabled",
+                    "disabled",
+                    "disabled",
+                ):
+                    raise ReleaseCandidateLifecycleError(
+                        f"{expected_layout} marker/DMA device-tree topology is not exact"
+                    )
+                safe_state = SingleRxSafeStateV2(
+                    tx_gain_db=gains,
+                    shared_tx_lo=shared_lo,
+                )
+                if expected_layout == "detector-only":
+                    layout = DetectorOnlyLayoutV2(safe_state=safe_state)
+                else:
+                    layout = RxOnlyLayoutV2(
+                        safe_state=safe_state,
+                    )
             capabilities = ("tandem-agc",) if tandem is not None else ()
             return RuntimeObservationV2(
                 serial=serial,
