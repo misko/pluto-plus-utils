@@ -9,6 +9,7 @@ from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.pss_iio import (
     PSS_MAP_CHUNK_BINS,
     PSS_MAP_CHUNK_MAGIC,
+    PSS_MAP_CHUNK_WORDS,
     PSS_MAP_CHUNKS,
     PSS_MAP_VERSIONS,
     PSS_PACKET_HEADER,
@@ -163,7 +164,7 @@ def _client() -> tuple[PssIioClient, _Device, _Device]:
             "coefficient_words": 0,
             "coefficient_commit": 0,
         },
-        [_Channel("packet_words", 26), _Channel("timestamp", 1)],
+        [_Channel("packet_words", 26)],
     )
     phase_map = _Device(
         "starlink-pss-map",
@@ -178,7 +179,7 @@ def _client() -> tuple[PssIioClient, _Device, _Device]:
             "fault_flags": 0,
             "acquisition_enable": 0,
         },
-        [_Channel("chunk_metadata", 9), _Channel("phase_bins", 100)],
+        [_Channel("chunk_words", PSS_MAP_CHUNK_WORDS)],
     )
     context = _Context(tracker, phase_map)
     return PssIioClient(context, SimpleNamespace(Buffer=_Buffer)), tracker, phase_map

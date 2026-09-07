@@ -38,7 +38,8 @@ PSS_MAP_CHUNK_MAGIC = 0x4B4E4843
 PSS_MAP_CHUNK_BINS = 100
 PSS_MAP_CHUNKS = PSS_MAP_PHASE_BINS // PSS_MAP_CHUNK_BINS
 PSS_MAP_METADATA_WORDS = 9
-PSS_MAP_CHUNK_BYTES = PSS_MAP_METADATA_WORDS * 4 + PSS_MAP_CHUNK_BINS * 2
+PSS_MAP_CHUNK_WORDS = PSS_MAP_METADATA_WORDS + PSS_MAP_CHUNK_BINS // 2
+PSS_MAP_CHUNK_BYTES = PSS_MAP_CHUNK_WORDS * 4
 
 
 def _signed_16(value: int) -> int:
@@ -266,8 +267,7 @@ def _find_scan_channel(device: Any, expected_repeat: int) -> Any:
     # pylibiio 0.25 does not expose repeat on every build. Names are stable.
     names = {
         PSS_RESULT_WORDS: "packet_words",
-        PSS_MAP_METADATA_WORDS: "chunk_metadata",
-        PSS_MAP_CHUNK_BINS: "phase_bins",
+        PSS_MAP_CHUNK_WORDS: "chunk_words",
     }
     wanted = names[expected_repeat]
     for channel in candidates:
@@ -489,8 +489,7 @@ class PssIioClient:
         if refill_chunks < PSS_MAP_CHUNKS:
             raise ValueError(f"phase-map refill must hold at least {PSS_MAP_CHUNKS} chunks")
         _disable_scan_channels(self.phase_map)
-        _find_scan_channel(self.phase_map, PSS_MAP_METADATA_WORDS).enabled = True
-        _find_scan_channel(self.phase_map, PSS_MAP_CHUNK_BINS).enabled = True
+        _find_scan_channel(self.phase_map, PSS_MAP_CHUNK_WORDS).enabled = True
         self._map_buffer = self._iio.Buffer(self.phase_map, refill_chunks, False)
         try:
             _write_attr(self.phase_map, "acquisition_enable", 1)
