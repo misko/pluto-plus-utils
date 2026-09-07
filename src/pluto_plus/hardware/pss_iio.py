@@ -12,6 +12,7 @@ import importlib
 import struct
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
@@ -38,6 +39,37 @@ PSS_MAP_CHUNK_BINS = 100
 PSS_MAP_CHUNKS = PSS_MAP_PHASE_BINS // PSS_MAP_CHUNK_BINS
 PSS_MAP_METADATA_WORDS = 9
 PSS_MAP_CHUNK_BYTES = PSS_MAP_METADATA_WORDS * 4 + PSS_MAP_CHUNK_BINS * 2
+
+
+def _signed_16(value: int) -> int:
+    return value - (1 << 16) if value & (1 << 15) else value
+
+
+def read_ci16_coefficients(path: Path, *, rate_msps: int) -> tuple[tuple[int, int], ...]:
+    """Read the FPGA's strict one-packed-CI16-word-per-line coefficient format."""
+
+    if rate_msps not in PSS_TRACK_VERSIONS:
+        raise ValueError("PSS tracker rate must be 15, 30, or 60 MS/s")
+    expected = 66 * (rate_msps // 15)
+    coefficients: list[tuple[int, int]] = []
+    for line_number, raw in enumerate(path.read_text(encoding="ascii").splitlines(), 1):
+        word = raw.strip()
+        if len(word) != 8 or any(
+            character not in "0123456789abcdefABCDEF" for character in word
+        ):
+            raise ValueError(
+                f"PSS coefficient line {line_number} is not one packed CI16 word"
+            )
+        packed = int(word, 16)
+        coefficients.append(
+            (_signed_16(packed & 0xFFFF), _signed_16(packed >> 16))
+        )
+    if len(coefficients) != expected:
+        raise ValueError(
+            f"{rate_msps} MS/s coefficient file has {len(coefficients)} words, "
+            f"expected {expected}"
+        )
+    return tuple(coefficients)
 
 
 def _s48(low: int, high: int) -> int:
@@ -263,6 +295,53 @@ def _split_scans(payload: bytes, scan_bytes: int) -> tuple[bytes, ...]:
     )
 
 
+def _close_iio_buffer(iio_module: Any, buffer: Any) -> None:
+    """Cancel and destroy modern or legacy pylibiio buffers exactly once."""
+
+    first_error: BaseException | None = None
+    cancel = getattr(buffer, "cancel", None)
+    if callable(cancel):
+        try:
+            cancel()
+        except BaseException as error:
+            first_error = error
+    try:
+        closer = getattr(buffer, "close", None) or getattr(buffer, "destroy", None)
+        if callable(closer):
+            closer()
+        else:
+            native = getattr(buffer, "_buffer", None)
+            destroy = getattr(iio_module, "_buffer_destroy", None)
+            if native is None or not callable(destroy):
+                raise RadioConfigurationError(
+                    "pylibiio buffer exposes no deterministic destroy operation"
+                )
+            buffer._buffer = None
+            destroy(native)
+    except BaseException as error:
+        if first_error is None:
+            first_error = error
+    if first_error is not None:
+        raise first_error
+
+
+def _close_iio_context(iio_module: Any, context: Any) -> None:
+    """Destroy modern or legacy pylibiio contexts exactly once."""
+
+    closer = getattr(context, "close", None) or getattr(context, "destroy", None)
+    if callable(closer):
+        closer()
+        return
+    native = getattr(context, "_context", None)
+    destroy = getattr(iio_module, "_destroy", None)
+    if native is None or not callable(destroy):
+        raise RadioConfigurationError(
+            "pylibiio context exposes no deterministic close operation"
+        )
+    context._context = None
+    destroy(native)
+
+
 class PssIioClient:
     """Capability-discovered, network-safe IIO client for the two PSS devices."""
 
@@ -276,11 +355,17 @@ class PssIioClient:
         self._map_buffer: Any | None = None
         self._expected_request: int | None = None
         self._remaining_results: int | None = None
+        self._closed = False
 
     @classmethod
     def connect(cls, uri: str, *, iio_module: Any | None = None) -> Self:
         module = iio_module or importlib.import_module("iio")
-        return cls(module.Context(uri), module)
+        context = module.Context(uri)
+        try:
+            return cls(context, module)
+        except BaseException:
+            _close_iio_context(module, context)
+            raise
 
     def _find_device(self, name: str) -> Any:
         find_device = getattr(self.context, "find_device", None)
@@ -336,6 +421,11 @@ class PssIioClient:
         _write_attr(self.tracker, "coefficient_commit", 1)
         if _read_int_attr(self.tracker, "active_coefficient_generation") != generation:
             raise RadioConfigurationError("PSS coefficient commit did not become active")
+
+    def load_coefficient_file(self, path: Path, *, generation: int) -> None:
+        self.load_coefficients(
+            read_ci16_coefficients(path, rate_msps=self.rate_msps), generation
+        )
 
     def open_fine(
         self,
@@ -427,35 +517,45 @@ class PssIioClient:
         return tuple(maps)
 
     def close_fine(self) -> None:
-        if self._fine_buffer is None:
+        buffer = self._fine_buffer
+        if buffer is None:
             return
+        self._fine_buffer = None
         try:
             _write_attr(self.tracker, "schedule_enable", 0)
         finally:
-            cancel = getattr(self._fine_buffer, "cancel", None)
-            if callable(cancel):
-                cancel()
-            self._fine_buffer = None
             self._expected_request = None
             self._remaining_results = None
+            _close_iio_buffer(self._iio, buffer)
 
     def close_maps(self) -> None:
-        if self._map_buffer is None:
+        buffer = self._map_buffer
+        if buffer is None:
             return
+        self._map_buffer = None
         try:
             _write_attr(self.phase_map, "acquisition_enable", 0)
         finally:
-            cancel = getattr(self._map_buffer, "cancel", None)
-            if callable(cancel):
-                cancel()
-            self._map_buffer = None
+            _close_iio_buffer(self._iio, buffer)
 
     def close(self) -> None:
-        self.close_fine()
-        self.close_maps()
-        close = getattr(self.context, "close", None)
-        if callable(close):
-            close()
+        if self._closed:
+            return
+        first_error: BaseException | None = None
+        for close_resource in (self.close_fine, self.close_maps):
+            try:
+                close_resource()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        self._closed = True
+        try:
+            _close_iio_context(self._iio, self.context)
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        if first_error is not None:
+            raise first_error
 
     def __enter__(self) -> Self:
         return self

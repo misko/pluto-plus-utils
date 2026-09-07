@@ -17,6 +17,7 @@ from pluto_plus.hardware.pss_iio import (
     PssIioClient,
     PssMapChunk,
     PssMapReassembler,
+    read_ci16_coefficients,
     reassemble_maps,
 )
 
@@ -126,6 +127,7 @@ class _Buffer:
         self.device = device
         self.count = count
         self.cancelled = False
+        self.closed = False
 
     def refill(self) -> None:
         pass
@@ -135,6 +137,9 @@ class _Buffer:
 
     def cancel(self) -> None:
         self.cancelled = True
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _client() -> tuple[PssIioClient, _Device, _Device]:
@@ -206,3 +211,99 @@ def test_client_fails_closed_on_tracker_map_rate_disagreement() -> None:
     context = _Context(client.tracker, phase_map)
     with pytest.raises(RadioConfigurationError, match="rates disagree"):
         PssIioClient(context, SimpleNamespace(Buffer=_Buffer))
+
+
+def test_coefficient_file_decodes_packed_signed_ci16(tmp_path) -> None:
+    coefficient_path = tmp_path / "coefficients.mem"
+    words = ["f97effc1", *("00010002" for _ in range(263))]
+    coefficient_path.write_text("\n".join(words) + "\n", encoding="ascii")
+    coefficients = read_ci16_coefficients(coefficient_path, rate_msps=60)
+    assert coefficients[0] == (-63, -1666)
+    assert coefficients[-1] == (2, 1)
+
+
+def test_coefficient_file_rejects_bad_word_or_rate_count(tmp_path) -> None:
+    coefficient_path = tmp_path / "coefficients.mem"
+    coefficient_path.write_text("xyz\n", encoding="ascii")
+    with pytest.raises(ValueError, match="line 1"):
+        read_ci16_coefficients(coefficient_path, rate_msps=60)
+    coefficient_path.write_text("00000000\n", encoding="ascii")
+    with pytest.raises(ValueError, match="expected 264"):
+        read_ci16_coefficients(coefficient_path, rate_msps=60)
+
+
+def test_legacy_pylibiio_resources_are_destroyed_exactly_once() -> None:
+    client, _, _ = _client()
+    context = client.context
+    context.close = None  # type: ignore[method-assign]
+    context._context = object()
+    destroyed_contexts: list[object] = []
+    destroyed_buffers: list[object] = []
+
+    class LegacyBuffer(_Buffer):
+        close = None
+
+        def __init__(self, device: _Device, count: int, cyclic: bool) -> None:
+            super().__init__(device, count, cyclic)
+            self._buffer = object()
+
+    module = SimpleNamespace(
+        Buffer=LegacyBuffer,
+        _destroy=destroyed_contexts.append,
+        _buffer_destroy=destroyed_buffers.append,
+    )
+    client._iio = module
+    client.open_fine(
+        first_center=1_000_000,
+        period_q32_32=80_000 << 32,
+        request_base=3,
+        count=1,
+    )
+    client.open_maps()
+    client.close()
+    client.close()
+    assert len(destroyed_buffers) == 2
+    assert len(destroyed_contexts) == 1
+    assert context._context is None
+
+
+def test_connect_destroys_legacy_context_when_contract_discovery_fails() -> None:
+    native = object()
+    destroyed: list[object] = []
+
+    class MissingContext:
+        def __init__(self, uri: str) -> None:
+            self.uri = uri
+            self._context = native
+
+        def find_device(self, name: str) -> None:
+            return None
+
+    module = SimpleNamespace(Context=MissingContext, _destroy=destroyed.append)
+    with pytest.raises(RadioConfigurationError, match="lacks required device"):
+        PssIioClient.connect("usb:5.1.5", iio_module=module)
+    assert destroyed == [native]
+
+
+def test_legacy_buffer_is_destroyed_even_when_cancel_fails() -> None:
+    client, _, _ = _client()
+    destroyed_buffers: list[object] = []
+
+    class FailingCancelBuffer(_Buffer):
+        close = None
+
+        def __init__(self, device: _Device, count: int, cyclic: bool) -> None:
+            super().__init__(device, count, cyclic)
+            self._buffer = object()
+
+        def cancel(self) -> None:
+            raise RuntimeError("cancel failed")
+
+    client._iio = SimpleNamespace(
+        Buffer=FailingCancelBuffer,
+        _buffer_destroy=destroyed_buffers.append,
+    )
+    client.open_maps()
+    with pytest.raises(RuntimeError, match="cancel failed"):
+        client.close_maps()
+    assert len(destroyed_buffers) == 1
