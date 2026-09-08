@@ -3355,6 +3355,53 @@ def test_rx_only_canary_cannot_plan_a_lan_persistent_write(tmp_path: Path) -> No
         )
 
 
+def test_30m_detector_canary_is_local_only_and_has_exact_transition() -> None:
+    profile = bootstrap.STANDALONE_FLASH_PROFILES["starlink-pss-30m-iio-v1-dnm-persistent-canary"]
+
+    assert profile.persistent_allowed is True
+    assert profile.policy.hardware_qualified is False
+    assert profile.policy.asset_sha256 == (
+        "ec00dfcbcc999f6011c980c98ffc5ee21f61172296b7865df795a7c28dd28931"
+    )
+    assert profile.policy.fit_body_sha256 == (
+        "ca1ba8b794f9a91d8bf4674aa7121498a92758bf00453884d33b8b427fa26e95"
+    )
+    assert profile.policy.fit_body_size == 13_144_851
+    assert profile.source_iio_layout is bootstrap.SINGLE_RX_RX_ONLY_LAYOUT
+    assert profile.return_iio_layout is bootstrap.SINGLE_RX_DETECTOR_ONLY_LAYOUT
+    assert profile.allowed_before_firmwares == ("v0.50-plutoplus-starlink-pss-15m-rx-only-dnm-v7",)
+
+    rollback = bootstrap.STANDALONE_FLASH_PROFILES[
+        "starlink-pss-15m-rx-only-dnm-v7-from-30m-iio-canary"
+    ]
+    assert rollback.policy.hardware_qualified is False
+    assert rollback.source_iio_layout is bootstrap.SINGLE_RX_DETECTOR_ONLY_LAYOUT
+    assert rollback.return_iio_layout is bootstrap.SINGLE_RX_RX_ONLY_LAYOUT
+    assert rollback.allowed_before_firmwares == ("starlink-pss30-iio-v1-dnm",)
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    (
+        "starlink-pss-30m-iio-v1-dnm-persistent-canary",
+        "starlink-pss-15m-rx-only-dnm-v7-from-30m-iio-canary",
+    ),
+)
+def test_30m_detector_canary_round_trip_cannot_plan_lan_writes(
+    tmp_path: Path, profile_id: str
+) -> None:
+    image = tmp_path / "candidate.dfu"
+    image.write_bytes(b"not inspected because LAN authority fails first")
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="not qualified"):
+        bootstrap.prepare_lan_flash_plan(
+            image,
+            serial="SERIAL_A",
+            host="192.168.1.17",
+            mutation_profile_id=profile_id,
+        )
+
+
 def test_single_rx_remote_safety_contracts_are_layout_specific() -> None:
     common = {
         "serial": "SERIAL_A",
@@ -3398,10 +3445,22 @@ def test_single_rx_remote_safety_contracts_are_layout_specific() -> None:
     }
     bootstrap._require_remote_tx_safe(rx_only, bootstrap.SINGLE_RX_RX_ONLY_LAYOUT)
 
+    detector_only = {
+        **rx_only,
+        "all_buffer_enable": "0,0",
+        "rx_dma_dt_state": "disabled",
+    }
+    bootstrap._require_remote_tx_safe(detector_only, bootstrap.SINGLE_RX_DETECTOR_ONLY_LAYOUT)
+
     with pytest.raises(bootstrap.BootstrapFirmwareError, match="rx-only-1r1t-v1"):
         bootstrap._require_remote_tx_safe(
             {**rx_only, "tx_lo_powerdown": "0"},
             bootstrap.SINGLE_RX_RX_ONLY_LAYOUT,
+        )
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="detector-only-1r1t-v1"):
+        bootstrap._require_remote_tx_safe(
+            {**detector_only, "rx_dma_dt_state": "enabled"},
+            bootstrap.SINGLE_RX_DETECTOR_ONLY_LAYOUT,
         )
 
 

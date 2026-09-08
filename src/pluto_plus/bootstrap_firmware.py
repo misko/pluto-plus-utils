@@ -74,8 +74,10 @@ from pluto_plus.doctor import (
     IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY,
     SINGLE_RX_METADATA_RC1_RAM_POLICY,
+    STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_CANARY_POLICY,
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY,
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_PROMOTION_POLICY,
+    STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
     TANDEM_V6_DEVELOPMENT_POLICY,
@@ -123,7 +125,7 @@ class StandaloneIioLayout:
     tx_dds_tone_count: int
     minimum_buffer_count: int
     tx_lo_powerdown_count: int | None = None
-    device_tree_contract: Literal["ignore", "tx-capable", "rx-only"] = "ignore"
+    device_tree_contract: Literal["ignore", "tx-capable", "rx-only", "detector-only"] = "ignore"
 
 
 PAIRED_RX_TX_CAPABLE_LAYOUT = StandaloneIioLayout(
@@ -160,6 +162,18 @@ SINGLE_RX_RX_ONLY_LAYOUT = StandaloneIioLayout(
     tx_lo_powerdown_count=1,
     device_tree_contract="rx-only",
 )
+SINGLE_RX_DETECTOR_ONLY_LAYOUT = StandaloneIioLayout(
+    layout_id="detector-only-1r1t-v1",
+    rx_scan_channels=(),
+    dds_present=False,
+    tandem_agc=False,
+    tx_hardwaregain_count=1,
+    tx_scan_count=0,
+    tx_dds_tone_count=0,
+    minimum_buffer_count=2,
+    tx_lo_powerdown_count=1,
+    device_tree_contract="detector-only",
+)
 
 _IIO_LAYOUTS = {
     layout.layout_id: layout
@@ -167,6 +181,7 @@ _IIO_LAYOUTS = {
         PAIRED_RX_TX_CAPABLE_LAYOUT,
         SINGLE_RX_TX_CAPABLE_LAYOUT,
         SINGLE_RX_RX_ONLY_LAYOUT,
+        SINGLE_RX_DETECTOR_ONLY_LAYOUT,
     )
 }
 
@@ -650,6 +665,30 @@ STANDALONE_FLASH_PROFILES = {
             allowed_before_firmwares=(
                 IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY.device_firmware,
                 IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_RX_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_CANARY_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_CANARY_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_RX_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
             ),
         )
     ),
@@ -2835,6 +2874,14 @@ def _require_remote_tx_safe(fields: dict[str, str], layout: StandaloneIioLayout)
         tx_safe = tx_safe and (
             fields.get("root_marker_present") == "1"
             and fields.get("rx_dma_dt_state") == "enabled"
+            and fields.get("dds_dt_state") == "disabled"
+            and fields.get("tx_dma_dt_state") == "disabled"
+            and fields.get("tandem_dt_state") == "disabled"
+        )
+    elif layout.device_tree_contract == "detector-only":
+        tx_safe = tx_safe and (
+            fields.get("root_marker_present") == "1"
+            and fields.get("rx_dma_dt_state") == "disabled"
             and fields.get("dds_dt_state") == "disabled"
             and fields.get("tx_dma_dt_state") == "disabled"
             and fields.get("tandem_dt_state") == "disabled"

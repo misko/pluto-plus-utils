@@ -829,6 +829,41 @@ STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_PROMOTION_POLICY = (
     )
 )
 
+# Exact native-IIO 30 MS/s detector bytes from the deliberately isolated
+# ``codex/starlink-rx-only-do-not-merge`` firmware branch.  The candidate has
+# passed routed timing, repeated RAM boots, cabled full-rate timing, Ethernet
+# transport, and persistent-v7 return on the selected AD9361 radio.  It remains
+# a local persistent canary here: network-only authority is introduced only by
+# a distinct policy after an exact local persistent round trip proves this
+# byte identity and the detector-only IIO topology.
+STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY = FirmwarePolicy(
+    profile_id="starlink-pss-30m-iio-v1-dnm-persistent-canary",
+    release_tag="starlink-pss-30m-iio-v1-dnm-4bcbc3a60861",
+    device_firmware="starlink-pss30-iio-v1-dnm",
+    asset_name="starlink-pss30-iio-v1-dnm-4bcbc3a60861-pluto.dfu",
+    asset_sha256="ec00dfcbcc999f6011c980c98ffc5ee21f61172296b7865df795a7c28dd28931",
+    release_url=(
+        "https://github.com/misko/plutosdr-fw/commit/4bcbc3a6086181ce3c124db17919309b3955a3ec"
+    ),
+    source_commit="4bcbc3a6086181ce3c124db17919309b3955a3ec",
+    fit_body_sha256="ca1ba8b794f9a91d8bf4674aa7121498a92758bf00453884d33b8b427fa26e95",
+    fit_body_size=13_144_851,
+    hardware_qualified=False,
+    published_at=datetime(2026, 9, 8, 0, 9, 2, tzinfo=UTC),
+)
+
+# Exact v7 recovery bytes receive a separate local-only transition policy for
+# the detector-only canary.  Keeping this unqualified for LAN use ensures a
+# local round trip must succeed before either direction can reach a remote
+# radio.
+STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_CANARY_POLICY = (
+    STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY.model_copy(
+        update={
+            "profile_id": "starlink-pss-15m-rx-only-dnm-v7-from-30m-iio-canary",
+        }
+    )
+)
+
 # V0.48 remains the exact, already-qualified recovery bytes.  The new identity
 # does not broaden accepted bytes; it only gives a one-RX RX-only source a
 # layout-aware path back to the normal one-RX TX-capable runtime.
