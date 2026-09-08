@@ -563,7 +563,11 @@ def test_usb_return_accepts_equivalent_rev_c_models_from_ssh_and_iiod(
             "hw_model": "Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
             "fw_version": "v6",
             "ad9361-phy,model": "ad9361",
-            "device_names": ("cf-ad9361-lpc", "tandem-agc"),
+            "device_names": (
+                "cf-ad9361-lpc",
+                "cf-ad9361-dds-core-lpc",
+                "tandem-agc",
+            ),
             "cf-ad9361-lpc,scan_channels": (
                 "voltage0",
                 "voltage1",
@@ -598,7 +602,11 @@ def test_usb_return_accepts_exact_expected_firmware_change(
             "hw_model": "Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
             "fw_version": "v0.42-qspi",
             "ad9361-phy,model": "ad9361",
-            "device_names": ("cf-ad9361-lpc", "tandem-agc"),
+            "device_names": (
+                "cf-ad9361-lpc",
+                "cf-ad9361-dds-core-lpc",
+                "tandem-agc",
+            ),
             "cf-ad9361-lpc,scan_channels": CAPABILITIES.rx_scan_channels,
         },
     )
@@ -613,3 +621,53 @@ def test_usb_return_accepts_exact_expected_firmware_change(
 
     assert after.firmware == "v0.42-qspi"
     assert muted == [f"{SERIAL}:{PATH}"]
+
+
+def test_usb_return_attests_rx_only_safety_without_dds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan(tmp_path)
+    before = LocalRebootAttestation(
+        serial=SERIAL,
+        firmware="v6-rx-only",
+        boot_id="before",
+        capabilities=LocalRebootCapabilities(
+            board_model="Analog Devices PlutoSDR Rev.C (Z7010/AD9363)",
+            phy_model="ad9361",
+            rx_scan_channels=("voltage0", "voltage1"),
+            tandem_agc=False,
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "inspect_bound_iiod",
+        lambda interface: {
+            "hw_serial": SERIAL,
+            "hw_model": "Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
+            "fw_version": "v6-rx-only",
+            "ad9361-phy,model": "ad9361",
+            "device_names": ("cf-ad9361-lpc",),
+            "cf-ad9361-lpc,scan_channels": ("voltage0", "voltage1"),
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "mute_returned_radio_at_path",
+        lambda serial, path: pytest.fail("RX-only return must not require a DDS mute"),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "exact_usb_iio_uri",
+        lambda path, serial: "usb:exact-rx-only",
+    )
+    safety_checks: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        bootstrap,
+        "_require_rx_only_iio_safe",
+        lambda uri, serial: safety_checks.append((uri, serial)),
+    )
+
+    after = local_reboot.attest_and_mute_returned_usb(plan, before)
+
+    assert after.capabilities.rx_scan_channels == ("voltage0", "voltage1")
+    assert safety_checks == [("usb:exact-rx-only", SERIAL)]

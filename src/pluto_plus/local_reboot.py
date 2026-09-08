@@ -427,7 +427,12 @@ def attest_and_mute_returned_usb(
 ) -> LocalRebootAttestation:
     """Independently reconcile a rotated SSH key via exact physical USB-IIO."""
 
-    from pluto_plus.bootstrap_firmware import inspect_bound_iiod, mute_returned_radio_at_path
+    from pluto_plus.bootstrap_firmware import (
+        _require_rx_only_iio_safe,
+        exact_usb_iio_uri,
+        inspect_bound_iiod,
+        mute_returned_radio_at_path,
+    )
 
     facts = inspect_bound_iiod(plan.usb_interface)
     serial = str(facts.get("hw_serial") or "").strip()
@@ -468,7 +473,11 @@ def attest_and_mute_returned_usb(
         or not _equivalent_capabilities(candidate.capabilities, before.capabilities)
     ):
         raise LocalRebootError("returned USB-IIO firmware or capabilities changed across reboot")
-    mute_returned_radio_at_path(plan.serial, Path(plan.usb_sysfs_path))
+    if "cf-ad9361-dds-core-lpc" in names:
+        mute_returned_radio_at_path(plan.serial, Path(plan.usb_sysfs_path))
+    else:
+        uri = exact_usb_iio_uri(Path(plan.usb_sysfs_path), plan.serial)
+        _require_rx_only_iio_safe(uri, plan.serial)
     return candidate
 
 
