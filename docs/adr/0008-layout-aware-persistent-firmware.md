@@ -58,4 +58,5 @@ local-only.
   machinery instead of a direct SSH or MTD bypass.
 - A source-version or topology mismatch fails before staging firmware.
 - LAN receipts schema v2 include both layouts and a post-key-rotation, read-only
-  return attestation of QSPI identity, device-tree state, and TX safety.
+  return attestation of the boot ID, full-QSPI and FIT hashes, device-tree state,
+  and TX safety.

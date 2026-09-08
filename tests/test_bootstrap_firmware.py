@@ -2407,6 +2407,9 @@ class FakeLanSshTransport:
             return (
                 f"PPU\tserial\t{self.plan.target_serial}\n"
                 f"PPU\tfirmware\t{firmware}\n"
+                "PPU\tboot_id\t11111111-1111-4111-8111-111111111111\n"
+                "PPU\tqspi_bytes\t33554432\n"
+                f"PPU\tqspi_sha256\t{'3' * 64}\n"
                 f"PPU\tfit_sha256\t{fit_sha256}\n"
                 "PPU\tall_buffer_enable\t0,0\n"
                 "PPU\tdds_present\t1\n"
@@ -2530,6 +2533,10 @@ def test_execute_lan_flash_orders_attestation_rotation_and_receipt(
     assert receipt["schema_version"] == 2
     assert receipt["outcome"] == "success"
     assert receipt["host_key_rotation"]["replacement_known_hosts_sha256"] == "2" * 64
+    assert receipt["read_only_return_attestation"]["boot_id"] == (
+        "11111111-1111-4111-8111-111111111111"
+    )
+    assert receipt["read_only_return_attestation"]["qspi_sha256"] == "3" * 64
 
 
 def test_execute_lan_flash_refuses_unsafe_tx_before_staging(
@@ -2761,6 +2768,9 @@ class ReadOnlyReconciliationTransport:
         return (
             f"PPU\tserial\t{self.plan.target_serial}\n"
             f"PPU\tfirmware\t{self.plan.expected_firmware}\n"
+            "PPU\tboot_id\t11111111-1111-4111-8111-111111111111\n"
+            "PPU\tqspi_bytes\t33554432\n"
+            f"PPU\tqspi_sha256\t{'3' * 64}\n"
             f"PPU\tfit_sha256\t{self.plan.fit_sha256}\n"
             "PPU\tall_buffer_enable\t0,0\n"
             "PPU\tdds_present\t1\n"

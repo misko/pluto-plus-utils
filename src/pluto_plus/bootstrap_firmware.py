@@ -2378,6 +2378,7 @@ def execute_lan_flash_plan(
         if not hmac.compare_digest(returned_fields["fit_sha256"], plan.fit_sha256):
             raise BootstrapFirmwareError("remote return QSPI FIT differs from the plan")
         _require_remote_tx_safe(returned_fields, profile.return_iio_layout)
+        receipt["read_only_return_attestation"] = dict(returned_fields)
         phases.append("remote_return_tx_safe_read_only_attested")
         _update_receipt(receipt_path, receipt, phases)
         result = BootstrapResult(
@@ -2633,6 +2634,9 @@ dt_state() {
 }
 serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
 firmware=$(awk '$1 == "device-fw" {print $2; exit}' /opt/VERSIONS)
+boot_id=$(cat /proc/sys/kernel/random/boot_id)
+qspi_bytes=$(cat /sys/class/mtd/mtd3/size)
+qspi_sha256=$(sha256sum /dev/mtdblock3 | awk '{print $1}')
 fit_sha256=$(head -c "$fit_size" /dev/mtdblock3 | sha256sum | awk '{print $1}')
 test "$serial" = "$serial_expected"
 phy=''; dds=''; tandem_present=0
@@ -2686,6 +2690,9 @@ root_marker_present=0
 test ! -e "$dt_root/misko,rx-only-fpga" || root_marker_present=1
 emit serial "$serial"
 emit firmware "$firmware"
+emit boot_id "$boot_id"
+emit qspi_bytes "$qspi_bytes"
+emit qspi_sha256 "$qspi_sha256"
 emit fit_sha256 "$fit_sha256"
 emit all_buffer_enable "$buffers"
 emit dds_present "$dds_present"
@@ -2730,6 +2737,9 @@ def _parse_reconciliation_report(output: str) -> dict[str, str]:
     required = {
         "serial",
         "firmware",
+        "boot_id",
+        "qspi_bytes",
+        "qspi_sha256",
         "fit_sha256",
         "all_buffer_enable",
         "dds_present",
@@ -2746,7 +2756,18 @@ def _parse_reconciliation_report(output: str) -> dict[str, str]:
         "tx_dma_dt_state",
         "tandem_dt_state",
     }
-    if set(fields) != required or not re.fullmatch(r"[0-9a-f]{64}", fields["fit_sha256"]):
+    if (
+        set(fields) != required
+        or re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            fields["boot_id"],
+        )
+        is None
+        or not fields["qspi_bytes"].isdigit()
+        or int(fields["qspi_bytes"]) <= 0
+        or re.fullmatch(r"[0-9a-f]{64}", fields["qspi_sha256"]) is None
+        or re.fullmatch(r"[0-9a-f]{64}", fields["fit_sha256"]) is None
+    ):
         raise BootstrapFirmwareError("remote reconciliation report is incomplete")
     return fields
 
