@@ -49,7 +49,7 @@ def _iio_facts() -> dict[str, object]:
     return {
         "hw_serial": SERIAL,
         "fw_version": "candidate-v1",
-        "hw_model": "PlutoSDR+ Rev.C",
+        "hw_model": "Analog Devices PlutoSDR Rev.C (Z7010-AD9361)",
         "ad9361-phy,model": "ad9361",
         "iio,buffer-metadata": "3",
         "device_names": ("ad9361-phy", "cf-ad9361-lpc", "tandem-agc"),
@@ -245,9 +245,10 @@ def test_prepare_network_reboot_binds_iio_identity_and_metadata(tmp_path: Path) 
         iio_inspector=lambda _host: _iio_facts(),
     )
 
-    assert plan.schema_version == 2
+    assert plan.schema_version == 3
     assert plan.expected_metadata_abi == 3
     assert plan.before == _attestation()
+    assert plan.iio_before.board_model == "Analog Devices PlutoSDR Rev.C (Z7010-AD9361)"
 
 
 def test_execute_network_reboot_proves_disappear_return_and_rotated_key(

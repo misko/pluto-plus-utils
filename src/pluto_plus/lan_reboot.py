@@ -21,7 +21,6 @@ from pluto_plus.hardware.iio_metadata import require_metadata_abi_capability
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 from pluto_plus.local_reboot import (
     LocalRebootAttestation,
-    LocalRebootCapabilities,
     LocalRebootTransport,
 )
 
@@ -84,6 +83,7 @@ class LanNetworkRebootPlan:
     known_hosts_sha256: str
     expected_metadata_abi: int
     before: LocalRebootAttestation
+    iio_before: LanNetworkIioAttestation
     confirmation_phrase: str
 
 
@@ -104,6 +104,19 @@ class LanNetworkRebootReceipt:
     dispatch_error: str | None
     error: str | None
     receipt_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class LanNetworkIioAttestation:
+    """IIOD-owned identity and topology kept distinct from device-tree labels."""
+
+    serial: str
+    firmware: str
+    metadata_abi: int
+    board_model: str
+    phy_model: str
+    rx_scan_channels: tuple[str, ...]
+    tandem_agc: bool
 
 
 def prepare_lan_reboot(
@@ -153,14 +166,13 @@ def prepare_lan_network_reboot(
         raise LanRebootError("remote attestation lacks the exact serial or boot identity")
     facts = _inspect_network_iio(ssh_host, iio_inspector)
     expected_metadata_abi = _metadata_abi(facts)
-    _require_network_iio_matches(
+    iio_before = _network_iio_attestation(
         facts,
-        serial=serial,
-        before=before,
         expected_metadata_abi=expected_metadata_abi,
     )
+    _require_iio_matches_ssh(iio_before, before)
     return LanNetworkRebootPlan(
-        schema_version=2,
+        schema_version=3,
         plan_id=uuid.uuid4().hex,
         created_at=_now(),
         serial=serial,
@@ -168,6 +180,7 @@ def prepare_lan_network_reboot(
         known_hosts_sha256=known_hosts_sha256,
         expected_metadata_abi=expected_metadata_abi,
         before=before,
+        iio_before=iio_before,
         confirmation_phrase=f"REBOOT LAN {serial}",
     )
 
@@ -245,12 +258,12 @@ def execute_lan_network_reboot(
         completed.append("remote_identity_reattested")
         checkpoint()
         facts = _inspect_network_iio(plan.ssh_host, iio_inspector)
-        _require_network_iio_matches(
+        fresh_iio = _network_iio_attestation(
             facts,
-            serial=plan.serial,
-            before=before,
             expected_metadata_abi=plan.expected_metadata_abi,
         )
+        if fresh_iio != plan.iio_before:
+            raise LanRebootError("LAN IIOD identity or topology changed after planning")
         completed.append("lan_iiod_identity_reattested")
         checkpoint()
         transport.ensure_tx_safe(plan.serial)
@@ -435,41 +448,59 @@ def _metadata_abi(facts: Mapping[str, object]) -> int:
     return value
 
 
-def _require_network_iio_matches(
+def _network_iio_attestation(
     facts: Mapping[str, object],
     *,
-    serial: str,
-    before: LocalRebootAttestation,
     expected_metadata_abi: int,
-) -> None:
-    if str(facts.get("hw_serial") or "").strip() != serial:
-        raise LanRebootError("LAN IIOD serial differs from the reboot plan")
-    if str(facts.get("fw_version") or "").strip() != before.firmware:
-        raise LanRebootError("LAN IIOD firmware differs from the SSH attestation")
+) -> LanNetworkIioAttestation:
     try:
         require_metadata_abi_capability(facts, expected_metadata_abi)
     except ValueError as error:
         raise LanRebootError("LAN IIOD metadata ABI differs from the reboot plan") from error
+    serial = str(facts.get("hw_serial") or "").strip()
+    firmware = str(facts.get("fw_version") or "").strip()
+    board_model = str(facts.get("hw_model") or "").strip()
+    phy_model = str(facts.get("ad9361-phy,model") or "").strip()
+    if not serial or not firmware or not board_model or not phy_model:
+        raise LanRebootError("LAN IIOD identity or model attributes are incomplete")
     raw_names = facts.get("device_names", ())
-    names = (
-        {str(value) for value in raw_names}
-        if isinstance(raw_names, (tuple, list, set, frozenset))
-        else set()
-    )
+    if not isinstance(raw_names, (tuple, list, set, frozenset)):
+        raise LanRebootError("LAN IIOD device inventory is malformed")
+    names = {str(value) for value in raw_names}
     raw_scan = facts.get("cf-ad9361-lpc,scan_channels", ())
-    scan = (
-        tuple(sorted(str(value) for value in raw_scan))
-        if isinstance(raw_scan, (tuple, list, set, frozenset))
-        else ()
-    )
-    observed = LocalRebootCapabilities(
-        board_model=str(facts.get("hw_model") or "").strip(),
-        phy_model=str(facts.get("ad9361-phy,model") or "").strip(),
+    if not isinstance(raw_scan, (tuple, list, set, frozenset)):
+        raise LanRebootError("LAN IIOD RX scan inventory is malformed")
+    scan = tuple(sorted(str(value) for value in raw_scan))
+    if not scan:
+        raise LanRebootError("LAN IIOD RX scan inventory is empty")
+    return LanNetworkIioAttestation(
+        serial=serial,
+        firmware=firmware,
+        metadata_abi=expected_metadata_abi,
+        board_model=board_model,
+        phy_model=phy_model,
         rx_scan_channels=scan,
         tandem_agc="tandem-agc" in names,
     )
-    if observed != before.capabilities:
-        raise LanRebootError("LAN IIOD capabilities differ from the SSH attestation")
+
+
+def _require_iio_matches_ssh(
+    iio: LanNetworkIioAttestation,
+    ssh: LocalRebootAttestation,
+) -> None:
+    # The device-tree model exposed over SSH may retain the factory AD9363 label
+    # while IIOD advertises the active AD9361 runtime variant. Keep both labels
+    # in evidence and compare the operational fields shared by both sources.
+    if iio.serial != ssh.serial:
+        raise LanRebootError("LAN IIOD serial differs from the SSH attestation")
+    if iio.firmware != ssh.firmware:
+        raise LanRebootError("LAN IIOD firmware differs from the SSH attestation")
+    if (
+        iio.phy_model != ssh.capabilities.phy_model
+        or iio.rx_scan_channels != ssh.capabilities.rx_scan_channels
+        or iio.tandem_agc != ssh.capabilities.tandem_agc
+    ):
+        raise LanRebootError("LAN IIOD topology differs from the SSH attestation")
 
 
 def _wait_for_network_iio_state(
@@ -493,12 +524,12 @@ def _wait_for_network_iio_state(
             present = False
         else:
             try:
-                _require_network_iio_matches(
+                observed = _network_iio_attestation(
                     facts,
-                    serial=plan.serial,
-                    before=plan.before,
                     expected_metadata_abi=plan.expected_metadata_abi,
                 )
+                if observed != plan.iio_before:
+                    raise LanRebootError("LAN IIOD return differs from the reboot plan")
             except LanRebootError as error:
                 # During boot, IIOD may answer before all context attributes and
                 # devices have appeared. Treat that as unavailable, but never
