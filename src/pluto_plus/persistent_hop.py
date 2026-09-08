@@ -20,12 +20,14 @@ import math
 import struct
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import suppress
 from typing import Final, Protocol
 
 import numpy as np
 import numpy.typing as npt
 
 from pluto_plus.direct_radio.samples import ci16_dual_rx
+from pluto_plus.metadata_extension import PersistentHopMetadataExtension
 from pluto_plus.tandem import TandemSessionRequestV1
 
 PERSISTENT_HOP_PROTOCOL_VERSION: Final = 1
@@ -975,6 +977,7 @@ class PersistentHopWireBlock:
     evidence: bytes
     iq_payload: bytes
     stream_generation: int | None = None
+    extension_metadata: bytes | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1321,6 +1324,17 @@ class PersistentHopSession:
         self._receipt: PersistentHopSessionReceiptV1 | None = None
         self._initial_status = initial_status
         self._start_clock_bracket = start_clock_bracket
+        self._metadata_extension: PersistentHopMetadataExtension | None = getattr(
+            backend, "metadata_extension", None
+        )
+        self._metadata_extension_error: str | None = getattr(
+            backend, "metadata_extension_error", None
+        )
+
+    @property
+    def metadata_extension_error(self) -> str | None:
+        """Advisory result faults are independent of the capture receipt."""
+        return self._metadata_extension_error
 
     @property
     def start_clock_bracket(self) -> PersistentHopStartClockBracketV1 | None:
@@ -1429,6 +1443,17 @@ class PersistentHopSession:
                     samples = ci16_dual_rx(wire.iq_payload)
                 except ValueError as error:
                     raise PersistentHopClientError(str(error)) from error
+                if (
+                    self._metadata_extension is not None
+                    and self._metadata_extension_error is None
+                    and wire.extension_metadata is not None
+                ):
+                    try:
+                        self._metadata_extension.consume(
+                            wire.extension_metadata, wire.iq_payload, evidence=evidence
+                        )
+                    except Exception as error:
+                        self._fail_metadata_extension(f"result consumption failed: {error}")
                 yield PersistentHopDecodedBlockV1(
                     evidence=evidence,
                     samples=samples,
@@ -1460,6 +1485,10 @@ class PersistentHopSession:
                 restoration=_restoration_receipt(status),
             )
             full_receipt = self._cancelled_full_receipt(status)
+            self._finish_metadata_extension(status)
+        except BaseException:
+            self._fail_metadata_extension("capture cancellation validation failed")
+            raise
         finally:
             host_lifecycle = self._release()
         assert receipt is not None and full_receipt is not None
@@ -1595,6 +1624,14 @@ class PersistentHopSession:
     def _finish_completed(self) -> None:
         status = PersistentHopStatusV1.unpack(self._backend.read_status())
         self._require_terminal_status(status, PersistentHopSessionState.COMPLETED)
+        if (
+            self._previous_block_sequence is None
+            or status.last_block_sequence != self._previous_block_sequence
+            or status.last_block_end_counter != self._previous_block_end
+        ):
+            raise PersistentHopClientError(
+                "persistent-hop completion status disagrees with delivered IQ"
+            )
         if not 1 <= status.visits_started <= self.request.dwell_count:
             raise PersistentHopClientError("persistent-hop completion has an invalid visit count")
         if status.events_emitted != status.visits_started:
@@ -1686,6 +1723,7 @@ class PersistentHopSession:
         )
         if not receipt.duty_target_met:
             raise PersistentHopClientError("persistent-hop session missed its minimum valid duty")
+        self._finish_metadata_extension(status)
         self._receipt = dataclasses.replace(
             receipt,
             host_lifecycle=self._release(),
@@ -1854,6 +1892,7 @@ class PersistentHopSession:
             raise PersistentHopClientError("persistent-hop settings restoration was not attested")
 
     def _cancel_after_failure(self) -> BaseException | None:
+        self._fail_metadata_extension("capture validation failed")
         if self._closed:
             return None
         try:
@@ -1868,6 +1907,33 @@ class PersistentHopSession:
         finally:
             self._release()
         return None
+
+    def _fail_metadata_extension(self, reason: str) -> None:
+        if self._metadata_extension is None:
+            return
+        if self._metadata_extension_error is None:
+            self._metadata_extension_error = reason
+        with suppress(Exception):
+            self._metadata_extension.fail(self._metadata_extension_error)
+
+    def _finish_metadata_extension(self, status: PersistentHopStatusV1) -> None:
+        extension = self._metadata_extension
+        if extension is None or self._metadata_extension_error is not None:
+            return
+
+        def drain(capacity: int) -> bytes:
+            callback = getattr(self._backend, "drain_metadata", None)
+            if not callable(callback):
+                raise NotImplementedError("backend lacks metadata-only drain")
+            result = callback(capacity)
+            if not isinstance(result, bytes) or not 0 < len(result) <= capacity:
+                raise ValueError("metadata-only drain returned an invalid byte payload")
+            return result
+
+        try:
+            extension.finish(status, drain)
+        except Exception as error:
+            self._fail_metadata_extension(f"terminal result drain failed: {error}")
 
     def _release(self) -> PersistentHopHostLifecycleReceiptV1 | None:
         if not self._closed:

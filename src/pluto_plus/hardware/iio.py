@@ -1328,6 +1328,7 @@ class IioRadioDevice:
         status_capacity: int,
         metadata_status_reader: Callable[[Any, int], bytes],
         metadata_canceller: Callable[[Any], None],
+        metadata_unwrapper: Callable[[bytes], bytes] | None = None,
     ) -> IioRawSidecarCaptureSession:
         """Arm one exact dual-RX ABI-3 buffer with an additive raw sidecar."""
 
@@ -1384,6 +1385,7 @@ class IioRadioDevice:
             kernel_buffers=actual_kernel_buffers,
             metadata_status_reader=metadata_status_reader,
             metadata_canceller=metadata_canceller,
+            metadata_unwrapper=metadata_unwrapper,
             status_capacity=status_capacity,
         )
         try:

@@ -98,6 +98,7 @@ class IioRawSidecarBlock:
     metadata_header: bytes
     sidecar: bytes
     iq_payload: bytes
+    extension_metadata: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1155,6 +1156,7 @@ class IioRawSidecarCaptureSession:
         metadata_canceller: Callable[[Any], None],
         status_capacity: int,
         metadata_capacity: int = DEFAULT_METADATA_CAPACITY,
+        metadata_unwrapper: Callable[[bytes], bytes] | None = None,
     ) -> None:
         if not request:
             raise ValueError("raw sidecar metadata request must be nonempty")
@@ -1173,6 +1175,7 @@ class IioRawSidecarCaptureSession:
         self._metadata_canceller = metadata_canceller
         self._status_capacity = status_capacity
         self._metadata_capacity = metadata_capacity
+        self._metadata_unwrapper = metadata_unwrapper
         self._buffer: Any | None = None
         self._open_clock_bracket: IioBufferOpenClockBracket | None = None
         self._start_time_anchors: list[HostTimeAnchorMeasurement] = []
@@ -1333,6 +1336,11 @@ class IioRawSidecarCaptureSession:
         if raw_metadata is None:
             raise RuntimeError("raw sidecar refill returned no metadata")
         raw = bytes(raw_metadata)
+        extension_metadata = raw if self._metadata_unwrapper is not None else None
+        if self._metadata_unwrapper is not None:
+            raw = self._metadata_unwrapper(raw)
+            if not isinstance(raw, bytes):
+                raise RuntimeError("raw sidecar metadata unwrapper returned non-byte data")
         if len(raw) < 8:
             raise RuntimeError("raw sidecar metadata is shorter than its ABI header")
         base_bytes = struct.unpack_from("<H", raw, 6)[0]
@@ -1355,7 +1363,22 @@ class IioRawSidecarCaptureSession:
             metadata_header=raw[:base_bytes],
             sidecar=raw[base_bytes:],
             iq_payload=iq_payload,
+            extension_metadata=extension_metadata,
         )
+
+    def drain_metadata(self, capacity: int = DEFAULT_METADATA_CAPACITY) -> bytes:
+        """Metadata only: never refill or replace the last received IQ block."""
+        if type(capacity) is not int or not 1 <= capacity <= 65536:
+            raise ValueError("metadata drain capacity must be within 1..65536")
+        if self._buffer is None:
+            raise RuntimeError("raw sidecar metadata capture is not open")
+        drain = getattr(self._buffer, "drain_metadata", None)
+        if not callable(drain):
+            raise NotImplementedError("installed pylibiio lacks metadata-only drain")
+        result = drain(capacity)
+        if not isinstance(result, bytes) or not 0 < len(result) <= capacity:
+            raise RuntimeError("metadata drain returned an invalid byte payload")
+        return result
 
     def read_status(self) -> bytes:
         if self._buffer is None:

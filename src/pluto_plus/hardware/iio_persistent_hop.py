@@ -7,6 +7,7 @@ import dataclasses
 import importlib
 import zlib
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import suppress
 from types import ModuleType
 from typing import Any
 
@@ -14,6 +15,7 @@ from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.base import DEFAULT_RESTORE_LO_SEARCH_HZ
 from pluto_plus.hardware.iio import IioRadioDevice, IioReceiverSettingsReadback
 from pluto_plus.hardware.iio_metadata import IioRawSidecarCaptureSession
+from pluto_plus.metadata_extension import PersistentHopMetadataExtension
 from pluto_plus.models import Transport
 from pluto_plus.persistent_hop import (
     PERSISTENT_HOP_EXCLUDED_SERIAL,
@@ -53,6 +55,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
         adi_module: ModuleType | Any | None = None,
         iio_module: ModuleType | Any | None = None,
         radio_factory: Callable[[str, str], IioRadioDevice] | None = None,
+        metadata_extension: PersistentHopMetadataExtension | None = None,
     ) -> None:
         self._uri = require_physical_lan_uri(uri)
         self._expected_serial = require_allowed_serial(expected_serial)
@@ -66,6 +69,16 @@ class IioPersistentHopBackend(PersistentHopBackend):
         self._kernel_buffers_requested: int | None = None
         self._kernel_buffers_readback: int | None = None
         self._start_clock_bracket: PersistentHopStartClockBracketV1 | None = None
+        self._metadata_extension = metadata_extension
+        self._metadata_extension_error: str | None = None
+
+    @property
+    def metadata_extension(self) -> PersistentHopMetadataExtension | None:
+        return self._metadata_extension
+
+    @property
+    def metadata_extension_error(self) -> str | None:
+        return self._metadata_extension_error
 
     @property
     def uri(self) -> str:
@@ -219,6 +232,28 @@ class IioPersistentHopBackend(PersistentHopBackend):
         if module is None:
             module = importlib.import_module("iio")
             self._iio_module = module
+        extension_options: dict[str, Any] = {}
+        extension = self._metadata_extension
+        if extension is not None:
+            try:
+                negotiated_request = extension.negotiate(
+                    request,
+                    self.context_attributes(),
+                    drain_supported=callable(
+                        getattr(getattr(module, "MetadataBuffer", None), "drain_metadata", None)
+                    ),
+                )
+                if not isinstance(negotiated_request, bytes) or not negotiated_request:
+                    raise ValueError("metadata extension returned an invalid OPEN request")
+                if negotiated_request != request:
+                    extension_options["metadata_unwrapper"] = extension.unwrap
+                    request = negotiated_request
+            except Exception as error:
+                # Optional negotiation fails before OPEN, so legacy capture
+                # needs neither an extra buffer nor a speculative reopen.
+                self._metadata_extension_error = f"negotiation failed: {error}"
+                with suppress(Exception):
+                    extension.fail(self._metadata_extension_error)
         capture = self._require_radio().begin_raw_sidecar_metadata_capture(
             samples_per_block,
             kernel_buffers=kernel_buffers,
@@ -228,6 +263,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
                 module, buffer, capacity
             ),
             metadata_canceller=lambda buffer: _cancel_metadata_session(module, buffer),
+            **extension_options,
         )
         readback = self._require_radio().read_kernel_buffers_count()
         if readback != kernel_buffers:
@@ -270,6 +306,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
                 evidence=raw.sidecar,
                 iq_payload=raw.iq_payload,
                 stream_generation=stream_generation,
+                extension_metadata=raw.extension_metadata,
             )
             if evidence.state in {
                 PersistentHopSessionState.COMPLETED,
@@ -283,6 +320,9 @@ class IioPersistentHopBackend(PersistentHopBackend):
 
     def read_status(self) -> bytes:
         return self._require_capture().read_status()
+
+    def drain_metadata(self, capacity: int) -> bytes:
+        return self._require_capture().drain_metadata(capacity)
 
     def close(self) -> PersistentHopHostLifecycleReceiptV1 | None:
         errors: list[BaseException] = []
@@ -348,6 +388,7 @@ def iio_persistent_hop_client(
     expected_serial: str,
     adi_module: ModuleType | Any | None = None,
     iio_module: ModuleType | Any | None = None,
+    metadata_extension: PersistentHopMetadataExtension | None = None,
 ) -> PersistentHopClient:
     """Build the production client while preserving the exact serial/IP gates."""
 
@@ -361,6 +402,7 @@ def iio_persistent_hop_client(
             expected_serial=exact_serial,
             adi_module=adi_module,
             iio_module=iio_module,
+            metadata_extension=metadata_extension,
         ),
     )
 

@@ -515,19 +515,28 @@ class _FakeMetadataBuffer:
         self.closed = True
 
 
+@pytest.mark.parametrize("extended", [False, True])
 def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     monkeypatch: Any,
+    extended: bool,
 ) -> None:
     base_bytes = 64
     metadata = bytearray(base_bytes)
     struct.pack_into("<H", metadata, 6, base_bytes)
     metadata += _sidecar()
     buffer = _FakeMetadataBuffer(
-        bytes(metadata),
+        (b"extension" if extended else b"") + bytes(metadata),
         bytes(SAMPLES * 8),
         _status(PersistentHopSessionState.RUNNING),
     )
     calls: list[tuple[Any, ...]] = []
+    drains: list[int] = []
+
+    def drain(capacity: int) -> bytes:
+        drains.append(capacity)
+        return b"terminal metadata"
+
+    buffer.drain_metadata = drain
 
     def factory(*args: Any) -> _FakeMetadataBuffer:
         calls.append(args)
@@ -576,6 +585,7 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
             SimpleNamespace(), item
         ),
         status_capacity=160,
+        metadata_unwrapper=(lambda raw: raw[len(b"extension"):]) if extended else None,
     )
     session.open()
     assert session.open_clock_bracket == IioBufferOpenClockBracket(
@@ -588,12 +598,54 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert calls == [(sdr._rxadc, SAMPLES, request, 64 * 1024)]
     assert block.sidecar == _sidecar()
     assert block.iq_payload == bytes(SAMPLES * 8)
+    assert block.extension_metadata == (b"extension" + bytes(metadata) if extended else None)
+    buffer.refilled = False
+    assert session.drain_metadata() == b"terminal metadata"
+    assert drains == [65536]
+    assert not buffer.refilled and buffer.iq == block.iq_payload
     assert session.read_status() == _status(PersistentHopSessionState.RUNNING)
     session.request_cancel()
     assert buffer.in_band_cancelled
     assert not buffer.generic_cancelled
     session.close()
     assert buffer.closed
+
+
+@pytest.mark.parametrize("mode", ["wrapped", "unsupported", "exception", "invalid"])
+def test_backend_negotiates_extension_once_before_open_and_falls_back_without_reopen(mode: str):
+    radio = _FakeRadio()
+    negotiations: list[tuple[bytes, bool]] = []
+    errors: list[str] = []
+
+    def negotiate(request: bytes, attributes: dict[str, str], *, drain_supported: bool):
+        assert attributes["hw_serial"] == SERIAL
+        negotiations.append((request, drain_supported))
+        if mode == "exception":
+            raise ValueError("injected negotiation failure")
+        if mode == "invalid":
+            return None
+        return b"wrapped" + request if mode == "wrapped" else request
+
+    extension = SimpleNamespace(negotiate=negotiate, unwrap=lambda raw: raw, fail=errors.append)
+    backend = IioPersistentHopBackend(
+        URI,
+        expected_serial=SERIAL,
+        iio_module=SimpleNamespace(MetadataBuffer=SimpleNamespace(drain_metadata=lambda: None)),
+        radio_factory=lambda _uri, _serial: radio,
+        metadata_extension=extension,
+    )
+    backend.open()
+    prepared = backend.prepare_plan(_plan())
+    request = prepared.request(session_id=SESSION).append_to_tandem_request(
+        TandemSessionRequestV1(mode=TandemMode.HOLD), SAMPLES, retention_frames=3
+    )
+    backend.start(request, samples_per_block=SAMPLES, kernel_buffers=2)
+    assert negotiations == [(request, True)]
+    assert radio.open_request == (b"wrapped" + request if mode == "wrapped" else request)
+    assert bool(errors) == (mode in {"exception", "invalid"})
+    assert backend.metadata_extension is extension
+    assert bool(backend.metadata_extension_error) == bool(errors)
+    backend.close()
 
 
 def test_raw_binding_projects_first_sample_from_fpga_counter_anchor() -> None:
