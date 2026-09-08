@@ -1248,10 +1248,12 @@ uv run pluto firmware flash-lan /absolute/path/to/qualified-pluto.dfu \
 
 The pinned pre-reboot SSH key authorizes only the mutation. Before staging, the
 command independently re-attests the radio serial, current firmware, updater, and
-the source layout's exact idle/TX-safe surface. A profile can bind an exact source
-firmware allow-list and distinct source/return layouts; callers cannot override
-either. The command hashes the staged FRM and exact FIT bytes read back from `mtd3`
-before reset.
+then quiesces TX through the exact serial-attested IIOD context, including TX LO
+powerdown. A second read-only SSH attestation records and requires the source
+layout's exact idle/TX-safe surface before any staging. A profile can bind an
+exact source firmware allow-list and distinct source/return layouts; callers
+cannot override either. The command hashes the staged FRM and exact FIT bytes
+read back from `mtd3` before reset.
 
 Pluto's generated SSH host key is ephemeral and normally changes at reboot. The
 command therefore does not wait for old-key SSH to recover. It first observes IIOD

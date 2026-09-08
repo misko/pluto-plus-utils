@@ -222,6 +222,10 @@ default enrollment layout is `tx-capable-2r2t-profile-tandem-v1`; pass
 `--iio-layout tx-capable-1r1t-v1` when the already-running source firmware was
 explicitly provisioned for one RX and one TX.
 
+The guarded LAN flash re-attests the pinned endpoint, quiesces TX through an
+exact serial-attested IIOD context (including TX LO powerdown), and records a
+second read-only source safety attestation before it stages any firmware bytes.
+
 Pluto+ Utils implements this as a separate setup plan, not as a generic remote shell or
 firmware upload. The daemon must be explicitly composed with one exact serial, sysfs path,
 USB network interface, private USB address, private password file, and pinned SSH host-key

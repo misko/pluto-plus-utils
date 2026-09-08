@@ -2547,6 +2547,11 @@ def test_execute_lan_flash_orders_attestation_rotation_and_receipt(
     )
     monkeypatch.setattr(
         bootstrap,
+        "mute_returned_radio_lan",
+        lambda host, serial: lifecycle.append("source-tx-quiesced"),
+    )
+    monkeypatch.setattr(
+        bootstrap,
         "_wait_for_lan_iio_state",
         lambda host, available, timeout_s: lifecycle.append(
             "iio-returned" if available else "iio-disappeared"
@@ -2580,12 +2585,14 @@ def test_execute_lan_flash_orders_attestation_rotation_and_receipt(
 
     assert result.outcome == "success"
     assert lifecycle == [
+        "source-tx-quiesced",
         "iio-disappeared",
         "iio-returned",
         "return-attested",
         "key-rotated",
     ]
     assert "remote_tx_safe_read_only_attested" in result.phases
+    assert "source_tx_quiesced" in result.phases
     assert "mtd3_fit_verified" in result.phases
     assert result.phases[-1] == "remote_return_tx_safe_read_only_attested"
     safe_call = next(
@@ -2596,6 +2603,7 @@ def test_execute_lan_flash_orders_attestation_rotation_and_receipt(
     receipt = json.loads(Path(result.receipt_path).read_text())
     assert receipt["schema_version"] == 2
     assert receipt["outcome"] == "success"
+    assert receipt["read_only_source_attestation"]["firmware"] == plan.before_firmware
     assert receipt["host_key_rotation"]["replacement_known_hosts_sha256"] == "2" * 64
     assert receipt["read_only_return_attestation"]["boot_id"] == (
         "11111111-1111-4111-8111-111111111111"
@@ -2615,6 +2623,7 @@ def test_execute_lan_flash_refuses_unsafe_tx_before_staging(
         "prepare_lan_flash_plan",
         lambda *args, **kwargs: (plan, frm),
     )
+    monkeypatch.setattr(bootstrap, "mute_returned_radio_lan", lambda host, serial: None)
 
     result = bootstrap.execute_lan_flash_plan(
         plan,
@@ -2643,6 +2652,7 @@ def test_execute_lan_flash_marks_ambiguous_updater_unknown_without_key_rotation(
         "prepare_lan_flash_plan",
         lambda *args, **kwargs: (plan, frm),
     )
+    monkeypatch.setattr(bootstrap, "mute_returned_radio_lan", lambda host, serial: None)
 
     result = bootstrap.execute_lan_flash_plan(
         plan,
@@ -3259,6 +3269,43 @@ def test_exact_path_mute_never_scans_busy_peer_contexts(
 
     assert opened == ["usb:5.13.5"]
     assert muted == [device]
+    assert closed == ["buffer", "context"]
+
+
+def test_lan_mute_powers_down_and_reads_back_the_exact_tx_lo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Attribute:
+        value = "0"
+
+    powerdown = Attribute()
+    tx_lo = SimpleNamespace(attrs={"powerdown": powerdown})
+    phy = SimpleNamespace(
+        find_channel=lambda channel_id, output: (
+            tx_lo if (channel_id, output) == ("altvoltage1", True) else None
+        )
+    )
+    closed: list[str] = []
+    device = SimpleNamespace(
+        _ctx=SimpleNamespace(
+            attrs={"hw_serial": "SERIAL_A"},
+            close=lambda: closed.append("context"),
+        ),
+        _ctrl=phy,
+        rx_destroy_buffer=lambda: closed.append("buffer"),
+    )
+
+    class Environment:
+        healthy = True
+        actionable_message = ""
+
+    monkeypatch.setattr(bootstrap, "inspect_iio_environment", lambda **kwargs: Environment())
+    monkeypatch.setitem(sys.modules, "adi", SimpleNamespace(ad9361=lambda *, uri: device))
+    monkeypatch.setattr("pluto_plus.hardware.iio._mute_transmit", lambda selected: None)
+
+    bootstrap.mute_returned_radio_lan("192.168.1.17", "SERIAL_A")
+
+    assert powerdown.value == "1"
     assert closed == ["buffer", "context"]
 
 

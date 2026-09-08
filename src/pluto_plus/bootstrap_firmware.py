@@ -2304,12 +2304,17 @@ def execute_lan_flash_plan(
             raise BootstrapFirmwareError("fixed radio updater is unavailable")
         phases.append("remote_preflight_attested")
         _update_receipt(receipt_path, receipt, phases)
+        mute_returned_radio_lan(plan.host, plan.target_serial)
+        phases.append("source_tx_quiesced")
+        _update_receipt(receipt_path, receipt, phases)
         safe_output = transport.run(
             f"sh -s -- {plan.target_serial} {plan.fit_size}",
             stdin=_REMOTE_RECONCILE_SCRIPT,
             timeout_s=120,
         )
         safe_fields = _parse_reconciliation_report(safe_output)
+        receipt["read_only_source_attestation"] = dict(safe_fields)
+        _update_receipt(receipt_path, receipt, phases)
         if safe_fields["serial"] != plan.target_serial:
             raise BootstrapFirmwareError("remote TX-safe preflight serial changed")
         if safe_fields["firmware"] != plan.before_firmware:
@@ -3168,6 +3173,7 @@ def mute_returned_radio_lan(host: str, serial: str) -> None:
             if device._ctx.attrs.get("hw_serial") != serial:
                 raise BootstrapFirmwareError("LAN TX safety context has the wrong serial")
             _mute_transmit(device)
+            _power_down_tx_lo(device)
         finally:
             device.rx_destroy_buffer()
             _close_adi_context(device)
@@ -3177,6 +3183,25 @@ def mute_returned_radio_lan(host: str, serial: str) -> None:
         raise BootstrapFirmwareError(
             f"cannot attest returned LAN TX-safe state: {error}"
         ) from error
+
+
+def _power_down_tx_lo(device: Any) -> None:
+    """Power down and read back the exact AD936x TX LO control."""
+
+    phy = getattr(device, "_ctrl", None)
+    if phy is None:
+        context = getattr(device, "_ctx", None)
+        find_device = getattr(context, "find_device", None)
+        phy = find_device("ad9361-phy") if callable(find_device) else None
+    find_channel = getattr(phy, "find_channel", None)
+    tx_lo = find_channel("altvoltage1", True) if callable(find_channel) else None
+    attributes = getattr(tx_lo, "attrs", {}) if tx_lo is not None else {}
+    if "powerdown" not in attributes:
+        raise BootstrapFirmwareError("LAN TX safety context lacks the exact TX LO control")
+    control = attributes["powerdown"]
+    control.value = "1"
+    if round(float(str(control.value).split()[0])) != 1:
+        raise BootstrapFirmwareError("LAN TX LO did not remain powered down")
 
 
 def mute_returned_radio(serial: str) -> None:
