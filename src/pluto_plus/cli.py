@@ -935,6 +935,14 @@ def radio_reboot_local(
         "--isolate-usb-route",
         help="Temporarily isolate competing local Pluto NICs/routes with a durable receipt.",
     ),
+    exact_usb_route: bool = typer.Option(
+        False,
+        "--exact-usb-route",
+        help=(
+            "Own a temporary selected-interface /32 route for each USB SSH call; "
+            "peer Pluto interfaces remain unchanged."
+        ),
+    ),
     isolation_confirmation: str | None = typer.Option(
         None,
         "--isolation-confirm",
@@ -962,7 +970,7 @@ def radio_reboot_local(
         execute_local_reboot,
         prepare_local_reboot,
     )
-    from pluto_plus.setup_helper import BoundSshTransport
+    from pluto_plus.setup_helper import BoundSshTransport, ExactUsbSshRouteLease
 
     selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
     expected_return_firmware = None
@@ -982,6 +990,18 @@ def radio_reboot_local(
                 2,
             )
         expected_return_firmware = str(return_profile.policy.device_firmware)
+    if isolate_usb_route and exact_usb_route:
+        _fail(
+            "local_reboot_route_mode_conflict",
+            "--exact-usb-route and --isolate-usb-route are mutually exclusive",
+            2,
+        )
+    if exact_usb_route and ssh_host != "192.168.2.1":
+        _fail(
+            "local_reboot_exact_route_invalid",
+            "--exact-usb-route requires --ssh-host 192.168.2.1",
+            2,
+        )
     isolation_plan = None
     route_checker_override: Callable[[str, str], UsbSshRouteObservation] | None = None
     pluto_interfaces: tuple[str, ...] = ()
@@ -1028,6 +1048,7 @@ def radio_reboot_local(
             ssh_host=ssh_host,
             known_hosts_file=selected_known_hosts,
             expected_return_firmware=expected_return_firmware,
+            exact_usb_route=exact_usb_route,
             **prepare_options,
         )
     except (LocalRebootError, OSError, ValueError) as error:
@@ -1086,11 +1107,17 @@ def radio_reboot_local(
             _fail("invalid_private_file", "radio SSH password must be UTF-8", 2)
 
     def reboot_action() -> Any:
+        exact_route_lease = (
+            ExactUsbSshRouteLease(interface=plan.usb_interface, host=plan.ssh_host)
+            if plan.ssh_route_mode == "usb_gadget_exact"
+            else None
+        )
         ssh = BoundSshTransport(
             host=plan.ssh_host,
-            interface=(plan.usb_interface if plan.ssh_route_mode == "usb_gadget" else None),
+            interface=(plan.usb_interface if plan.ssh_route_mode != "lan" else None),
             password=password,
             known_hosts_file=selected_known_hosts,
+            exact_route_lease=exact_route_lease,
         )
         return execute_local_reboot(
             plan,

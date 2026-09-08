@@ -69,7 +69,7 @@ class LocalRebootPlan:
     runtime_usb_device_node: str
     raw_usb_write_access: bool
     ssh_host: str
-    ssh_route_mode: Literal["usb_gadget", "lan"]
+    ssh_route_mode: Literal["usb_gadget", "usb_gadget_exact", "lan"]
     known_hosts_sha256: str
     route_observation: UsbSshRouteObservation | None
     expected_return_firmware: str | None
@@ -156,6 +156,7 @@ def prepare_local_reboot(
     ssh_host: str,
     known_hosts_file: Path,
     expected_return_firmware: str | None = None,
+    exact_usb_route: bool = False,
     scanner: Callable[[], Sequence[LocalUsbPluto]] = scan_local_usb_plutos,
     route_checker: Callable[[str, str], UsbSshRouteObservation] = (
         require_unambiguous_usb_ssh_route
@@ -187,7 +188,13 @@ def prepare_local_reboot(
         raise LocalRebootError("SSH host must be a literal private IPv4 address") from error
     if host_address.version != 4 or not host_address.is_private:
         raise LocalRebootError("SSH host must be a literal private IPv4 address")
-    route_mode: Literal["usb_gadget", "lan"] = "usb_gadget" if ssh_host == "192.168.2.1" else "lan"
+    if exact_usb_route and ssh_host != "192.168.2.1":
+        raise LocalRebootError("exact USB routing requires SSH host 192.168.2.1")
+    route_mode: Literal["usb_gadget", "usb_gadget_exact", "lan"]
+    if ssh_host == "192.168.2.1":
+        route_mode = "usb_gadget_exact" if exact_usb_route else "usb_gadget"
+    else:
+        route_mode = "lan"
     try:
         interface_validator(interface, str(path))
         route = route_checker(interface, ssh_host) if route_mode == "usb_gadget" else None
@@ -195,7 +202,7 @@ def prepare_local_reboot(
         raise LocalRebootError(str(error)) from error
     known_hosts_sha256 = _private_file_sha256(known_hosts_file, "SSH known-hosts")
     return LocalRebootPlan(
-        schema_version=4,
+        schema_version=5,
         plan_id=uuid.uuid4().hex,
         created_at=_now(),
         serial=serial,
@@ -282,6 +289,7 @@ def execute_local_reboot(
             ssh_host=plan.ssh_host,
             known_hosts_file=known_hosts_file,
             expected_return_firmware=plan.expected_return_firmware,
+            exact_usb_route=plan.ssh_route_mode == "usb_gadget_exact",
             scanner=scanner,
             route_checker=route_checker,
             interface_validator=interface_validator,

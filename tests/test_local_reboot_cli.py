@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -9,7 +12,7 @@ from pluto_plus.cli import app
 from pluto_plus.host_isolation import HostIsolationPlan, HostRoute
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.ip_firmware import UsbSshRouteObservation
-from pluto_plus.local_reboot import LocalRebootPlan
+from pluto_plus.local_reboot import LocalRebootPlan, LocalRebootReceipt
 
 runner = CliRunner()
 SERIAL = "SERIAL_A"
@@ -21,7 +24,7 @@ def _plan(
     expected_return_firmware: str | None = None,
 ) -> LocalRebootPlan:
     return LocalRebootPlan(
-        schema_version=4,
+        schema_version=5,
         plan_id="plan-a",
         created_at="2026-08-18T00:00:00+00:00",
         serial=SERIAL,
@@ -171,6 +174,123 @@ def test_reboot_local_isolation_dry_run_exposes_separate_plan(
     assert document["host_isolation"]["confirmation_phrase"] == (
         "ISOLATE USB SSH enx001"
     )
+
+
+def test_reboot_local_exact_route_is_explicit_without_peer_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def prepare(*args, **kwargs):
+        observed.update(kwargs)
+        return replace(
+            _plan(),
+            ssh_route_mode="usb_gadget_exact",
+            route_observation=None,
+        )
+
+    monkeypatch.setattr("pluto_plus.local_reboot.prepare_local_reboot", prepare)
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "reboot-local",
+            SERIAL,
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            "/private/radio.known_hosts",
+            "--exact-usb-route",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.output)
+    assert observed["exact_usb_route"] is True
+    assert document["plan"]["ssh_route_mode"] == "usb_gadget_exact"
+    assert document["host_isolation"] is None
+
+
+def test_reboot_local_exact_route_execution_wires_owned_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = replace(
+        _plan(),
+        ssh_route_mode="usb_gadget_exact",
+        route_observation=None,
+    )
+    known_hosts = tmp_path / "known_hosts"
+    password = tmp_path / "password"
+    known_hosts.write_text("placeholder\n")
+    password.write_text("analog\n")
+    known_hosts.chmod(0o600)
+    password.chmod(0o600)
+    lease = object()
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "pluto_plus.local_reboot.prepare_local_reboot",
+        lambda *args, **kwargs: plan,
+    )
+    monkeypatch.setattr(
+        "pluto_plus.cli.inspect_iio_environment",
+        lambda: SimpleNamespace(healthy=True),
+    )
+
+    def exact_route(**kwargs):
+        observed["lease"] = kwargs
+        return lease
+
+    def bound_transport(**kwargs):
+        observed["transport"] = kwargs
+        return SimpleNamespace()
+
+    monkeypatch.setattr("pluto_plus.setup_helper.ExactUsbSshRouteLease", exact_route)
+    monkeypatch.setattr("pluto_plus.setup_helper.BoundSshTransport", bound_transport)
+    monkeypatch.setattr(
+        "pluto_plus.local_reboot.execute_local_reboot",
+        lambda *args, **kwargs: LocalRebootReceipt(
+            schema_version=1,
+            receipt_id="receipt-a",
+            plan=plan,
+            started_at="2026-08-18T00:00:00+00:00",
+            finished_at="2026-08-18T00:00:01+00:00",
+            outcome="success",
+            completed_phases=(),
+            before=None,
+            after=None,
+            error=None,
+            receipt_path=str(tmp_path / "receipt.json"),
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "radio",
+            "reboot-local",
+            SERIAL,
+            "--usb-sysfs-path",
+            "/sys/bus/usb/devices/3-8",
+            "--ssh-known-hosts-file",
+            str(known_hosts),
+            "--ssh-password-file",
+            str(password),
+            "--exact-usb-route",
+            "--execute",
+            "--confirm",
+            "REBOOT SERIAL_A",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed["lease"] == {"interface": "enx001", "host": "192.168.2.1"}
+    transport = observed["transport"]
+    assert isinstance(transport, dict)
+    assert transport["interface"] == "enx001"
+    assert transport["exact_route_lease"] is lease
 
 
 def test_reboot_local_execute_requires_exact_confirmation(

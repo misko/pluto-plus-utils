@@ -139,7 +139,7 @@ def test_prepare_binds_exact_serial_path_interface_route_and_private_trust(
 def test_prepare_binds_expected_return_firmware(tmp_path: Path) -> None:
     plan = _plan(tmp_path, expected_return_firmware="v0.42-qspi")
 
-    assert plan.schema_version == 4
+    assert plan.schema_version == 5
     assert plan.expected_return_firmware == "v0.42-qspi"
 
 
@@ -167,6 +167,47 @@ def test_prepare_unique_lan_host_keeps_usb_identity_but_does_not_bind_usb_route(
     assert plan.route_observation is None
     assert plan.usb_interface == INTERFACE
     assert route_calls == []
+
+
+def test_prepare_exact_usb_route_records_strategy_without_route_ambiguity_check(
+    tmp_path: Path,
+) -> None:
+    route_calls: list[tuple[str, str]] = []
+
+    def route_checker(interface: str, host: str) -> UsbSshRouteObservation:
+        route_calls.append((interface, host))
+        raise AssertionError("exact route execution owns the temporary /32")
+
+    plan = prepare_local_reboot(
+        SERIAL,
+        PATH,
+        ssh_host="192.168.2.1",
+        known_hosts_file=_credentials(tmp_path),
+        exact_usb_route=True,
+        scanner=lambda: (_radio(),),
+        route_checker=route_checker,
+        interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
+    )
+
+    assert plan.schema_version == 5
+    assert plan.ssh_route_mode == "usb_gadget_exact"
+    assert plan.route_observation is None
+    assert route_calls == []
+
+
+def test_prepare_exact_usb_route_rejects_lan_endpoint(tmp_path: Path) -> None:
+    with pytest.raises(LocalRebootError, match="requires SSH host 192.168.2.1"):
+        prepare_local_reboot(
+            SERIAL,
+            PATH,
+            ssh_host="192.168.1.18",
+            known_hosts_file=_credentials(tmp_path),
+            exact_usb_route=True,
+            scanner=lambda: (_radio(),),
+            interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
+        )
 
 
 def test_prepare_refuses_duplicate_or_non_private_identity(tmp_path: Path) -> None:

@@ -1340,7 +1340,11 @@ the new key is never trusted: return is independently attested and TX-muted thro
 the already selected USB-IIOD interface.
 
 When several local Pluto gadget interfaces all claim `192.168.2.10/24` and the
-radio endpoint `192.168.2.1`, add `--isolate-usb-route` to the dry run. The plan
+radio endpoint `192.168.2.1`, prefer `--exact-usb-route`. The plan records
+`usb_gadget_exact`; execution owns and verifies a selected-interface `/32` route
+only for each bounded SSH call, then removes it, without changing peer Pluto
+interfaces. Use `--isolate-usb-route` only when an operation explicitly requires
+peer-link isolation. That plan
 records the selected interface, peer Pluto interfaces, overlapping host routes,
 and the separate confirmation phrase `ISOLATE USB SSH <interface>`. Repeat the
 enrollment or reboot with both its normal confirmation and
