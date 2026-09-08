@@ -1176,7 +1176,7 @@ def radio_reboot_lan(
     execute: bool = typer.Option(
         False,
         "--execute",
-        help="Mute TX, dispatch the reboot, and verify the exact serial returns over USB.",
+        help="Mute TX, reboot, rotate SSH trust, and verify the exact LAN return.",
     ),
     confirmation: str | None = typer.Option(
         None,
@@ -1193,16 +1193,17 @@ def radio_reboot_lan(
         "--timeout",
         min=5,
         max=300,
-        help="Seconds to wait for the exact serial to return over local USB.",
+        help="Seconds to wait for IIOD disappearance and the exact LAN return.",
     ),
 ) -> None:
     """Guardedly reboot one LAN-attested radio whose USB gadget is absent."""
 
+    from pluto_plus.bootstrap_firmware import rotate_lan_ssh_host_key_after_attested_return
     from pluto_plus.lan_reboot import (
         LanRebootError,
         LanRebootExecutionError,
-        execute_lan_reboot,
-        prepare_lan_reboot,
+        execute_lan_network_reboot,
+        prepare_lan_network_reboot,
     )
     from pluto_plus.local_reboot import FixedSshLocalRebootTransport
 
@@ -1223,7 +1224,7 @@ def radio_reboot_lan(
         )
     )
     try:
-        plan = prepare_lan_reboot(
+        plan = prepare_lan_network_reboot(
             serial,
             ssh_host=ssh_host,
             known_hosts_file=selected_known_hosts,
@@ -1250,10 +1251,27 @@ def radio_reboot_lan(
             2,
         )
     try:
-        receipt = execute_lan_reboot(
+        receipt = execute_lan_network_reboot(
             plan,
             confirmation=confirmation or "",
             transport=transport,
+            returned_transport_factory=lambda: FixedSshLocalRebootTransport(
+                BoundSshTransport(
+                    host=ssh_host,
+                    interface=None,
+                    password=password,
+                    known_hosts_file=selected_known_hosts,
+                )
+            ),
+            host_key_rotator=lambda: rotate_lan_ssh_host_key_after_attested_return(
+                serial=serial,
+                host=ssh_host,
+                expected_firmware=plan.before.firmware,
+                expected_metadata_abi=plan.expected_metadata_abi,
+                password=password,
+                known_hosts_file=selected_known_hosts,
+                timeout_s=min(timeout_s, 60),
+            ),
             known_hosts_file=selected_known_hosts,
             receipt_directory=receipt_directory.expanduser().absolute(),
             timeout_s=timeout_s,

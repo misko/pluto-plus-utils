@@ -1363,6 +1363,29 @@ removes only the recorded competing routes and peer Pluto links, attests the
 selected route, runs the bounded operation, and restores the host network in a
 `finally` block. Uncertain restoration always overrides operation success.
 
+### Serial-scoped remote LAN reboot
+
+For a radio that remains at one unique private LAN address and cannot return over
+local USB, use the network-return reboot. Its default is also a read-only plan:
+
+```bash
+uv run pluto radio reboot-lan EXACT_SERIAL \
+  --ssh-host 192.168.1.X \
+  --ssh-known-hosts-file /private/EXACT_SERIAL.known_hosts
+```
+
+Review the plan, then repeat with `--execute --confirm 'REBOOT LAN EXACT_SERIAL'`.
+The command refuses the shared USB-gadget address and any selected serial that is
+locally attached over USB. Before reboot it binds the pinned SSH key, SSH identity,
+IIOD serial, firmware, metadata ABI, RX topology, and TX-safe state. It then proves
+IIOD disappearance and return, independently re-attests the exact serial over
+IIOD, rotates the ephemeral SSH host key, verifies that rotation against the
+installed private `known_hosts`, and re-attests the new boot identity and TX-safe
+state. The firmware and capabilities must remain unchanged and the boot ID must
+change. Every attempt is recorded atomically in a mode-0600 `lan-network-*.json`
+receipt; any failure after reboot dispatch has an `unknown` outcome and must be
+inspected rather than replayed blindly.
+
 ## Direct transport status
 
 `pluto_plus.direct_radio` contains USB v3 and direct-IP v1 wire parsers, bounded
