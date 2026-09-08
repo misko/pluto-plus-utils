@@ -36,6 +36,8 @@ PSS_TRACK_SCAN_BYTES = PSS_TRACK_SCAN_WORDS * 4
 PSS_MAP_ID = 0x50534D41
 PSS_MAP_VERSIONS = {15: 0x00010001, 30: 0x00010002, 60: 0x00010004}
 PSS_MAP_CAPABILITIES = {15: 0x3F, 30: 0x7F, 60: 0xFF}
+PSS_MAP_SHARED_XFFT_VERSION = 0x00010005
+PSS_MAP_SHARED_XFFT_CAPABILITIES = 0x13F
 PSS_MAP_TILE_GEOMETRY = 0x00401002
 PSS_MAP_PHASE_BINS = 20_000
 PSS_MAP_CHUNK_MAGIC = 0x4B4E4843
@@ -50,6 +52,20 @@ PSS_MAP_FRAMES = 64
 PSS_MAP_WINDOW_MAPS = 3
 PSS_MAP_CANONICAL_SPAN = PSS_MAP_PHASE_BINS * PSS_MAP_FRAMES
 PSS_MAP_DEFAULT_DRIFT_BINS = (-12, -8, -4, 0, 4, 8, 12)
+
+
+def _map_contract(rate_msps: int, experimental_shared_xfft: bool) -> tuple[int, int]:
+    """Select one exact contract; never reinterpret a legacy rate's default ABI."""
+
+    if not isinstance(experimental_shared_xfft, bool):
+        raise ValueError("experimental_shared_xfft must be a boolean")
+    if rate_msps not in PSS_MAP_VERSIONS:
+        raise ValueError("PSS map rate must be 15, 30, or 60 MS/s")
+    if experimental_shared_xfft:
+        if rate_msps != 15:
+            raise ValueError("experimental shared-XFFT ABI 1.5 only supports 15 MS/s")
+        return PSS_MAP_SHARED_XFFT_VERSION, PSS_MAP_SHARED_XFFT_CAPABILITIES
+    return PSS_MAP_VERSIONS[rate_msps], PSS_MAP_CAPABILITIES[rate_msps]
 
 
 def _signed_16(value: int) -> int:
@@ -160,7 +176,9 @@ class PssMapChunk:
     bins: tuple[int, ...]
 
     @classmethod
-    def decode(cls, payload: bytes) -> Self:
+    def decode(cls, payload: bytes, *, allow_experimental_shared_xfft: bool = False) -> Self:
+        if not isinstance(allow_experimental_shared_xfft, bool):
+            raise ValueError("allow_experimental_shared_xfft must be a boolean")
         if len(payload) != PSS_MAP_CHUNK_BYTES:
             raise ValueError(
                 f"phase-map chunk is {len(payload)} bytes, expected {PSS_MAP_CHUNK_BYTES}"
@@ -170,7 +188,9 @@ class PssMapChunk:
         start_index = _u64(metadata[5], metadata[6])
         if metadata[0] != PSS_MAP_CHUNK_MAGIC:
             raise ValueError("phase-map chunk magic is invalid")
-        if metadata[1] not in PSS_MAP_VERSIONS.values():
+        if metadata[1] not in PSS_MAP_VERSIONS.values() and not (
+            allow_experimental_shared_xfft and metadata[1] == PSS_MAP_SHARED_XFFT_VERSION
+        ):
             raise ValueError("phase-map chunk ABI is unsupported")
         if metadata[2] == 0:
             raise ValueError("phase-map generation must be nonzero")
@@ -234,6 +254,7 @@ def analyze_phase_maps(
     *,
     rate_msps: int,
     drift_bins: Sequence[int] = PSS_MAP_DEFAULT_DRIFT_BINS,
+    experimental_shared_xfft: bool = False,
 ) -> PssCoarseEstimate:
     """Extract one deterministic coarse candidate using the qualified C algorithm.
 
@@ -242,8 +263,7 @@ def analyze_phase_maps(
     accidentally schedule the full-rate tracker in canonical units.
     """
 
-    if rate_msps not in PSS_MAP_VERSIONS:
-        raise ValueError("PSS map rate must be 15, 30, or 60 MS/s")
+    expected_abi, _ = _map_contract(rate_msps, experimental_shared_xfft)
     if len(maps) != PSS_MAP_WINDOW_MAPS:
         raise ValueError("exactly three complete phase maps are required")
     hypotheses = tuple(drift_bins)
@@ -256,7 +276,6 @@ def analyze_phase_maps(
         raise ValueError(
             "drift bank must contain one through seven strictly increasing bounded integers"
         )
-    expected_abi = PSS_MAP_VERSIONS[rate_msps]
     for phase_map in maps:
         if phase_map.abi_version != expected_abi:
             raise ValueError("phase-map ABI does not match the selected sample rate")
@@ -487,12 +506,16 @@ def _close_iio_context(iio_module: Any, context: Any) -> None:
 class PssIioClient:
     """Capability-discovered, network-safe IIO client for the two PSS devices."""
 
-    def __init__(self, context: Any, iio_module: Any) -> None:
+    def __init__(
+        self, context: Any, iio_module: Any, *, experimental_shared_xfft: bool = False
+    ) -> None:
         self.context = context
         self._iio = iio_module
+        self.experimental_shared_xfft = experimental_shared_xfft
         self.tracker = self._find_device(PSS_TRACK_DEVICE)
         self.phase_map = self._find_device(PSS_MAP_DEVICE)
         self.rate_msps = self._require_contracts()
+        self.map_abi_version, _ = _map_contract(self.rate_msps, experimental_shared_xfft)
         self._fine_buffer: Any | None = None
         self._map_buffer: Any | None = None
         self._expected_request: int | None = None
@@ -507,7 +530,14 @@ class PssIioClient:
         *,
         expected_serial: str | None = None,
         iio_module: Any | None = None,
+        experimental_shared_xfft: bool = False,
     ) -> Self:
+        if not isinstance(experimental_shared_xfft, bool):
+            raise ValueError("experimental_shared_xfft must be a boolean")
+        if experimental_shared_xfft and (expected_serial is None or not expected_serial.strip()):
+            raise ValueError(
+                "experimental shared-XFFT connection requires an exact expected serial"
+            )
         module = iio_module or importlib.import_module("iio")
         context = module.Context(uri)
         try:
@@ -526,7 +556,7 @@ class PssIioClient:
                     raise RadioConfigurationError(
                         "IIO context serial does not match the expected PSS radio"
                     )
-            return cls(context, module)
+            return cls(context, module, experimental_shared_xfft=experimental_shared_xfft)
         except BaseException:
             _close_iio_context(module, context)
             raise
@@ -547,6 +577,10 @@ class PssIioClient:
             raise RadioConfigurationError("PSS IIO FPGA identity mismatch")
         if rate not in PSS_TRACK_VERSIONS or map_rate != rate:
             raise RadioConfigurationError("PSS tracker/map sample rates disagree")
+        try:
+            map_version, map_capabilities = _map_contract(rate, self.experimental_shared_xfft)
+        except ValueError as error:
+            raise RadioConfigurationError(str(error)) from error
         expected = (
             (
                 self.tracker,
@@ -559,9 +593,9 @@ class PssIioClient:
             (
                 self.phase_map,
                 {
-                    "abi_version": PSS_MAP_VERSIONS[rate],
+                    "abi_version": map_version,
                     "tile_geometry": PSS_MAP_TILE_GEOMETRY,
-                    "capabilities": PSS_MAP_CAPABILITIES[rate],
+                    "capabilities": map_capabilities,
                     "phase_bins": PSS_MAP_PHASE_BINS,
                     "reassembly_chunks": PSS_MAP_CHUNKS,
                 },
@@ -691,10 +725,15 @@ class PssIioClient:
         scans = _split_scans(bytes(self._map_buffer.read()), PSS_MAP_SCAN_BYTES)
         chunks = tuple(
             PssMapChunk.decode(
-                _unpadded_scan(scan, PSS_MAP_CHUNK_BYTES, label="PSS phase-map chunk")
+                _unpadded_scan(scan, PSS_MAP_CHUNK_BYTES, label="PSS phase-map chunk"),
+                allow_experimental_shared_xfft=self.experimental_shared_xfft,
             )
             for scan in scans
         )
+        if any(chunk.abi_version != self.map_abi_version for chunk in chunks):
+            raise RadioConfigurationError(
+                "PSS phase-map stream ABI differs from its attested context"
+            )
         if _read_int_attr(self.phase_map, "fault_flags"):
             raise RadioConfigurationError("PSS phase-map driver latched a stream fault")
         return chunks

@@ -33,3 +33,22 @@ Live completion still requires blind host GLRT on the same capture (without
 FPGA acquisition seeds) and qualified FPGA PSS timing agreement. Synthetic test
 vectors, successful parsing, and byte-count agreement are not live-lock evidence.
 Firmware remains on its do-not-merge branch; .18 must qualify before outdoor .17.
+
+## Experimental shared-transform PSS companion
+
+The paired 15 MS/s receiver candidate identifies its phase-map device as PSMA
+ABI 1.5, capabilities `0x13f`. `PssIioClient.connect(...,
+expected_serial=..., experimental_shared_xfft=True)` selects this exact
+contract explicitly. The default remains the dedicated-transform ABI for each
+legacy rate. Shared 30/60 MS/s, a missing expected serial, wrong capabilities,
+wrong map geometry, and latched driver faults are rejected. Every returned map
+chunk must match the ABI admitted from its IIO context, including legacy streams.
+
+Offline `PssMapChunk.decode(..., allow_experimental_shared_xfft=True)` permits
+the known 1.5 envelope; it does not attest hardware. `analyze_phase_maps(...,
+rate_msps=15, experimental_shared_xfft=True)` retains the existing three-map
+numerical algorithm and canonical source coordinates. Its 256 ms window is
+still unsuitable for a single 120 ms hopping visit. No short-dwell sensitivity,
+live lock, firmware promotion, or hardware qualification follows from this
+additive host support. The matched kernel must reject shared-service health
+bit 14 before exposing a map. Production TAG2/HOPS exclusions are unchanged.
