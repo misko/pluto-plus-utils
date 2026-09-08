@@ -1,9 +1,10 @@
 """Ephemeral, no-flash lifecycle for one attested radio-local iiOD.
 
-The public lifecycle exposes no remote command parameter.  Its production
-transport can only stage one byte payload, start one TCP iiOD server on the
-fixed alternate port, inspect that exact process, terminate it, and remove the
-three session-unique files it owns beneath ``/tmp``.
+The public lifecycle exposes no remote command parameter. Its production
+transport stages one daemon, starts one TCP iiOD on the fixed alternate port,
+inspects and terminates that exact process, and removes its three unique files.
+An explicit optional companion bundle adds only enumerated, hash-checked files
+in an exclusively created, private ``/tmp`` directory.
 """
 
 from __future__ import annotations
@@ -21,7 +22,10 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
+
+if TYPE_CHECKING:
+    from pluto_plus.userspace_iiod_bundle import IiodCompanionBundle, IiodCompanionTransport
 
 from pluto_plus.persistent_hop import (
     PERSISTENT_HOP_CAPABILITIES,
@@ -502,6 +506,57 @@ printf 'PPU\\tremoved_pid\\t%s\\n' "$pidfile"
 printf 'PPU\\tremoved_log\\t%s\\n' "$log"
 """
 
+# These operations own only an exclusively created directory of enumerated
+# companion files. No archive extraction, loader environment, process search,
+# recursive removal, or writes outside the fixed /tmp namespace are allowed.
+_BUNDLE_CHECK_SCRIPT = b"""set -eu
+root=$1
+owner=$2
+action=$3
+shift 3
+if [ "$action" = cleanup ] && [ ! -e "$root" ] && [ ! -L "$root" ]; then
+  printf 'PPU\\tstate\\tremoved\\n'
+  exit 0
+fi
+test ! -L "$root" && test -d "$root"
+test "$(stat -c '%u:%a' "$root")" = '0:700'
+test ! -L "$root/owner" && test -f "$root/owner"
+test "$(stat -c '%u:%a:%h' "$root/owner")" = '0:600:1'
+test "$(cat "$root/owner")" = "$owner"
+# Validate the complete inventory before removing any file. Cleanup permits
+# missing files after an interrupted stage, but never changed or partial bytes.
+check_files() {
+expected=1
+remaining=$#
+while [ "$remaining" -gt 0 ]; do
+  name=$1; bytes=$2; digest=$3; mode=$4
+  shift 4
+  remaining=$((remaining - 4))
+  path="$root/$name"
+  test ! -L "$path"
+  if [ "$action" = cleanup ] && [ ! -e "$path" ]; then continue; fi
+  test -f "$path"
+  test "$(stat -c '%u:%a:%h' "$path")" = "0:$mode:1"
+  test "$(wc -c < "$path" | tr -d ' ')" = "$bytes"
+  test "$(sha256sum "$path" | awk '{print $1}')" = "$digest"
+  expected=$((expected + 1))
+done
+test "$(find "$root" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = "$expected"
+}
+check_files "$@"
+if [ "$action" = cleanup ]; then
+  while [ "$#" -gt 0 ]; do
+    rm -f "$root/$1"
+    shift 4
+  done
+  rm "$root/owner"
+  rmdir "$root"
+  printf 'PPU\\tstate\\tremoved\\n'
+else
+  printf 'PPU\\tstate\\tverified\\n'
+fi
+"""
+
 
 class PinnedPasswordSshIiodTransport:
     """Password-file SSH transport pinned to one radio and private host key."""
@@ -673,6 +728,45 @@ class PinnedPasswordSshIiodTransport:
             _required(fields, "removed_pid"),
             _required(fields, "removed_log"),
         )
+
+    def stage_companions(self, bundle: IiodCompanionBundle, owner: str) -> None:
+        arguments = _bundle_arguments(bundle, owner)
+        root = arguments[0]
+        # mkdir, without -p, rejects any existing directory, including another
+        # instance of the same release. The owner is the daemon session nonce.
+        fields = self._command(
+            f"set -euC; umask 077; mkdir {root}; "
+            f"printf '%s\\n' {owner} > {root}/owner; "
+            "printf 'PPU\\tstate\\tcreated\\n'",
+            stdin=None,
+            timeout_s=10,
+        )
+        _require_bundle_state(fields, "created")
+        for file in bundle.files:
+            mode = "700" if file.executable else "600"
+            path = f"{root}/{file.name}"
+            fields = self._command(
+                f"set -euC; umask 077; test ! -L {root}; "
+                f'test "$(cat {root}/owner)" = {owner}; '
+                f"test ! -e {path}; test ! -L {path}; cat > {path}; chmod {mode} {path}; "
+                f"test \"$(wc -c < {path} | tr -d ' ')\" = {len(file.payload)}; "
+                f"test \"$(sha256sum {path} | awk '{{print $1}}')\" = {file.sha256}; "
+                "printf 'PPU\\tstate\\tstaged\\n'",
+                stdin=file.payload,
+                timeout_s=60,
+            )
+            _require_bundle_state(fields, "staged")
+        self.verify_companions(bundle, owner)
+
+    def verify_companions(self, bundle: IiodCompanionBundle, owner: str) -> None:
+        root, token, *files = _bundle_arguments(bundle, owner)
+        fields = self._script(_BUNDLE_CHECK_SCRIPT, (root, token, "verify", *files), timeout_s=30)
+        _require_bundle_state(fields, "verified")
+
+    def cleanup_companions(self, bundle: IiodCompanionBundle, owner: str) -> None:
+        root, token, *files = _bundle_arguments(bundle, owner)
+        fields = self._script(_BUNDLE_CHECK_SCRIPT, (root, token, "cleanup", *files), timeout_s=30)
+        _require_bundle_state(fields, "removed")
 
     def _script(
         self,
@@ -1005,6 +1099,7 @@ class UserspaceIiodDeployment:
         binary_path: Path,
         known_hosts_path: Path,
         password_path: Path,
+        bundle_manifest_path: Path | None = None,
         port_probe: PortProbe = tcp_port_probe,
         serial_probe: SerialProbe = persistent_hop_endpoint_probe,
         transport: UserspaceIiodTransport | None = None,
@@ -1022,6 +1117,17 @@ class UserspaceIiodDeployment:
             password_file=password_path,
             runner=runner,
         )
+        if bundle_manifest_path is not None:
+            from pluto_plus.userspace_iiod_bundle import BundledIiodTransport
+
+            if any(
+                not callable(getattr(selected_transport, name, None))
+                for name in ("stage_companions", "verify_companions", "cleanup_companions")
+            ):
+                raise ValueError("selected iiOD transport lacks companion bundle support")
+            selected_transport = BundledIiodTransport(
+                cast("IiodCompanionTransport", selected_transport), bundle_manifest_path
+            )
         self.binary_path = _canonical_local_path(binary_path, label="userspace iiOD binary")
         self._lifecycle = UserspaceIiodLifecycle(
             host=host,
@@ -1069,6 +1175,26 @@ class UserspaceIiodDeployment:
 
 def _random_session_id() -> str:
     return os.urandom(16).hex()
+
+
+def _bundle_arguments(bundle: IiodCompanionBundle, owner: str) -> tuple[str, ...]:
+    from pluto_plus.userspace_iiod_bundle import IiodCompanionBundle
+
+    if not isinstance(bundle, IiodCompanionBundle) or not _TOKEN.fullmatch(owner):
+        raise ValueError("invalid companion bundle or ownership token")
+    # Recheck before constructing any shell text; all names and bytes are frozen.
+    bundle.__post_init__()
+    fields = [bundle.remote_directory, owner]
+    for file in bundle.files:
+        fields.extend(
+            (file.name, str(len(file.payload)), file.sha256, "700" if file.executable else "600")
+        )
+    return tuple(fields)
+
+
+def _require_bundle_state(fields: dict[str, str], expected: str) -> None:
+    if fields != {"state": expected}:
+        raise UserspaceIiodLifecycleError("companion bundle operation was not attested")
 
 
 def _wait_for_open_port(
