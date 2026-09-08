@@ -505,6 +505,41 @@ def test_rotated_ssh_key_is_not_trusted_and_exact_usb_verifier_can_reconcile(
     assert transport.events[-1] == f"attest:{SERIAL}"
 
 
+def test_exact_route_uses_usb_verifier_after_ssh_readiness_timeout(tmp_path: Path) -> None:
+    plan = replace(_plan(tmp_path), ssh_route_mode="usb_gadget_exact", route_observation=None)
+    transport = FakeTransport((_attestation("before"), TimeoutError("SSH not ready")))
+    scans = iter(((_radio(),), (), (_radio(),)))
+    verifier_calls: list[str] = []
+
+    def verify_usb(
+        selected_plan: LocalRebootPlan, before: LocalRebootAttestation
+    ) -> LocalRebootAttestation:
+        assert selected_plan == plan
+        verifier_calls.append(before.serial)
+        return replace(before, boot_id=None)
+
+    receipt = execute_local_reboot(
+        plan,
+        confirmation=plan.confirmation_phrase,
+        transport=transport,
+        known_hosts_file=tmp_path / "known_hosts",
+        receipt_directory=tmp_path / "receipts",
+        scanner=lambda: next(scans),
+        route_checker=lambda interface, host: ROUTE,
+        interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
+        post_reboot_usb_verifier=verify_usb,
+        timeout_s=0.02,
+        poll_interval_s=0.001,
+    )
+
+    assert receipt.outcome == "success"
+    assert receipt.after is not None and receipt.after.boot_id is None
+    assert "post_reboot_usb_iiod_attested" in receipt.completed_phases
+    assert verifier_calls == [SERIAL]
+    assert transport.events[-1] == f"attest:{SERIAL}"
+
+
 def test_usb_return_accepts_equivalent_rev_c_models_from_ssh_and_iiod(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -382,6 +382,23 @@ def execute_local_reboot(
                 raise LocalRebootError("radio capabilities changed across reboot")
             after = candidate
             break
+        if after is None and plan.ssh_route_mode == "usb_gadget_exact":
+            try:
+                candidate = post_reboot_usb_verifier(plan, before)
+            except BaseException as usb_error:
+                raise LocalRebootError(
+                    "radio failed both SSH and exact USB-IIO post-reboot attestation: "
+                    f"SSH={last_error}; USB-IIO={usb_error}"
+                ) from usb_error
+            if candidate.serial != before.serial:
+                raise LocalRebootError("radio serial changed across reboot")
+            expected_firmware = plan.expected_return_firmware or before.firmware
+            if candidate.firmware != expected_firmware:
+                raise LocalRebootError("radio firmware changed across reboot")
+            if not _equivalent_capabilities(candidate.capabilities, before.capabilities):
+                raise LocalRebootError("radio capabilities changed across reboot")
+            after = candidate
+            post_reboot_verified_over_usb = True
         if after is None:
             raise LocalRebootError(f"radio did not pass post-reboot attestation: {last_error}")
         completed.append(
