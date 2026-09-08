@@ -864,6 +864,28 @@ STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_CANARY_POLICY = (
     )
 )
 
+# The exact 30 MS/s bytes and exact v7 recovery bytes receive LAN authority
+# only after the local .18 round trip returned both identities, attested each
+# topology/TX-safe state, and transported a fault-free native-IIO map soak.
+# These remain distinct objects so the local-only policies above cannot gain
+# remote authority by mutation.
+STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_PROMOTION_POLICY = (
+    STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY.model_copy(
+        update={
+            "profile_id": "starlink-pss-30m-iio-v1-dnm-persistent-promotion",
+            "hardware_qualified": True,
+        }
+    )
+)
+STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_PROMOTION_POLICY = (
+    STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_CANARY_POLICY.model_copy(
+        update={
+            "profile_id": "starlink-pss-15m-rx-only-dnm-v7-from-30m-iio-promotion",
+            "hardware_qualified": True,
+        }
+    )
+)
+
 # V0.48 remains the exact, already-qualified recovery bytes.  The new identity
 # does not broaden accepted bytes; it only gives a one-RX RX-only source a
 # layout-aware path back to the normal one-RX TX-capable runtime.
