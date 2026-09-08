@@ -815,6 +815,20 @@ STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY = FirmwarePolicy(
     published_at=datetime(2026, 9, 6, 23, 30, 52, tzinfo=UTC),
 )
 
+# The immutable v7 bytes above passed local persistent return, exact-topology
+# reboot, deterministic 15 MS/s phases 0/19999/7311, exact v0.48 rollback, and
+# a byte-identical v7 restore on serial 1040007c4a94000211000b009186843ef2.
+# LAN authority is a distinct policy so the local-only qualification boundary
+# remains visible and testable.
+STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_PROMOTION_POLICY = (
+    STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY.model_copy(
+        update={
+            "profile_id": "starlink-pss-15m-rx-only-dnm-v7-persistent-promotion",
+            "hardware_qualified": True,
+        }
+    )
+)
+
 # V0.48 remains the exact, already-qualified recovery bytes.  The new identity
 # does not broaden accepted bytes; it only gives a one-RX RX-only source a
 # layout-aware path back to the normal one-RX TX-capable runtime.

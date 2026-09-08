@@ -75,6 +75,7 @@ from pluto_plus.doctor import (
     IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY,
     SINGLE_RX_METADATA_RC1_RAM_POLICY,
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY,
+    STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_PROMOTION_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
     TANDEM_V6_DEVELOPMENT_POLICY,
@@ -629,6 +630,19 @@ STANDALONE_FLASH_PROFILES = {
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY.profile_id: (
         StandaloneFlashProfile(
             STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_TX_CAPABLE_LAYOUT,
+            return_iio_layout=SINGLE_RX_RX_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY.device_firmware,
+                IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_PROMOTION_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_PROMOTION_POLICY,
             3,
             False,
             source_iio_layout=SINGLE_RX_TX_CAPABLE_LAYOUT,

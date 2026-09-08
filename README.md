@@ -1264,6 +1264,9 @@ retried without read-only reconciliation.
 Hardware-unqualified persistent canary profiles remain local-USB only. Promoting
 the same immutable bytes to LAN use requires a distinct reviewed policy after
 local persistent return, workload, reboot/cold-return, and rollback testing.
+The qualified 15 MS/s RX-only PSS v7 bytes use
+`starlink-pss-15m-rx-only-dnm-v7-persistent-promotion` for LAN deployment; the
+otherwise byte-identical `persistent-canary` profile remains local-only.
 
 A firmware-provisioned persistent host key would remove routine rotation, but it must
 be generated per device and stored in protected persistent storage. Reusing one key

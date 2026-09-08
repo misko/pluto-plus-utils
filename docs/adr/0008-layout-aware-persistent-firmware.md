@@ -39,6 +39,18 @@ with the same immutable DFU/FIT bytes may authorize LAN persistence only after
 the local persistent return, deterministic workload, reboot/cold-return, and
 rollback gates pass. This is a policy change, not a caller-supplied override.
 
+The 15 MS/s Starlink PSS RX-only v7 promotion satisfied that boundary on the
+dedicated local canary serial `1040007c4a94000211000b009186843ef2`. The exact
+DFU SHA-256 is `dfd38e9e687f881599a3e4dea0070430e3731193debda64e313305a90dfd833d`.
+Persistent return and exact-topology reboot retained the same firmware and
+RX-only layout; deterministic phases `0`, `19999`, and `7311` each produced a
+unique peak at the requested phase across nine continuous, fault-free maps;
+the exact v0.48 recovery image returned successfully; and restoring the same
+v7 bytes also returned successfully. LAN use is therefore authorized only by
+the distinct `starlink-pss-15m-rx-only-dnm-v7-persistent-promotion` profile;
+the original `persistent-canary` profile remains hardware-unqualified and
+local-only.
+
 ## Consequences
 
 - Existing paired-RX profiles retain their prior behavior.

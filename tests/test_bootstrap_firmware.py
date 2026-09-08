@@ -3204,6 +3204,21 @@ def test_rx_only_persistent_canary_is_local_only_and_has_exact_1r1t_transition()
         "v0.48-plutoplus-spf-iq-direct-async-v3",
         "v0.49-plutoplus-spf-iq-direct-async-v4",
     )
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "starlink-pss-15m-rx-only-dnm-v7-persistent-promotion"
+    ]
+    assert promotion.policy.profile_id != profile.policy.profile_id
+    assert promotion.policy.hardware_qualified is True
+    assert promotion.policy.asset_sha256 == profile.policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == profile.policy.fit_body_sha256
+    assert promotion.policy.fit_body_size == profile.policy.fit_body_size
+    assert promotion.policy.source_commit == profile.policy.source_commit
+    assert promotion.persistent_allowed is profile.persistent_allowed is True
+    assert promotion.metadata_abi == profile.metadata_abi == 3
+    assert promotion.tandem_agc is profile.tandem_agc is False
+    assert promotion.source_iio_layout is profile.source_iio_layout
+    assert promotion.return_iio_layout is profile.return_iio_layout
+    assert promotion.allowed_before_firmwares == profile.allowed_before_firmwares
 
 
 def test_rx_only_canary_cannot_plan_a_lan_persistent_write(tmp_path: Path) -> None:
