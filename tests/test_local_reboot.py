@@ -13,6 +13,7 @@ import pluto_plus.local_reboot as local_reboot
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.ip_firmware import UsbSshRouteObservation
 from pluto_plus.local_reboot import (
+    FixedSshLocalRebootTransport,
     LocalRebootAttestation,
     LocalRebootCapabilities,
     LocalRebootError,
@@ -74,6 +75,42 @@ class FakeTransport:
         self.events.append(f"reboot:{serial}")
 
 
+class ReportingTransport:
+    def __init__(self, report: str) -> None:
+        self.report = report
+
+    def run(self, command: str, *, stdin: bytes | None = None, timeout_s: float = 15) -> str:
+        assert command == f"/bin/sh -s -- {SERIAL}"
+        assert stdin is local_reboot._TX_SAFE_SCRIPT
+        assert timeout_s == 20
+        return self.report
+
+
+@pytest.mark.parametrize(
+    "report",
+    (
+        "PPU\tgain_count\t1\nPPU\ttx_lo_count\t1\nPPU\tdds_present\t0\nPPU\ttx_safe\t1\n",
+        "PPU\tgain_count\t2\nPPU\ttx_lo_count\t1\nPPU\tdds_present\t1\nPPU\ttx_safe\t1\n",
+    ),
+)
+def test_fixed_ssh_tx_safe_accepts_rx_only_and_tx_capable_layouts(report: str) -> None:
+    FixedSshLocalRebootTransport(ReportingTransport(report)).ensure_tx_safe(SERIAL)
+
+
+@pytest.mark.parametrize(
+    "report",
+    (
+        "PPU\tgain_count\t0\nPPU\ttx_lo_count\t1\nPPU\tdds_present\t0\nPPU\ttx_safe\t1\n",
+        "PPU\tgain_count\t1\nPPU\ttx_lo_count\t0\nPPU\tdds_present\t0\nPPU\ttx_safe\t1\n",
+        "PPU\tgain_count\t1\nPPU\ttx_lo_count\t1\nPPU\tdds_present\t2\nPPU\ttx_safe\t1\n",
+        "PPU\tgain_count\tone\nPPU\ttx_lo_count\t1\nPPU\tdds_present\t0\nPPU\ttx_safe\t1\n",
+    ),
+)
+def test_fixed_ssh_tx_safe_rejects_invalid_layout_reports(report: str) -> None:
+    with pytest.raises(LocalRebootError, match="TX-safe"):
+        FixedSshLocalRebootTransport(ReportingTransport(report)).ensure_tx_safe(SERIAL)
+
+
 class UncertainRebootTransport(FakeTransport):
     def __init__(
         self,
@@ -93,7 +130,9 @@ class UncertainRebootTransport(FakeTransport):
         raise TimeoutError("SSH disconnected during dispatch")
 
 
-def _attestation(boot_id: str, *, firmware: str = "v6", serial: str = SERIAL):
+def _attestation(
+    boot_id: str, *, firmware: str = "v6", serial: str = SERIAL
+) -> LocalRebootAttestation:
     return LocalRebootAttestation(
         serial=serial,
         firmware=firmware,
@@ -109,7 +148,9 @@ def _credentials(tmp_path: Path) -> Path:
     return path
 
 
-def _plan(tmp_path: Path, *, expected_return_firmware: str | None = None):
+def _plan(
+    tmp_path: Path, *, expected_return_firmware: str | None = None
+) -> LocalRebootPlan:
     return prepare_local_reboot(
         SERIAL,
         PATH,
@@ -497,12 +538,16 @@ def test_usb_return_accepts_equivalent_rev_c_models_from_ssh_and_iiod(
         },
     )
     muted: list[str] = []
-    monkeypatch.setattr(bootstrap, "mute_returned_radio", muted.append)
+    monkeypatch.setattr(
+        bootstrap,
+        "mute_returned_radio_at_path",
+        lambda serial, path: muted.append(f"{serial}:{path}"),
+    )
 
     after = local_reboot.attest_and_mute_returned_usb(plan, before)
 
     assert after.capabilities.board_model.endswith("(Z7010-AD9361)")
-    assert muted == [SERIAL]
+    assert muted == [f"{SERIAL}:{PATH}"]
 
 
 def test_usb_return_accepts_exact_expected_firmware_change(
@@ -523,9 +568,13 @@ def test_usb_return_accepts_exact_expected_firmware_change(
         },
     )
     muted: list[str] = []
-    monkeypatch.setattr(bootstrap, "mute_returned_radio", muted.append)
+    monkeypatch.setattr(
+        bootstrap,
+        "mute_returned_radio_at_path",
+        lambda serial, path: muted.append(f"{serial}:{path}"),
+    )
 
     after = local_reboot.attest_and_mute_returned_usb(plan, before)
 
     assert after.firmware == "v0.42-qspi"
-    assert muted == [SERIAL]
+    assert muted == [f"{SERIAL}:{PATH}"]

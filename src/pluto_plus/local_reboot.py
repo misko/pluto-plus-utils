@@ -134,7 +134,18 @@ class FixedSshLocalRebootTransport:
         fields = _parse_report(
             self._transport.run(f"/bin/sh -s -- {serial}", stdin=_TX_SAFE_SCRIPT, timeout_s=20)
         )
-        if fields.get("tx_safe") != "1":
+        try:
+            gain_count = int(_required(fields, "gain_count"))
+            tx_lo_count = int(_required(fields, "tx_lo_count"))
+            dds_present = int(_required(fields, "dds_present"))
+        except ValueError as error:
+            raise LocalRebootError("TX-safe report contains a non-integer count") from error
+        if (
+            gain_count not in {1, 2}
+            or tx_lo_count != 1
+            or dds_present not in {0, 1}
+            or fields.get("tx_safe") != "1"
+        ):
             raise LocalRebootError("TX-safe readback was not affirmative")
 
     def reboot(self, serial: str) -> None:
@@ -399,7 +410,7 @@ def attest_and_mute_returned_usb(
 ) -> LocalRebootAttestation:
     """Independently reconcile a rotated SSH key via exact physical USB-IIO."""
 
-    from pluto_plus.bootstrap_firmware import inspect_bound_iiod, mute_returned_radio
+    from pluto_plus.bootstrap_firmware import inspect_bound_iiod, mute_returned_radio_at_path
 
     facts = inspect_bound_iiod(plan.usb_interface)
     serial = str(facts.get("hw_serial") or "").strip()
@@ -440,7 +451,7 @@ def attest_and_mute_returned_usb(
         or not _equivalent_capabilities(candidate.capabilities, before.capabilities)
     ):
         raise LocalRebootError("returned USB-IIO firmware or capabilities changed across reboot")
-    mute_returned_radio(plan.serial)
+    mute_returned_radio_at_path(plan.serial, Path(plan.usb_sysfs_path))
     return candidate
 
 
@@ -599,20 +610,55 @@ for d in /sys/bus/iio/devices/iio:device*; do
     cf-ad9361-dds-core-lpc) dds="$d" ;;
   esac
 done
-test -n "$phy" && test -n "$dds"
-printf '%s\n' -80 >"$phy/out_voltage0_hardwaregain"
-printf '%s\n' -80 >"$phy/out_voltage1_hardwaregain"
-printf '%s\n' 0 >"$dds/buffer/enable"
-for f in "$dds"/scan_elements/out_voltage[0-3]_en; do test ! -e "$f" || printf '%s\n' 0 >"$f"; done
-for f in "$dds"/out_altvoltage*_scale "$dds"/out_altvoltage*_raw; do printf '%s\n' 0 >"$f"; done
-test "$(awk '{print $1}' "$phy/out_voltage0_hardwaregain")" = -80.000000
-test "$(awk '{print $1}' "$phy/out_voltage1_hardwaregain")" = -80.000000
-test "$(cat "$dds/buffer/enable")" = 0
-for f in "$dds"/scan_elements/out_voltage[0-3]_en "$dds"/out_altvoltage*_raw; do
-  test ! -e "$f" || test "$(cat "$f")" = 0
+test -n "$phy"
+gain_count=0
+for f in "$phy"/out_voltage*_hardwaregain; do
+  test -f "$f" || continue
+  printf '%s\n' -80 >"$f"
+  awk '{ exit !($1 <= -80) }' "$f"
+  gain_count=$((gain_count + 1))
 done
-for f in "$dds"/out_altvoltage*_scale; do
-  test ! -e "$f" || awk -v value="$(cat "$f")" 'BEGIN { exit !(value == 0) }'
+test "$gain_count" -ge 1 && test "$gain_count" -le 2
+tx_lo_count=0
+for f in "$phy"/out_altvoltage*_TX_LO_powerdown; do
+  test -f "$f" || continue
+  printf '%s\n' 1 >"$f"
+  test "$(cat "$f")" = 1
+  tx_lo_count=$((tx_lo_count + 1))
 done
+test "$tx_lo_count" -eq 1
+dds_present=0
+if [ -n "$dds" ]; then
+  dds_present=1
+  printf '%s\n' 0 >"$dds/buffer/enable"
+  for f in "$dds"/scan_elements/out_voltage[0-3]_en; do
+    test ! -e "$f" || printf '%s\n' 0 >"$f"
+  done
+  for f in "$dds"/out_altvoltage*_scale "$dds"/out_altvoltage*_raw; do
+    test -f "$f" || continue
+    printf '%s\n' 0 >"$f"
+  done
+  test "$(cat "$dds/buffer/enable")" = 0
+  for f in "$dds"/scan_elements/out_voltage[0-3]_en "$dds"/out_altvoltage*_raw; do
+    test ! -e "$f" || test "$(cat "$f")" = 0
+  done
+  for f in "$dds"/out_altvoltage*_scale; do
+    test ! -e "$f" || awk -v value="$(cat "$f")" 'BEGIN { exit !(value == 0) }'
+  done
+else
+  dt=/sys/firmware/devicetree/base
+  test -e "$dt/misko,rx-only-fpga"
+  for node in \
+    "$dt/fpga-axi@0/cf-ad9361-dds-core-lpc@79024000" \
+    "$dt/fpga-axi@0/dma@7c420000" \
+    "$dt/fpga-axi@0/tandem-agc@7c450000"
+  do
+    test -d "$node"
+    test "$(tr -d '\000' <"$node/status")" = disabled
+  done
+fi
+printf 'PPU\tgain_count\t%s\n' "$gain_count"
+printf 'PPU\ttx_lo_count\t%s\n' "$tx_lo_count"
+printf 'PPU\tdds_present\t%s\n' "$dds_present"
 printf 'PPU\ttx_safe\t1\n'
 """
