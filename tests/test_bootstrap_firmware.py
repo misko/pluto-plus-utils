@@ -2640,6 +2640,65 @@ def test_execute_lan_flash_refuses_unsafe_tx_before_staging(
     assert not any(call[0] == "upload_frm" for call in transport.calls)
 
 
+def test_execute_lan_flash_attests_rx_only_source_without_opening_missing_dds(
+    lan_planned: tuple[bootstrap.LanFlashPlan, bytes, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base, frm, _ = lan_planned
+    profile_id = "starlink-pss-30m-iio-v1-dnm-persistent-promotion"
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[profile_id]
+    plan = replace(
+        base,
+        before_firmware="v0.50-plutoplus-starlink-pss-15m-rx-only-dnm-v7",
+        expected_firmware="starlink-pss30-iio-v1-dnm",
+        mutation_profile_id=profile_id,
+        source_iio_layout=profile.source_iio_layout.layout_id,
+        return_iio_layout=profile.return_iio_layout.layout_id,
+    )
+    transport = FakeLanSshTransport(plan)
+    lifecycle: list[str] = []
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_lan_flash_plan",
+        lambda *args, **kwargs: (plan, frm),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "mute_returned_radio_lan",
+        lambda *args: pytest.fail("an RX-only source must not open a DDS device"),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_require_rx_only_iio_safe",
+        lambda uri, serial: lifecycle.append(f"rx-only:{uri}:{serial}"),
+    )
+    monkeypatch.setattr(bootstrap, "_require_remote_tx_safe", lambda *args: None)
+    monkeypatch.setattr(bootstrap, "_wait_for_lan_iio_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_attest_lan_return_when_ready",
+        lambda *args, **kwargs: (plan.target_serial, plan.expected_firmware, "ad9361"),
+    )
+
+    result = bootstrap.execute_lan_flash_plan(
+        plan,
+        frm,
+        confirmation=plan.confirmation_phrase,
+        receipt_directory=tmp_path / "receipts",
+        transport=transport,
+        host_key_rotator=lambda: {
+            "previous_known_hosts_sha256": "1" * 64,
+            "replacement_known_hosts_sha256": "2" * 64,
+        },
+    )
+
+    assert result.outcome == "success"
+    assert lifecycle == [f"rx-only:ip:{plan.host}:{plan.target_serial}"]
+    assert "source_rx_only_attested" in result.phases
+    assert "source_tx_quiesced" not in result.phases
+
+
 def test_execute_lan_flash_marks_ambiguous_updater_unknown_without_key_rotation(
     lan_planned: tuple[bootstrap.LanFlashPlan, bytes, Path],
     tmp_path: Path,

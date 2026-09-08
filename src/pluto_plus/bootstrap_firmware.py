@@ -2369,8 +2369,12 @@ def execute_lan_flash_plan(
             raise BootstrapFirmwareError("fixed radio updater is unavailable")
         phases.append("remote_preflight_attested")
         _update_receipt(receipt_path, receipt, phases)
-        mute_returned_radio_lan(plan.host, plan.target_serial)
-        phases.append("source_tx_quiesced")
+        if profile.source_iio_layout.dds_present:
+            mute_returned_radio_lan(plan.host, plan.target_serial)
+            phases.append("source_tx_quiesced")
+        else:
+            _require_rx_only_iio_safe(f"ip:{plan.host}", plan.target_serial)
+            phases.append("source_rx_only_attested")
         _update_receipt(receipt_path, receipt, phases)
         safe_output = transport.run(
             f"sh -s -- {plan.target_serial} {plan.fit_size}",
