@@ -1185,9 +1185,12 @@ uv run pluto firmware enroll-lan-ssh EXACT_SERIAL \
 ```
 
 The plan reads only that host's bounded IIOD context and requires the exact
-serial, immutable firmware profile, AD9361/paired-RX scan layout, metadata ABI,
-and profile-specific tandem capability. Review it, then repeat with both explicit
-guards:
+serial, immutable firmware profile, named IIO layout, metadata ABI, and
+profile-specific tandem capability. The default layout is the historical
+`tx-capable-2r2t-profile-tandem-v1`. For a radio already provisioned as one RX
+and one TX, explicitly add `--iio-layout tx-capable-1r1t-v1`; the profile and
+layout must agree on tandem capability. Review the plan, then repeat with both
+explicit guards and the same layout option:
 
 ```bash
 uv run pluto firmware enroll-lan-ssh EXACT_SERIAL \

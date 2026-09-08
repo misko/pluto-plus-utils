@@ -820,6 +820,21 @@ def _require_iio_layout(
     *,
     transport: str,
 ) -> None:
+    _require_iio_layout_shape(
+        facts,
+        layout,
+        expected_tandem=_layout_tandem(profile, layout),
+        transport=transport,
+    )
+
+
+def _require_iio_layout_shape(
+    facts: Mapping[str, Any],
+    layout: StandaloneIioLayout,
+    *,
+    expected_tandem: bool,
+    transport: str,
+) -> None:
     raw_names = facts.get("device_names", ())
     names = (
         {str(value) for value in raw_names}
@@ -852,7 +867,6 @@ def _require_iio_layout(
             f"expected {layout.dds_present} for {layout.layout_id}"
         )
     tandem_present = "tandem-agc" in names
-    expected_tandem = _layout_tandem(profile, layout)
     if tandem_present is not expected_tandem:
         raise BootstrapFirmwareError(
             f"{transport} runtime tandem capability is {tandem_present}, "
@@ -875,6 +889,7 @@ class LanSshHostKeyEnrollmentPlan:
     expected_firmware: str
     expected_metadata_abi: int
     expected_tandem_agc: bool
+    iio_layout: str
     observed_model: str
     confirmation_phrase: str
     trust_model: str = "explicit_lan_tofu"
@@ -1164,6 +1179,7 @@ def prepare_lan_ssh_host_key_enrollment(
     host: str,
     known_hosts_file: Path,
     profile_id: str,
+    iio_layout: str = PAIRED_RX_TX_CAPABLE_LAYOUT.layout_id,
 ) -> LanSshHostKeyEnrollmentPlan:
     """Attest one exact LAN IIOD endpoint without creating SSH trust."""
 
@@ -1176,6 +1192,14 @@ def prepare_lan_ssh_host_key_enrollment(
     if len(profile.metadata_abis) != 1:  # pragma: no cover - immutable profile invariant
         raise BootstrapFirmwareError("LAN SSH enrollment profile must select one metadata ABI")
     expected_metadata_abi = profile.metadata_abis[0]
+    layout = _IIO_LAYOUTS.get(iio_layout)
+    if layout is None:
+        raise BootstrapFirmwareError(f"unknown LAN SSH enrollment IIO layout {iio_layout!r}")
+    if layout.tandem_agc is not None and layout.tandem_agc is not profile.tandem_agc_required:
+        raise BootstrapFirmwareError(
+            f"metadata firmware profile {profile_id!r} is incompatible with IIO layout "
+            f"{iio_layout!r}"
+        )
     destination = known_hosts_file.expanduser().resolve()
     if destination.exists() or destination.is_symlink():
         raise BootstrapFirmwareError("known-hosts destination already exists; refusing overwrite")
@@ -1211,28 +1235,12 @@ def prepare_lan_ssh_host_key_enrollment(
         raise BootstrapFirmwareError(
             f"LAN IIOD metadata ABI does not provide expected ABI {expected_metadata_abi}"
         ) from error
-    raw_device_names = facts.get("device_names", ())
-    device_names = (
-        {str(value) for value in raw_device_names}
-        if isinstance(raw_device_names, (tuple, list, set, frozenset))
-        else set()
+    _require_iio_layout_shape(
+        facts,
+        layout,
+        expected_tandem=profile.tandem_agc_required,
+        transport="LAN SSH enrollment",
     )
-    if not {"ad9361-phy", "cf-ad9361-lpc"} <= device_names:
-        raise BootstrapFirmwareError("LAN IIOD endpoint lacks the paired-RX IIO devices")
-    raw_scan_channels = facts.get("cf-ad9361-lpc,scan_channels", ())
-    scan_channels = (
-        {str(value) for value in raw_scan_channels}
-        if isinstance(raw_scan_channels, (tuple, list, set, frozenset))
-        else set()
-    )
-    if not {"voltage0", "voltage1", "voltage2", "voltage3"} <= scan_channels:
-        raise BootstrapFirmwareError("LAN IIOD endpoint lacks the canonical paired-RX scan layout")
-    observed_tandem = "tandem-agc" in device_names
-    if observed_tandem is not profile.tandem_agc_required:
-        raise BootstrapFirmwareError(
-            "LAN IIOD tandem capability is "
-            f"{observed_tandem}, expected {profile.tandem_agc_required}"
-        )
     return LanSshHostKeyEnrollmentPlan(
         serial=serial,
         host=normalized_host,
@@ -1241,6 +1249,7 @@ def prepare_lan_ssh_host_key_enrollment(
         expected_firmware=expected_firmware,
         expected_metadata_abi=expected_metadata_abi,
         expected_tandem_agc=profile.tandem_agc_required,
+        iio_layout=layout.layout_id,
         observed_model=observed_model,
         confirmation_phrase=f"TRUST LAN SSH {serial} {normalized_host}",
     )
@@ -1265,6 +1274,7 @@ def execute_lan_ssh_host_key_enrollment(
         host=plan.host,
         known_hosts_file=Path(plan.known_hosts_file),
         profile_id=plan.profile_id,
+        iio_layout=plan.iio_layout,
     )
     if fresh != plan:
         raise BootstrapFirmwareError("LAN SSH enrollment identity plan changed before execution")
@@ -1328,6 +1338,7 @@ def execute_lan_ssh_host_key_enrollment(
             "firmware_version": fresh.expected_firmware,
             "metadata_abi": fresh.expected_metadata_abi,
             "tandem_agc": fresh.expected_tandem_agc,
+            "iio_layout": fresh.iio_layout,
             "fingerprint": fingerprint,
         }
     finally:

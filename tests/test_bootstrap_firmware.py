@@ -346,6 +346,7 @@ def test_lan_ssh_enrollment_attests_then_uses_isolated_tofu_and_pinned_sessions(
     assert result["trust_model"] == "explicit_lan_tofu"
     assert result["serial"] == "SERIAL_A"
     assert result["metadata_abi"] == 1
+    assert result["iio_layout"] == "tx-capable-2r2t-profile-tandem-v1"
     assert destination.read_text() == "192.168.1.20 ssh-ed25519 AAAATESTKEY\n"
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
     assert passwords == [b"analog", b"analog"]
@@ -358,6 +359,69 @@ def test_lan_ssh_enrollment_attests_then_uses_isolated_tofu_and_pinned_sessions(
         assert "PubkeyAuthentication=no" in arguments
         assert "PreferredAuthentications=password" in arguments
         assert sum(item.startswith("UserKnownHostsFile=") for item in arguments) == 1
+
+
+def test_lan_ssh_enrollment_accepts_explicit_single_rx_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facts = _lan_iio_facts()
+    facts.update(
+        {
+            "fw_version": "v0.48-plutoplus-spf-iq-direct-async-v3",
+            "iio,buffer-metadata": "3",
+            "device_names": (
+                "ad9361-phy",
+                "cf-ad9361-lpc",
+                "cf-ad9361-dds-core-lpc",
+                "tandem-agc",
+            ),
+            "cf-ad9361-lpc,scan_channels": ("voltage0", "voltage1"),
+        }
+    )
+    monkeypatch.setattr(bootstrap, "_inspect_iio_context", lambda host: facts)
+
+    plan = bootstrap.prepare_lan_ssh_host_key_enrollment(
+        serial="SERIAL_A",
+        host="192.168.1.20",
+        known_hosts_file=tmp_path / "SERIAL_A.known_hosts",
+        profile_id="iq-direct-async-v3-release",
+        iio_layout="tx-capable-1r1t-v1",
+    )
+
+    assert plan.expected_firmware == "v0.48-plutoplus-spf-iq-direct-async-v3"
+    assert plan.expected_metadata_abi == 3
+    assert plan.expected_tandem_agc is True
+    assert plan.iio_layout == "tx-capable-1r1t-v1"
+
+
+def test_lan_ssh_enrollment_rejects_single_rx_runtime_under_default_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facts = _lan_iio_facts()
+    facts.update(
+        {
+            "fw_version": "v0.48-plutoplus-spf-iq-direct-async-v3",
+            "iio,buffer-metadata": "3",
+            "device_names": (
+                "ad9361-phy",
+                "cf-ad9361-lpc",
+                "cf-ad9361-dds-core-lpc",
+                "tandem-agc",
+            ),
+            "cf-ad9361-lpc,scan_channels": ("voltage0", "voltage1"),
+        }
+    )
+    monkeypatch.setattr(bootstrap, "_inspect_iio_context", lambda host: facts)
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="runtime RX scan layout"):
+        bootstrap.prepare_lan_ssh_host_key_enrollment(
+            serial="SERIAL_A",
+            host="192.168.1.20",
+            known_hosts_file=tmp_path / "SERIAL_A.known_hosts",
+            profile_id="iq-direct-async-v3-release",
+        )
 
 
 def test_lan_ssh_enrollment_rejects_pinned_remote_serial_mismatch_without_publish(

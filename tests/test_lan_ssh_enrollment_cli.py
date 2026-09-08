@@ -56,9 +56,53 @@ def test_lan_ssh_enrollment_cli_dry_run_names_weaker_trust_and_exact_confirmatio
     assert payload["will_trust_host_key"] is False
     assert "weaker than USB-anchored" in payload["warning"]
     assert payload["plan"]["trust_model"] == "explicit_lan_tofu"
+    assert payload["plan"]["iio_layout"] == "tx-capable-2r2t-profile-tandem-v1"
     assert payload["plan"]["confirmation_phrase"] == (
         "TRUST LAN SSH SERIAL_A 192.168.1.20"
     )
+    assert not destination.exists()
+
+
+def test_lan_ssh_enrollment_cli_passes_explicit_single_rx_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facts = _facts()
+    facts.update(
+        {
+            "fw_version": "v0.48-plutoplus-spf-iq-direct-async-v3",
+            "iio,buffer-metadata": "3",
+            "device_names": (
+                "ad9361-phy",
+                "cf-ad9361-lpc",
+                "cf-ad9361-dds-core-lpc",
+                "tandem-agc",
+            ),
+            "cf-ad9361-lpc,scan_channels": ("voltage0", "voltage1"),
+        }
+    )
+    monkeypatch.setattr(bootstrap, "_inspect_iio_context", lambda host: facts)
+    destination = tmp_path / "SERIAL_A.known_hosts"
+
+    result = runner.invoke(
+        app,
+        [
+            "firmware",
+            "enroll-lan-ssh",
+            "SERIAL_A",
+            "--host",
+            "192.168.1.20",
+            "--known-hosts-file",
+            str(destination),
+            "--profile",
+            "iq-direct-async-v3-release",
+            "--iio-layout",
+            "tx-capable-1r1t-v1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["plan"]["iio_layout"] == "tx-capable-1r1t-v1"
     assert not destination.exists()
 
 

@@ -217,7 +217,10 @@ execution additionally requires `--use-default-password` and the exact phrase
 `TRUST LAN SSH <serial> <host>`. It records no user or global SSH trust, verifies
 the gadget serial again over the newly pinned key, and creates the requested
 private known-hosts file only if no destination exists. Prefer USB enrollment;
-LAN TOFU cannot exclude an attacker able to impersonate both IIOD and SSH.
+LAN TOFU cannot exclude an attacker able to impersonate both IIOD and SSH. The
+default enrollment layout is `tx-capable-2r2t-profile-tandem-v1`; pass
+`--iio-layout tx-capable-1r1t-v1` when the already-running source firmware was
+explicitly provisioned for one RX and one TX.
 
 Pluto+ Utils implements this as a separate setup plan, not as a generic remote shell or
 firmware upload. The daemon must be explicitly composed with one exact serial, sysfs path,

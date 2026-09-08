@@ -4422,6 +4422,11 @@ def firmware_enroll_lan_ssh(
         "--profile",
         help="Immutable metadata firmware/capability profile required from IIOD.",
     ),
+    iio_layout: str = typer.Option(
+        "tx-capable-2r2t-profile-tandem-v1",
+        "--iio-layout",
+        help="Named current IIO layout required from IIOD.",
+    ),
     execute: bool = typer.Option(False, "--execute", help="Perform explicit LAN TOFU."),
     use_default_password: bool = typer.Option(
         False,
@@ -4448,6 +4453,7 @@ def firmware_enroll_lan_ssh(
             host=host,
             known_hosts_file=known_hosts_file,
             profile_id=profile,
+            iio_layout=iio_layout,
         )
     except (BootstrapFirmwareError, OSError, ValueError) as error:
         _fail("lan_ssh_identity_attestation_failed", str(error), 4)
