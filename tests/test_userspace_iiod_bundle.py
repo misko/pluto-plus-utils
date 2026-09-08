@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from dataclasses import replace
 
@@ -330,20 +331,24 @@ class LocalScriptRunner:
     def __init__(self, root):
         self.root = root
         self.calls = []
+        self.environment = None
 
     def run(self, argv, *, stdin, timeout_s):
         self.calls.append((argv, stdin))
         command = argv[-1].replace(ROOT, str(self.root))
         if stdin is not None and stdin.startswith(b"set -eu\n"):
-            stdin = stdin.replace(b"'0:700'", f"'{os.geteuid()}:700'".encode())
-            stdin = stdin.replace(b"'0:600:1'", f"'{os.geteuid()}:600:1'".encode())
-            stdin = stdin.replace(b'"0:$mode:1"', f'"{os.geteuid()}:$mode:1"'.encode())
+            stdin = stdin.replace(b"'drwx------:0'", f"'drwx------:{os.geteuid()}'".encode())
+            stdin = stdin.replace(b"'-rw-------:1:0'", f"'-rw-------:1:{os.geteuid()}'".encode())
+            stdin = stdin.replace(
+                b'"$permissions:1:0"', f'"$permissions:1:{os.geteuid()}"'.encode()
+            )
         result = subprocess.run(
             ["/bin/sh", "-c", command],
             input=stdin,
             capture_output=True,
             timeout=timeout_s,
             check=False,
+            env=self.environment,
         )
         return SshCommandResult(result.returncode, result.stdout, result.stderr)
 
@@ -433,5 +438,33 @@ def test_real_scripts_refuse_preexisting_root_and_can_clean_missing_uploads(scri
     (runner.root / "worker").unlink()
     with pytest.raises(UserspaceIiodLifecycleError):
         transport.verify_companions(bundle, SESSION)
+    transport.cleanup_companions(bundle, SESSION)
+    assert not runner.root.exists()
+
+
+def test_real_scripts_work_without_optional_stat_applet(scripts, tmp_path):
+    transport, runner, bundle = scripts
+    commands = tmp_path / "minimal-bin"
+    commands.mkdir()
+    for name in (
+        "ls",
+        "awk",
+        "find",
+        "wc",
+        "tr",
+        "cat",
+        "sha256sum",
+        "mkdir",
+        "chmod",
+        "rm",
+        "rmdir",
+    ):
+        executable = shutil.which(name)
+        assert executable is not None
+        (commands / name).symlink_to(executable)
+    assert not (commands / "stat").exists()
+    runner.environment = {**os.environ, "PATH": str(commands)}
+    transport.stage_companions(bundle, SESSION)
+    transport.verify_companions(bundle, SESSION)
     transport.cleanup_companions(bundle, SESSION)
     assert not runner.root.exists()

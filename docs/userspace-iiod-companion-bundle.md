@@ -51,6 +51,13 @@ before removing only the enumerated paths and then the empty directory. There
 is no archive extraction, arbitrary command API, recursive deletion, or write
 under QNAP. A later session cannot clean a previous unresolved session's bundle.
 
+Metadata checks use the fixed permission/link-count/numeric-uid fields from
+`LC_ALL=C ls -ldn` plus the regular-file/symlink tests. They do not require the
+optional BusyBox `stat` applet, which is absent on the tested radio image. Input
+paths have already been restricted to canonical directories and safe basenames;
+unexpected field output fails closed. Permissions and ownership requirements
+are unchanged. A minimal-command regression test omits `stat` entirely.
+
 Interrupted uploads with entirely missing files can be cleaned. A truncated,
 changed or unexpected file causes cleanup to fail and **retain the directory**
 for inspection. An unresolved process likewise retains its dependencies. Such

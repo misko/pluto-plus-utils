@@ -519,9 +519,9 @@ if [ "$action" = cleanup ] && [ ! -e "$root" ] && [ ! -L "$root" ]; then
   exit 0
 fi
 test ! -L "$root" && test -d "$root"
-test "$(stat -c '%u:%a' "$root")" = '0:700'
+test "$(LC_ALL=C ls -ldn "$root" | awk '{print $1 ":" $3}')" = 'drwx------:0'
 test ! -L "$root/owner" && test -f "$root/owner"
-test "$(stat -c '%u:%a:%h' "$root/owner")" = '0:600:1'
+test "$(LC_ALL=C ls -ldn "$root/owner" | awk '{print $1 ":" $2 ":" $3}')" = '-rw-------:1:0'
 test "$(cat "$root/owner")" = "$owner"
 # Validate the complete inventory before removing any file. Cleanup permits
 # missing files after an interrupted stage, but never changed or partial bytes.
@@ -536,7 +536,8 @@ while [ "$remaining" -gt 0 ]; do
   test ! -L "$path"
   if [ "$action" = cleanup ] && [ ! -e "$path" ]; then continue; fi
   test -f "$path"
-  test "$(stat -c '%u:%a:%h' "$path")" = "0:$mode:1"
+  case "$mode" in 700) permissions='-rwx------';; 600) permissions='-rw-------';; *) exit 1;; esac
+  test "$(LC_ALL=C ls -ldn "$path" | awk '{print $1 ":" $2 ":" $3}')" = "$permissions:1:0"
   test "$(wc -c < "$path" | tr -d ' ')" = "$bytes"
   test "$(sha256sum "$path" | awk '{print $1}')" = "$digest"
   expected=$((expected + 1))
