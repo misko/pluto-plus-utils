@@ -48,6 +48,7 @@ class LocalRebootCapabilities:
     phy_model: str
     rx_scan_channels: tuple[str, ...]
     tandem_agc: bool
+    detector_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,8 +116,11 @@ class FixedSshLocalRebootTransport:
         channels = tuple(
             sorted(item for item in fields.get("rx_scan_channels", "").split(",") if item)
         )
-        if not channels:
-            raise LocalRebootError("remote attestation found no RX scan channels")
+        detector_only = fields.get("detector_only") == "1"
+        if (not channels) is not detector_only:
+            raise LocalRebootError(
+                "remote RX scan inventory must be non-empty or an exact detector-only topology"
+            )
         return LocalRebootAttestation(
             serial=serial,
             firmware=_required(fields, "firmware"),
@@ -126,6 +130,7 @@ class FixedSshLocalRebootTransport:
                 phy_model=_required(fields, "phy_model"),
                 rx_scan_channels=channels,
                 tandem_agc=fields.get("tandem_agc") == "1",
+                detector_only=detector_only,
             ),
         )
 
@@ -453,8 +458,11 @@ def attest_and_mute_returned_usb(
         if isinstance(raw_channels, (tuple, list, set, frozenset))
         else ()
     )
+    detector_only = {"starlink-pss-map", "starlink-pss-track"} <= names
     if not firmware or not board_model or not phy_model or "cf-ad9361-lpc" not in names:
         raise LocalRebootError("returned USB-IIO capability attestation is incomplete")
+    if (not channels) is not detector_only:
+        raise LocalRebootError("returned USB-IIO RX/detector topology is inconsistent")
     candidate = LocalRebootAttestation(
         serial=serial,
         firmware=firmware,
@@ -466,12 +474,12 @@ def attest_and_mute_returned_usb(
             phy_model=phy_model,
             rx_scan_channels=channels,
             tandem_agc="tandem-agc" in names,
+            detector_only=detector_only,
         ),
     )
-    if (
-        candidate.firmware != (plan.expected_return_firmware or before.firmware)
-        or not _equivalent_capabilities(candidate.capabilities, before.capabilities)
-    ):
+    if candidate.firmware != (
+        plan.expected_return_firmware or before.firmware
+    ) or not _equivalent_capabilities(candidate.capabilities, before.capabilities):
         raise LocalRebootError("returned USB-IIO firmware or capabilities changed across reboot")
     if "cf-ad9361-dds-core-lpc" in names:
         mute_returned_radio_at_path(plan.serial, Path(plan.usb_sysfs_path))
@@ -496,6 +504,7 @@ def _equivalent_capabilities(
         and first.phy_model == second.phy_model
         and first.rx_scan_channels == second.rx_scan_channels
         and first.tandem_agc is second.tandem_agc
+        and first.detector_only is second.detector_only
     )
 
 
@@ -609,10 +618,12 @@ emit boot_id "$(cat /proc/sys/kernel/random/boot_id)"
 compatible_path=/proc/device-tree/amba/spi@e0006000/ad9361-phy@0/compatible
 compatible=$(tr '\000' '\n' <"$compatible_path" 2>/dev/null | head -n1 || true)
 emit phy_model "${compatible#adi,}"
-rx=''; tandem=0
+rx=''; tandem=0; pss_map=0; pss_track=0
 for d in /sys/bus/iio/devices/iio:device*; do
   name=$(cat "$d/name" 2>/dev/null || true)
   test "$name" != tandem-agc || tandem=1
+  test "$name" != starlink-pss-map || pss_map=1
+  test "$name" != starlink-pss-track || pss_track=1
   test "$name" = cf-ad9361-lpc || continue
   for f in "$d"/scan_elements/in_voltage[0-3]_en; do
     test -e "$f" || continue
@@ -620,8 +631,16 @@ for d in /sys/bus/iio/devices/iio:device*; do
     case ",$rx," in *,$channel,*) ;; *) rx="${rx}${rx:+,}$channel";; esac
   done
 done
+detector=0
+test -n "$rx" || {
+  test -e /sys/firmware/devicetree/base/misko,rx-only-fpga
+  test "$pss_map" = 1
+  test "$pss_track" = 1
+  detector=1
+}
 emit rx_scan_channels "$rx"
 emit tandem_agc "$tandem"
+emit detector_only "$detector"
 """
 
 

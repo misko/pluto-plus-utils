@@ -117,6 +117,7 @@ class LanNetworkIioAttestation:
     phy_model: str
     rx_scan_channels: tuple[str, ...]
     tandem_agc: bool
+    detector_only: bool = False
 
 
 def prepare_lan_reboot(
@@ -218,9 +219,7 @@ def execute_lan_network_reboot(
     mutation_attempted = False
 
     def checkpoint(
-        outcome: Literal[
-            "started", "success", "failed_before_mutation", "unknown"
-        ] = "started",
+        outcome: Literal["started", "success", "failed_before_mutation", "unknown"] = "started",
         *,
         finished_at: str | None = None,
         error: str | None = None,
@@ -245,9 +244,7 @@ def execute_lan_network_reboot(
 
     checkpoint()
     try:
-        if _private_file_sha256(known_hosts_file, "SSH known-hosts") != (
-            plan.known_hosts_sha256
-        ):
+        if _private_file_sha256(known_hosts_file, "SSH known-hosts") != (plan.known_hosts_sha256):
             raise LanRebootError("SSH trust changed after LAN reboot planning")
         _require_usb_absent(plan.serial, scanner())
         completed.append("usb_absence_reattested")
@@ -357,9 +354,7 @@ def execute_lan_reboot(
     mutation_attempted = False
 
     def checkpoint(
-        outcome: Literal[
-            "started", "success", "failed_before_mutation", "unknown"
-        ] = "started",
+        outcome: Literal["started", "success", "failed_before_mutation", "unknown"] = "started",
         *,
         finished_at: str | None = None,
         error: str | None = None,
@@ -471,8 +466,11 @@ def _network_iio_attestation(
     if not isinstance(raw_scan, (tuple, list, set, frozenset)):
         raise LanRebootError("LAN IIOD RX scan inventory is malformed")
     scan = tuple(sorted(str(value) for value in raw_scan))
-    if not scan:
-        raise LanRebootError("LAN IIOD RX scan inventory is empty")
+    detector_only = {"starlink-pss-map", "starlink-pss-track"} <= names
+    if (not scan) is not detector_only:
+        raise LanRebootError(
+            "LAN IIOD RX scan inventory must be non-empty or an exact detector-only topology"
+        )
     return LanNetworkIioAttestation(
         serial=serial,
         firmware=firmware,
@@ -481,6 +479,7 @@ def _network_iio_attestation(
         phy_model=phy_model,
         rx_scan_channels=scan,
         tandem_agc="tandem-agc" in names,
+        detector_only=detector_only,
     )
 
 
@@ -499,6 +498,7 @@ def _require_iio_matches_ssh(
         iio.phy_model != ssh.capabilities.phy_model
         or iio.rx_scan_channels != ssh.capabilities.rx_scan_channels
         or iio.tandem_agc != ssh.capabilities.tandem_agc
+        or iio.detector_only != ssh.capabilities.detector_only
     ):
         raise LanRebootError("LAN IIOD topology differs from the SSH attestation")
 

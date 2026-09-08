@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import pluto_plus.lan_reboot as lan_reboot
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 from pluto_plus.lan_reboot import (
     LanRebootError,
@@ -60,6 +61,36 @@ def _iio_facts() -> dict[str, object]:
             "voltage3",
         ),
     }
+
+
+def test_network_iio_attestation_accepts_exact_detector_only_inventory() -> None:
+    facts = {
+        **_iio_facts(),
+        "device_names": (
+            "ad9361-phy",
+            "cf-ad9361-lpc",
+            "starlink-pss-map",
+            "starlink-pss-track",
+        ),
+        "cf-ad9361-lpc,scan_channels": (),
+    }
+
+    result = lan_reboot._network_iio_attestation(facts, expected_metadata_abi=3)
+
+    assert result.rx_scan_channels == ()
+    assert result.tandem_agc is False
+    assert result.detector_only is True
+
+
+def test_network_iio_attestation_rejects_empty_unknown_inventory() -> None:
+    facts = {
+        **_iio_facts(),
+        "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+        "cf-ad9361-lpc,scan_channels": (),
+    }
+
+    with pytest.raises(LanRebootError, match="detector-only topology"):
+        lan_reboot._network_iio_attestation(facts, expected_metadata_abi=3)
 
 
 def _usb_radio() -> LocalUsbPluto:
@@ -348,9 +379,7 @@ def test_execute_network_reboot_rejects_unbound_rotation_evidence(tmp_path: Path
             plan,
             confirmation=plan.confirmation_phrase,
             transport=transport,
-            returned_transport_factory=lambda: _Transport(
-                attestation=_returned_attestation()
-            ),
+            returned_transport_factory=lambda: _Transport(attestation=_returned_attestation()),
             host_key_rotator=lambda: {
                 "previous_known_hosts_sha256": "0" * 64,
                 "replacement_known_hosts_sha256": "1" * 64,

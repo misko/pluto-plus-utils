@@ -86,6 +86,52 @@ class ReportingTransport:
         return self.report
 
 
+class AttestationReportingTransport:
+    def __init__(self, report: str) -> None:
+        self.report = report
+
+    def run(self, command: str, *, stdin: bytes | None = None, timeout_s: float = 15) -> str:
+        assert command == f"/bin/sh -s -- {SERIAL}"
+        assert stdin is local_reboot._ATTEST_SCRIPT
+        assert timeout_s == 25
+        return self.report
+
+
+def test_fixed_ssh_attestation_accepts_exact_detector_only_topology() -> None:
+    report = (
+        f"PPU\tserial\t{SERIAL}\n"
+        "PPU\tfirmware\tstarlink-pss30-iio-v1-dnm\n"
+        "PPU\tboot_id\t11111111-1111-4111-8111-111111111111\n"
+        "PPU\tboard_model\tPlutoSDR+ Rev.C\n"
+        "PPU\tphy_model\tad9361\n"
+        "PPU\trx_scan_channels\t\n"
+        "PPU\ttandem_agc\t0\n"
+        "PPU\tdetector_only\t1\n"
+    )
+
+    result = FixedSshLocalRebootTransport(AttestationReportingTransport(report)).attest(SERIAL)
+
+    assert result.capabilities.rx_scan_channels == ()
+    assert result.capabilities.tandem_agc is False
+    assert result.capabilities.detector_only is True
+
+
+def test_fixed_ssh_attestation_rejects_an_unidentified_empty_scan_layout() -> None:
+    report = (
+        f"PPU\tserial\t{SERIAL}\n"
+        "PPU\tfirmware\tunknown\n"
+        "PPU\tboot_id\t11111111-1111-4111-8111-111111111111\n"
+        "PPU\tboard_model\tPlutoSDR+ Rev.C\n"
+        "PPU\tphy_model\tad9361\n"
+        "PPU\trx_scan_channels\t\n"
+        "PPU\ttandem_agc\t0\n"
+        "PPU\tdetector_only\t0\n"
+    )
+
+    with pytest.raises(LocalRebootError, match="detector-only topology"):
+        FixedSshLocalRebootTransport(AttestationReportingTransport(report)).attest(SERIAL)
+
+
 @pytest.mark.parametrize(
     "report",
     (
@@ -148,9 +194,7 @@ def _credentials(tmp_path: Path) -> Path:
     return path
 
 
-def _plan(
-    tmp_path: Path, *, expected_return_firmware: str | None = None
-) -> LocalRebootPlan:
+def _plan(tmp_path: Path, *, expected_return_firmware: str | None = None) -> LocalRebootPlan:
     return prepare_local_reboot(
         SERIAL,
         PATH,
