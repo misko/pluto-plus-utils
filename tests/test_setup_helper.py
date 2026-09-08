@@ -313,6 +313,50 @@ def test_bound_ssh_transport_streams_large_binary_stdin_after_authenticated_mark
         os.close(slave_fd)
 
 
+def test_bound_ssh_transport_classifies_rotated_key_before_stdin_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+
+    class RotatedKeyChild:
+        before = b""
+        exitstatus = 255
+        signalstatus = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            self.calls += 1
+            if self.calls == 1:
+                return 0
+            self.before = b"REMOTE HOST IDENTIFICATION HAS CHANGED!\r\n"
+            return 2
+
+        def sendline(self, value: bytes) -> None:
+            assert value == b"analog"
+
+        def close(self, force: bool = False) -> None:
+            del force
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", lambda *_args, **_kwargs: RotatedKeyChild())
+    transport = BoundSshTransport(
+        host="192.168.1.14",
+        interface=None,
+        password="analog",
+        known_hosts_file=known_hosts,
+    )
+
+    with pytest.raises(SetupSshHostKeyChangedError, match="host key changed"):
+        transport.run("head -c 7 >/tmp/payload", stdin=b"payload")
+
+
 def test_bound_ssh_transport_rejects_public_or_named_hosts(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("placeholder\n")

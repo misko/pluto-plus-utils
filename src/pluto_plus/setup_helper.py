@@ -472,6 +472,7 @@ class BoundSshTransport:
             timeout=timeout_s,
         )
         transcript = bytearray()
+        closed_before_stdin = False
         try:
             while True:
                 matched = child.expect(
@@ -496,8 +497,7 @@ class BoundSshTransport:
                     stdin = None
                     continue
                 if matched == 2:
-                    if stdin is not None:
-                        raise SetupHelperError("radio SSH closed before accepting stdin")
+                    closed_before_stdin = stdin is not None
                     break
                 raise SetupHelperError("radio SSH operation timed out")
         finally:
@@ -507,6 +507,8 @@ class BoundSshTransport:
         output = bytes(transcript).decode(errors="replace").replace("\r", "")
         if "REMOTE HOST IDENTIFICATION HAS CHANGED" in output:
             raise SetupSshHostKeyChangedError("pinned radio SSH host key changed after reboot")
+        if closed_before_stdin:
+            raise SetupHelperError("radio SSH closed before accepting stdin")
         # A reboot intentionally tears down SSH before it can return a status.
         rebooting = "/usr/sbin/device_reboot " in command
         if not rebooting and (exit_status not in {0, None} or signal_status is not None):

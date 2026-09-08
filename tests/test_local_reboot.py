@@ -450,7 +450,7 @@ def test_changed_firmware_never_passes_post_return_attestation(tmp_path: Path) -
             route_checker=lambda interface, host: ROUTE,
             interface_validator=lambda interface, path: None,
             usb_access_checker=lambda path: True,
-            timeout_s=0.01,
+            timeout_s=0.2,
             poll_interval_s=0.001,
         )
 
