@@ -500,20 +500,20 @@ profile, and exact DFU/FRM/FIT hashes. Execution requires the printed
 `FLASH LAN <serial> <host>` phrase and a private pinned known-hosts file.
 
 Before upload, the command revalidates IIOD and pinned-SSH identity and performs a
-read-only TX-safe check: all radio buffers are idle, both TX gains are at or below
--80 dB, TX scan elements are disabled, and DDS raw/scale controls are zero. It then
-uses only the fixed staging path and updater, verifies the staged FRM, hashes the
-exact FIT length from `mtd3`, cleans the stage, and reboots.
+layout-aware, read-only TX-safe check. The shipped profile fixes the RX geometry,
+DDS/tandem presence, TX-gain count, shared TX-LO state, buffer count, and DDS
+control counts. It then uses only the fixed staging path and updater, verifies the
+staged FRM, hashes the exact FIT length from `mtd3`, cleans the stage, and reboots.
 
 The on-radio SSH key is generated at boot and is not expected to persist. After
 reboot, `flash-lan` uses IIOD—not the new SSH key—as the first identity anchor. It
-requires the exact serial, target firmware, metadata ABI, PHY, paired-RX/tandem
-layout, profile-specific DDR/RAM-ring attributes, direct-async attributes, and
-TX-safe readback. Only then may one `accept-new` SSH session capture the replacement
-key and read the exact gadget serial. The old known-hosts file is archived by digest;
-the replacement is published atomically; both fingerprints and hashes are written
-to the flash receipt. Thus an ordinary ephemeral key does not strand a successful
-update or silently broaden trust.
+requires the exact serial, target firmware, metadata ABI, PHY, named return layout,
+profile-specific attributes, and IIO TX-safe readback. Only then may one
+`accept-new` SSH session capture the replacement key and read the exact gadget
+serial. The old known-hosts file is archived by digest and the replacement is
+published atomically. Using that replacement key, the executor finally rechecks
+the exact QSPI FIT, buffer/TX state, and any 1R1T device-tree contract. Both key
+fingerprints and hashes are written to the schema-v2 flash receipt.
 
 Long-term persistent SSH identity is a firmware/storage feature, not a host-side
 workaround. It should use a unique per-radio private key in protected persistent

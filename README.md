@@ -1244,19 +1244,26 @@ uv run pluto firmware flash-lan /absolute/path/to/qualified-pluto.dfu \
 ```
 
 The pinned pre-reboot SSH key authorizes only the mutation. Before staging, the
-command independently re-attests the radio serial, current firmware, updater, idle
-buffers, muted TX gains, disabled TX scan elements, and zeroed DDS state. It hashes
-the staged FRM and the exact FIT bytes read back from `mtd3` before reset.
+command independently re-attests the radio serial, current firmware, updater, and
+the source layout's exact idle/TX-safe surface. A profile can bind an exact source
+firmware allow-list and distinct source/return layouts; callers cannot override
+either. The command hashes the staged FRM and exact FIT bytes read back from `mtd3`
+before reset.
 
 Pluto's generated SSH host key is ephemeral and normally changes at reboot. The
 command therefore does not wait for old-key SSH to recover. It first observes IIOD
 disappear and return, then requires the exact serial, target firmware, metadata ABI,
-paired-RX/tandem layout, direct-async and RAM-ring capabilities, and TX-safe readback.
-Only after that independent attestation does it accept one replacement key, verify
-the same serial through the new SSH session, archive the old known-hosts bytes, and
-atomically replace the active mode-0600 file. Both key hashes and fingerprints are
-stored in the durable receipt. A failure after updater dispatch is `unknown` and must
-not be retried without read-only reconciliation.
+named return layout, profile capabilities, and TX-safe IIO readback. Only after that
+independent attestation does it accept one replacement key, verify the same serial,
+archive the old known-hosts bytes, and atomically replace the active mode-0600 file.
+The replacement key is immediately used for a final read-only QSPI, device-tree,
+buffer, and TX-safety attestation. Both key hashes and fingerprints are stored in
+the schema-v2 receipt. A failure after updater dispatch is `unknown` and must not be
+retried without read-only reconciliation.
+
+Hardware-unqualified persistent canary profiles remain local-USB only. Promoting
+the same immutable bytes to LAN use requires a distinct reviewed policy after
+local persistent return, workload, reboot/cold-return, and rollback testing.
 
 A firmware-provisioned persistent host key would remove routine rotation, but it must
 be generated per device and stored in protected persistent storage. Reusing one key

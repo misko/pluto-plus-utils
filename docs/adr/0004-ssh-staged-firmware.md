@@ -22,9 +22,11 @@ Add a distinct `ssh_frm` transport with these boundaries:
 
 1. A radio must be explicitly enrolled by exact hardware serial, literal network
    endpoint, and pinned SSH host key. Discovery never enrolls a radio.
-2. The first version accepts only the hardware-qualified canonical release from
-   the shipped policy manifest. Candidate qualification remains a USB volatile-DFU
-   workflow.
+2. LAN execution accepts only an exact, hardware-qualified persistent profile
+   shipped with the utility. A hardware-unqualified persistent canary may be
+   selected only by the serial/path-bound local USB workflow; it cannot plan a
+   LAN write. Volatile qualification remains a distinct workflow and never
+   grants persistence by implication.
 3. Planning validates the source DFU/FRM, stages a content-addressed `pluto.frm`,
    and binds its hashes, the enrollment, current radio identity, expected firmware,
    expiration, and transport into a one-time plan.
@@ -39,8 +41,11 @@ Add a distinct `ssh_frm` transport with these boundaries:
    updater starts has an `unknown` outcome and is never retried automatically.
 8. Reconciliation is fresh and read-only. It re-attests identity, active firmware,
    and persistent image evidence without invoking the updater.
-9. A changed post-reboot host key is never trusted automatically. It requires a
-   separate authenticated enrollment reconciliation before another mutation.
+9. A changed post-reboot host key is accepted only after IIOD returns with the
+   planned serial, firmware, PHY, metadata ABI, capabilities, and exact named
+   IIO layout. The old key is archived, the replacement is verified against the
+   same gadget serial, and the replacement key is then used for a read-only
+   QSPI, device-tree, buffer, and TX-safety attestation.
 10. Remote firmware routes use the existing admin boundary and are unavailable over
     non-loopback plaintext HTTP.
 

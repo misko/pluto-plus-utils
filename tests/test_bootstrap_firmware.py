@@ -2377,6 +2377,7 @@ class FakeLanSshTransport:
         self.updater_output = updater_output
         self.tx_gain = tx_gain
         self.calls: list[tuple[str, bytes | None]] = []
+        self.reconcile_count = 0
 
     def upload_frm(self, data: bytes, *, timeout_s: float = 120) -> None:
         del timeout_s
@@ -2399,16 +2400,28 @@ class FakeLanSshTransport:
                 "updater=/sbin/update_frm.sh\n"
             )
         if stdin == bootstrap._REMOTE_RECONCILE_SCRIPT:
+            returned = self.reconcile_count > 0
+            self.reconcile_count += 1
+            firmware = self.plan.expected_firmware if returned else self.plan.before_firmware
+            fit_sha256 = self.plan.fit_sha256 if returned else "0" * 64
             return (
                 f"PPU\tserial\t{self.plan.target_serial}\n"
-                f"PPU\tfirmware\t{self.plan.before_firmware}\n"
-                f"PPU\tfit_sha256\t{'0' * 64}\n"
+                f"PPU\tfirmware\t{firmware}\n"
+                f"PPU\tfit_sha256\t{fit_sha256}\n"
                 "PPU\tall_buffer_enable\t0,0\n"
+                "PPU\tdds_present\t1\n"
+                "PPU\ttandem_present\t1\n"
                 f"PPU\ttx_hardwaregain_db\t{self.tx_gain}\n"
+                "PPU\ttx_lo_powerdown\t\n"
                 "PPU\ttx_buffer_enable\t0\n"
                 "PPU\ttx_scan_enable\t0,0,0,0\n"
                 "PPU\ttx_dds_raw\t0,0,0,0,0,0,0,0\n"
                 "PPU\ttx_dds_scale\t0,0,0,0,0,0,0,0\n"
+                "PPU\troot_marker_present\t0\n"
+                "PPU\trx_dma_dt_state\tenabled\n"
+                "PPU\tdds_dt_state\tenabled\n"
+                "PPU\ttx_dma_dt_state\tenabled\n"
+                "PPU\ttandem_dt_state\tenabled\n"
             )
         if command == bootstrap._REMOTE_STAGE_HASH_COMMAND:
             return f"{self.plan.frm_sha256}  /tmp/pluto-plus-utils/pluto.frm\n"
@@ -2507,13 +2520,14 @@ def test_execute_lan_flash_orders_attestation_rotation_and_receipt(
     ]
     assert "remote_tx_safe_read_only_attested" in result.phases
     assert "mtd3_fit_verified" in result.phases
-    assert result.phases[-1] == "lan_ssh_host_key_rotated"
+    assert result.phases[-1] == "remote_return_tx_safe_read_only_attested"
     safe_call = next(
         call for call in transport.calls if call[1] == bootstrap._REMOTE_RECONCILE_SCRIPT
     )
     upload_call = next(call for call in transport.calls if call[0] == "upload_frm")
     assert transport.calls.index(safe_call) < transport.calls.index(upload_call)
     receipt = json.loads(Path(result.receipt_path).read_text())
+    assert receipt["schema_version"] == 2
     assert receipt["outcome"] == "success"
     assert receipt["host_key_rotation"]["replacement_known_hosts_sha256"] == "2" * 64
 
@@ -2749,11 +2763,19 @@ class ReadOnlyReconciliationTransport:
             f"PPU\tfirmware\t{self.plan.expected_firmware}\n"
             f"PPU\tfit_sha256\t{self.plan.fit_sha256}\n"
             "PPU\tall_buffer_enable\t0,0\n"
+            "PPU\tdds_present\t1\n"
+            "PPU\ttandem_present\t1\n"
             "PPU\ttx_hardwaregain_db\t-80,-80\n"
+            "PPU\ttx_lo_powerdown\t\n"
             "PPU\ttx_buffer_enable\t0\n"
             "PPU\ttx_scan_enable\t0,0,0,0\n"
             "PPU\ttx_dds_raw\t0,0,0,0,0,0,0,0\n"
             "PPU\ttx_dds_scale\t0,0,0,0,0,0,0,0\n"
+            "PPU\troot_marker_present\t0\n"
+            "PPU\trx_dma_dt_state\tenabled\n"
+            "PPU\tdds_dt_state\tenabled\n"
+            "PPU\ttx_dma_dt_state\tenabled\n"
+            "PPU\ttandem_dt_state\tenabled\n"
         )
 
 
@@ -3164,3 +3186,136 @@ def test_exact_path_mute_never_scans_busy_peer_contexts(
     assert opened == ["usb:5.13.5"]
     assert muted == [device]
     assert closed == ["buffer", "context"]
+
+
+def test_rx_only_persistent_canary_is_local_only_and_has_exact_1r1t_transition() -> None:
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[
+        "starlink-pss-15m-rx-only-dnm-v7-persistent-canary"
+    ]
+
+    assert profile.persistent_allowed is True
+    assert profile.policy.hardware_qualified is False
+    assert profile.policy.asset_sha256 == (
+        "dfd38e9e687f881599a3e4dea0070430e3731193debda64e313305a90dfd833d"
+    )
+    assert profile.source_iio_layout is bootstrap.SINGLE_RX_TX_CAPABLE_LAYOUT
+    assert profile.return_iio_layout is bootstrap.SINGLE_RX_RX_ONLY_LAYOUT
+    assert profile.allowed_before_firmwares == (
+        "v0.48-plutoplus-spf-iq-direct-async-v3",
+        "v0.49-plutoplus-spf-iq-direct-async-v4",
+    )
+
+
+def test_rx_only_canary_cannot_plan_a_lan_persistent_write(tmp_path: Path) -> None:
+    image = tmp_path / "candidate.dfu"
+    image.write_bytes(b"not inspected because LAN authority fails first")
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="not qualified"):
+        bootstrap.prepare_lan_flash_plan(
+            image,
+            serial="SERIAL_A",
+            host="192.168.1.17",
+            mutation_profile_id="starlink-pss-15m-rx-only-dnm-v7-persistent-canary",
+        )
+
+
+def test_single_rx_remote_safety_contracts_are_layout_specific() -> None:
+    common = {
+        "serial": "SERIAL_A",
+        "firmware": "v-test",
+        "fit_sha256": "0" * 64,
+        "root_marker_present": "0",
+        "rx_dma_dt_state": "enabled",
+        "dds_dt_state": "enabled",
+        "tx_dma_dt_state": "enabled",
+        "tandem_dt_state": "enabled",
+    }
+    tx_capable = {
+        **common,
+        "all_buffer_enable": "0,0",
+        "dds_present": "1",
+        "tandem_present": "1",
+        "tx_hardwaregain_db": "-89.75",
+        "tx_lo_powerdown": "1",
+        "tx_buffer_enable": "0",
+        "tx_scan_enable": "0,0",
+        "tx_dds_raw": "0,0,0,0",
+        "tx_dds_scale": "0,0,0,0",
+    }
+    bootstrap._require_remote_tx_safe(tx_capable, bootstrap.SINGLE_RX_TX_CAPABLE_LAYOUT)
+
+    rx_only = {
+        **common,
+        "all_buffer_enable": "0",
+        "dds_present": "0",
+        "tandem_present": "0",
+        "tx_hardwaregain_db": "-80",
+        "tx_lo_powerdown": "1",
+        "tx_buffer_enable": "",
+        "tx_scan_enable": "",
+        "tx_dds_raw": "",
+        "tx_dds_scale": "",
+        "root_marker_present": "1",
+        "dds_dt_state": "disabled",
+        "tx_dma_dt_state": "disabled",
+        "tandem_dt_state": "disabled",
+    }
+    bootstrap._require_remote_tx_safe(rx_only, bootstrap.SINGLE_RX_RX_ONLY_LAYOUT)
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="rx-only-1r1t-v1"):
+        bootstrap._require_remote_tx_safe(
+            {**rx_only, "tx_lo_powerdown": "0"},
+            bootstrap.SINGLE_RX_RX_ONLY_LAYOUT,
+        )
+
+
+def test_1r1t_rollback_profile_accepts_only_the_rx_only_source() -> None:
+    profile = bootstrap.STANDALONE_FLASH_PROFILES[
+        "iq-direct-async-v3-release-persistent-1r1t-rollback"
+    ]
+
+    assert profile.policy.hardware_qualified is True
+    assert profile.source_iio_layout is bootstrap.SINGLE_RX_RX_ONLY_LAYOUT
+    assert profile.return_iio_layout is bootstrap.SINGLE_RX_TX_CAPABLE_LAYOUT
+    assert profile.allowed_before_firmwares == ("v0.50-plutoplus-starlink-pss-15m-rx-only-dnm-v7",)
+
+
+def test_rx_only_iio_safety_readback_is_non_mutating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[bool] = []
+
+    def attribute(value: str) -> SimpleNamespace:
+        return SimpleNamespace(value=value)
+
+    channels = [
+        SimpleNamespace(
+            id="altvoltage0",
+            name="RX_LO",
+            output=True,
+            attrs={"powerdown": attribute("0")},
+        ),
+        SimpleNamespace(
+            id="altvoltage1",
+            name="TX_LO",
+            output=True,
+            attrs={"powerdown": attribute("1")},
+        ),
+        SimpleNamespace(
+            id="voltage0",
+            name=None,
+            output=True,
+            attrs={"hardwaregain": attribute("-80.000000 dB")},
+        ),
+    ]
+    context = SimpleNamespace(
+        attrs={"hw_serial": "SERIAL_A"},
+        devices=[SimpleNamespace(name="ad9361-phy", channels=channels)],
+        set_timeout=lambda value: None,
+        close=lambda: closed.append(True),
+    )
+    monkeypatch.setitem(sys.modules, "iio", SimpleNamespace(Context=lambda uri: context))
+
+    bootstrap._require_rx_only_iio_safe("ip:192.168.1.17", "SERIAL_A")
+
+    assert closed == [True]

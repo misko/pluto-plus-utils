@@ -791,6 +791,41 @@ IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V4_RELEASE_RAM_PO
     }
 )
 
+# Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
+# ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a
+# local, recoverable-radio persistent canary only: ``hardware_qualified=False``
+# keeps the network-only flash command closed until the same bytes have passed
+# persistent return, cold-return, RX-only topology, and deterministic detector
+# checks on an attached radio.  A later promotion must be a distinct reviewed
+# policy object; changing this flag in place would erase the qualification
+# boundary.
+STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY = FirmwarePolicy(
+    profile_id="starlink-pss-15m-rx-only-dnm-v7-persistent-canary",
+    release_tag="starlink-pss-15m-rx-only-dnm-v7-02ae824f53be",
+    device_firmware="v0.50-plutoplus-starlink-pss-15m-rx-only-dnm-v7",
+    asset_name="plutoplus-starlink-pss-15m-rx-only-dnm-v7-02ae824f53be-pluto.dfu",
+    asset_sha256="dfd38e9e687f881599a3e4dea0070430e3731193debda64e313305a90dfd833d",
+    release_url=(
+        "https://github.com/misko/plutosdr-fw/commit/02ae824f53bec4495ba8f902d5d26a8958c2d397"
+    ),
+    source_commit="02ae824f53bec4495ba8f902d5d26a8958c2d397",
+    fit_body_sha256="9a16418d04b3955f96ef6d903175450c1fb9de485d4a98de29612b3a8e6039cd",
+    fit_body_size=12_975_455,
+    hardware_qualified=False,
+    published_at=datetime(2026, 9, 6, 23, 30, 52, tzinfo=UTC),
+)
+
+# V0.48 remains the exact, already-qualified recovery bytes.  The new identity
+# does not broaden accepted bytes; it only gives a one-RX RX-only source a
+# layout-aware path back to the normal one-RX TX-capable runtime.
+IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_1R1T_ROLLBACK_POLICY = (
+    IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY.model_copy(
+        update={
+            "profile_id": "iq-direct-async-v3-release-persistent-1r1t-rollback",
+        }
+    )
+)
+
 # The exact v0.44 release DFU/FIT receives a distinct QSPI authorization only
 # after two candidate-byte and two final-byte 20 MS/s, 20-second physical-IP
 # ring runs each proved an exact 200 MB contiguous prefix, clean finite target

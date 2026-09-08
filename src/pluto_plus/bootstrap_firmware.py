@@ -67,12 +67,14 @@ from pluto_plus.doctor import (
     IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V3_CANDIDATE_RAM_POLICY,
+    IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_1R1T_ROLLBACK_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V4_CANDIDATE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY,
     SINGLE_RX_METADATA_RC1_RAM_POLICY,
+    STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
     TANDEM_V6_DEVELOPMENT_POLICY,
@@ -108,6 +110,67 @@ BOOTSTRAP_POLICY = CANONICAL_POLICY
 
 
 @dataclass(frozen=True, slots=True)
+class StandaloneIioLayout:
+    """Exact IIO/TX-safety shape on either side of a persistent transition."""
+
+    layout_id: str
+    rx_scan_channels: tuple[str, ...]
+    dds_present: bool
+    tandem_agc: bool | None
+    tx_hardwaregain_count: int
+    tx_scan_count: int
+    tx_dds_tone_count: int
+    minimum_buffer_count: int
+    tx_lo_powerdown_count: int | None = None
+    device_tree_contract: Literal["ignore", "tx-capable", "rx-only"] = "ignore"
+
+
+PAIRED_RX_TX_CAPABLE_LAYOUT = StandaloneIioLayout(
+    layout_id="tx-capable-2r2t-profile-tandem-v1",
+    rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
+    dds_present=True,
+    tandem_agc=None,
+    tx_hardwaregain_count=2,
+    tx_scan_count=4,
+    tx_dds_tone_count=8,
+    minimum_buffer_count=2,
+)
+SINGLE_RX_TX_CAPABLE_LAYOUT = StandaloneIioLayout(
+    layout_id="tx-capable-1r1t-v1",
+    rx_scan_channels=("voltage0", "voltage1"),
+    dds_present=True,
+    tandem_agc=True,
+    tx_hardwaregain_count=1,
+    tx_scan_count=2,
+    tx_dds_tone_count=4,
+    minimum_buffer_count=2,
+    tx_lo_powerdown_count=1,
+    device_tree_contract="tx-capable",
+)
+SINGLE_RX_RX_ONLY_LAYOUT = StandaloneIioLayout(
+    layout_id="rx-only-1r1t-v1",
+    rx_scan_channels=("voltage0", "voltage1"),
+    dds_present=False,
+    tandem_agc=False,
+    tx_hardwaregain_count=1,
+    tx_scan_count=0,
+    tx_dds_tone_count=0,
+    minimum_buffer_count=1,
+    tx_lo_powerdown_count=1,
+    device_tree_contract="rx-only",
+)
+
+_IIO_LAYOUTS = {
+    layout.layout_id: layout
+    for layout in (
+        PAIRED_RX_TX_CAPABLE_LAYOUT,
+        SINGLE_RX_TX_CAPABLE_LAYOUT,
+        SINGLE_RX_RX_ONLY_LAYOUT,
+    )
+}
+
+
+@dataclass(frozen=True, slots=True)
 class StandaloneFlashProfile:
     """Exact mutation policy plus required post-boot capabilities."""
 
@@ -124,6 +187,9 @@ class StandaloneFlashProfile:
     iiod_cpu_affinity: int | None = None
     iiod_rw_cpu_affinity: int | None = None
     required_iio_capabilities: tuple[tuple[str, str], ...] = ()
+    source_iio_layout: StandaloneIioLayout = PAIRED_RX_TX_CAPABLE_LAYOUT
+    return_iio_layout: StandaloneIioLayout = PAIRED_RX_TX_CAPABLE_LAYOUT
+    allowed_before_firmwares: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.iiod_cpu_affinity is not None and self.iiod_rw_cpu_affinity is not None:
@@ -134,6 +200,8 @@ class StandaloneFlashProfile:
         keys = tuple(key for key, _value in self.required_iio_capabilities)
         if len(keys) != len(set(keys)) or any(not key for key in keys):
             raise ValueError("required IIO capability keys must be non-empty and unique")
+        if len(self.allowed_before_firmwares) != len(set(self.allowed_before_firmwares)):
+            raise ValueError("allowed source firmware identities must be unique")
 
 
 STANDALONE_FLASH_PROFILES = {
@@ -558,6 +626,47 @@ STANDALONE_FLASH_PROFILES = {
             ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
         ),
     ),
+    STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_TX_CAPABLE_LAYOUT,
+            return_iio_layout=SINGLE_RX_RX_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY.device_firmware,
+                IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY.device_firmware,
+            ),
+        )
+    ),
+    IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_1R1T_ROLLBACK_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_1R1T_ROLLBACK_POLICY,
+            3,
+            True,
+            ddr_burst_max_iq_bytes=200_000_000,
+            ddr_burst_reserve_bytes=128 * 1024 * 1024,
+            ddr_ring_max_iq_bytes=200_000_000,
+            ddr_ring_modes="finite,continuous",
+            buffer_metadata_status=True,
+            buffer_metadata_timing_log=True,
+            iiod_rw_cpu_affinity=1,
+            required_iio_capabilities=(
+                ("iio,buffer-direct-async", "1"),
+                ("iio,buffer-direct-async-ring", "1"),
+                (
+                    "iio,buffer-direct-async-overrun-policies",
+                    "drop-backlog,preserve-backlog",
+                ),
+                ("iio,buffer-direct-async-default-overrun-policy", "drop-backlog"),
+            ),
+            source_iio_layout=SINGLE_RX_RX_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_TX_CAPABLE_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
     DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY.profile_id: StandaloneFlashProfile(
         DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,
         3,
@@ -676,6 +785,65 @@ STANDALONE_FLASH_PROFILES = {
         ddr_burst_reserve_bytes=128 * 1024 * 1024,
     ),
 }
+
+
+def _layout_tandem(profile: StandaloneFlashProfile, layout: StandaloneIioLayout) -> bool:
+    return profile.tandem_agc if layout.tandem_agc is None else layout.tandem_agc
+
+
+def _require_allowed_before_firmware(before_firmware: str, profile: StandaloneFlashProfile) -> None:
+    allowed = profile.allowed_before_firmwares
+    if allowed and before_firmware not in allowed:
+        raise BootstrapFirmwareError(
+            f"source firmware is {before_firmware!r}, expected one of {allowed!r}"
+        )
+
+
+def _require_iio_layout(
+    facts: Mapping[str, Any],
+    profile: StandaloneFlashProfile,
+    layout: StandaloneIioLayout,
+    *,
+    transport: str,
+) -> None:
+    raw_names = facts.get("device_names", ())
+    names = (
+        {str(value) for value in raw_names}
+        if isinstance(raw_names, (tuple, list, set, frozenset))
+        else set()
+    )
+    if not {"ad9361-phy", "cf-ad9361-lpc"} <= names:
+        raise BootstrapFirmwareError(
+            f"{transport} runtime lacks the required AD936x PHY/RX IIO devices"
+        )
+    raw_scan = facts.get("cf-ad9361-lpc,scan_channels", ())
+    scan = (
+        {str(value) for value in raw_scan}
+        if isinstance(raw_scan, (tuple, list, set, frozenset))
+        else set()
+    )
+    expected_scan = set(layout.rx_scan_channels)
+    scan_matches = (
+        expected_scan <= scan if layout is PAIRED_RX_TX_CAPABLE_LAYOUT else scan == expected_scan
+    )
+    if not scan_matches:
+        raise BootstrapFirmwareError(
+            f"{transport} runtime RX scan layout is {tuple(sorted(scan))!r}, "
+            f"expected {tuple(sorted(expected_scan))!r} for {layout.layout_id}"
+        )
+    dds_present = "cf-ad9361-dds-core-lpc" in names
+    if layout is not PAIRED_RX_TX_CAPABLE_LAYOUT and dds_present is not layout.dds_present:
+        raise BootstrapFirmwareError(
+            f"{transport} runtime DDS presence is {dds_present}, "
+            f"expected {layout.dds_present} for {layout.layout_id}"
+        )
+    tandem_present = "tandem-agc" in names
+    expected_tandem = _layout_tandem(profile, layout)
+    if tandem_present is not expected_tandem:
+        raise BootstrapFirmwareError(
+            f"{transport} runtime tandem capability is {tandem_present}, "
+            f"expected {expected_tandem} for {layout.layout_id}"
+        )
 
 
 class BootstrapFirmwareError(RuntimeError):
@@ -1429,6 +1597,8 @@ class BootstrapPlan:
     expected_tandem_agc: bool = False
     operation: Literal["flash", "force_flash"] = "force_flash"
     target_serial: str | None = None
+    source_iio_layout: str = PAIRED_RX_TX_CAPABLE_LAYOUT.layout_id
+    return_iio_layout: str = PAIRED_RX_TX_CAPABLE_LAYOUT.layout_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -1452,6 +1622,8 @@ class LanFlashPlan:
     expected_tandem_agc: bool
     confirmation_phrase: str
     trust_model: str = "explicit_lan_tofu"
+    source_iio_layout: str = PAIRED_RX_TX_CAPABLE_LAYOUT.layout_id
+    return_iio_layout: str = PAIRED_RX_TX_CAPABLE_LAYOUT.layout_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -1570,6 +1742,14 @@ def prepare_usb_flash_plan(
     before_phy = str(facts.get("ad9361-phy,model") or "").strip()
     if not before_firmware or before_phy not in {"ad9361", "ad9363a", "ad9364"}:
         raise BootstrapFirmwareError("target did not expose complete firmware/PHY facts")
+    _require_allowed_before_firmware(before_firmware, profile)
+    if not force_blank_serial and profile.source_iio_layout is not PAIRED_RX_TX_CAPABLE_LAYOUT:
+        _require_iio_layout(
+            facts,
+            profile,
+            profile.source_iio_layout,
+            transport="source USB",
+        )
 
     partition = Path(local.storage_devices[0])
     block_device = _attest_partition(target, partition)
@@ -1599,6 +1779,8 @@ def prepare_usb_flash_plan(
             confirmation_phrase=confirmation,
             operation=operation,
             target_serial=local.serial,
+            source_iio_layout=profile.source_iio_layout.layout_id,
+            return_iio_layout=profile.return_iio_layout.layout_id,
         ),
         frm,
     )
@@ -1670,33 +1852,19 @@ def prepare_lan_flash_plan(
         raise BootstrapFirmwareError(
             f"LAN target already reports exact firmware {before_firmware!r}; refusing a rewrite"
         )
+    _require_allowed_before_firmware(before_firmware, profile)
     try:
         observed_metadata_abi = int(str(facts.get("iio,buffer-metadata") or ""))
     except ValueError as error:
         raise BootstrapFirmwareError("LAN target metadata ABI is missing or malformed") from error
     if observed_metadata_abi < 1:
         raise BootstrapFirmwareError("LAN target metadata ABI must be positive")
-    raw_device_names = facts.get("device_names", ())
-    device_names = (
-        {str(value) for value in raw_device_names}
-        if isinstance(raw_device_names, (tuple, list, set, frozenset))
-        else set()
+    _require_iio_layout(
+        facts,
+        profile,
+        profile.source_iio_layout,
+        transport="source LAN",
     )
-    if not {"ad9361-phy", "cf-ad9361-lpc"} <= device_names:
-        raise BootstrapFirmwareError("LAN target lacks the canonical paired-RX IIO devices")
-    raw_scan_channels = facts.get("cf-ad9361-lpc,scan_channels", ())
-    scan_channels = (
-        {str(value) for value in raw_scan_channels}
-        if isinstance(raw_scan_channels, (tuple, list, set, frozenset))
-        else set()
-    )
-    if not {"voltage0", "voltage1", "voltage2", "voltage3"} <= scan_channels:
-        raise BootstrapFirmwareError("LAN target lacks the canonical paired-RX scan layout")
-    observed_tandem = "tandem-agc" in device_names
-    if observed_tandem is not profile.tandem_agc:
-        raise BootstrapFirmwareError(
-            f"LAN target tandem capability is {observed_tandem}, expected {profile.tandem_agc}"
-        )
 
     return (
         LanFlashPlan(
@@ -1716,6 +1884,8 @@ def prepare_lan_flash_plan(
             expected_metadata_abi=profile.metadata_abi,
             expected_tandem_agc=profile.tandem_agc,
             confirmation_phrase=f"FLASH LAN {serial} {normalized_host}",
+            source_iio_layout=profile.source_iio_layout.layout_id,
+            return_iio_layout=profile.return_iio_layout.layout_id,
         ),
         frm,
     )
@@ -1767,6 +1937,8 @@ def execute_bootstrap_plan(
         "expected_tandem_agc",
         "operation",
         "target_serial",
+        "source_iio_layout",
+        "return_iio_layout",
     ):
         if getattr(fresh_plan, field) != getattr(plan, field):
             raise BootstrapFirmwareError(f"bootstrap precondition changed: {field}")
@@ -2075,12 +2247,15 @@ def execute_lan_flash_plan(
         mutation_profile_id=plan.mutation_profile_id,
     )
     _require_same_lan_plan(plan, fresh_plan, fresh_frm, frm)
+    profile = STANDALONE_FLASH_PROFILES.get(plan.mutation_profile_id)
+    if profile is None:  # pragma: no cover - revalidated immutable plan
+        raise BootstrapFirmwareError("LAN flash plan names an unknown profile")
 
     receipt_id = str(uuid.uuid4())
     receipt_path = receipt_directory / f"{receipt_id}.json"
     phases: list[str] = ["preflight_revalidated"]
     receipt: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "receipt_id": receipt_id,
         "transport": "lan_ssh_frm",
         "outcome": "started",
@@ -2114,7 +2289,7 @@ def execute_lan_flash_plan(
             raise BootstrapFirmwareError("remote TX-safe preflight serial changed")
         if safe_fields["firmware"] != plan.before_firmware:
             raise BootstrapFirmwareError("remote TX-safe preflight firmware changed")
-        _require_remote_tx_safe(safe_fields)
+        _require_remote_tx_safe(safe_fields, profile.source_iio_layout)
         phases.append("remote_tx_safe_read_only_attested")
         _update_receipt(receipt_path, receipt, phases)
 
@@ -2175,6 +2350,21 @@ def execute_lan_flash_plan(
         host_key_rotation = host_key_rotator()
         receipt["host_key_rotation"] = host_key_rotation
         phases.append("lan_ssh_host_key_rotated")
+        _update_receipt(receipt_path, receipt, phases)
+        returned_output = transport.run(
+            f"sh -s -- {plan.target_serial} {plan.fit_size}",
+            stdin=_REMOTE_RECONCILE_SCRIPT,
+            timeout_s=120,
+        )
+        returned_fields = _parse_reconciliation_report(returned_output)
+        if returned_fields["serial"] != plan.target_serial:
+            raise BootstrapFirmwareError("remote return TX-safe serial changed")
+        if returned_fields["firmware"] != plan.expected_firmware:
+            raise BootstrapFirmwareError("remote return TX-safe firmware changed")
+        if not hmac.compare_digest(returned_fields["fit_sha256"], plan.fit_sha256):
+            raise BootstrapFirmwareError("remote return QSPI FIT differs from the plan")
+        _require_remote_tx_safe(returned_fields, profile.return_iio_layout)
+        phases.append("remote_return_tx_safe_read_only_attested")
         _update_receipt(receipt_path, receipt, phases)
         result = BootstrapResult(
             receipt_id=receipt_id,
@@ -2303,6 +2493,7 @@ def reconcile_usb_flash_receipt(
     profile = STANDALONE_FLASH_PROFILES.get(mutation_profile_id)
     if profile is None or not profile.persistent_allowed:
         raise BootstrapFirmwareError("receipt does not select a persistent qualified profile")
+    _require_plan_layouts(plan, profile)
     policy = profile.policy
     expected = (
         (plan.image_sha256, policy.asset_sha256, "DFU SHA-256"),
@@ -2334,6 +2525,14 @@ def reconcile_usb_flash_receipt(
     )
     if ("tandem-agc" in device_names) is not plan.expected_tandem_agc:
         raise BootstrapFirmwareError("current tandem capability does not match the receipt")
+    if profile.return_iio_layout is not PAIRED_RX_TX_CAPABLE_LAYOUT:
+        _require_iio_layout(
+            facts,
+            profile,
+            profile.return_iio_layout,
+            transport="reconciled USB",
+        )
+    _require_profile_iio_capabilities(facts, profile, transport="reconciled USB")
 
     output = transport.run(
         f"sh -s -- {plan.target_serial} {plan.fit_size}",
@@ -2348,7 +2547,7 @@ def reconcile_usb_flash_receipt(
     remote_fit = fields.get("fit_sha256", "")
     if not hmac.compare_digest(remote_fit, plan.fit_sha256):
         raise BootstrapFirmwareError("remote mtd3 FIT does not match the receipt")
-    _require_remote_tx_safe(fields)
+    _require_remote_tx_safe(fields, profile.return_iio_layout)
 
     phases = (
         "receipt_validated",
@@ -2407,50 +2606,87 @@ _REMOTE_RECONCILE_SCRIPT = rb"""set -eu
 serial_expected="$1"
 fit_size="$2"
 emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
+dt_state() {
+  path=$1
+  if [ ! -d "$path" ]; then printf absent; return; fi
+  if [ ! -r "$path/status" ]; then printf enabled; return; fi
+  value=$(tr -d '\000' <"$path/status")
+  case "$value" in
+    okay|ok) printf enabled ;;
+    disabled) printf disabled ;;
+    *) exit 1 ;;
+  esac
+}
 serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
 firmware=$(awk '$1 == "device-fw" {print $2; exit}' /opt/VERSIONS)
 fit_sha256=$(head -c "$fit_size" /dev/mtdblock3 | sha256sum | awk '{print $1}')
 test "$serial" = "$serial_expected"
-phy=''; dds=''
+phy=''; dds=''; tandem_present=0
 for d in /sys/bus/iio/devices/iio:device*; do
   case "$(cat "$d/name" 2>/dev/null || true)" in
     ad9361-phy) phy="$d" ;;
     cf-ad9361-dds-core-lpc) dds="$d" ;;
+    tandem-agc) tandem_present=1 ;;
   esac
 done
-test -n "$phy" && test -n "$dds"
-gains=''; scans=''; raws=''; scales=''; buffers=''
-for f in "$phy"/out_voltage0_hardwaregain "$phy"/out_voltage1_hardwaregain; do
+test -n "$phy"
+dds_present=0
+test -z "$dds" || dds_present=1
+gains=''; scans=''; raws=''; scales=''; buffers=''; tx_los=''; tx_buffer=''
+for f in "$phy"/out_voltage*_hardwaregain; do
+  test -f "$f" || continue
   value=$(awk '{print $1}' "$f")
   gains="${gains}${gains:+,}${value}"
 done
-for f in "$dds"/scan_elements/out_voltage[0-3]_en; do
+for f in "$phy"/out_altvoltage*_TX_LO_powerdown; do
+  test -f "$f" || continue
   value=$(cat "$f")
-  scans="${scans}${scans:+,}${value}"
+  tx_los="${tx_los}${tx_los:+,}${value}"
 done
-for f in "$dds"/out_altvoltage*_raw; do
-  value=$(cat "$f")
-  raws="${raws}${raws:+,}${value}"
-done
-for f in "$dds"/out_altvoltage*_scale; do
-  value=$(cat "$f")
-  scales="${scales}${scales:+,}${value}"
-done
+if [ -n "$dds" ]; then
+  for f in "$dds"/scan_elements/out_voltage*_en; do
+    test -f "$f" || continue
+    value=$(cat "$f")
+    scans="${scans}${scans:+,}${value}"
+  done
+  for f in "$dds"/out_altvoltage*_raw; do
+    test -f "$f" || continue
+    value=$(cat "$f")
+    raws="${raws}${raws:+,}${value}"
+  done
+  for f in "$dds"/out_altvoltage*_scale; do
+    test -f "$f" || continue
+    value=$(cat "$f")
+    scales="${scales}${scales:+,}${value}"
+  done
+  tx_buffer=$(cat "$dds/buffer/enable")
+fi
 for f in /sys/bus/iio/devices/iio:device*/buffer/enable; do
   test -f "$f" || continue
   value=$(cat "$f")
   buffers="${buffers}${buffers:+,}${value}"
 done
 test -n "$buffers"
+dt_root=/sys/firmware/devicetree/base
+root_marker_present=0
+test ! -e "$dt_root/misko,rx-only-fpga" || root_marker_present=1
 emit serial "$serial"
 emit firmware "$firmware"
 emit fit_sha256 "$fit_sha256"
 emit all_buffer_enable "$buffers"
+emit dds_present "$dds_present"
+emit tandem_present "$tandem_present"
 emit tx_hardwaregain_db "$gains"
-emit tx_buffer_enable "$(cat "$dds/buffer/enable")"
+emit tx_lo_powerdown "$tx_los"
+emit tx_buffer_enable "$tx_buffer"
 emit tx_scan_enable "$scans"
 emit tx_dds_raw "$raws"
 emit tx_dds_scale "$scales"
+emit root_marker_present "$root_marker_present"
+emit rx_dma_dt_state "$(dt_state "$dt_root/fpga-axi@0/dma@7c400000")"
+emit dds_dt_state "$(dt_state "$dt_root/fpga-axi@0/cf-ad9361-dds-core-lpc@79024000")"
+emit tx_dma_dt_state "$(dt_state "$dt_root/fpga-axi@0/dma@7c420000")"
+emit tandem_dt_state "$(dt_state "$dt_root/fpga-axi@0/tandem-agc@7c450000")"
 """
 
 
@@ -2482,42 +2718,78 @@ def _parse_reconciliation_report(output: str) -> dict[str, str]:
         "firmware",
         "fit_sha256",
         "all_buffer_enable",
+        "dds_present",
+        "tandem_present",
         "tx_hardwaregain_db",
+        "tx_lo_powerdown",
         "tx_buffer_enable",
         "tx_scan_enable",
         "tx_dds_raw",
         "tx_dds_scale",
+        "root_marker_present",
+        "rx_dma_dt_state",
+        "dds_dt_state",
+        "tx_dma_dt_state",
+        "tandem_dt_state",
     }
     if set(fields) != required or not re.fullmatch(r"[0-9a-f]{64}", fields["fit_sha256"]):
         raise BootstrapFirmwareError("remote reconciliation report is incomplete")
     return fields
 
 
-def _require_remote_tx_safe(fields: dict[str, str]) -> None:
+def _numeric_csv(value: str) -> tuple[float, ...]:
+    return () if value == "" else tuple(float(item) for item in value.split(","))
+
+
+def _require_remote_tx_safe(fields: dict[str, str], layout: StandaloneIioLayout) -> None:
     try:
-        gains = tuple(float(value) for value in fields["tx_hardwaregain_db"].split(","))
-        all_buffers = tuple(float(value) for value in fields["all_buffer_enable"].split(","))
-        buffers = tuple(float(value) for value in fields["tx_buffer_enable"].split(","))
-        scans = tuple(float(value) for value in fields["tx_scan_enable"].split(","))
-        raws = tuple(float(value) for value in fields["tx_dds_raw"].split(","))
-        scales = tuple(float(value) for value in fields["tx_dds_scale"].split(","))
+        gains = _numeric_csv(fields["tx_hardwaregain_db"])
+        tx_los = _numeric_csv(fields["tx_lo_powerdown"])
+        all_buffers = _numeric_csv(fields["all_buffer_enable"])
+        buffers = _numeric_csv(fields["tx_buffer_enable"])
+        scans = _numeric_csv(fields["tx_scan_enable"])
+        raws = _numeric_csv(fields["tx_dds_raw"])
+        scales = _numeric_csv(fields["tx_dds_scale"])
     except (KeyError, ValueError) as error:
         raise BootstrapFirmwareError("remote TX-safe report is invalid") from error
+    expected_tandem = layout.tandem_agc
     tx_safe = (
-        len(gains) == 2
+        fields.get("dds_present") == ("1" if layout.dds_present else "0")
+        and (expected_tandem is None or fields.get("tandem_present") == str(int(expected_tandem)))
+        and len(gains) == layout.tx_hardwaregain_count
         and all(value <= -80 for value in gains)
-        and len(all_buffers) >= 2
+        and len(all_buffers) >= layout.minimum_buffer_count
         and all(value == 0 for value in all_buffers)
-        and buffers == (0,)
-        and len(scans) == 4
+        and len(scans) == layout.tx_scan_count
         and all(value == 0 for value in scans)
-        and len(raws) == 8
+        and len(raws) == layout.tx_dds_tone_count
         and all(value == 0 for value in raws)
-        and len(scales) == 8
+        and len(scales) == layout.tx_dds_tone_count
         and all(value == 0 for value in scales)
+        and (buffers == (0,) if layout.dds_present else buffers == ())
+        and (
+            layout.tx_lo_powerdown_count is None
+            or (len(tx_los) == layout.tx_lo_powerdown_count and all(value == 1 for value in tx_los))
+        )
     )
+    if layout.device_tree_contract == "tx-capable":
+        tx_safe = tx_safe and (
+            fields.get("root_marker_present") == "0"
+            and fields.get("rx_dma_dt_state") == "enabled"
+            and fields.get("dds_dt_state") == "enabled"
+            and fields.get("tx_dma_dt_state") == "enabled"
+            and fields.get("tandem_dt_state") == "enabled"
+        )
+    elif layout.device_tree_contract == "rx-only":
+        tx_safe = tx_safe and (
+            fields.get("root_marker_present") == "1"
+            and fields.get("rx_dma_dt_state") == "enabled"
+            and fields.get("dds_dt_state") == "disabled"
+            and fields.get("tx_dma_dt_state") == "disabled"
+            and fields.get("tandem_dt_state") == "disabled"
+        )
     if not tx_safe:
-        raise BootstrapFirmwareError("remote TX-safe readback was not affirmative")
+        raise BootstrapFirmwareError(f"remote TX-safe readback did not match {layout.layout_id}")
 
 
 def _validate_plan_payload(
@@ -2559,6 +2831,8 @@ def _require_same_plan(
         "expected_tandem_agc",
         "operation",
         "target_serial",
+        "source_iio_layout",
+        "return_iio_layout",
     ):
         if getattr(fresh_plan, field) != getattr(plan, field):
             raise BootstrapFirmwareError(f"bootstrap precondition changed: {field}")
@@ -2589,6 +2863,8 @@ def _require_same_lan_plan(
         "expected_tandem_agc",
         "confirmation_phrase",
         "trust_model",
+        "source_iio_layout",
+        "return_iio_layout",
     ):
         if getattr(fresh_plan, field) != getattr(plan, field):
             raise BootstrapFirmwareError(f"LAN flash precondition changed: {field}")
@@ -2610,6 +2886,71 @@ def _require_profile_iio_capabilities(
             raise BootstrapFirmwareError(
                 f"returned {transport} capability {key} is {actual!r}, expected {expected!r}"
             )
+
+
+def _require_plan_layouts(
+    plan: BootstrapPlan | LanFlashPlan, profile: StandaloneFlashProfile
+) -> None:
+    if (
+        plan.source_iio_layout != profile.source_iio_layout.layout_id
+        or plan.return_iio_layout != profile.return_iio_layout.layout_id
+    ):
+        raise BootstrapFirmwareError("flash plan IIO layouts differ from the selected profile")
+
+
+def _require_rx_only_iio_safe(uri: str, serial: str) -> None:
+    """Read back the immutable one-RX safety surface without enabling TX."""
+
+    try:
+        import iio
+
+        context: Any = iio.Context(uri)
+        try:
+            setter = getattr(context, "set_timeout", None)
+            if callable(setter):
+                setter(5_000)
+            raw_attrs = {str(key): str(value) for key, value in context.attrs.items()}
+            observed_serial = raw_attrs.get(
+                "hw_serial", raw_attrs.get("usb,serial", raw_attrs.get("serial", ""))
+            )
+            if observed_serial != serial:
+                raise BootstrapFirmwareError("RX-only safety context has the wrong serial")
+            phys = [device for device in context.devices if str(device.name) == "ad9361-phy"]
+            if len(phys) != 1:
+                raise BootstrapFirmwareError("RX-only runtime lacks exactly one AD936x PHY")
+            gain_controls: list[Any] = []
+            powerdown_controls: list[tuple[str, str, Any]] = []
+            for channel in phys[0].channels:
+                if not bool(channel.output):
+                    continue
+                if "hardwaregain" in channel.attrs:
+                    gain_controls.append(channel)
+                if "powerdown" in channel.attrs:
+                    powerdown_controls.append((str(channel.id), str(channel.name or ""), channel))
+            if sorted(str(channel.id) for channel in gain_controls) != ["voltage0"]:
+                raise BootstrapFirmwareError(
+                    "RX-only runtime TX hardware-gain inventory is not exact"
+                )
+            lo_inventory = sorted((channel_id, name) for channel_id, name, _ in powerdown_controls)
+            if lo_inventory != [("altvoltage0", "RX_LO"), ("altvoltage1", "TX_LO")]:
+                raise BootstrapFirmwareError("RX-only runtime LO inventory is not exact")
+            gain = float(str(gain_controls[0].attrs["hardwaregain"].value).split()[0])
+            tx_lo_control = next(
+                channel for _channel_id, name, channel in powerdown_controls if name == "TX_LO"
+            )
+            tx_lo = float(str(tx_lo_control.attrs["powerdown"].value).split()[0])
+            if gain > -80 or tx_lo != 1:
+                raise BootstrapFirmwareError(
+                    "RX-only runtime did not boot with gain muted and TX LO powered down"
+                )
+        finally:
+            closer = getattr(context, "close", None)
+            if callable(closer):
+                closer()
+    except BootstrapFirmwareError:
+        raise
+    except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise BootstrapFirmwareError(f"cannot attest RX-only IIO TX-safe state: {error}") from error
 
 
 def _attest_return(plan: BootstrapPlan) -> tuple[str | None, str, str]:
@@ -2650,9 +2991,21 @@ def _attest_return(plan: BootstrapPlan) -> tuple[str | None, str, str]:
     profile = STANDALONE_FLASH_PROFILES.get(plan.mutation_profile_id)
     if profile is None:  # pragma: no cover - immutable plan invariant
         raise BootstrapFirmwareError("returned USB plan names an unknown profile")
+    _require_plan_layouts(plan, profile)
+    if profile.return_iio_layout is not PAIRED_RX_TX_CAPABLE_LAYOUT:
+        _require_iio_layout(
+            facts,
+            profile,
+            profile.return_iio_layout,
+            transport="returned USB",
+        )
     _require_profile_iio_capabilities(facts, profile, transport="USB")
     if plan.target_serial is not None:
-        mute_returned_radio(plan.target_serial)
+        if profile.return_iio_layout.dds_present:
+            mute_returned_radio_at_path(plan.target_serial, Path(plan.usb_sysfs_path))
+        else:
+            uri = exact_usb_iio_uri(Path(plan.usb_sysfs_path), plan.target_serial)
+            _require_rx_only_iio_safe(uri, plan.target_serial)
     return returned_serial, returned_firmware, returned_phy
 
 
@@ -2695,6 +3048,14 @@ def _attest_lan_return(plan: LanFlashPlan) -> tuple[str, str, str]:
     profile = STANDALONE_FLASH_PROFILES.get(plan.mutation_profile_id)
     if profile is None:  # pragma: no cover - immutable plan invariant
         raise BootstrapFirmwareError("returned LAN plan names an unknown profile")
+    _require_plan_layouts(plan, profile)
+    if profile.return_iio_layout is not PAIRED_RX_TX_CAPABLE_LAYOUT:
+        _require_iio_layout(
+            facts,
+            profile,
+            profile.return_iio_layout,
+            transport="returned LAN",
+        )
     expected_integers = {
         "iio,buffer-ddr-burst-max-iq-bytes": profile.ddr_burst_max_iq_bytes,
         "iio,buffer-ddr-burst-reserve-bytes": profile.ddr_burst_reserve_bytes,
@@ -2717,7 +3078,10 @@ def _attest_lan_return(plan: LanFlashPlan) -> tuple[str, str, str]:
     ):
         raise BootstrapFirmwareError("returned LAN timing-log capability is unavailable")
     _require_profile_iio_capabilities(facts, profile, transport="LAN")
-    mute_returned_radio_lan(plan.host, plan.target_serial)
+    if profile.return_iio_layout.dds_present:
+        mute_returned_radio_lan(plan.host, plan.target_serial)
+    else:
+        _require_rx_only_iio_safe(f"ip:{plan.host}", plan.target_serial)
     return returned_serial, returned_firmware, returned_phy
 
 
