@@ -12,13 +12,16 @@ import ipaddress
 import json
 import os
 import re
+import select
 import stat
 import subprocess
 import tempfile
+import termios
 import threading
 import time
+import tty
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -61,6 +64,8 @@ from pluto_plus.setup_profiles import (
 _SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _INTERFACE_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_SSH_STDIN_READY = b"PPU\tstdin_ready\t1"
+_SSH_STDIN_CHUNK_BYTES = 16 * 1024
 
 
 class SetupHelperError(SetupUnavailableError):
@@ -69,6 +74,59 @@ class SetupHelperError(SetupUnavailableError):
 
 class SetupSshHostKeyChangedError(SetupHelperError):
     """Pinned SSH trust changed; callers must use an independent trust anchor."""
+
+
+def _stream_pexpect_stdin(fd: int, payload: bytes, *, timeout_s: float) -> bytes:
+    """Bound a binary-safe raw PTY write while continuing to drain output."""
+
+    if not payload:
+        return b""
+    deadline = time.monotonic() + timeout_s
+    original_blocking = os.get_blocking(fd)
+    transcript = bytearray()
+    sent = 0
+    try:
+        # The remote wrapper consumes the exact byte count, so this dedicated
+        # child PTY needs neither canonical line buffering nor a terminal EOF.
+        # It is intentionally left raw until pexpect closes it after SSH exits.
+        tty.setraw(fd, termios.TCSANOW)
+        os.set_blocking(fd, False)
+        while sent < len(payload):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SetupHelperError("radio SSH stdin transfer timed out")
+            try:
+                readable, writable, _ = select.select([fd], [fd], [], remaining)
+            except OSError as error:
+                raise SetupHelperError(f"radio SSH stdin transfer failed: {error}") from error
+            if readable:
+                try:
+                    output = os.read(fd, 64 * 1024)
+                except BlockingIOError:
+                    output = b""
+                except OSError as error:
+                    raise SetupHelperError(
+                        f"radio SSH closed during stdin transfer: {error}"
+                    ) from error
+                if output:
+                    transcript.extend(output)
+            if writable:
+                try:
+                    count = os.write(
+                        fd,
+                        memoryview(payload)[sent : sent + _SSH_STDIN_CHUNK_BYTES],
+                    )
+                except BlockingIOError:
+                    continue
+                except OSError as error:
+                    raise SetupHelperError(f"radio SSH stdin transfer failed: {error}") from error
+                if count <= 0:  # pragma: no cover - defensive OS contract guard
+                    raise SetupHelperError("radio SSH stdin transfer made no progress")
+                sent += count
+    finally:
+        with suppress(OSError):
+            os.set_blocking(fd, original_blocking)
+    return bytes(transcript)
 
 
 class SetupTransport(Protocol):
@@ -399,7 +457,11 @@ class BoundSshTransport:
             "-o",
             "GlobalKnownHostsFile=/dev/null",
             f"{self._username}@{self.host}",
-            command,
+            (
+                command
+                if stdin is None
+                else f"printf 'PPU\\tstdin_ready\\t1\\n' && head -c {len(stdin)} | ( {command} )"
+            ),
         ]
         if self.interface is not None:
             arguments[0:0] = ["-B", self.interface]
@@ -413,17 +475,29 @@ class BoundSshTransport:
         try:
             while True:
                 matched = child.expect(
-                    [b"[Pp]assword:", pexpect.EOF, pexpect.TIMEOUT], timeout=timeout_s
+                    [
+                        b"[Pp]assword:",
+                        _SSH_STDIN_READY + b"\\r?\\n",
+                        pexpect.EOF,
+                        pexpect.TIMEOUT,
+                    ],
+                    timeout=timeout_s,
                 )
                 transcript.extend(cast(bytes, child.before or b""))
                 if matched == 0:
                     child.sendline(self._password.encode())
-                    if stdin is not None:
-                        child.send(stdin)
-                        child.sendeof()
-                        stdin = None
                     continue
                 if matched == 1:
+                    if stdin is None:
+                        raise SetupHelperError("radio SSH emitted an unexpected stdin marker")
+                    transcript.extend(
+                        _stream_pexpect_stdin(child.child_fd, stdin, timeout_s=timeout_s)
+                    )
+                    stdin = None
+                    continue
+                if matched == 2:
+                    if stdin is not None:
+                        raise SetupHelperError("radio SSH closed before accepting stdin")
                     break
                 raise SetupHelperError("radio SSH operation timed out")
         finally:

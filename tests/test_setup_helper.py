@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import pty
+import threading
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -186,7 +189,7 @@ def test_bound_ssh_transport_scopes_exact_route_to_each_call(
 
         def expect(self, patterns: object, timeout: float | None = None) -> int:
             del patterns, timeout
-            return 1
+            return 2
 
         def close(self, force: bool = False) -> None:
             del force
@@ -225,7 +228,7 @@ def test_bound_ssh_transport_uses_only_the_selected_known_hosts_file(
 
         def expect(self, patterns: object, timeout: float | None = None) -> int:
             del patterns, timeout
-            return 1
+            return 2
 
         def close(self, force: bool = False) -> None:
             del force
@@ -248,6 +251,66 @@ def test_bound_ssh_transport_uses_only_the_selected_known_hosts_file(
     assert transport.run("fw_printenv mode") == ""
     assert f"UserKnownHostsFile={known_hosts}" in spawned_arguments
     assert "GlobalKnownHostsFile=/dev/null" in spawned_arguments
+
+
+def test_bound_ssh_transport_streams_large_binary_stdin_after_authenticated_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("placeholder\n")
+    known_hosts.chmod(0o600)
+    payload = os.urandom(512 * 1024)
+    master_fd, slave_fd = pty.openpty()
+    received = bytearray()
+
+    def drain() -> None:
+        while len(received) < len(payload):
+            received.extend(os.read(slave_fd, min(64 * 1024, len(payload) - len(received))))
+
+    drain_thread = threading.Thread(target=drain)
+    drain_thread.start()
+
+    class StreamingChild:
+        before = b""
+        exitstatus = 0
+        signalstatus = None
+        child_fd = master_fd
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def expect(self, patterns: object, timeout: float | None = None) -> int:
+            del patterns, timeout
+            self.calls += 1
+            if self.calls == 3:
+                drain_thread.join(timeout=5)
+            return {1: 0, 2: 1, 3: 2}[self.calls]
+
+        def sendline(self, value: bytes) -> None:
+            assert value == b"analog"
+
+        def close(self, force: bool = False) -> None:
+            del force
+            os.close(master_fd)
+
+    import pexpect
+
+    monkeypatch.setattr(pexpect, "spawn", lambda *_args, **_kwargs: StreamingChild())
+    transport = BoundSshTransport(
+        host="192.168.1.14",
+        interface=None,
+        password="analog",
+        known_hosts_file=known_hosts,
+    )
+
+    try:
+        assert transport.run("head -c 524288 >/tmp/payload", stdin=payload) == ""
+        drain_thread.join(timeout=5)
+        assert not drain_thread.is_alive()
+        assert bytes(received) == payload
+    finally:
+        os.close(slave_fd)
 
 
 def test_bound_ssh_transport_rejects_public_or_named_hosts(tmp_path: Path) -> None:
