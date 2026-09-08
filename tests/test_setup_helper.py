@@ -517,9 +517,47 @@ def test_bound_ssh_transport_never_auto_reenrolls_a_lan_endpoint(tmp_path: Path)
             serial="SERIAL_A",
             usb_sysfs_path=Path("/sys/bus/usb/devices/3-8"),
         )
-
     assert known_hosts.read_text() == "placeholder\n"
 
+
+def test_bound_ssh_transport_rejects_resalted_entry_for_the_same_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    old_key = b"|1|old-salt|old-hash ssh-ed25519 AAAATEST\n"
+    new_entry = b"|1|new-salt|new-hash ssh-ed25519 AAAATEST\n"
+    known_hosts.write_bytes(old_key)
+    known_hosts.chmod(0o600)
+
+    import pluto_plus.setup_helper as setup_helper
+
+    monkeypatch.setattr(setup_helper, "_known_hosts_fingerprint", lambda path: "SHA256:same")
+    transport = BoundSshTransport(
+        host="192.168.2.1",
+        interface="enx_path_a",
+        password="analog",
+        known_hosts_file=known_hosts,
+        route_preflight=lambda: None,
+        usb_identity_checker=lambda serial, path: None,
+    )
+
+    def enroll(path: Path, *, serial: str, timeout_s: float) -> str:
+        del timeout_s
+        assert serial == "SERIAL_A"
+        path.write_bytes(new_entry)
+        return "serial=SERIAL_A\n"
+
+    monkeypatch.setattr(transport, "_enroll_replacement_key", enroll)
+
+    with pytest.raises(SetupHelperError, match="did not change"):
+        transport.reenroll_after_attested_usb_reboot(
+            serial="SERIAL_A",
+            usb_sysfs_path=Path("/sys/bus/usb/devices/3-8"),
+        )
+
+    assert known_hosts.read_bytes() == old_key
+    assert list(tmp_path.glob("known_hosts.pre-reboot-*")) == []
 
 def test_bound_ssh_transport_keeps_pinned_key_when_replacement_serial_is_wrong(
     tmp_path: Path,

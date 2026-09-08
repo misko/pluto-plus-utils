@@ -590,6 +590,8 @@ class BoundSshTransport:
             if replacement_sha256 == previous_sha256:
                 raise SetupHelperError("post-reboot SSH host key did not change")
             replacement_fingerprint = _known_hosts_fingerprint(temporary)
+            if replacement_fingerprint == previous_fingerprint:
+                raise SetupHelperError("post-reboot SSH host key did not change")
             backup = self._known_hosts_file.with_name(
                 f"{self._known_hosts_file.name}.pre-reboot-{previous_sha256[:12]}"
             )
