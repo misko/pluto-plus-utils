@@ -14,12 +14,14 @@ import re
 import statistics
 import struct
 import threading
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Concatenate, ParamSpec, Self, TypeVar
+from uuid import uuid4
 
 from pluto_plus.errors import RadioConfigurationError
 
@@ -55,6 +57,8 @@ PSS_MAP_FRAMES = 64
 PSS_MAP_WINDOW_MAPS = 3
 PSS_MAP_CANONICAL_SPAN = PSS_MAP_PHASE_BINS * PSS_MAP_FRAMES
 PSS_MAP_DEFAULT_DRIFT_BINS = (-12, -8, -4, 0, 4, 8, 12)
+PSS_MAX_BATCH_SCANS = 4096
+PSS_MAX_BATCH_BYTES = 1 << 20
 PSS_HEALTH_WORDS = 46
 _HEALTH_CONTRACTS = {
     # ABI: declared MSPS, DDC telemetry mode, known health bits, fatal bits.
@@ -203,6 +207,12 @@ def _client_operation(
     @wraps(method)
     def guarded(self: PssIioClient, /, *args: _Params.args, **kwargs: _Params.kwargs) -> _Result:
         with self._operation_lock:
+            if self._batch_io_active:
+                raise RadioConfigurationError("PSS bounded batch I/O is in flight")
+            if self._batch_cleanup_errors:
+                raise RadioConfigurationError(
+                    "PSS failed-open cleanup is unverified; use joined graceful teardown"
+                )
             if self._graceful_closing:
                 raise RadioConfigurationError("PSS client is closing gracefully")
             if self._closed and method.__name__ not in {"close", "close_fine", "close_maps"}:
@@ -389,6 +399,100 @@ class PssPhaseMap:
         if rate_msps not in PSS_MAP_VERSIONS:
             raise ValueError("PSS map rate must be 15, 30, or 60 MS/s")
         return self.start_index * (rate_msps // 15)
+
+
+@dataclass(frozen=True, slots=True)
+class PssBatchAttributes:
+    """Separately sampled attributes, NOT atomic health or an RF qualification.
+
+    None is unavailable (or not applicable to maps), never an invented zero.
+    Raw numeric attributes are bounded to 128 characters with explicit errors.
+    """
+
+    fault_flags: int | None
+    coefficient_generation: int | None
+    raw: tuple[tuple[str, str], ...]
+    errors: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PssBatchScan:
+    """One raw byte range; decoded values with errors are diagnostic only."""
+
+    index: int
+    byte_offset: int
+    byte_count: int
+    decoded: PssFinePacket | PssMapChunk | None
+    errors: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PssBatchReceipt:
+    """One bounded native refill attempt, retaining bytes BEFORE parsing.
+
+    stream_id is host-generated, not a boot/serial/visit attestation. Native
+    refill byte count may be unavailable in pylibiio; read() bytes are not proof
+    of DMA/RF continuity or persistence. No batch joins native refill boundaries.
+    """
+
+    stream: str
+    stream_id: str
+    batch_index: int
+    rate_msps: int
+    abi_version: int
+    requested_scans: int
+    scan_bytes: int
+    buffer_bytes: int | None
+    buffer_step: int | None
+    refill_started: bool
+    refill_completed: bool
+    native_refill_bytes: int | None
+    observed_bytes: int | None
+    raw: bytes | None
+    attributes_before: PssBatchAttributes | None
+    attributes_after: PssBatchAttributes | None
+    expected_request_before: int | None
+    remaining_results_before: int | None
+    scans: tuple[PssBatchScan, ...]
+    errors: tuple[str, ...]
+
+    @property
+    def raw_retention_complete(self) -> bool:
+        return self.raw is not None and self.observed_bytes == len(self.raw)
+
+    @property
+    def complete_scans(self) -> int:
+        return len(self.raw) // self.scan_bytes if self.raw is not None else 0
+
+    @property
+    def trailing_bytes(self) -> int:
+        return len(self.raw) % self.scan_bytes if self.raw is not None else 0
+
+    @property
+    def complete(self) -> bool:
+        return (not self.errors and self.refill_completed and self.raw_retention_complete and
+                self.observed_bytes == self.requested_scans * self.scan_bytes and
+                len(self.scans) == self.requested_scans and
+                all(scan.index == index and scan.byte_offset == index * self.scan_bytes and
+                    scan.byte_count == self.scan_bytes and scan.decoded is not None and
+                    not scan.errors for index, scan in enumerate(self.scans)))
+
+
+class PssBatchError(RadioConfigurationError):
+    """Failed batch with retained raw/decoded diagnostics; stream cannot resume."""
+
+    def __init__(self, receipt: PssBatchReceipt) -> None:
+        super().__init__("PSS batch rejected: " + "; ".join(receipt.errors))
+        self.receipt = receipt
+
+
+@dataclass(slots=True)
+class _BatchStream:
+    requested_scans: int
+    batch_mode: bool
+    stream_id: str
+    next_batch: int = 0
+    failed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -699,6 +803,71 @@ class PssIioClient:
         self._graceful_closing = False
         self._graceful_receipt: PssGracefulCloseReceipt | None = None
         self._last_health_generation: int | None = None
+        self._batch_io_active = False
+        self._batch_streams: dict[str, _BatchStream] = {}
+        self._batch_cleanup_errors: tuple[str, ...] = ()
+
+    @contextmanager
+    def _exclusive_batch_io(self) -> Iterator[None]:
+        """New mode only: do not race a shared timeout, buffer or control path."""
+        with self._operation_lock:
+            # A legacy close may have completed after the public wrapper entered
+            # but before this guard. No mutable stream lookup precedes admission.
+            if self._closed or self._graceful_closing:
+                raise RadioConfigurationError("PSS client is closed or closing gracefully")
+            if self._batch_cleanup_errors:
+                raise RadioConfigurationError(
+                    "PSS failed-open cleanup is unverified; use joined graceful teardown"
+                )
+            if self._active_operations != 1 or self._batch_io_active:
+                raise RadioConfigurationError("join other PSS operations before bounded batch I/O")
+            self._batch_io_active = True
+        try:
+            yield
+        finally:
+            with self._operation_lock:
+                self._batch_io_active = False
+
+    @staticmethod
+    def _batch_geometry(count: int, scan_bytes: int, timeout_ms: int) -> None:
+        if type(count) is not int or not 1 <= count <= PSS_MAX_BATCH_SCANS:
+            raise ValueError("PSS batch must contain 1..4096 scans")
+        if count * scan_bytes > PSS_MAX_BATCH_BYTES:
+            raise ValueError("PSS batch exceeds the one-MiB byte cap")
+        if type(timeout_ms) is not int or not 1 <= timeout_ms <= 60_000:
+            raise ValueError("PSS batch timeout must be 1..60000 milliseconds")
+
+    def _require_read_mode(self, stream: str, *, batch_mode: bool) -> _BatchStream:
+        state = self._batch_streams.get(stream)
+        if state is None or state.batch_mode != batch_mode:
+            raise RadioConfigurationError(
+                "PSS stream read mode does not match its explicit open mode"
+            )
+        if state.failed:
+            raise RadioConfigurationError("PSS batch stream failed; join and clean up before reuse")
+        return state
+
+    def _close_failed_batch_open(self, stream: str, error: BaseException) -> None:
+        """No reader exists yet; disable/destroy without native network cancel."""
+        device = self.tracker if stream == "fine" else self.phase_map
+        field = "_fine_buffer" if stream == "fine" else "_map_buffer"
+        enable = "schedule_enable" if stream == "fine" else "acquisition_enable"
+        buffer = getattr(self, field)
+        setattr(self, field, None)
+        self._batch_streams.pop(stream, None)
+        if stream == "fine":
+            self._expected_request = self._remaining_results = None
+        try:
+            _write_attr(device, enable, 0)
+        except BaseException as cleanup_error:
+            self._batch_cleanup_errors += (f"{stream} failed-open disable: {cleanup_error}",)
+            error.add_note(f"PSS failed-open disable: {cleanup_error}")
+        if buffer is not None:
+            try:
+                _destroy_iio_buffer(self._iio, buffer)
+            except BaseException as cleanup_error:
+                self._batch_cleanup_errors += (f"{stream} failed-open destroy: {cleanup_error}",)
+                error.add_note(f"PSS failed-open destroy: {cleanup_error}")
 
     @classmethod
     def connect(
@@ -818,34 +987,57 @@ class PssIioClient:
         count: int,
         queue_target: int = 7,
         refill_results: int = 16,
+        batch_mode: bool = False,
+        timeout_ms: int = 1000,
     ) -> None:
-        if self._fine_buffer is not None:
+        if not batch_mode and self._fine_buffer is not None:
             raise RadioConfigurationError("PSS fine stream is already open")
         if min(first_center, period_q32_32, request_base, refill_results) <= 0:
             raise ValueError("PSS fine schedule values must be positive")
         if not 0 <= count <= 0xFFFFFFFF or not 1 <= queue_target <= 7:
             raise ValueError("PSS fine schedule count or queue target is invalid")
-        _disable_scan_channels(self.tracker)
-        _find_scan_channel(self.tracker, PSS_TRACK_SCAN_WORDS).enabled = True
-        _write_attr(self.tracker, "schedule_first_center", first_center)
-        _write_attr(self.tracker, "schedule_period_q32_32", period_q32_32)
-        _write_attr(self.tracker, "schedule_request_base", request_base)
-        _write_attr(self.tracker, "schedule_count", count)
-        _write_attr(self.tracker, "schedule_queue_target", queue_target)
+        if type(batch_mode) is not bool:
+            raise ValueError("batch_mode must be a boolean")
         actual_refill = min(refill_results, count) if count else refill_results
-        self._fine_buffer = self._iio.Buffer(self.tracker, actual_refill, False)
-        try:
-            _write_attr(self.tracker, "schedule_enable", 1)
-            self._expected_request = request_base
-            self._remaining_results = count or None
-        except BaseException:
-            self.close_fine()
-            raise
+        if batch_mode:
+            self._batch_geometry(actual_refill, PSS_TRACK_SCAN_BYTES, timeout_ms)
+            if count % actual_refill:
+                raise ValueError("finite PSS batch schedule must fill whole native refills")
+        with self._exclusive_batch_io() if batch_mode else nullcontext():
+            if batch_mode:
+                if self._fine_buffer is not None:
+                    raise RadioConfigurationError("PSS fine stream is already open")
+                self._set_finite_timeout(timeout_ms)
+            state = _BatchStream(actual_refill, batch_mode, str(uuid4()) if batch_mode else "")
+            _disable_scan_channels(self.tracker)
+            _find_scan_channel(self.tracker, PSS_TRACK_SCAN_WORDS).enabled = True
+            if batch_mode and self.tracker.sample_size != PSS_TRACK_SCAN_BYTES:
+                raise RadioConfigurationError("PSS fine batch scan stride is unsupported")
+            _write_attr(self.tracker, "schedule_first_center", first_center)
+            _write_attr(self.tracker, "schedule_period_q32_32", period_q32_32)
+            _write_attr(self.tracker, "schedule_request_base", request_base)
+            _write_attr(self.tracker, "schedule_count", count)
+            _write_attr(self.tracker, "schedule_queue_target", queue_target)
+            try:
+                self._fine_buffer = self._iio.Buffer(self.tracker, actual_refill, False)
+                self._batch_streams["fine"] = state
+                if batch_mode:
+                    self._check_batch_buffer(self._fine_buffer, actual_refill, PSS_TRACK_SCAN_BYTES)
+                _write_attr(self.tracker, "schedule_enable", 1)
+                self._expected_request = request_base
+                self._remaining_results = count or None
+            except BaseException as error:
+                if batch_mode:
+                    self._close_failed_batch_open("fine", error)
+                else:
+                    self.close_fine()
+                raise
 
     @_client_operation
     def read_fine(self) -> tuple[PssFinePacket, ...]:
         if self._fine_buffer is None:
             raise RadioConfigurationError("PSS fine stream is not open")
+        self._require_read_mode("fine", batch_mode=False)
         self._fine_buffer.refill()
         scans = _split_scans(bytes(self._fine_buffer.read()), PSS_TRACK_SCAN_BYTES)
         packets = tuple(
@@ -873,7 +1065,9 @@ class PssIioClient:
         return packets
 
     @_client_operation
-    def open_maps(self, *, refill_chunks: int = 400) -> None:
+    def open_maps(
+        self, *, refill_chunks: int = 400, batch_mode: bool = False, timeout_ms: int = 1000,
+    ) -> None:
         """Open the one continuous coarse-map session for this FPGA reset epoch.
 
         Keep this stream open and refill it continuously.  Stopping and restarting
@@ -881,29 +1075,48 @@ class PssIioClient:
         fault, so a second session is rejected until the FPGA has been reset.
         """
 
-        if self._map_buffer is not None:
+        if not batch_mode and self._map_buffer is not None:
             raise RadioConfigurationError("PSS phase-map stream is already open")
-        if self._map_session_consumed or _read_int_attr(self.phase_map, "maps_delivered"):
-            raise RadioConfigurationError(
-                "PSS phase-map acquisition is one continuous session per FPGA reset epoch"
-            )
-        if refill_chunks < PSS_MAP_CHUNKS:
-            raise ValueError(f"phase-map refill must hold at least {PSS_MAP_CHUNKS} chunks")
-        self._map_session_consumed = True
-        _write_attr(self.phase_map, "acquisition_flush", 1)
-        _disable_scan_channels(self.phase_map)
-        _find_scan_channel(self.phase_map, PSS_MAP_SCAN_WORDS).enabled = True
-        self._map_buffer = self._iio.Buffer(self.phase_map, refill_chunks, False)
-        try:
-            _write_attr(self.phase_map, "acquisition_enable", 1)
-        except BaseException:
-            self.close_maps()
-            raise
+        if type(batch_mode) is not bool:
+            raise ValueError("batch_mode must be a boolean")
+        if batch_mode:
+            self._batch_geometry(refill_chunks, PSS_MAP_SCAN_BYTES, timeout_ms)
+        with self._exclusive_batch_io() if batch_mode else nullcontext():
+            if batch_mode:
+                if self._map_buffer is not None:
+                    raise RadioConfigurationError("PSS phase-map stream is already open")
+                self._set_finite_timeout(timeout_ms)
+            if self._map_session_consumed or _read_int_attr(self.phase_map, "maps_delivered"):
+                raise RadioConfigurationError(
+                    "PSS phase-map acquisition is one continuous session per FPGA reset epoch"
+                )
+            if refill_chunks < PSS_MAP_CHUNKS:
+                raise ValueError(f"phase-map refill must hold at least {PSS_MAP_CHUNKS} chunks")
+            state = _BatchStream(refill_chunks, batch_mode, str(uuid4()) if batch_mode else "")
+            self._map_session_consumed = True
+            _write_attr(self.phase_map, "acquisition_flush", 1)
+            _disable_scan_channels(self.phase_map)
+            _find_scan_channel(self.phase_map, PSS_MAP_SCAN_WORDS).enabled = True
+            if batch_mode and self.phase_map.sample_size != PSS_MAP_SCAN_BYTES:
+                raise RadioConfigurationError("PSS map batch scan stride is unsupported")
+            try:
+                self._map_buffer = self._iio.Buffer(self.phase_map, refill_chunks, False)
+                self._batch_streams["map"] = state
+                if batch_mode:
+                    self._check_batch_buffer(self._map_buffer, refill_chunks, PSS_MAP_SCAN_BYTES)
+                _write_attr(self.phase_map, "acquisition_enable", 1)
+            except BaseException as error:
+                if batch_mode:
+                    self._close_failed_batch_open("map", error)
+                else:
+                    self.close_maps()
+                raise
 
     @_client_operation
     def read_map_chunks(self) -> tuple[PssMapChunk, ...]:
         if self._map_buffer is None:
             raise RadioConfigurationError("PSS phase-map stream is not open")
+        self._require_read_mode("map", batch_mode=False)
         self._map_buffer.refill()
         scans = _split_scans(bytes(self._map_buffer.read()), PSS_MAP_SCAN_BYTES)
         chunks = tuple(
@@ -920,6 +1133,254 @@ class PssIioClient:
         if _read_int_attr(self.phase_map, "fault_flags"):
             raise RadioConfigurationError("PSS phase-map driver latched a stream fault")
         return chunks
+
+    @staticmethod
+    def _check_batch_buffer(buffer: Any, count: int, stride: int) -> tuple[int, int]:
+        length, step = len(buffer), buffer.step
+        if type(step) is not int or step != stride or length != count * stride:
+            raise RadioConfigurationError("PSS batch native buffer length/step mismatch")
+        binding_count = getattr(buffer, "sample_count", getattr(buffer, "_samples_count", None))
+        if binding_count is not None and (type(binding_count) is not int or binding_count != count):
+            raise RadioConfigurationError("PSS batch native sample count mismatch")
+        return length, step
+
+    @staticmethod
+    def _batch_attributes(device: Any, *, fine: bool) -> PssBatchAttributes:
+        names = ("fault_flags", "active_coefficient_generation") if fine else ("fault_flags",)
+        raw: list[tuple[str, str]] = []
+        values: dict[str, int] = {}
+        errors: list[str] = []
+        for name in names:
+            try:
+                text = _attr_value(device, name)
+                raw.append((name, text[:128]))
+                if len(text) > 128:
+                    raise ValueError("numeric attribute exceeds 128 characters; raw text truncated")
+                value = int(text, 0)
+                if not 0 <= value <= 0xFFFFFFFF or (
+                    name == "active_coefficient_generation" and not value
+                ):
+                    raise ValueError("attribute is outside its nonnegative/nonzero u32 contract")
+                values[name] = value
+            except Exception as error:
+                errors.append(f"{name}: {error}")
+        if values.get("fault_flags"):
+            errors.append("driver latched a stream fault")
+        return PssBatchAttributes(values.get("fault_flags"),
+                                  values.get("active_coefficient_generation"),
+                                  tuple(raw), tuple(errors))
+
+    def _decode_batch_scans(
+        self, raw: bytes, *, fine: bool, before: PssBatchAttributes,
+        expected_request: int | None, remaining: int | None,
+    ) -> tuple[tuple[PssBatchScan, ...], BaseException | None]:
+        stride = PSS_TRACK_SCAN_BYTES if fine else PSS_MAP_SCAN_BYTES
+        payload_bytes = PSS_PACKET_BYTES if fine else PSS_MAP_CHUNK_BYTES
+        observations = []
+        for index, offset in enumerate(range(0, len(raw), stride)):
+            scan = raw[offset:offset + stride]
+            errors: list[str] = []
+            decoded: PssFinePacket | PssMapChunk | None = None
+            try:
+                if len(scan) != stride:
+                    raise ValueError("truncated trailing scan")
+                payload = _unpadded_scan(scan, payload_bytes, label="PSS batch scan")
+                if fine:
+                    packet = PssFinePacket.decode(payload, rate_msps=self.rate_msps)
+                    decoded = packet
+                    if packet.coefficient_generation != before.coefficient_generation:
+                        errors.append("fine packet coefficient generation differs from before read")
+                    if expected_request is None or packet.request_id != expected_request + index:
+                        errors.append("fine packet request sequence is discontinuous or wraps")
+                    if remaining is not None and index >= remaining:
+                        errors.append("fine packet exceeds the finite schedule")
+                else:
+                    decoded = PssMapChunk.decode(
+                        payload, allow_experimental_shared_xfft=self.experimental_shared_xfft,
+                    )
+                    if decoded.abi_version != self.map_abi_version:
+                        errors.append("map chunk ABI differs from the admitted context")
+            except BaseException as error:
+                errors.append(f"decode: {error}")
+                if not isinstance(error, Exception):
+                    observations.append(
+                        PssBatchScan(index, offset, len(scan), decoded, tuple(errors))
+                    )
+                    return tuple(observations), error
+            observations.append(PssBatchScan(index, offset, len(scan), decoded, tuple(errors)))
+        return tuple(observations), None
+
+    def _read_batch(self, stream: str, *, timeout_ms: int) -> PssBatchReceipt:
+        fine = stream == "fine"
+        stride = PSS_TRACK_SCAN_BYTES if fine else PSS_MAP_SCAN_BYTES
+        with self._exclusive_batch_io():
+            buffer = self._fine_buffer if fine else self._map_buffer
+            if buffer is None:
+                raise RadioConfigurationError(f"PSS {stream} stream is not open")
+            state = self._require_read_mode(stream, batch_mode=True)
+            self._batch_geometry(state.requested_scans, stride, timeout_ms)
+            ordinal = state.next_batch
+            state.next_batch += 1
+            device = self.tracker if fine else self.phase_map
+            buffer_bytes: int | None = None
+            buffer_step: int | None = None
+            native_count: int | None = None
+            observed_bytes: int | None = None
+            raw: bytes | None = None
+            before: PssBatchAttributes | None = None
+            after: PssBatchAttributes | None = None
+            scans: tuple[PssBatchScan, ...] = ()
+            errors: list[str] = []
+            refill_started = refill_completed = False
+            expected = self._expected_request if fine else None
+            remaining = self._remaining_results if fine else None
+            interrupt: BaseException | None = None
+            phase = "timeout"
+            try:
+                self._set_finite_timeout(timeout_ms)
+                phase = "buffer geometry"
+                # Capture reported geometry even when a mismatched value fails admission.
+                buffer_bytes = len(buffer)
+                reported_step = buffer.step
+                buffer_step = reported_step if type(reported_step) is int else None
+                self._check_batch_buffer(buffer, state.requested_scans, stride)
+                if fine and remaining == 0:
+                    raise ValueError("fine schedule is already completely received")
+                phase = "attributes before"
+                before = self._batch_attributes(device, fine=fine)
+                if before.errors:
+                    raise ValueError("; ".join(before.errors))
+                phase = "refill"
+                refill_started = True
+                returned = buffer.refill()
+                refill_completed = True
+                if returned is not None:
+                    if type(returned) is int:
+                        native_count = returned
+                        if returned < 0:
+                            refill_completed = False
+                            raise OSError("native refill returned a negative byte count")
+                    else:
+                        errors.append("native refill returned an unsupported byte-count type")
+                phase = "read"
+                payload = buffer.read()
+                if type(payload) not in (bytes, bytearray):
+                    raise ValueError("PSS batch read requires binding bytes or bytearray")
+                observed_bytes = len(payload)
+                # A broken binding can already have allocated more. Retain no
+                # more than the admitted per-stream cap and explicitly reject it.
+                cap = min(PSS_MAX_BATCH_BYTES, PSS_MAX_BATCH_SCANS * stride)
+                raw = bytes(payload[:cap])
+                if observed_bytes > cap:
+                    errors.append("raw retention truncated at the bounded byte cap")
+                if observed_bytes != state.requested_scans * stride:
+                    errors.append("raw refill byte count differs from the requested native batch")
+                if native_count is not None and native_count != observed_bytes:
+                    errors.append("native refill byte count differs from bytes returned by read")
+            except BaseException as error:
+                errors.append(f"{phase}: {error}")
+                if not isinstance(error, Exception):
+                    interrupt = error
+            if refill_started:
+                try:
+                    after = self._batch_attributes(device, fine=fine)
+                    errors.extend(f"attributes after: {error}" for error in after.errors)
+                    if fine and before is not None and (
+                        after.coefficient_generation != before.coefficient_generation
+                    ):
+                        errors.append("fine coefficient generation changed across the refill")
+                except BaseException as error:
+                    errors.append(f"attributes after: {error}")
+                    if not isinstance(error, Exception) and interrupt is None:
+                        interrupt = error
+            try:
+                raw_receipt = PssBatchReceipt(
+                    stream=stream, stream_id=state.stream_id, batch_index=ordinal,
+                    rate_msps=self.rate_msps,
+                    abi_version=(PSS_TRACK_VERSIONS[self.rate_msps]
+                                 if fine else self.map_abi_version),
+                    requested_scans=state.requested_scans, scan_bytes=stride,
+                    buffer_bytes=buffer_bytes, buffer_step=buffer_step,
+                    refill_started=refill_started, refill_completed=refill_completed,
+                    native_refill_bytes=native_count, observed_bytes=observed_bytes, raw=raw,
+                    attributes_before=before, attributes_after=after,
+                    expected_request_before=expected, remaining_results_before=remaining,
+                    scans=(), errors=tuple(errors),
+                )
+            except BaseException as error:
+                state.failed = True
+                # Even receipt construction failure must not erase the payload.
+                # This fallback is explicitly NOT a complete structured receipt.
+                error.pss_batch_raw = raw  # type: ignore[attr-defined]
+                error.add_note("PSS raw receipt construction failed; pss_batch_raw retains bytes")
+                raise
+            try:
+                if raw is not None and before is not None and interrupt is None:
+                    scans, interrupt = self._decode_batch_scans(
+                        raw, fine=fine, before=before, expected_request=expected,
+                        remaining=remaining,
+                    )
+                    errors.extend(
+                        f"scan {scan.index}: {error}" for scan in scans for error in scan.errors
+                    )
+                    if fine and expected is not None and expected + len(scans) > 0xFFFFFFFF and (
+                        remaining is None or remaining > len(scans)
+                    ):
+                        errors.append("fine request sequence would wrap through zero")
+                receipt = replace(raw_receipt, scans=scans, errors=tuple(errors))
+            except BaseException as error:
+                state.failed = True
+                error.pss_batch_receipt = raw_receipt  # type: ignore[attr-defined]
+                error.pss_batch_scans = scans  # type: ignore[attr-defined]
+                error.add_note("PSS decode/receipt finalization failed; raw receipt retained")
+                raise
+            try:
+                if not receipt.complete:
+                    state.failed = True
+                    if interrupt is not None:
+                        interrupt.add_note(str(PssBatchError(receipt)))
+                        # Preserve process-control semantics AND the raw observation.
+                        raise interrupt
+                    raise PssBatchError(receipt)
+                if fine:
+                    assert expected is not None
+                    self._expected_request = (expected + len(scans)) & 0xFFFFFFFF
+                    if remaining is not None:
+                        self._remaining_results = remaining - len(scans)
+                return receipt
+            except PssBatchError:
+                raise
+            except BaseException as error:
+                # Completeness traversal and ledger writes can be interrupted
+                # too. Never resume a possibly partly advanced host ledger.
+                state.failed = True
+                # Start with a definitely incomplete fallback before attempting
+                # to construct the richer failed, fully decoded receipt.
+                error.pss_batch_receipt = raw_receipt  # type: ignore[attr-defined]
+                error.pss_batch_scans = scans  # type: ignore[attr-defined]
+                try:
+                    error.pss_batch_receipt = replace(  # type: ignore[attr-defined]
+                        receipt, errors=receipt.errors + (f"final decision/accounting: {error}",),
+                    )
+                except BaseException as receipt_error:
+                    error.add_note(f"PSS failed-decision receipt unavailable: {receipt_error}")
+                error.add_note("PSS final decision/accounting failed; decoded receipt retained")
+                raise
+
+    @_client_operation
+    def read_map_batch(self, *, timeout_ms: int = 1000) -> PssBatchReceipt:
+        """Retain one raw native batch before parsing; never reassemble or drop negatives.
+
+        Requires open_maps(batch_mode=True). Persist this receipt/raw or the
+        PssBatchError receipt before feeding decoded chunks to a reassembler.
+        The caller binds owner, boot, visit and actual source support separately.
+        """
+        return self._read_batch("map", timeout_ms=timeout_ms)
+
+    @_client_operation
+    def read_fine_batch(self, *, timeout_ms: int = 1000) -> PssBatchReceipt:
+        """Retain one bounded raw batch; commit fine request accounting only on success."""
+        return self._read_batch("fine", timeout_ms=timeout_ms)
 
     @_client_operation
     def read_maps(self, reassembler: PssMapReassembler) -> tuple[PssPhaseMap, ...]:
@@ -1035,7 +1496,11 @@ class PssIioClient:
             raise
 
         try:
+            errors.extend(f"unverified {error}" for error in self._batch_cleanup_errors)
             read_health(0)
+            for stream, state in self._batch_streams.items():
+                if state.failed:
+                    errors.append(f"{stream} batch failed; retain its separate error receipt")
             if self._fine_buffer is not None and self._remaining_results != 0:
                 errors.append(
                     "fine schedule is unbounded or incomplete; queued work is unqualified"
@@ -1061,6 +1526,7 @@ class PssIioClient:
                     errors.append(f"{device.name} destroy: {error}")
             self._expected_request = None
             self._remaining_results = None
+            self._batch_streams.clear()
             read_health(1)
             after = health[1]
             if owned_map and after is not None and (after.words[5] or after.words[4] & 2):
@@ -1093,6 +1559,7 @@ class PssIioClient:
         if buffer is None:
             return
         self._fine_buffer = None
+        self._batch_streams.pop("fine", None)
         try:
             _write_attr(self.tracker, "schedule_enable", 0)
         finally:
@@ -1106,6 +1573,7 @@ class PssIioClient:
         if buffer is None:
             return
         self._map_buffer = None
+        self._batch_streams.pop("map", None)
         try:
             _write_attr(self.phase_map, "acquisition_enable", 0)
         finally:
