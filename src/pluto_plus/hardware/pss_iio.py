@@ -17,13 +17,27 @@ import threading
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
-from functools import wraps
+from functools import partial, wraps
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Concatenate, ParamSpec, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, Self, TypeVar
 from uuid import uuid4
 
 from pluto_plus.errors import RadioConfigurationError
+from pluto_plus.hardware.pss_control import (
+    CONTROL_FIELDS,
+    PssFineStartError,
+    PssFineStartReceipt,
+    PssTrackerControlError,
+    PssTrackerControlReceipt,
+    _ControlJournal,
+    _error_text,
+    _start_control_errors,
+)
+
+if TYPE_CHECKING:
+    from pluto_plus.hardware.fine_schedule import FineScheduleManifest
+    from pluto_plus.hardware.source_support import ObservationIdentity
 
 PSS_TRACK_DEVICE = "starlink-pss-track"
 PSS_MAP_DEVICE = "starlink-pss-map"
@@ -847,7 +861,9 @@ class PssIioClient:
             raise RadioConfigurationError("PSS batch stream failed; join and clean up before reuse")
         return state
 
-    def _close_failed_batch_open(self, stream: str, error: BaseException) -> None:
+    def _close_failed_batch_open(
+        self, stream: str, error: BaseException, journal: _ControlJournal | None = None,
+    ) -> None:
         """No reader exists yet; disable/destroy without native network cancel."""
         device = self.tracker if stream == "fine" else self.phase_map
         field = "_fine_buffer" if stream == "fine" else "_map_buffer"
@@ -858,14 +874,32 @@ class PssIioClient:
         if stream == "fine":
             self._expected_request = self._remaining_results = None
         try:
-            _write_attr(device, enable, 0)
+            if journal is None:
+                _write_attr(device, enable, 0)
+            else:
+                journal.call("cleanup", "write", enable,
+                             lambda: _write_attr(device, enable, 0), requested="0")
         except BaseException as cleanup_error:
             self._batch_cleanup_errors += (f"{stream} failed-open disable: {cleanup_error}",)
             error.add_note(f"PSS failed-open disable: {cleanup_error}")
         if buffer is not None:
             try:
-                _destroy_iio_buffer(self._iio, buffer)
+                if journal is None:
+                    _destroy_iio_buffer(self._iio, buffer)
+                else:
+                    journal.call("cleanup", "destroy", "fine_buffer",
+                                 lambda: _destroy_iio_buffer(self._iio, buffer))
             except BaseException as cleanup_error:
+                if journal is not None and journal.steps and (
+                    journal.steps[-1].phase == "cleanup"
+                    and journal.steps[-1].action == "destroy"
+                    and journal.steps[-1].attempted is False
+                ):
+                    # Timeout/deadline setup failed before destruction began.
+                    # This handle is known live, unlike a possibly destroyed
+                    # native pointer. Quarantine blocks reads/reopens; joined
+                    # graceful teardown may still destroy this handle once.
+                    setattr(self, field, buffer)
                 self._batch_cleanup_errors += (f"{stream} failed-open destroy: {cleanup_error}",)
                 error.add_note(f"PSS failed-open destroy: {cleanup_error}")
 
@@ -1004,34 +1038,296 @@ class PssIioClient:
             if count % actual_refill:
                 raise ValueError("finite PSS batch schedule must fill whole native refills")
         with self._exclusive_batch_io() if batch_mode else nullcontext():
-            if batch_mode:
-                if self._fine_buffer is not None:
-                    raise RadioConfigurationError("PSS fine stream is already open")
+            self._open_fine_owned(first_center=first_center, period_q32_32=period_q32_32,
+                                  request_base=request_base, count=count, queue_target=queue_target,
+                                  actual_refill=actual_refill, batch_mode=batch_mode,
+                                  timeout_ms=timeout_ms)
+
+    def _open_fine_owned(
+        self, *, first_center: int, period_q32_32: int, request_base: int, count: int,
+        queue_target: int, actual_refill: int, batch_mode: bool, timeout_ms: int,
+        journal: _ControlJournal | None = None,
+    ) -> None:
+        """Common owned open body; caller holds the required lifecycle admission."""
+        if batch_mode:
+            if self._fine_buffer is not None:
+                raise RadioConfigurationError("PSS fine stream is already open")
+            if journal is None:
                 self._set_finite_timeout(timeout_ms)
-            state = _BatchStream(actual_refill, batch_mode, str(uuid4()) if batch_mode else "")
-            _disable_scan_channels(self.tracker)
+        state = _BatchStream(actual_refill, batch_mode, str(uuid4()) if batch_mode else "")
+        if journal is not None:
+            journal.stream_id = state.stream_id
+
+        def invoke(name: str, operation: Callable[[], Any], action: str = "prepare",
+                   requested: str | None = None) -> Any:
+            if journal is None:
+                return operation()
+            return journal.call("open", action, name, operation, requested=requested)
+
+        def enable_scan() -> None:
             _find_scan_channel(self.tracker, PSS_TRACK_SCAN_WORDS).enabled = True
-            if batch_mode and self.tracker.sample_size != PSS_TRACK_SCAN_BYTES:
-                raise RadioConfigurationError("PSS fine batch scan stride is unsupported")
-            _write_attr(self.tracker, "schedule_first_center", first_center)
-            _write_attr(self.tracker, "schedule_period_q32_32", period_q32_32)
-            _write_attr(self.tracker, "schedule_request_base", request_base)
-            _write_attr(self.tracker, "schedule_count", count)
-            _write_attr(self.tracker, "schedule_queue_target", queue_target)
-            try:
-                self._fine_buffer = self._iio.Buffer(self.tracker, actual_refill, False)
-                self._batch_streams["fine"] = state
-                if batch_mode:
-                    self._check_batch_buffer(self._fine_buffer, actual_refill, PSS_TRACK_SCAN_BYTES)
-                _write_attr(self.tracker, "schedule_enable", 1)
-                self._expected_request = request_base
-                self._remaining_results = count or None
-            except BaseException as error:
+
+        invoke("disable_scan_channels", lambda: _disable_scan_channels(self.tracker))
+        invoke("enable_packet_scan", enable_scan)
+        if batch_mode and self.tracker.sample_size != PSS_TRACK_SCAN_BYTES:
+            raise RadioConfigurationError("PSS fine batch scan stride is unsupported")
+        for name, value in (("schedule_first_center", first_center),
+                            ("schedule_period_q32_32", period_q32_32),
+                            ("schedule_request_base", request_base), ("schedule_count", count),
+                            ("schedule_queue_target", queue_target)):
+            invoke(name, partial(_write_attr, self.tracker, name, value),
+                   "write", str(value))
+
+        def allocate() -> None:
+            # Register ownership inside the allocation operation so an error
+            # finalizing its receipt still leaves an owned buffer to clean up.
+            self._fine_buffer = self._iio.Buffer(self.tracker, actual_refill, False)
+            self._batch_streams["fine"] = state
+
+        try:
+            invoke("fine_buffer", allocate, "allocate", str(actual_refill))
+            if batch_mode:
+                invoke("fine_buffer_geometry", lambda: self._check_batch_buffer(
+                    self._fine_buffer, actual_refill, PSS_TRACK_SCAN_BYTES), "validate")
+            invoke("schedule_enable", lambda: _write_attr(self.tracker, "schedule_enable", 1),
+                   "write", "1")
+            self._expected_request = request_base
+            self._remaining_results = count or None
+        except BaseException as error:
+            # The receipt path owns cleanup across both this body and its
+            # subsequent readbacks; legacy callers preserve their old policy.
+            if journal is None:
                 if batch_mode:
                     self._close_failed_batch_open("fine", error)
                 else:
                     self.close_fine()
-                raise
+            raise
+
+    def _require_control_profile(self, observation: ObservationIdentity) -> None:
+        from pluto_plus.hardware.source_support import ObservationIdentity, ProcessingProfile
+
+        if (not isinstance(observation, ObservationIdentity)
+                or observation.profile is not ProcessingProfile.PAIRED_15_SHARED_XFFT_512_447_V1
+                or self.rate_msps != 15 or self.map_abi_version != PSS_MAP_SHARED_XFFT_VERSION
+                or not self.experimental_shared_xfft):
+            raise ValueError("control receipts require the explicit paired 15 MS/s shared profile")
+
+    def _control_identity(
+        self, observation: ObservationIdentity,
+    ) -> tuple[tuple[tuple[str, str | None], ...], tuple[str, ...]]:
+        raw: list[tuple[str, str | None]] = []
+        errors: list[str] = []
+        attrs = self.context.attrs
+        for name in ("hw_serial", "usb,serial", "serial", "boot_id"):
+            value = attrs.get(name)
+            if value is not None and not isinstance(value, str):
+                errors.append(f"context {name} is not text")
+                value = None
+            if value is not None and len(value) > 256:
+                errors.append(f"context {name} exceeds its retained bound")
+                value = value[:256]
+            raw.append((name, value))
+        serials = [value for name, value in raw if name != "boot_id" and value]
+        if not serials or any(value != observation.serial for value in serials):
+            errors.append("context serial aliases do not match the observation")
+        boot = dict(raw)["boot_id"]
+        if boot is not None and boot != observation.boot_id:
+            errors.append("cached context boot identity differs from the observation")
+        return tuple(raw), tuple(errors)
+
+    def _read_control_owned(
+        self, journal: _ControlJournal, phase: str, *, observation: ObservationIdentity,
+        fields: tuple[str, ...], identity: tuple[tuple[str, str | None], ...],
+        identity_errors: tuple[str, ...] = (),
+    ) -> PssTrackerControlReceipt:
+        for name in fields:
+            def read(name: str = name) -> Any:
+                return self.tracker.attrs[name].value
+
+            try:
+                journal.call(phase, "read", name, read)
+            except Exception:
+                # Preserve all independent observations, including known faults;
+                # expired budgets record unattempted fields without more I/O.
+                continue
+        return journal.control_receipt(phase, observation=observation, fields=fields,
+                                       identity=identity, errors=identity_errors)
+
+    def _read_control_transaction(
+        self, observation: ObservationIdentity, fields: tuple[str, ...], *,
+        timeout_ms: int, budget_ms: int,
+    ) -> PssTrackerControlReceipt:
+        self._require_control_profile(observation)
+        journal = _ControlJournal(timeout_ms=timeout_ms, budget_ms=budget_ms,
+                                  setter=self._set_finite_timeout)
+        with self._exclusive_batch_io():
+            identity: tuple[tuple[str, str | None], ...] = ()
+            identity_errors: tuple[str, ...] = ()
+            try:
+                identity, identity_errors = journal.call(
+                    "identity", "metadata", "context_identity",
+                    lambda: self._control_identity(observation))
+                if identity_errors:
+                    raise RadioConfigurationError("; ".join(identity_errors))
+                receipt = self._read_control_owned(
+                    journal, "control", observation=observation, fields=fields, identity=identity)
+                if not receipt.complete:
+                    raise PssTrackerControlError(receipt)
+                return receipt
+            except BaseException as error:
+                if isinstance(error, PssTrackerControlError):
+                    raise
+                error.pss_control_steps = tuple(journal.steps)  # type: ignore[attr-defined]
+                error.pss_control_identity = identity  # type: ignore[attr-defined]
+                try:
+                    receipt = journal.control_receipt(
+                        "control", observation=observation, fields=fields, identity=identity,
+                        errors=identity_errors + (_error_text(error),))
+                except BaseException as receipt_error:
+                    error.add_note("rich control receipt unavailable: " +
+                                   _error_text(receipt_error))
+                    raise error from receipt_error
+                if not isinstance(error, Exception):
+                    error.pss_control_receipt = receipt  # type: ignore[attr-defined]
+                    raise
+                raise PssTrackerControlError(receipt) from error
+
+    @_client_operation
+    def read_current_index(
+        self, observation: ObservationIdentity, *, timeout_ms: int = 1000, budget_ms: int = 5000,
+    ) -> PssTrackerControlReceipt:
+        """Retain one coherent u64 read, not a multi-field/PHY/boot snapshot.
+
+        The supplied identity is externally owned. Exact cached context serials
+        are checked; absent context boot metadata remains explicitly unavailable.
+        No counter freshness, minimum lead time, RF health or frame lock is inferred.
+        """
+        return self._read_control_transaction(observation, ("current_index",),
+                                               timeout_ms=timeout_ms, budget_ms=budget_ms)
+
+    @_client_operation
+    def read_tracker_control(
+        self, observation: ObservationIdentity, *, timeout_ms: int = 1000, budget_ms: int = 5000,
+    ) -> PssTrackerControlReceipt:
+        """Read bounded, separately sampled controls; nonzero faults remain observations."""
+        return self._read_control_transaction(observation, CONTROL_FIELDS,
+                                               timeout_ms=timeout_ms, budget_ms=budget_ms)
+
+    @_client_operation
+    def open_fine_receipted(
+        self, manifest: FineScheduleManifest, *, queue_target: int = 7, refill_results: int = 16,
+        timeout_ms: int = 1000, budget_ms: int = 10_000,
+    ) -> PssFineStartReceipt:
+        """Open finite raw-batch fine capture with write and later-readback evidence.
+
+        This is not a radio lease or a paired recorder. The caller owns the
+        observation, coefficient content and external lifecycle. No reads may be
+        in flight on this context. Rejected starts retain cleanup evidence; an
+        uncertain write is never interpreted as driver rejection or acceptance.
+        """
+        from pluto_plus.hardware.fine_schedule import FineScheduleManifest
+
+        if not isinstance(manifest, FineScheduleManifest):
+            raise ValueError("an explicit finite FineScheduleManifest is required")
+        self._require_control_profile(manifest.observation)
+        if type(queue_target) is not int or not 1 <= queue_target <= 7:
+            raise ValueError("queue_target must be 1..7")
+        if type(refill_results) is not int or not 1 <= refill_results <= PSS_MAX_BATCH_SCANS:
+            raise ValueError("refill_results must be 1..4096")
+        actual_refill = min(refill_results, manifest.count)
+        self._batch_geometry(actual_refill, PSS_TRACK_SCAN_BYTES, timeout_ms)
+        if manifest.count % actual_refill:
+            raise ValueError("finite PSS batch schedule must fill whole native refills")
+        journal = _ControlJournal(timeout_ms=timeout_ms, budget_ms=budget_ms,
+                                  setter=self._set_finite_timeout)
+        with self._exclusive_batch_io():
+            if self._fine_buffer is not None:
+                raise RadioConfigurationError("PSS fine stream is already open")
+            identity: tuple[tuple[str, str | None], ...] = ()
+            before: PssTrackerControlReceipt | None = None
+            after: PssTrackerControlReceipt | None = None
+            errors: list[str] = []
+            try:
+                identity, identity_errors = journal.call(
+                    "identity", "metadata", "context_identity",
+                    lambda: self._control_identity(manifest.observation))
+                if identity_errors:
+                    errors.extend(identity_errors)
+                    raise RadioConfigurationError("observation identity was not admitted")
+                before = self._read_control_owned(
+                    journal, "before", observation=manifest.observation, fields=CONTROL_FIELDS,
+                    identity=identity)
+                errors.extend(_start_control_errors(before, manifest, after=False,
+                                                     queue_target=queue_target))
+                if errors:
+                    raise RadioConfigurationError("fine start preflight evidence failed")
+                self._open_fine_owned(
+                    first_center=manifest.first_center, period_q32_32=manifest.period_q32_32,
+                    request_base=manifest.request_base, count=manifest.count,
+                    queue_target=queue_target, actual_refill=actual_refill, batch_mode=True,
+                    timeout_ms=timeout_ms, journal=journal)
+                after = self._read_control_owned(
+                    journal, "after", observation=manifest.observation, fields=CONTROL_FIELDS,
+                    identity=identity)
+                errors.extend(_start_control_errors(after, manifest, after=True,
+                                                     queue_target=queue_target))
+                current_before, current_after = before.current_index, after.current_index
+                if (current_before is not None and current_after is not None
+                        and current_after < current_before):
+                    errors.append("source index regressed across fine startup")
+                if errors:
+                    raise RadioConfigurationError("fine start later-readback evidence failed")
+                receipt = PssFineStartReceipt(
+                    manifest, queue_target, actual_refill, journal.stream_id,
+                    before, after, tuple(journal.steps), ())
+                if not receipt.complete:
+                    raise RadioConfigurationError("fine start receipt is incomplete")
+                return receipt
+            except BaseException as error:
+                # Cleanup must not depend on reconstructing a rich receipt:
+                # that constructor may be the operation which just failed.
+                if self._fine_buffer is not None or any(
+                    step.phase == "open" and step.attempted
+                    and step.action in {"write", "allocate"} for step in journal.steps
+                ):
+                    missing_handle = self._fine_buffer is None and any(
+                        step.phase == "open" and step.action == "allocate"
+                        and step.attempted and not step.returned for step in journal.steps)
+                    try:
+                        journal.begin_cleanup()
+                        self._close_failed_batch_open("fine", error, journal)
+                    except BaseException as cleanup_error:
+                        self._batch_cleanup_errors += (
+                            f"fine cleanup could not be completed: {_error_text(cleanup_error)}",)
+                    if missing_handle:
+                        self._batch_cleanup_errors += (
+                            "fine allocation outcome unverified; native handle unavailable",)
+                    errors.extend(self._batch_cleanup_errors)
+                error.pss_control_steps = tuple(journal.steps)  # type: ignore[attr-defined]
+                error.pss_control_identity = identity  # type: ignore[attr-defined]
+                error.pss_fine_manifest = manifest  # type: ignore[attr-defined]
+                try:
+                    errors.append(_error_text(error))
+                    if before is None:
+                        before = journal.control_receipt(
+                            "before", observation=manifest.observation,
+                            fields=CONTROL_FIELDS, identity=identity)
+                    if after is None and any(step.phase == "after" for step in journal.steps):
+                        after = journal.control_receipt(
+                            "after", observation=manifest.observation,
+                            fields=CONTROL_FIELDS, identity=identity)
+                    receipt = PssFineStartReceipt(
+                        manifest, queue_target, actual_refill, journal.stream_id, before, after,
+                        tuple(journal.steps), tuple(errors), journal.cleanup_attempted,
+                        not self._batch_cleanup_errors if journal.cleanup_attempted else None)
+                except BaseException as receipt_error:
+                    error.add_note("rich fine start receipt unavailable: " +
+                                   _error_text(receipt_error))
+                    raise error from receipt_error
+                if not isinstance(error, Exception):
+                    error.pss_fine_start_receipt = receipt  # type: ignore[attr-defined]
+                    raise
+                raise PssFineStartError(receipt) from error
 
     @_client_operation
     def read_fine(self) -> tuple[PssFinePacket, ...]:
