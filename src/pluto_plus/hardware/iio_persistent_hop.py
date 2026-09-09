@@ -47,6 +47,8 @@ class IioPersistentHopBackend(PersistentHopBackend):
     final host-side restoration.  It never scans for or falls back to USB.
     """
 
+    _requires_negotiated_extension = False
+
     def __init__(
         self,
         uri: str,
@@ -217,9 +219,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
         plan = self._prepared_plan
         if plan is None:
             raise RuntimeError("persistent-hop IIO plan was not bufferlessly prepared")
-        if len(request) != _TANDEM_REQUEST_BYTES + PERSISTENT_HOP_REQUEST_BYTES:
-            raise PersistentHopClientError("persistent-hop OPEN request has the wrong size")
-        decoded = PersistentHopRequestV1.unpack(request[-PERSISTENT_HOP_REQUEST_BYTES:])
+        decoded = self._request_geometry(request)
         if (
             decoded != plan.request(session_id=decoded.session_id)
             or samples_per_block != plan.samples_per_block
@@ -234,6 +234,8 @@ class IioPersistentHopBackend(PersistentHopBackend):
             self._iio_module = module
         extension_options: dict[str, Any] = {}
         extension = self._metadata_extension
+        if extension is None and self._requires_negotiated_extension:
+            raise PersistentHopClientError("adaptive capture requires detector negotiation")
         if extension is not None:
             try:
                 negotiated_request = extension.negotiate(
@@ -245,6 +247,8 @@ class IioPersistentHopBackend(PersistentHopBackend):
                 )
                 if not isinstance(negotiated_request, bytes) or not negotiated_request:
                     raise ValueError("metadata extension returned an invalid OPEN request")
+                if negotiated_request == request and self._requires_negotiated_extension:
+                    raise ValueError("adaptive detector negotiation was unavailable")
                 if negotiated_request != request:
                     extension_options["metadata_unwrapper"] = extension.unwrap
                     request = negotiated_request
@@ -254,6 +258,8 @@ class IioPersistentHopBackend(PersistentHopBackend):
                 self._metadata_extension_error = f"negotiation failed: {error}"
                 with suppress(Exception):
                     extension.fail(self._metadata_extension_error)
+                if self._requires_negotiated_extension:
+                    raise PersistentHopClientError(self._metadata_extension_error) from error
         capture = self._require_radio().begin_raw_sidecar_metadata_capture(
             samples_per_block,
             kernel_buffers=kernel_buffers,
@@ -276,21 +282,19 @@ class IioPersistentHopBackend(PersistentHopBackend):
         self._capture = capture
         self._start_clock_bracket = _map_start_clock_bracket(capture.open_clock_bracket)
 
+    def _request_geometry(self, request: bytes) -> PersistentHopRequestV1:
+        if len(request) != _TANDEM_REQUEST_BYTES + PERSISTENT_HOP_REQUEST_BYTES:
+            raise PersistentHopClientError("persistent-hop OPEN request has the wrong size")
+        return PersistentHopRequestV1.unpack(request[-PERSISTENT_HOP_REQUEST_BYTES:])
+
+    def _evidence_geometry(self, payload: bytes) -> PersistentHopEvidenceV1:
+        return PersistentHopEvidenceV1.unpack(payload)
+
     def blocks(self) -> Iterator[PersistentHopWireBlock]:
         capture = self._require_capture()
         while True:
             raw = capture.read_block()
-            evidence = PersistentHopEvidenceV1.unpack(raw.sidecar)
-            if self._start_clock_bracket is not None and evidence.buffer_sequence == 0:
-                plan = self._prepared_plan
-                if plan is None:
-                    raise RuntimeError("persistent-hop plan disappeared during capture")
-                self._start_clock_bracket = _map_start_clock_bracket(
-                    capture.first_sample_clock_bracket(
-                        evidence.block_first_counter,
-                        sample_rate_hz=plan.sample_rate_hz,
-                    )
-                )
+            evidence = self._evidence_geometry(raw.sidecar)
             # HOPS and the established ABI-3 prefix independently describe the
             # same refill. Reject disagreement before exposing any IQ.
             stream_generation, *base = _base_block_identity(raw.metadata_header)
@@ -301,6 +305,16 @@ class IioPersistentHopBackend(PersistentHopBackend):
             ):
                 raise PersistentHopClientError(
                     "HOPS counters disagree with the ABI-3 metadata header"
+                )
+            if self._start_clock_bracket is not None and evidence.buffer_sequence == 0:
+                plan = self._prepared_plan
+                if plan is None:
+                    raise RuntimeError("persistent-hop plan disappeared during capture")
+                self._start_clock_bracket = _map_start_clock_bracket(
+                    capture.first_sample_clock_bracket(
+                        evidence.block_first_counter,
+                        sample_rate_hz=plan.sample_rate_hz,
+                    )
                 )
             yield PersistentHopWireBlock(
                 evidence=raw.sidecar,
@@ -362,6 +376,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
             receive_buffer_closed=capture is None or not capture.is_open,
             fastlock_inactive=fastlock_inactive,
         )
+
     def _require_radio(self) -> IioRadioDevice:
         if self._radio is None:
             raise RuntimeError("persistent-hop IIO backend is not open")
