@@ -172,7 +172,8 @@ def test_bad_initial_status_restores_and_releases_client():
     assert radio.capture.closed and radio.closed and radio.restored == radio.original
 
 
-def test_close_without_any_iq_preserves_empty_cancel_inventory():
+@pytest.mark.parametrize("cancel_method", ["close", "before_iteration"])
+def test_close_without_any_iq_preserves_empty_cancel_inventory(cancel_method):
     radio, backend, _ = setup()
     original_status = PersistentHopStatusV1.unpack(radio.capture.statuses[0])
     radio.capture.statuses = [
@@ -204,7 +205,13 @@ def test_close_without_any_iq_preserves_empty_cancel_inventory():
     )
     # The deliberately minimal extension has no finish callback. Its error is
     # advisory and must not change source accounting or restoration.
-    receipt = session.close()
+    if cancel_method == "before_iteration":
+        radio.capture.read_block = lambda: pytest.fail("cancelled source must not refill IQ")
+        session.request_cancel()
+        assert tuple(session.visits()) == ()
+        receipt = session.receipt
+    else:
+        receipt = session.close()
     assert not receipt.stream.events and not receipt.stream.valid_sample_count
     assert receipt.metadata_extension_error and receipt.host_lifecycle.receive_buffer_closed
     assert session.close() is receipt

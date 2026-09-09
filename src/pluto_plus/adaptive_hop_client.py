@@ -177,6 +177,13 @@ class AdaptiveHopSession:
             raise PersistentHopClientError("adaptive visit iterator is single-use")
         self._iterated = True
         try:
+            if self._cancel_requested:
+                # Cancellation may precede the first refill. The provider is
+                # already terminal: drain its status/results without asking a
+                # stopped acquisition for an ordinary IQ frame.
+                self._finish()
+                yield from self.take_terminal_visits()
+                return
             for wire in self._backend.blocks():
                 # Do not discard a returned buffer if cancellation raced its refill.
                 self._ready.extend(self._stream.feed(wire))
