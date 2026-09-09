@@ -1087,6 +1087,22 @@ class PersistentHopCancellationReceiptV1:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class PersistentHopFailureDiagnosticsV1:
+    """Read-only diagnostics after a failed iterator released its client.
+
+    This is not a capture or cancellation receipt and never attests IQ coverage.
+    A missing host lifecycle or any cleanup error does not prove restoration.
+    The optional status is decoded, terminal and bound to this session, but may
+    explicitly report continuity loss or failed restoration.
+    """
+
+    session_id: int
+    terminal_status: PersistentHopStatusV1 | None
+    host_lifecycle: PersistentHopHostLifecycleReceiptV1 | None
+    cleanup_errors: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class PersistentHopSessionReceiptV1:
     session_id: int
     radio_serial: str
@@ -1322,6 +1338,7 @@ class PersistentHopSession:
         self._stream_generation: int | None = None
         self._visits: list[PersistentHopVisitV1] = []
         self._receipt: PersistentHopSessionReceiptV1 | None = None
+        self._failure_diagnostics: PersistentHopFailureDiagnosticsV1 | None = None
         self._initial_status = initial_status
         self._start_clock_bracket = start_clock_bracket
         self._metadata_extension: PersistentHopMetadataExtension | None = getattr(
@@ -1350,6 +1367,11 @@ class PersistentHopSession:
     @property
     def completed_visits(self) -> tuple[PersistentHopVisitV1, ...]:
         return tuple(self._visits)
+
+    @property
+    def failure_diagnostics(self) -> PersistentHopFailureDiagnosticsV1 | None:
+        """Retained cleanup evidence; never a substitute for ``receipt``."""
+        return self._failure_diagnostics
 
     @property
     def receipt(self) -> PersistentHopSessionReceiptV1:
@@ -1461,9 +1483,8 @@ class PersistentHopSession:
                 )
             self._finish_completed()
         except BaseException as error:
-            cleanup_error = self._cancel_after_failure()
-            if cleanup_error is not None:
-                error.add_note(f"persistent-hop cleanup also failed: {cleanup_error!r}")
+            for message in self._cancel_after_failure():
+                error.add_note(f"persistent-hop cleanup also failed: {message}")
             raise
 
     def cancel(self) -> PersistentHopCancellationReceiptV1:
@@ -1891,22 +1912,41 @@ class PersistentHopSession:
         if restoration.status != "restored":
             raise PersistentHopClientError("persistent-hop settings restoration was not attested")
 
-    def _cancel_after_failure(self) -> BaseException | None:
-        self._fail_metadata_extension("capture validation failed")
+    def _cancel_after_failure(self) -> tuple[str, ...]:
+        errors: list[str] = []
+        try:
+            self._fail_metadata_extension("capture validation failed")
+        except BaseException as error:
+            errors.append(f"metadata extension: {type(error).__name__}: {str(error)[:2048]}")
         if self._closed:
-            return None
+            return tuple(errors)
+        status: PersistentHopStatusV1 | None = None
+        host_lifecycle: PersistentHopHostLifecycleReceiptV1 | None = None
         try:
             self._backend.cancel()
-            status = PersistentHopStatusV1.unpack(self._backend.read_status())
-            if status.session_id != self.request.session_id:
+            observed = PersistentHopStatusV1.unpack(self._backend.read_status())
+            if observed.session_id != self.request.session_id:
                 raise PersistentHopClientError("cleanup status belongs to a different session")
+            if observed.state not in _TERMINAL_STATES:
+                raise PersistentHopClientError("cleanup status is not terminal")
+            status = observed
             if _restoration_receipt(status).status != "restored":
                 raise PersistentHopClientError("cleanup did not attest exact settings restoration")
         except BaseException as error:
-            return error
-        finally:
-            self._release()
-        return None
+            errors.append(f"cancel/status: {type(error).__name__}: {str(error)[:2048]}")
+        try:
+            host_lifecycle = self._release()
+        except BaseException as error:
+            errors.append(f"backend release: {type(error).__name__}: {str(error)[:2048]}")
+        # _release marks the client closed even if backend restoration failed.
+        # Retain both failures, and never let close replace the original IQ error.
+        self._failure_diagnostics = PersistentHopFailureDiagnosticsV1(
+            session_id=self.request.session_id,
+            terminal_status=status,
+            host_lifecycle=host_lifecycle,
+            cleanup_errors=tuple(errors),
+        )
+        return tuple(errors)
 
     def _fail_metadata_extension(self, reason: str) -> None:
         if self._metadata_extension is None:

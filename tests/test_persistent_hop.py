@@ -933,3 +933,143 @@ def test_client_rejects_abi3_stream_generation_change() -> None:
     with pytest.raises(PersistentHopClientError, match="stream generation changed"):
         list(session.blocks())
     assert backend.cancelled and backend.closed
+
+
+@pytest.mark.parametrize("cleanup_fault", ["none", "cancel", "status", "close", "both"])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_failed_capture_keeps_primary_error_and_released_cleanup_diagnostics(
+    cleanup_fault: str,
+    interrupted: bool,
+) -> None:
+    primary = KeyboardInterrupt("capture interrupted") if interrupted else OSError(84, "IQ gap")
+
+    class Backend(_Backend):
+        close_count = 0
+
+        def blocks(self) -> Iterator[PersistentHopWireBlock]:
+            yield _wire_block()
+            raise primary
+
+        def cancel(self) -> None:
+            super().cancel()
+            if cleanup_fault in {"cancel", "both"}:
+                raise RuntimeError("cancel transport failed")
+
+        def read_status(self) -> bytes:
+            if self.cancelled and cleanup_fault == "status":
+                raise RuntimeError("terminal transport failed")
+            return super().read_status()
+
+        def close(self) -> None:
+            self.close_count += 1
+            super().close()
+            if cleanup_fault in {"close", "both"}:
+                raise RuntimeError("host restoration failed")
+
+    backend = Backend(URI)
+    status = dataclasses.replace(
+        _cancelled_status(),
+        state=PersistentHopSessionState.FAILED,
+        reason=PersistentHopTerminalReason.COUNTER_DISCONTINUITY,
+        error_code=-84,
+        flags=_cancelled_status().flags | PersistentHopStatusFlag.CONTINUITY_FAULT,
+    )
+    backend.statuses[-1] = status
+    session = _client(backend).start(
+        _plan(),
+        session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+    blocks = session.blocks()
+    first = next(blocks)
+    assert first.evidence.block_first_counter == 1_000
+    with pytest.raises(type(primary)) as caught:
+        next(blocks)
+    assert caught.value is primary
+    assert backend.cancelled and backend.closed and backend.close_count == 1
+    diagnostic = session.failure_diagnostics
+    assert diagnostic is not None and diagnostic.session_id == SESSION_ID
+    assert diagnostic.terminal_status == (
+        None if cleanup_fault in {"cancel", "status", "both"} else status
+    )
+    assert diagnostic.host_lifecycle is None  # This minimal backend supplies none.
+    assert len(diagnostic.cleanup_errors) == (
+        0 if cleanup_fault == "none" else 2 if cleanup_fault == "both" else 1
+    )
+    assert all(message in "\n".join(primary.__notes__) for message in diagnostic.cleanup_errors)
+    assert session.close() is None and backend.close_count == 1
+    with pytest.raises(PersistentHopClientError, match="no terminal receipt"):
+        _ = session.receipt
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        diagnostic.session_id = 3  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("status_kind", ["foreign", "active", "restore_failed"])
+def test_failure_diagnostics_never_attest_wrong_session_or_nonterminal_status(
+    status_kind: str,
+) -> None:
+    backend = _Backend(URI, blocks=(_wire_block(buffer_sequence=5),))
+    status = _cancelled_status()
+    if status_kind == "foreign":
+        status = dataclasses.replace(status, session_id=SESSION_ID + 1)
+    elif status_kind == "active":
+        status = _active_status()
+    else:
+        status = dataclasses.replace(
+            status,
+            flags=status.flags & ~PersistentHopStatusFlag.RESTORE_SUCCEEDED,
+            state=PersistentHopSessionState.FAILED,
+            reason=PersistentHopTerminalReason.RESTORE_ERROR,
+            error_code=-5,
+            restore_error_code=-5,
+        )
+    backend.statuses[-1] = status
+    session = _client(backend).start(
+        _plan(),
+        session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+    assert session.failure_diagnostics is None
+    with pytest.raises(PersistentHopClientError, match="buffer sequence"):
+        list(session.blocks())
+    diagnostic = session.failure_diagnostics
+    assert diagnostic is not None
+    assert diagnostic.terminal_status == (status if status_kind == "restore_failed" else None)
+    assert len(diagnostic.cleanup_errors) == 1
+    assert backend.closed
+
+
+def test_failure_diagnostics_retain_successful_host_lifecycle_without_iq_receipt() -> None:
+    from pluto_plus.persistent_hop import (
+        PersistentHopHostLifecycleReceiptV1,
+        PersistentHopReceiverSettingsV1,
+    )
+
+    settings = PersistentHopReceiverSettingsV1(
+        center_frequency_hz=915_000_000,
+        sample_rate_hz=2_500_000,
+        bandwidth_hz=2_500_000,
+        channels=(0, 1),
+        gain_modes=("manual", "manual"),
+        gain_db=(40.0, 40.0),
+    )
+    lifecycle = PersistentHopHostLifecycleReceiptV1(settings, settings, True, True)
+
+    class Backend(_Backend):
+        def close(self) -> PersistentHopHostLifecycleReceiptV1:
+            super().close()
+            return lifecycle
+
+    backend = Backend(URI, blocks=(_wire_block(buffer_sequence=5),))
+    session = _client(backend).start(
+        _plan(), session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+    with pytest.raises(PersistentHopClientError, match="buffer sequence"):
+        list(session.blocks())
+    diagnostic = session.failure_diagnostics
+    assert diagnostic is not None and diagnostic.host_lifecycle is lifecycle
+    assert diagnostic.terminal_status == _cancelled_status()
+    assert diagnostic.cleanup_errors == ()
+    with pytest.raises(PersistentHopClientError, match="no terminal receipt"):
+        _ = session.receipt
