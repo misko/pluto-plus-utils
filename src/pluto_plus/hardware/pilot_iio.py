@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import math
+import queue
 import re
 import threading
 import time
@@ -32,6 +33,7 @@ PILOT_DELAY_CANONICAL_SAMPLES = 269
 PILOT_FIFO_CAPACITY = 32
 PILOT_MAX_FINITE_SAMPLES = 5_000_000  # Two-second envelope for a >=1s inner comparison.
 PILOT_MAX_REFILL_SAMPLES = 2_500_000  # <=10 MB, below the matched DMA's 16 MiB cap.
+PILOT_MAX_PROGRESS_EVENTS = 4096
 _U64_MAX = (1 << 64) - 1
 
 
@@ -220,6 +222,82 @@ class PilotCapture:
     upstream_health_qualified: bool = False
     live_signal_qualified: bool = False
     disk_persisted: bool = False
+    snapshot_origin: PilotSnapshot | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PilotEventIdentity:
+    """Caller-bound finite capture identity, not independent firmware attestation."""
+
+    serial: str
+    session_id: str
+    boot_id: str | None
+    visit_id: int
+    source_rate_hz: int
+    requested_samples: int
+    refill_samples: int
+    output_rate_hz: int = PILOT_OUTPUT_RATE_HZ
+
+
+@dataclass(frozen=True, slots=True)
+class PilotArmedEvent:
+    """Verified DMA-before-ARM snapshot; does NOT assert any host-received IQ."""
+
+    identity: PilotEventIdentity
+    snapshot: PilotSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class PilotOriginEvent:
+    """First actual full refill, anchored to a validated hardware prefix origin.
+
+    An earlier ARM snapshot can supply the origin; its delivered count need not
+    cover received_samples. The latter is from the reader, not that snapshot.
+    This early observation remains provisional until the final capture receipt.
+    """
+
+    identity: PilotEventIdentity
+    snapshot: PilotSnapshot
+    received_samples: int
+
+    @property
+    def first_source_center(self) -> int:
+        return self.snapshot.source_center(0)
+
+
+@dataclass(frozen=True, slots=True)
+class PilotIqChunkEvent:
+    """Exact complete CI16 refill at an output-sample offset, not a disk receipt."""
+
+    identity: PilotEventIdentity
+    output_offset: int
+    iq: bytes
+
+    @property
+    def sample_count(self) -> int:
+        return len(self.iq) // 4
+
+
+@dataclass(frozen=True, slots=True)
+class PilotTerminalEvent:
+    """Best-effort post-cleanup summary; capture() return/error is authoritative.
+
+    published_iq_bytes counts successfully enqueued chunks, NOT consumer reads
+    or durable writes. complete means only the finite reader's transport gate.
+    """
+
+    identity: PilotEventIdentity
+    complete: bool
+    received_bytes: int
+    published_iq_bytes: int
+    iq_sha256: str
+    snapshots: tuple[PilotSnapshot, ...]
+    failure: str | None
+    cleanup_errors: tuple[str, ...]
+    progress_errors: tuple[str, ...]
+
+
+PilotCaptureEvent = PilotArmedEvent | PilotOriginEvent | PilotIqChunkEvent | PilotTerminalEvent
 
 
 class PilotCaptureError(RadioConfigurationError):
@@ -228,6 +306,7 @@ class PilotCaptureError(RadioConfigurationError):
     def __init__(
         self, message: str, *, session_id: str, visit_id: int, partial_iq: bytes,
         snapshots: tuple[PilotSnapshot, ...], cleanup_errors: tuple[str, ...],
+        progress_errors: tuple[str, ...] = (),
     ) -> None:
         super().__init__(message)
         self.session_id = session_id
@@ -235,6 +314,7 @@ class PilotCaptureError(RadioConfigurationError):
         self.partial_iq = partial_iq
         self.snapshots = snapshots
         self.cleanup_errors = cleanup_errors
+        self.progress_errors = progress_errors
 
 
 def _bounded_integer(value: int, name: str, maximum: int) -> int:
@@ -395,7 +475,18 @@ class PilotIioClient:
     def capture(
         self, *, visit_id: int, samples: int = 300_000, refill_samples: int = 25_000,
         timeout_ms: int = 5000,
+        progress_queue: queue.Queue[PilotCaptureEvent] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> PilotCapture:
+        """Capture finite IQ, optionally publishing bounded, provisional events.
+
+        Supply a standard FIFO Queue with maxsize 1..4096 and a separate consumer.
+        Enqueue never waits for capacity: backpressure fails capture, preserving
+        partial IQ and cleanup evidence. The caller owns the queue and must not
+        mutate it or its methods/limits while capturing. No callbacks run here.
+        An external Event is never cleared, including before startup; cancel()
+        retains its legacy per-capture reset. Neither token calls native cancel.
+        """
         _bounded_integer(visit_id, "visit_id", 0xffffffff)
         _bounded_integer(samples, "samples", PILOT_MAX_FINITE_SAMPLES)
         _bounded_integer(refill_samples, "refill_samples", PILOT_MAX_REFILL_SAMPLES)
@@ -404,6 +495,13 @@ class PilotIioClient:
             raise ValueError("PIL1 refills must align to an eight-byte paired DMA beat")
         if samples % refill_samples:
             raise ValueError("finite samples must be a whole number of IIO refills")
+        if progress_queue is not None:
+            if type(progress_queue) is not queue.Queue:
+                raise ValueError("progress_queue must be a standard bounded FIFO queue.Queue")
+            _bounded_integer(progress_queue.maxsize, "progress_queue.maxsize",
+                             PILOT_MAX_PROGRESS_EVENTS)
+        if cancel_event is not None and type(cancel_event) is not threading.Event:
+            raise ValueError("cancel_event must be a threading.Event")
         if self._closed or self._busy or self._unusable:
             raise RadioConfigurationError("PIL1 client is closed, capturing, or needs reconnection")
         self._busy = True
@@ -414,15 +512,58 @@ class PilotIioClient:
         buffer: Any | None = None
         original: tuple[str, str, tuple[bool, bool]] | None = None
         cleanup_errors: list[str] = []
+        progress_errors: list[str] = []
         failure: BaseException | None = None
+        io_started = False
+        published_iq_bytes = 0
+        origin: PilotSnapshot | None = None
+        prefix_first: int | None = None
+        identity = PilotEventIdentity(
+            self.serial, self.session_id, self.boot_id, visit_id, self.source_rate_hz,
+            samples, refill_samples,
+        )
 
         def budget() -> None:
-            if self._cancel.is_set():
+            nonlocal io_started
+            if self._cancel.is_set() or (cancel_event is not None and cancel_event.is_set()):
                 raise RadioConfigurationError("PIL1 capture cancelled")
             remaining = math.ceil((deadline - time.monotonic()) * 1000)
             if remaining <= 0:
                 raise TimeoutError("PIL1 finite capture deadline expired")
+            io_started = True
             self._timeout(min(self.io_timeout_ms, remaining))
+
+        def emit(event: PilotCaptureEvent) -> None:
+            assert progress_queue is not None
+            try:
+                progress_queue.put_nowait(event)
+            except Exception as error:
+                message = ("PIL1 progress queue is full" if isinstance(error, queue.Full) else
+                           f"PIL1 progress event delivery failed: {error}")
+                progress_errors.append(message)
+                raise RadioConfigurationError(message) from error
+
+        def check_progress_snapshot(
+            snapshot: PilotSnapshot, previous: PilotSnapshot | None,
+        ) -> None:
+            nonlocal prefix_first
+            self._attest_identity(identity.boot_id)
+            if self.boot_id != identity.boot_id:
+                raise RadioConfigurationError("PIL1 progress boot identity changed")
+            self._require_health(snapshot)
+            if previous is not None and snapshot.generation <= previous.generation:
+                raise RadioConfigurationError("PIL1 progress snapshot generation did not advance")
+            if snapshot.visit_id != visit_id or not snapshot.words[19] & 16:
+                raise RadioConfigurationError("PIL1 progress snapshot changed the armed visit")
+            if snapshot.admitted_samples > samples:
+                raise RadioConfigurationError("PIL1 progress prefix exceeds the finite request")
+            if prefix_first is not None and (
+                not snapshot.admitted_samples or
+                snapshot.first_newest_canonical_index != prefix_first
+            ):
+                raise RadioConfigurationError("PIL1 progress prefix origin changed")
+            if snapshot.admitted_samples:
+                prefix_first = snapshot.first_newest_canonical_index
 
         try:
             budget()
@@ -464,7 +605,12 @@ class PilotIioClient:
             self._require_health(armed)
             if armed.visit_id != visit_id or not armed.words[19] & 16:
                 raise RadioConfigurationError("PIL1 DMA creation did not arm the requested visit")
-            for _ in range(samples // refill_samples):
+            if progress_queue is not None:
+                # The matched driver's preenable CLEAR resets generation to
+                # zero. ARM is the NEW epoch baseline, never comparable to before.
+                check_progress_snapshot(armed, None)
+                emit(PilotArmedEvent(identity, armed))
+            for index in range(samples // refill_samples):
                 budget()
                 buffer.refill()
                 chunk = bytes(buffer.read())
@@ -475,6 +621,25 @@ class PilotIioClient:
                     raise RadioConfigurationError(
                         "PIL1 refill is short or exceeds its finite buffer"
                     )
+                if progress_queue is not None:
+                    if index == 0:
+                        if armed.axis_delivered_samples:
+                            origin = armed
+                            check_progress_snapshot(origin, None)
+                        else:
+                            budget()
+                            origin = self._snapshot()
+                            snapshots.append(origin)
+                            check_progress_snapshot(origin, armed)
+                            if origin.axis_delivered_samples < refill_samples:
+                                raise RadioConfigurationError(
+                                    "PIL1 origin snapshot cannot account for the received prefix"
+                                )
+                        # Only after an actual complete refill, even when the
+                        # origin snapshot itself was obtained before that read.
+                        emit(PilotOriginEvent(identity, origin, refill_samples))
+                    emit(PilotIqChunkEvent(identity, index * refill_samples, chunk))
+                    published_iq_bytes += len(chunk)
                 budget()
             budget()
             captured = self._snapshot()
@@ -485,14 +650,17 @@ class PilotIioClient:
             )
             if captured.generation == armed.generation:
                 raise RadioConfigurationError("PIL1 snapshot generation did not advance")
+            if progress_queue is not None:
+                check_progress_snapshot(captured, snapshots[-2])
         except BaseException as error:
             failure = error
         finally:
             # Recovery gets its own bounded I/O budget, even after cancellation.
-            try:
-                self._timeout(self.io_timeout_ms)
-            except BaseException as error:
-                cleanup_errors.append(f"timeout: {error}")
+            if io_started:
+                try:
+                    self._timeout(self.io_timeout_ms)
+                except BaseException as error:
+                    cleanup_errors.append(f"timeout: {error}")
             if buffer is not None:
                 try:
                     _destroy_pilot_buffer(self._iio, buffer)
@@ -508,6 +676,8 @@ class PilotIioClient:
                         )
                         if stopped.words != captured.words:
                             raise RadioConfigurationError("PIL1 accounting changed during cleanup")
+                        if progress_queue is not None:
+                            check_progress_snapshot(stopped, captured)
                 except BaseException as error:
                     cleanup_errors.append(f"terminal snapshot: {error}")
             if original is not None:
@@ -527,28 +697,48 @@ class PilotIioClient:
                             raise RadioConfigurationError("restored attribute readback mismatch")
                     except BaseException as error:
                         cleanup_errors.append(f"{name} restoration: {error}")
-            try:
-                self._attest_identity(self.boot_id)
-            except BaseException as error:
-                cleanup_errors.append(f"terminal identity: {error}")
+            if io_started:
+                try:
+                    self._attest_identity(self.boot_id)
+                except BaseException as error:
+                    cleanup_errors.append(f"terminal identity: {error}")
             self._busy = False
+        iq = bytes(payload)
+        iq_sha256 = hashlib.sha256(iq).hexdigest()
+        # Finalization point: cancellation during the finite copy/hash still
+        # invalidates completion; cancellation AFTER this decision cannot undo it.
+        if failure is None and cancel_event is not None and cancel_event.is_set():
+            failure = RadioConfigurationError("PIL1 capture cancelled")
+        if progress_queue is not None:
+            try:
+                emit(PilotTerminalEvent(
+                    identity=identity, complete=failure is None and not cleanup_errors,
+                    received_bytes=len(iq), published_iq_bytes=published_iq_bytes,
+                    iq_sha256=iq_sha256, snapshots=tuple(snapshots),
+                    failure=str(failure) if failure is not None else None,
+                    cleanup_errors=tuple(cleanup_errors), progress_errors=tuple(progress_errors),
+                ))
+            except BaseException as error:
+                if failure is None:
+                    failure = error
         if failure is not None or cleanup_errors:
             self._unusable = True
             capture_error = PilotCaptureError(
                 f"PIL1 finite capture failed: {failure or '; '.join(cleanup_errors)}",
-                session_id=self.session_id, visit_id=visit_id, partial_iq=bytes(payload),
+                session_id=self.session_id, visit_id=visit_id, partial_iq=iq,
                 snapshots=tuple(snapshots), cleanup_errors=tuple(cleanup_errors),
+                progress_errors=tuple(progress_errors),
             )
             if isinstance(failure, (KeyboardInterrupt, SystemExit)):
                 failure.add_note(str(capture_error))
                 raise failure
             raise capture_error from failure
-        iq = bytes(payload)
         return PilotCapture(
             serial=self.serial, session_id=self.session_id, boot_id=self.boot_id,
             visit_id=visit_id, source_rate_hz=self.source_rate_hz, iq=iq,
-            iq_sha256=hashlib.sha256(iq).hexdigest(), snapshot_before=snapshots[0],
+            iq_sha256=iq_sha256, snapshot_before=snapshots[0],
             snapshot_armed=snapshots[1], snapshot_final=snapshots[-1],
+            snapshot_origin=origin,
         )
 
     def close(self) -> None:

@@ -136,6 +136,8 @@ class _Buffer:
         self.read_delta = 0
         self.on_refill: Callable[[], None] | None = None
         self.on_close: Callable[[], None] | None = None
+        # Matched pilot_preenable always performs PIL_CLEAR before DMA/ARM.
+        device.generation = 0
         device.samples = 0
         device.armed = device.active = True
         device.visit = int(device.attrs["capture_visit_id"].value)
