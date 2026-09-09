@@ -233,6 +233,18 @@ def test_multiple_finite_visits_share_context_not_capture_generations() -> None:
     _assert_restored(device, module)
 
 
+def test_two_second_envelope_keeps_refills_bounded_and_default_unchanged() -> None:
+    device, context, module = _setup()
+    with _connect(module) as client:
+        result = client.capture(visit_id=17, samples=5_000_000, refill_samples=2_500_000)
+    assert len(result.iq) == 20_000_000
+    assert result.snapshot_final.axis_delivered_samples == 5_000_000
+    assert len(module.buffers) == 1 and module.buffers[0].refills == 2
+    assert module.buffers[0].byte_length == 10_000_000
+    assert context.closes == 1
+    _assert_restored(device, module)
+
+
 @pytest.mark.parametrize("kwargs", [
     {"expected_serial": ""}, {"expected_serial": "wrong serial"},
     {"source_rate_hz": 2_500_000}, {"source_rate_hz": True},
@@ -301,9 +313,10 @@ def test_requires_exact_device_contract_and_bounded_io(kind: str) -> None:
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"visit_id": 0}, {"visit_id": True}, {"samples": 0}, {"samples": 2_500_001},
+    {"visit_id": 0}, {"visit_id": True}, {"samples": 0}, {"samples": 5_000_001},
     {"samples": True}, {"refill_samples": 131072}, {"refill_samples": 3},
-    {"refill_samples": 0}, {"timeout_ms": 0}, {"timeout_ms": 60001},
+    {"refill_samples": 0}, {"refill_samples": 5_000_000},
+    {"timeout_ms": 0}, {"timeout_ms": 60001},
 ])
 def test_rejects_bad_finite_geometry_without_configuring_device(kwargs: dict) -> None:
     device, _, module = _setup()

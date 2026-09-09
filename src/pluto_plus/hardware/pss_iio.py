@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import importlib
 import math
+import re
 import statistics
 import struct
-from collections.abc import Iterable, Sequence
+import threading
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Concatenate, ParamSpec, Self, TypeVar
 
 from pluto_plus.errors import RadioConfigurationError
 
@@ -52,6 +55,166 @@ PSS_MAP_FRAMES = 64
 PSS_MAP_WINDOW_MAPS = 3
 PSS_MAP_CANONICAL_SPAN = PSS_MAP_PHASE_BINS * PSS_MAP_FRAMES
 PSS_MAP_DEFAULT_DRIFT_BINS = (-12, -8, -4, 0, 4, 8, 12)
+PSS_HEALTH_WORDS = 46
+_HEALTH_CONTRACTS = {
+    # ABI: declared MSPS, DDC telemetry mode, known health bits, fatal bits.
+    0x10001: (15, 0, 0x1FFF, 0x17FF),
+    0x10002: (30, 1, 0x3FFF, 0x37FF),
+    0x10003: (60, 1, 0x3FFF, 0x37FF),
+    0x10004: (60, 2, 0x3FFF, 0x37FF),
+    0x10005: (15, 0, 0x5FFF, 0x57FF),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PssAcquisitionHealth:
+    """PSMH v1 receipt: coherent snapshot plus separately labeled LIVE fields.
+
+    Declared MSPS is not a measured PHY rate. DDC mode 1 contains low32-only
+    observations, not 64-bit totals. Mode 2 reads each counter individually:
+    accepted/emitted are not mutually atomic or tied to the snapshot instant.
+    Serial, boot, source-interval binding, and RF claims belong to the caller.
+    """
+
+    raw: str
+    words: tuple[int, ...]
+
+    @classmethod
+    def decode(cls, text: str) -> Self:
+        if not isinstance(text, str) or not text.isascii() or len(text) > 2048:
+            raise ValueError("PSMH requires bounded ASCII text")
+        fields = text.split()
+        if fields[:3] != ["PSMH", "1", str(PSS_HEALTH_WORDS)] or len(fields) != 49:
+            raise ValueError("PSMH envelope/version/word count is invalid")
+        if any(not re.fullmatch(r"[0-9a-f]{8}", field) for field in fields[3:]):
+            raise ValueError("PSMH payload requires eight lowercase hexadecimal digits")
+        words = tuple(int(field, 16) for field in fields[3:])
+        contract = _HEALTH_CONTRACTS.get(words[0])
+        if contract is None or (words[1], words[34]) != contract[:2]:
+            raise ValueError("PSMH hardware ABI/declared rate/DDC mode mismatch")
+        if not words[2] or words[3] & ~0x1FF or words[4] & ~0x1FF:
+            raise ValueError("PSMH snapshot generation or reserved status bits are invalid")
+        if words[5] & ~7 or words[6] & ~0x7F or words[10] & ~3:
+            raise ValueError("PSMH reserved lifecycle/driver/ready bits are nonzero")
+        if words[24] & ~contract[2] or words[45] & 0xFC00FC00:
+            raise ValueError("PSMH reserved health/candidate-FIFO bits are nonzero")
+        for packed in words[44:46]:
+            if (packed & 0xFFFF) > (packed >> 16):
+                raise ValueError("PSMH FIFO occupancy exceeds recorded high water")
+        if any(words[10] & (1 << bank) and not words[11 + bank] for bank in range(2)):
+            raise ValueError("PSMH ready bank lacks a map generation")
+        if words[10] == 3 and words[11] == words[12]:
+            raise ValueError("PSMH ready banks repeat a map generation")
+        if (words[34] == 0 and any(words[35:41])) or (
+            words[34] == 1 and (words[36] or words[38])
+        ):
+            raise ValueError("PSMH DDC telemetry mode has unavailable nonzero fields")
+        return cls(text, words)
+
+    @property
+    def abi_version(self) -> int:
+        return self.words[0]
+
+    @property
+    def declared_rate_msps(self) -> int:
+        return self.words[1]
+
+    @property
+    def generation(self) -> int:
+        return self.words[2]
+
+    @property
+    def coherent_fault_signature(self) -> tuple[int, ...]:
+        return self.words[17:31]
+
+    @property
+    def ddc_telemetry_mode(self) -> int:
+        return self.words[34]
+
+    @property
+    def ddc_accepted_observation(self) -> int | None:
+        if not self.ddc_telemetry_mode:
+            return None
+        return self.words[35] | (self.words[36] << 32)
+
+    @property
+    def ddc_emitted_observation(self) -> int | None:
+        if not self.ddc_telemetry_mode:
+            return None
+        return self.words[37] | (self.words[38] << 32)
+
+    @property
+    def acquisition_enabled(self) -> bool:
+        return bool(self.words[5] & 2)
+
+    def require_fault_free(self) -> None:
+        mask = _HEALTH_CONTRACTS[self.abi_version][3]
+        if not self.words[3] & 1 or not self.words[4] & 1:
+            raise ValueError("PSMH hardware epoch is not live")
+        if self.words[6] or self.words[9] or any(self.words[31:34]):
+            raise ValueError("PSMH driver/bridge/snapshot fault is present")
+        for index, value in enumerate(self.coherent_fault_signature):
+            fatal_value = (value & mask) if index == 7 else value
+            if fatal_value:
+                raise ValueError("PSMH coherent acquisition hardware fault is present")
+        if self.words[39] or self.words[40]:
+            raise ValueError("PSMH live DDC discontinuity/clipping fault is present")
+
+
+class PssAcquisitionHealthError(RadioConfigurationError):
+    """Unavailable, invalid or unhealthy evidence, retaining the raw receipt."""
+
+    def __init__(
+        self, message: str, *, raw: str | None = None,
+        receipt: PssAcquisitionHealth | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.raw = raw
+        self.receipt = receipt
+
+
+@dataclass(frozen=True, slots=True)
+class PssGracefulCloseReceipt:
+    health_before: PssAcquisitionHealth | None
+    health_after: PssAcquisitionHealth | None
+    errors: tuple[str, ...]
+    health_before_raw: str | None = None
+    health_after_raw: str | None = None
+    native_cancel_used: bool = False
+    reader_join_asserted: bool = True
+    # These are cleanup observations, never a source-continuity or RF claim.
+
+
+class PssGracefulCloseError(RadioConfigurationError):
+    def __init__(self, receipt: PssGracefulCloseReceipt) -> None:
+        super().__init__("PSS graceful close incomplete: " + "; ".join(receipt.errors))
+        self.receipt = receipt
+
+
+_Params = ParamSpec("_Params")
+_Result = TypeVar("_Result")
+
+
+def _client_operation(
+    method: Callable[Concatenate[PssIioClient, _Params], _Result],
+) -> Callable[Concatenate[PssIioClient, _Params], _Result]:
+    """Count public operations without serializing independent legacy streams."""
+
+    @wraps(method)
+    def guarded(self: PssIioClient, /, *args: _Params.args, **kwargs: _Params.kwargs) -> _Result:
+        with self._operation_lock:
+            if self._graceful_closing:
+                raise RadioConfigurationError("PSS client is closing gracefully")
+            if self._closed and method.__name__ not in {"close", "close_fine", "close_maps"}:
+                raise RadioConfigurationError("PSS client is closed")
+            self._active_operations += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            with self._operation_lock:
+                self._active_operations -= 1
+
+    return guarded
 
 
 def _map_contract(rate_msps: int, experimental_shared_xfft: bool) -> tuple[int, int]:
@@ -475,23 +638,26 @@ def _close_iio_buffer(iio_module: Any, buffer: Any) -> None:
         except BaseException as error:
             first_error = error
     try:
-        closer = getattr(buffer, "close", None) or getattr(buffer, "destroy", None)
-        if callable(closer):
-            closer()
-        else:
-            native = getattr(buffer, "_buffer", None)
-            destroy = getattr(iio_module, "_buffer_destroy", None)
-            if native is None or not callable(destroy):
-                raise RadioConfigurationError(
-                    "pylibiio buffer exposes no deterministic destroy operation"
-                )
-            buffer._buffer = None
-            destroy(native)
+        _destroy_iio_buffer(iio_module, buffer)
     except BaseException as error:
         if first_error is None:
             first_error = error
     if first_error is not None:
         raise first_error
+
+
+def _destroy_iio_buffer(iio_module: Any, buffer: Any) -> None:
+    """Destroy without native cancellation; caller must have joined all readers."""
+    closer = getattr(buffer, "close", None) or getattr(buffer, "destroy", None)
+    if callable(closer):
+        closer()
+        return
+    native = getattr(buffer, "_buffer", None)
+    destroy = getattr(iio_module, "_buffer_destroy", None)
+    if native is None or not callable(destroy):
+        raise RadioConfigurationError("pylibiio buffer exposes no deterministic destroy operation")
+    buffer._buffer = None
+    destroy(native)
 
 
 def _close_iio_context(iio_module: Any, context: Any) -> None:
@@ -528,6 +694,11 @@ class PssIioClient:
         self._remaining_results: int | None = None
         self._map_session_consumed = False
         self._closed = False
+        self._operation_lock = threading.Lock()
+        self._active_operations = 0
+        self._graceful_closing = False
+        self._graceful_receipt: PssGracefulCloseReceipt | None = None
+        self._last_health_generation: int | None = None
 
     @classmethod
     def connect(
@@ -617,6 +788,7 @@ class PssIioClient:
                 raise RadioConfigurationError(f"{device.name} entered IIO with a latched fault")
         return rate
 
+    @_client_operation
     def load_coefficients(self, coefficients: Sequence[tuple[int, int]], generation: int) -> None:
         expected = 66 * (self.rate_msps // 15)
         if len(coefficients) != expected or not 1 <= generation <= 0xFFFFFFFF:
@@ -632,9 +804,11 @@ class PssIioClient:
         if _read_int_attr(self.tracker, "active_coefficient_generation") != generation:
             raise RadioConfigurationError("PSS coefficient commit did not become active")
 
+    @_client_operation
     def load_coefficient_file(self, path: Path, *, generation: int) -> None:
         self.load_coefficients(read_ci16_coefficients(path, rate_msps=self.rate_msps), generation)
 
+    @_client_operation
     def open_fine(
         self,
         *,
@@ -668,6 +842,7 @@ class PssIioClient:
             self.close_fine()
             raise
 
+    @_client_operation
     def read_fine(self) -> tuple[PssFinePacket, ...]:
         if self._fine_buffer is None:
             raise RadioConfigurationError("PSS fine stream is not open")
@@ -697,6 +872,7 @@ class PssIioClient:
             raise RadioConfigurationError("PSS fine driver latched a stream fault")
         return packets
 
+    @_client_operation
     def open_maps(self, *, refill_chunks: int = 400) -> None:
         """Open the one continuous coarse-map session for this FPGA reset epoch.
 
@@ -724,6 +900,7 @@ class PssIioClient:
             self.close_maps()
             raise
 
+    @_client_operation
     def read_map_chunks(self) -> tuple[PssMapChunk, ...]:
         if self._map_buffer is None:
             raise RadioConfigurationError("PSS phase-map stream is not open")
@@ -744,6 +921,7 @@ class PssIioClient:
             raise RadioConfigurationError("PSS phase-map driver latched a stream fault")
         return chunks
 
+    @_client_operation
     def read_maps(self, reassembler: PssMapReassembler) -> tuple[PssPhaseMap, ...]:
         maps: list[PssPhaseMap] = []
         for chunk in self.read_map_chunks():
@@ -752,6 +930,164 @@ class PssIioClient:
                 maps.append(completed)
         return tuple(maps)
 
+    def _read_acquisition_health(self, *, require_fault_free: bool) -> PssAcquisitionHealth:
+        raw: str | None = None
+        receipt: PssAcquisitionHealth | None = None
+        try:
+            raw = str(self.phase_map.attrs["acquisition_health"].value)
+            receipt = PssAcquisitionHealth.decode(raw)
+            if receipt.abi_version != self.map_abi_version or (
+                receipt.declared_rate_msps != self.rate_msps
+            ):
+                raise ValueError("acquisition health differs from the admitted context ABI/rate")
+            with self._operation_lock:
+                if (self._last_health_generation is not None and
+                        receipt.generation <= self._last_health_generation):
+                    raise ValueError("acquisition health snapshot generation is stale or reset")
+                self._last_health_generation = receipt.generation
+            if require_fault_free:
+                receipt.require_fault_free()
+            return receipt
+        except (AttributeError, KeyError) as error:
+            raise PssAcquisitionHealthError(
+                "fresh acquisition_health evidence is unavailable", raw=raw, receipt=receipt,
+            ) from error
+        except (ValueError, OSError) as error:
+            raise PssAcquisitionHealthError(
+                f"acquisition_health evidence rejected: {error}", raw=raw, receipt=receipt,
+            ) from error
+
+    @_client_operation
+    def read_acquisition_health(
+        self, *, require_fault_free: bool = True, timeout_ms: int = 1000,
+    ) -> PssAcquisitionHealth:
+        """Read fresh driver-serialized health, never substitute fault_flags alone.
+
+        Diagnostic callers may explicitly retain known faults, but cannot opt
+        out of envelope, context-binding, or freshness checks. Applies a finite
+        context timeout; the caller binds the receipt to its observation.
+        """
+        if not isinstance(require_fault_free, bool):
+            raise ValueError("require_fault_free must be a boolean")
+        self._set_finite_timeout(timeout_ms)
+        return self._read_acquisition_health(require_fault_free=require_fault_free)
+
+    def _set_finite_timeout(self, timeout_ms: int) -> None:
+        if type(timeout_ms) is not int or not 1 <= timeout_ms <= 60_000:
+            raise ValueError("PSS context timeout must be 1..60000 milliseconds")
+        setter = getattr(self.context, "set_timeout", None)
+        if not callable(setter):
+            raise RadioConfigurationError("PSS operation requires a bounded context timeout")
+        setter(timeout_ms)
+
+    def close_gracefully(
+        self, *, readers_joined: bool, timeout_ms: int = 1000,
+    ) -> PssGracefulCloseReceipt:
+        """Explicit joined-reader close without native cancellation.
+
+        The caller stops and joins bounded readers first, retaining all partial
+        data. This guard rejects concurrent public operations without waiting or
+        destroying a buffer being read. It cannot attest threads using private
+        buffer/context objects. Incomplete fine work is an evidence failure, NOT
+        a reason to leave the producer alive. Teardown is still attempted.
+
+        Only owned producers are disabled. This method closes its context; RF
+        restoration through the caller's owner/control context remains external.
+        Legacy close()/context-manager defaults retain their cancellation policy.
+        """
+        if readers_joined is not True:
+            raise ValueError("graceful close requires the caller to stop and join all readers")
+        if type(timeout_ms) is not int or not 1 <= timeout_ms <= 60_000:
+            raise ValueError("graceful close timeout must be 1..60000 milliseconds")
+        with self._operation_lock:
+            if self._graceful_receipt is not None:
+                if self._graceful_receipt.errors:
+                    raise PssGracefulCloseError(self._graceful_receipt)
+                return self._graceful_receipt
+            if self._closed:
+                raise RadioConfigurationError(
+                    "context was already closed without a graceful receipt"
+                )
+            if self._graceful_closing or self._active_operations:
+                raise RadioConfigurationError("join in-flight PSS operations before graceful close")
+            self._graceful_closing = True
+        errors: list[str] = []
+        health: list[PssAcquisitionHealth | None] = [None, None]
+        raw_health: list[str | None] = [None, None]
+        owned_map = self._map_buffer is not None
+
+        def read_health(ordinal: int) -> None:
+            try:
+                observed = self._read_acquisition_health(require_fault_free=True)
+                health[ordinal], raw_health[ordinal] = observed, observed.raw
+            except PssAcquisitionHealthError as error:
+                health[ordinal], raw_health[ordinal] = error.receipt, error.raw
+                errors.append(f"health {'before' if ordinal == 0 else 'after'}: {error}")
+            except BaseException as error:
+                errors.append(f"health read: {error}")
+
+        # No remote operation is safe to begin if a finite timeout cannot be set.
+        try:
+            self._set_finite_timeout(timeout_ms)
+        except BaseException:
+            with self._operation_lock:
+                self._graceful_closing = False
+            raise
+
+        try:
+            read_health(0)
+            if self._fine_buffer is not None and self._remaining_results != 0:
+                errors.append(
+                    "fine schedule is unbounded or incomplete; queued work is unqualified"
+                )
+            for field, device, enable_attr in (
+                ("_fine_buffer", self.tracker, "schedule_enable"),
+                ("_map_buffer", self.phase_map, "acquisition_enable"),
+            ):
+                buffer = getattr(self, field)
+                if buffer is None:
+                    continue
+                try:
+                    _write_attr(device, enable_attr, 0)
+                    if _read_int_attr(device, enable_attr):
+                        raise RadioConfigurationError("producer disable readback is not zero")
+                except BaseException as error:
+                    errors.append(f"{enable_attr} disable: {error}")
+                # Clear ownership even when destroy raises, avoiding double free.
+                setattr(self, field, None)
+                try:
+                    _destroy_iio_buffer(self._iio, buffer)
+                except BaseException as error:
+                    errors.append(f"{device.name} destroy: {error}")
+            self._expected_request = None
+            self._remaining_results = None
+            read_health(1)
+            after = health[1]
+            if owned_map and after is not None and (after.words[5] or after.words[4] & 2):
+                errors.append("map producer/IRQ lifecycle remains active after destruction")
+            try:
+                if _read_int_attr(self.tracker, "fault_flags"):
+                    errors.append("tracker driver reports a terminal fault")
+            except BaseException as error:
+                errors.append(f"tracker terminal fault read: {error}")
+        finally:
+            try:
+                _close_iio_context(self._iio, self.context)
+            except BaseException as error:
+                errors.append(f"context close: {error}")
+            receipt = PssGracefulCloseReceipt(
+                health_before=health[0], health_after=health[1], errors=tuple(errors),
+                health_before_raw=raw_health[0], health_after_raw=raw_health[1],
+            )
+            with self._operation_lock:
+                self._closed = True
+                self._graceful_closing = False
+                self._graceful_receipt = receipt
+        if receipt.errors:
+            raise PssGracefulCloseError(receipt)
+        return receipt
+
+    @_client_operation
     def close_fine(self) -> None:
         buffer = self._fine_buffer
         if buffer is None:
@@ -764,6 +1100,7 @@ class PssIioClient:
             self._remaining_results = None
             _close_iio_buffer(self._iio, buffer)
 
+    @_client_operation
     def close_maps(self) -> None:
         buffer = self._map_buffer
         if buffer is None:
@@ -774,6 +1111,7 @@ class PssIioClient:
         finally:
             _close_iio_buffer(self._iio, buffer)
 
+    @_client_operation
     def close(self) -> None:
         if self._closed:
             return

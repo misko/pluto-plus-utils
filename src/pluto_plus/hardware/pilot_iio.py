@@ -30,7 +30,8 @@ PILOT_CANONICAL_RATE_HZ = 15_000_000
 PILOT_SOURCE_RATES_HZ = (15_000_000, 30_000_000, 60_000_000)
 PILOT_DELAY_CANONICAL_SAMPLES = 269
 PILOT_FIFO_CAPACITY = 32
-PILOT_MAX_FINITE_SAMPLES = 2_500_000  # Bound retained IQ to one second / 10 MB.
+PILOT_MAX_FINITE_SAMPLES = 5_000_000  # Two-second envelope for a >=1s inner comparison.
+PILOT_MAX_REFILL_SAMPLES = 2_500_000  # <=10 MB, below the matched DMA's 16 MiB cap.
 _U64_MAX = (1 << 64) - 1
 
 
@@ -397,7 +398,7 @@ class PilotIioClient:
     ) -> PilotCapture:
         _bounded_integer(visit_id, "visit_id", 0xffffffff)
         _bounded_integer(samples, "samples", PILOT_MAX_FINITE_SAMPLES)
-        _bounded_integer(refill_samples, "refill_samples", PILOT_MAX_FINITE_SAMPLES)
+        _bounded_integer(refill_samples, "refill_samples", PILOT_MAX_REFILL_SAMPLES)
         _bounded_integer(timeout_ms, "timeout_ms", 60_000)
         if refill_samples % 2:
             raise ValueError("PIL1 refills must align to an eight-byte paired DMA beat")

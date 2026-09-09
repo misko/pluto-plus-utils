@@ -75,8 +75,14 @@ visit/limit attributes and scan selection. Multiple finite pilot captures can
 share one context; that does **not** authorize reopening the separate PSS map
 stream within its reset epoch.
 
-Memory is bounded to one second of requested IQ (2.5 million complex samples,
-10 MB); a normal 120 ms result is 1.2 MB. The default overall capture deadline is
+Requested IQ is bounded to two seconds (5 million complex samples, 20 MB),
+with at most 2.5 million samples (10 MB) per refill. Native buffers and temporary
+Python copies use additional memory; 20 MB is not a peak-memory guarantee.
+The larger optional envelope leaves room for an inner comparison interval of
+at least one second after map-support alignment; the default remains 120 ms,
+300,000 samples and 25,000-sample refills (1.2 MB total IQ). This is only a
+capture-length prerequisite, not an implemented paired comparison.
+The default overall capture deadline is
 5 seconds and each IIO operation has a timeout of at most 1 second. The initial
 libiio context constructor uses the library's connection timeout; recovery has
 its own finite per-operation timeout budget after the capture deadline.
@@ -126,3 +132,64 @@ error naming the abandoned generation. It cannot silently erase a negative or
 missing visit. Intentional hop-boundary discards still require an explicit
 reset plus a recorder-owned discard receipt; this parser change does not add
 the future persistent hop lifecycle.
+
+## Fresh PSS health and explicit joined-reader cleanup
+
+`PssAcquisitionHealth.decode(text)` accepts the matched driver's versioned
+`PSMH 1 46` receipt: 46 eight-digit lowercase hexadecimal u32 words. It retains
+the original text and words for durable session evidence. ABI, declared source
+rate, reserved fields, FIFO geometry and telemetry mode are checked. Known
+faults remain available for diagnostics; `require_fault_free()` rejects driver,
+bridge, coherent hardware and live DDC clipping/discontinuity faults. A zero
+denominator observation is diagnostic, not a detection or automatically fatal.
+
+`PssIioClient.read_acquisition_health()` reads the new `acquisition_health` IIO
+attribute with a finite context timeout, binds it to the admitted map ABI/rate,
+and requires an increasing fresh snapshot generation. It fails closed if the
+attribute is unavailable; cached `fault_flags` is not substituted. An unhealthy
+or malformed read raises `PssAcquisitionHealthError`, retaining any raw text
+and parsed receipt. `require_fault_free=False` retains known faults explicitly
+but does not bypass envelope, context-binding or freshness checks.
+
+The receipt deliberately separates evidence domains:
+
+| Fields | Meaning and limitation |
+| --- | --- |
+| words 10–30, 41–45 | Coherent FPGA snapshot: ready banks, generations/starts, fault signature, acquisition counts and FIFO occupancy/high-water marks. |
+| words 3–9, 31–33 | Separately observed live status, driver lifecycle/counters, bridge errors and snapshot-request overruns. |
+| words 34–40 | DDC telemetry: mode 0 absent/not applicable; mode 1 live low32-only on ABI 1.2/1.3; mode 2 individually sampled 64-bit counters on ABI 1.4. |
+
+DDC values are **not** part of the coherent snapshot, and even mode 2 accepted
+and emitted counts are not mutually atomic. Mode 1 cannot establish 64-bit
+coverage or wrap accounting. The declared rate is not a measured PHY rate.
+The caller still binds serial, boot, actual RF/source rate, filters and the
+recorded source interval. A fresh fault-free receipt alone does not prove
+sample continuity, disk persistence, GLRT detection or FPGA lock, and does not
+set the finite pilot result's `upstream_health_qualified` flag.
+
+For future paired orchestration, `client.close_gracefully(readers_joined=True)`
+is an explicit alternative to the unchanged legacy `close()`/context-manager
+cleanup. First stop and join all bounded reader threads and retain partial
+results. The guard refuses to destroy a buffer while a public operation is in
+flight and blocks new public operations during graceful close. The caller's
+join assertion does not attest direct use of private buffers or the context.
+If a finite context timeout cannot be set, cleanup does not begin; ownership
+and recovery remain with the caller. A timeout bounds individual IIO calls,
+not Python callbacks or an arbitrary third-party binding implementation.
+
+Graceful close records fresh health before/after teardown, disables each owned
+producer, destroys its buffer directly without native cancellation, checks
+terminal map/IRQ and tracker status, and closes the context. Incomplete or
+unbounded fine schedules invalidate the receipt **but still get torn down**.
+Failed health, producer-disable, destroy or context-close operations are
+retained in `PssGracefulCloseError.receipt`; available raw health is preserved.
+Repeating the close returns/re-raises that same receipt without a second native
+destruction. This is a narrow cleanup receipt, not proof that every queued map
+or sample reached the host. RF/configuration restoration remains the external
+owner's responsibility, and failure does not authorize reuse of the client.
+
+Ordinary buffer destruction avoids the network cancellation path that can skip
+acknowledged IIOD CLOSE. This helper does not implement independent reader
+contexts, source-interval joining, persistent storage, coefficient scheduling,
+blind GLRT comparison, or the future hopping recorder. Its tests use fake IIO
+lifecycles; hardware qualification remains separate.
