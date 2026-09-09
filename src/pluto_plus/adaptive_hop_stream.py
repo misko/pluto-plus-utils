@@ -94,6 +94,7 @@ class AdaptiveHopStreamReceiptV2:
     duty_denominator_sample_count: int
     valid_duty_ppm: int
     duty_target_met: bool
+    source_span_attested: bool
 
 
 class AdaptiveHopStreamV2:
@@ -357,7 +358,12 @@ class AdaptiveHopStreamV2:
                 first.invalid_end_counter_exclusive,
             ):
                 raise PersistentHopClientError("adaptive terminal startup interval changed")
-        denominator = status.final_counter - status.first_counter
+        # Before the first actual startup event, HOPT's first_counter may be
+        # unset (zero) while final_counter is the absolute device clock. Their
+        # difference is not an observed scan duration. Preserve raw HOPT but
+        # make elapsed/duty accounting explicitly unavailable in that case.
+        source_span_attested = bool(self._events)
+        denominator = status.final_counter - status.first_counter if source_span_attested else 0
         if status.state == PersistentHopSessionState.COMPLETED:
             if previous is None or previous.state != status.state or not self._events:
                 raise PersistentHopClientError("adaptive completion lacks terminal block/events")
@@ -425,10 +431,13 @@ class AdaptiveHopStreamV2:
                 0,
                 status.final_counter
                 - (status.last_block_end_counter if previous else status.first_counter),
-            ),
+            )
+            if source_span_attested
+            else 0,
             denominator,
             duty,
             duty >= self.minimum_valid_duty_ppm,
+            source_span_attested,
         )
         self._receipt = receipt
         self._segments.clear()

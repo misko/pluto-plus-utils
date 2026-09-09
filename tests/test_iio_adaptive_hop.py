@@ -191,7 +191,14 @@ def test_close_without_any_iq_preserves_empty_cancel_inventory(cancel_method):
         status = PersistentHopStatusV1.unpack(_status(PersistentHopSessionState.CANCELLED))
         radio.capture.statuses.append(
             AdaptiveHopStatusV2(
-                dc.replace(status, first_counter=0, final_counter=0, last_block_end_counter=0)
+                dc.replace(
+                    status,
+                    first_counter=0,
+                    final_counter=2**53 + 17,
+                    restore_before_counter=2**53 + 17,
+                    restore_after_counter=2**53 + 20,
+                    last_block_end_counter=0,
+                )
             ).pack()
         )
 
@@ -213,6 +220,12 @@ def test_close_without_any_iq_preserves_empty_cancel_inventory(cancel_method):
     else:
         receipt = session.close()
     assert not receipt.stream.events and not receipt.stream.valid_sample_count
+    assert not receipt.stream.source_span_attested
+    assert receipt.stream.duty_denominator_sample_count == 0
+    assert (
+        receipt.stream.unclassified_sample_count == receipt.stream.unreceived_tail_sample_count == 0
+    )
+    assert receipt.stream.status.geometry.final_counter == 2**53 + 17
     assert receipt.metadata_extension_error and receipt.host_lifecycle.receive_buffer_closed
     assert session.close() is receipt
     assert not session.take_terminal_visits()
