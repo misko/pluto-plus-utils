@@ -347,6 +347,27 @@ def test_metadata_extension_finishes_before_close_without_changing_iq_receipt(fa
     assert backend.closed and not backend.cancelled
 
 
+def test_visit_coverage_failure_reports_bounded_counter_geometry():
+    session, backend, _extension = _extension_session()
+    wire = backend.wire_blocks[0]
+    evidence = PersistentHopEvidenceV1.unpack(wire.evidence)
+    first = evidence.events[0].invalid_end_counter_exclusive + 17
+    skipped = first - evidence.block_first_counter
+    backend.wire_blocks = (
+        dataclasses.replace(
+            wire,
+            evidence=dataclasses.replace(evidence, block_first_counter=first).pack(),
+            iq_payload=wire.iq_payload[skipped * 8 :],
+        ),
+    )
+    with pytest.raises(
+        PersistentHopClientError,
+        match=r"visit=0.*expected=300000.*covered=299983.*retained=",
+    ):
+        list(session.visits())
+    assert backend.closed
+
+
 @pytest.mark.parametrize("corruption", ["iq", "hops", "terminal", "fail"])
 def test_metadata_extension_never_accepts_invalid_capture_evidence(corruption: str):
     session, backend, extension = _extension_session(corruption)

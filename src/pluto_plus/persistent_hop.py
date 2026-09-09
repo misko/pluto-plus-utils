@@ -1977,8 +1977,13 @@ def _sampled_visit_from_segments(
     )
     covered = sum(piece.shape[1] for piece in pieces)
     if covered != visit.valid_sample_count:
+        retained_start = segments[0][0] if segments else None
+        retained_end = segments[-1][1] if segments else None
         raise PersistentHopClientError(
-            "persistent-hop IQ blocks do not cover the attested valid visit"
+            "persistent-hop IQ blocks do not cover the attested valid visit: "
+            f"visit={visit.visit_index} expected={visit.valid_sample_count} "
+            f"covered={covered} valid=[{start},{end}) "
+            f"retained=[{retained_start},{retained_end}) segments={len(segments)}"
         )
     output = (
         pieces[0].copy()
