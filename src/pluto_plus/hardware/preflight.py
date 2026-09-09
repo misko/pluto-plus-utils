@@ -27,6 +27,15 @@ METADATA_RUNTIME_SOURCE_COMMITS = {
     3: "f6c450eada95ce99fe8756ebc244bfcf6ddcc72a",
     4: "98a5e6139459a01a5a42ca7cd3e98d807156b6b0",
 }
+# An explicit installer opt-in, not a replacement for the established defaults.
+# The receipt's existing immutable source identity distinguishes this runtime;
+# neither the metadata ABI nor the persisted receipt schema changes.
+SCANNER_GLRT_RUNTIME_SOURCE_COMMIT = "a1088b61de3c57762cfed5533e1baf8076a7b726"
+SCANNER_GLRT_BUFFER_METHODS = {
+    "cancel_metadata_session": ("self",),
+    "metadata_status_raw": ("self", "capacity"),
+    "drain_metadata": ("self", "capacity"),
+}
 _RING_METADATA_BUFFER_PARAMETERS = (
     "self",
     "device",
@@ -175,6 +184,13 @@ def verify_metadata_runtime(expected_abi: int = 1) -> MetadataRuntimeVerificatio
             f"MetadataBuffer constructor is {parameters}, expected "
             f"{METADATA_BUFFER_PARAMETERS[expected_abi]}"
         )
+    if receipt.source_commit == SCANNER_GLRT_RUNTIME_SOURCE_COMMIT:
+        for name, expected in SCANNER_GLRT_BUFFER_METHODS.items():
+            method = getattr(metadata_buffer, name, None)
+            if not callable(method):
+                raise RuntimeError(f"scanner runtime MetadataBuffer lacks {name}")
+            if tuple(inspect.signature(method).parameters) != expected:
+                raise RuntimeError(f"scanner runtime MetadataBuffer.{name} has the wrong ABI")
     if not _is_exact_native_loaded(native_path):
         raise RuntimeError(
             f"release-local metadata libiio is not the loaded libiio: {native_path}"
@@ -244,7 +260,10 @@ def _validate_metadata_runtime_receipt(
     if document.get("metadata_abi") != expected_abi:
         raise RuntimeError("metadata runtime receipt ABI does not match the radio")
     source_commit = str(document.get("source_commit") or "")
-    if source_commit != METADATA_RUNTIME_SOURCE_COMMITS[expected_abi]:
+    allowed_commits = {METADATA_RUNTIME_SOURCE_COMMITS[expected_abi]}
+    if expected_abi == 3:
+        allowed_commits.add(SCANNER_GLRT_RUNTIME_SOURCE_COMMIT)
+    if source_commit not in allowed_commits:
         raise RuntimeError("metadata runtime receipt has the wrong source commit")
     parameters = tuple(document.get("metadata_buffer_parameters") or ())
     if parameters != METADATA_BUFFER_PARAMETERS[expected_abi]:

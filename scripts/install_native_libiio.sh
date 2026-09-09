@@ -12,16 +12,26 @@ uv_bin=""
 metadata_abi=1
 source_ref=""
 source_commit=""
+scanner_glrt=0
+source_repository="https://github.com/misko/libiio.git"
+local_source_repository=""
 
 usage() {
     cat <<EOF
 Usage: scripts/install_native_libiio.sh --uv-bin ABSOLUTE_PATH
        [--python PATH] [--prefix PATH] [--jobs N] [--metadata-abi 1|2|3|4]
+       [--scanner-glrt] [--source-repository ABSOLUTE_LOCAL_PATH]
 
 Builds the exact host libiio matched to the selected firmware metadata ABI with
 USB support. The default ABI is 1 for the currently deployed production radios.
 The source-checkout script defaults to that checkout's .venv; the installed
 entry point defaults to its own Python environment.
+
+--scanner-glrt explicitly selects the pinned scanner GLRT/adaptive host runtime
+and requires --metadata-abi 3. Existing defaults are unchanged. Before its commit
+is published, --source-repository may select a local Git repository containing
+that exact commit. Only committed objects are fetched into a fresh checkout;
+working-tree edits are never built and no caller-supplied source pin is accepted.
 EOF
 }
 
@@ -32,6 +42,8 @@ while (($#)); do
     --jobs) jobs="${2:?missing value for --jobs}"; shift 2 ;;
     --uv-bin) uv_bin="${2:?missing value for --uv-bin}"; shift 2 ;;
     --metadata-abi) metadata_abi="${2:?missing value for --metadata-abi}"; shift 2 ;;
+    --scanner-glrt) scanner_glrt=1; shift ;;
+    --source-repository) local_source_repository="${2:?missing value for --source-repository}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; printf 'ERROR: unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
@@ -59,6 +71,22 @@ case "$metadata_abi" in
     exit 2
     ;;
 esac
+
+if ((scanner_glrt)); then
+    [[ "$metadata_abi" == 3 ]] || {
+        printf 'ERROR: --scanner-glrt requires --metadata-abi 3\n' >&2
+        exit 2
+    }
+    source_commit="a1088b61de3c57762cfed5533e1baf8076a7b726"
+    source_ref="$source_commit"
+fi
+if [[ -n "$local_source_repository" ]]; then
+    [[ "$local_source_repository" == /* && -d "$local_source_repository" ]] || {
+        printf 'ERROR: --source-repository must be an existing absolute local directory\n' >&2
+        exit 2
+    }
+    source_repository="$local_source_repository"
+fi
 
 [[ "$python_bin" == /* && "$prefix" == /* && "$uv_bin" == /* ]] || {
     printf 'ERROR: --python, --prefix, and --uv-bin must be absolute paths\n' >&2
@@ -97,12 +125,12 @@ cleanup() {
 trap cleanup EXIT
 
 git -C "$worktree" init --quiet src
-git -C "$worktree/src" remote add origin https://github.com/misko/libiio.git
+git -C "$worktree/src" remote add origin "$source_repository"
 git -C "$worktree/src" fetch --quiet --depth 1 origin "$source_ref"
 git -C "$worktree/src" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
 actual_commit="$(git -C "$worktree/src" rev-parse HEAD)"
 [[ "$actual_commit" == "$source_commit" ]] || {
-    printf 'ERROR: immutable libiio tag resolved to %s, expected %s\n' \
+    printf 'ERROR: immutable libiio source resolved to %s, expected %s\n' \
         "$actual_commit" "$source_commit" >&2
     exit 1
 }
