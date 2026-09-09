@@ -34,6 +34,14 @@ from pluto_plus.hardware.pss_control import (
     _error_text,
     _start_control_errors,
 )
+from pluto_plus.hardware.pss_stop import PssMapStopReceipt
+from pluto_plus.hardware.pss_stop_control import (
+    STOP_CONTRACT,
+    PssMapStopOperation,
+    PssMapStopOperationError,
+    _stop_transition_error,
+    _StopJournal,
+)
 
 if TYPE_CHECKING:
     from pluto_plus.hardware.fine_schedule import FineScheduleManifest
@@ -57,6 +65,8 @@ PSS_MAP_VERSIONS = {15: 0x00010001, 30: 0x00010002, 60: 0x00010004}
 PSS_MAP_CAPABILITIES = {15: 0x3F, 30: 0x7F, 60: 0xFF}
 PSS_MAP_SHARED_XFFT_VERSION = 0x00010005
 PSS_MAP_SHARED_XFFT_CAPABILITIES = 0x13F
+PSS_MAP_BOUNDARY_STOP_VERSION = 0x00010006
+PSS_MAP_BOUNDARY_STOP_CAPABILITIES = 0x33F
 PSS_MAP_TILE_GEOMETRY = 0x00401002
 PSS_MAP_PHASE_BINS = 20_000
 PSS_MAP_CHUNK_MAGIC = 0x4B4E4843
@@ -81,6 +91,7 @@ _HEALTH_CONTRACTS = {
     0x10003: (60, 1, 0x3FFF, 0x37FF),
     0x10004: (60, 2, 0x3FFF, 0x37FF),
     0x10005: (15, 0, 0x5FFF, 0x57FF),
+    0x10006: (15, 0, 0x5FFF, 0x57FF),
 }
 
 
@@ -241,11 +252,19 @@ def _client_operation(
     return guarded
 
 
-def _map_contract(rate_msps: int, experimental_shared_xfft: bool) -> tuple[int, int]:
+def _map_contract(
+    rate_msps: int, experimental_shared_xfft: bool, experimental_boundary_stop: bool = False,
+) -> tuple[int, int]:
     """Select one exact contract; never reinterpret a legacy rate's default ABI."""
 
     if not isinstance(experimental_shared_xfft, bool):
         raise ValueError("experimental_shared_xfft must be a boolean")
+    if not isinstance(experimental_boundary_stop, bool):
+        raise ValueError("experimental_boundary_stop must be a boolean")
+    if experimental_boundary_stop:
+        if not experimental_shared_xfft or rate_msps != 15:
+            raise ValueError("experimental boundary-stop ABI 1.6 requires shared 15 MS/s")
+        return PSS_MAP_BOUNDARY_STOP_VERSION, PSS_MAP_BOUNDARY_STOP_CAPABILITIES
     if rate_msps not in PSS_MAP_VERSIONS:
         raise ValueError("PSS map rate must be 15, 30, or 60 MS/s")
     if experimental_shared_xfft:
@@ -363,9 +382,15 @@ class PssMapChunk:
     bins: tuple[int, ...]
 
     @classmethod
-    def decode(cls, payload: bytes, *, allow_experimental_shared_xfft: bool = False) -> Self:
+    def decode(
+        cls, payload: bytes, *, allow_experimental_shared_xfft: bool = False,
+        allow_experimental_boundary_stop: bool = False,
+    ) -> Self:
         if not isinstance(allow_experimental_shared_xfft, bool):
             raise ValueError("allow_experimental_shared_xfft must be a boolean")
+        if (not isinstance(allow_experimental_boundary_stop, bool) or
+                (allow_experimental_boundary_stop and not allow_experimental_shared_xfft)):
+            raise ValueError("boundary-stop chunk decoding requires explicit shared opt-in")
         if len(payload) != PSS_MAP_CHUNK_BYTES:
             raise ValueError(
                 f"phase-map chunk is {len(payload)} bytes, expected {PSS_MAP_CHUNK_BYTES}"
@@ -376,7 +401,8 @@ class PssMapChunk:
         if metadata[0] != PSS_MAP_CHUNK_MAGIC:
             raise ValueError("phase-map chunk magic is invalid")
         if metadata[1] not in PSS_MAP_VERSIONS.values() and not (
-            allow_experimental_shared_xfft and metadata[1] == PSS_MAP_SHARED_XFFT_VERSION
+            (allow_experimental_shared_xfft and metadata[1] == PSS_MAP_SHARED_XFFT_VERSION)
+            or (allow_experimental_boundary_stop and metadata[1] == PSS_MAP_BOUNDARY_STOP_VERSION)
         ):
             raise ValueError("phase-map chunk ABI is unsupported")
         if metadata[2] == 0:
@@ -536,6 +562,7 @@ def analyze_phase_maps(
     rate_msps: int,
     drift_bins: Sequence[int] = PSS_MAP_DEFAULT_DRIFT_BINS,
     experimental_shared_xfft: bool = False,
+    experimental_boundary_stop: bool = False,
 ) -> PssCoarseEstimate:
     """Extract one deterministic coarse candidate using the qualified C algorithm.
 
@@ -544,7 +571,7 @@ def analyze_phase_maps(
     accidentally schedule the full-rate tracker in canonical units.
     """
 
-    expected_abi, _ = _map_contract(rate_msps, experimental_shared_xfft)
+    expected_abi, _ = _map_contract(rate_msps, experimental_shared_xfft, experimental_boundary_stop)
     if len(maps) != PSS_MAP_WINDOW_MAPS:
         raise ValueError("exactly three complete phase maps are required")
     hypotheses = tuple(drift_bins)
@@ -797,15 +824,23 @@ class PssIioClient:
     """Capability-discovered, network-safe IIO client for the two PSS devices."""
 
     def __init__(
-        self, context: Any, iio_module: Any, *, experimental_shared_xfft: bool = False
+        self, context: Any, iio_module: Any, *, experimental_shared_xfft: bool = False,
+        experimental_boundary_stop: bool = False,
     ) -> None:
         self.context = context
         self._iio = iio_module
         self.experimental_shared_xfft = experimental_shared_xfft
+        self.experimental_boundary_stop = experimental_boundary_stop
+        _map_contract(15, experimental_shared_xfft, experimental_boundary_stop)
+        if experimental_boundary_stop:
+            # Establish finite attribute I/O before any contract read. Legacy
+            # construction has unchanged timeout behavior.
+            self._set_finite_timeout(1000)
         self.tracker = self._find_device(PSS_TRACK_DEVICE)
         self.phase_map = self._find_device(PSS_MAP_DEVICE)
         self.rate_msps = self._require_contracts()
-        self.map_abi_version, _ = _map_contract(self.rate_msps, experimental_shared_xfft)
+        self.map_abi_version, _ = _map_contract(
+            self.rate_msps, experimental_shared_xfft, experimental_boundary_stop)
         self._fine_buffer: Any | None = None
         self._map_buffer: Any | None = None
         self._expected_request: int | None = None
@@ -820,6 +855,10 @@ class PssIioClient:
         self._batch_io_active = False
         self._batch_streams: dict[str, _BatchStream] = {}
         self._batch_cleanup_errors: tuple[str, ...] = ()
+        self._stop_observation: ObservationIdentity | None = None
+        self._last_stop_receipt: PssMapStopReceipt | None = None
+        self._stop_epoch_invalid = False
+        self._stop_context_id = str(uuid4()) if experimental_boundary_stop else ""
 
     @contextmanager
     def _exclusive_batch_io(self) -> Iterator[None]:
@@ -911,9 +950,9 @@ class PssIioClient:
         expected_serial: str | None = None,
         iio_module: Any | None = None,
         experimental_shared_xfft: bool = False,
+        experimental_boundary_stop: bool = False,
     ) -> Self:
-        if not isinstance(experimental_shared_xfft, bool):
-            raise ValueError("experimental_shared_xfft must be a boolean")
+        _map_contract(15, experimental_shared_xfft, experimental_boundary_stop)
         if experimental_shared_xfft and (expected_serial is None or not expected_serial.strip()):
             raise ValueError(
                 "experimental shared-XFFT connection requires an exact expected serial"
@@ -921,6 +960,8 @@ class PssIioClient:
         module = iio_module or importlib.import_module("iio")
         context = module.Context(uri)
         try:
+            if experimental_boundary_stop:
+                context.set_timeout(1000)
             if expected_serial is not None:
                 normalized = expected_serial.strip()
                 if not normalized:
@@ -932,11 +973,16 @@ class PssIioClient:
                         "IIO context cannot attest the expected PSS radio serial"
                     ) from error
                 observed = attrs.get("hw_serial") or attrs.get("usb,serial") or attrs.get("serial")
-                if observed != normalized:
+                serials = [attrs[key] for key in ("hw_serial", "usb,serial", "serial")
+                           if attrs.get(key)]
+                if observed != normalized or (experimental_boundary_stop and any(
+                    serial != normalized for serial in serials
+                )):
                     raise RadioConfigurationError(
                         "IIO context serial does not match the expected PSS radio"
                     )
-            return cls(context, module, experimental_shared_xfft=experimental_shared_xfft)
+            return cls(context, module, experimental_shared_xfft=experimental_shared_xfft,
+                       experimental_boundary_stop=experimental_boundary_stop)
         except BaseException:
             _close_iio_context(module, context)
             raise
@@ -958,7 +1004,8 @@ class PssIioClient:
         if rate not in PSS_TRACK_VERSIONS or map_rate != rate:
             raise RadioConfigurationError("PSS tracker/map sample rates disagree")
         try:
-            map_version, map_capabilities = _map_contract(rate, self.experimental_shared_xfft)
+            map_version, map_capabilities = _map_contract(
+                rate, self.experimental_shared_xfft, self.experimental_boundary_stop)
         except ValueError as error:
             raise RadioConfigurationError(str(error)) from error
         expected = (
@@ -978,6 +1025,8 @@ class PssIioClient:
                     "capabilities": map_capabilities,
                     "phase_bins": PSS_MAP_PHASE_BINS,
                     "reassembly_chunks": PSS_MAP_CHUNKS,
+                    **({"ddc_config": 0x000f0202, "ddc_group_delay": 0}
+                       if self.experimental_boundary_stop else {}),
                 },
             ),
         )
@@ -1107,8 +1156,12 @@ class PssIioClient:
         from pluto_plus.hardware.source_support import ObservationIdentity, ProcessingProfile
 
         if (not isinstance(observation, ObservationIdentity)
-                or observation.profile is not ProcessingProfile.PAIRED_15_SHARED_XFFT_512_447_V1
-                or self.rate_msps != 15 or self.map_abi_version != PSS_MAP_SHARED_XFFT_VERSION
+                or observation.profile not in (
+                    ProcessingProfile.PAIRED_15_SHARED_XFFT_512_447_V1,
+                    ProcessingProfile.PAIRED_15_SHARED_XFFT_512_447_STOP_V1,
+                )
+                or observation.profile.map_abi_version != self.map_abi_version
+                or self.rate_msps != 15
                 or not self.experimental_shared_xfft):
             raise ValueError("control receipts require the explicit paired 15 MS/s shared profile")
 
@@ -1419,6 +1472,7 @@ class PssIioClient:
             PssMapChunk.decode(
                 _unpadded_scan(scan, PSS_MAP_CHUNK_BYTES, label="PSS phase-map chunk"),
                 allow_experimental_shared_xfft=self.experimental_shared_xfft,
+                allow_experimental_boundary_stop=self.experimental_boundary_stop,
             )
             for scan in scans
         )
@@ -1493,6 +1547,7 @@ class PssIioClient:
                 else:
                     decoded = PssMapChunk.decode(
                         payload, allow_experimental_shared_xfft=self.experimental_shared_xfft,
+                        allow_experimental_boundary_stop=self.experimental_boundary_stop,
                     )
                     if decoded.abi_version != self.map_abi_version:
                         errors.append("map chunk ABI differs from the admitted context")
@@ -1736,6 +1791,152 @@ class PssIioClient:
         if not callable(setter):
             raise RadioConfigurationError("PSS operation requires a bounded context timeout")
         setter(timeout_ms)
+
+    def _observe_map_stop(
+        self, receipt: PssMapStopReceipt, observation: ObservationIdentity,
+    ) -> None:
+        problem = _stop_transition_error(self._last_stop_receipt, receipt)
+        if problem is not None:
+            self._stop_epoch_invalid = True
+        if self._stop_epoch_invalid:
+            raise RadioConfigurationError(problem or "PSS stop context epoch was invalidated")
+        self._stop_observation = observation
+        self._last_stop_receipt = receipt
+
+    def _map_stop_transaction(
+        self, observation: ObservationIdentity, *, request: bool, ticket: int | None,
+        timeout_ms: int, budget_ms: int,
+    ) -> PssMapStopOperation:
+        self._require_control_profile(observation)
+        if (not self.experimental_boundary_stop or
+                self.map_abi_version != PSS_MAP_BOUNDARY_STOP_VERSION):
+            raise ValueError("native stop operations require explicit ABI1.6 admission")
+        if ticket is not None and (type(ticket) is not int or not 1 <= ticket <= 0xffffffff):
+            raise ValueError("stop ticket must be a nonzero u32")
+        if request and ticket is None:
+            raise ValueError("a requested stop ticket is required")
+        journal = _StopJournal(timeout_ms=timeout_ms, budget_ms=budget_ms,
+                               setter=self._set_finite_timeout)
+        with self._exclusive_batch_io():
+            identity: tuple[tuple[str, str | None], ...] = ()
+            before: PssMapStopReceipt | None = None
+            after: PssMapStopReceipt | None = None
+            previous = self._last_stop_receipt
+            errors: list[str] = []
+
+            def contract(phase: str) -> None:
+                for name, expected in STOP_CONTRACT:
+                    def read_contract(name: str = name) -> Any:
+                        return self.phase_map.attrs[name].value
+
+                    raw = journal.call(phase, "read", name, read_contract)
+                    if int(raw.strip(), 0) != expected:
+                        raise RadioConfigurationError(f"PSS stop contract mismatch: {name}")
+
+            def read(phase: str) -> PssMapStopReceipt:
+                raw = journal.call(phase, "read", "acquisition_stop",
+                                   lambda: self.phase_map.attrs["acquisition_stop"].value)
+                return PssMapStopReceipt.decode(raw)
+
+            def result() -> PssMapStopOperation:
+                return PssMapStopOperation(
+                    "request" if request else "read", observation, self._stop_context_id,
+                    ticket, before, after, previous, tuple(journal.steps), identity, tuple(errors),
+                    journal.timeout_ms, journal.budget_ms, journal.elapsed_ms)
+
+            def read_identity() -> tuple[str, ...]:
+                nonlocal identity
+                identity, identity_errors = self._control_identity(observation)
+                return identity_errors
+
+            try:
+                if self._stop_observation is not None and self._stop_observation != observation:
+                    raise ValueError(
+                        "PSS stop observation differs from the context's bound observation")
+                identity_errors = journal.call(
+                    "identity", "metadata", "context_identity", read_identity)
+                if identity_errors:
+                    raise RadioConfigurationError("; ".join(identity_errors))
+                contract("contract_before")
+                if request:
+                    before = read("before")
+                    self._observe_map_stop(before, observation)
+                    if ticket != before.accepted_ticket and (
+                        before.accepted_ticket == 0xffffffff or ticket != before.accepted_ticket + 1
+                    ):
+                        raise ValueError("stop ticket is neither accepted nor the next ticket")
+                    try:
+                        journal.call(
+                            "request", "write", "acquisition_stop_request",
+                            lambda: _write_attr(
+                                self.phase_map, "acquisition_stop_request", str(ticket)),
+                            requested=str(ticket))
+                    except Exception as write_error:
+                        # A failed binding return does not prove the device rejected
+                        # the write. One bounded after-read retains possible acceptance;
+                        # the operation still fails and never silently retries a write.
+                        errors.append(_error_text(write_error))
+                after = read("after")
+                self._observe_map_stop(after, observation)
+                if ticket is not None and after.accepted_ticket != ticket:
+                    raise RadioConfigurationError(
+                        "fresh accepted stop ticket differs from expected ticket")
+                contract("contract_after")
+                receipt = result()
+                if not receipt.complete:
+                    if not errors:
+                        errors.append("PSS stop operation evidence is incomplete")
+                    raise PssMapStopOperationError(result())
+                journal.require_budget()
+                return receipt
+            except BaseException as error:
+                if isinstance(error, PssMapStopOperationError):
+                    raise
+                errors.append(_error_text(error))
+                # Retain bounded raw evidence before rich finalization. No buffer
+                # cleanup is needed or implied: this operation owns no new buffer.
+                error.pss_stop_steps = tuple(journal.steps)  # type: ignore[attr-defined]
+                error.pss_stop_identity = identity  # type: ignore[attr-defined]
+                error.pss_stop_observation = observation  # type: ignore[attr-defined]
+                error.pss_stop_context_id = self._stop_context_id  # type: ignore[attr-defined]
+                try:
+                    receipt = result()
+                except BaseException as receipt_error:
+                    error.add_note("rich stop receipt unavailable: " + _error_text(receipt_error))
+                    raise error from receipt_error
+                if not isinstance(error, Exception):
+                    error.pss_stop_receipt = receipt  # type: ignore[attr-defined]
+                    raise
+                raise PssMapStopOperationError(receipt) from error
+
+    @_client_operation
+    def read_map_stop(
+        self, observation: ObservationIdentity, *, expected_ticket: int | None = None,
+        timeout_ms: int = 1000, budget_ms: int = 5000,
+    ) -> PssMapStopOperation:
+        """Fresh typed PSST read; unchanged/pending/failed states remain observations.
+
+        Requires exact opt-in ABI1.6/profile/identity and rechecks its contract
+        before/after. A fresh read is not a new generation or fresh boot attestation.
+        No wait-for-terminal, health qualification, buffer mutation or native cancel.
+        """
+        return self._map_stop_transaction(observation, request=False, ticket=expected_ticket,
+                                          timeout_ms=timeout_ms, budget_ms=budget_ms)
+
+    @_client_operation
+    def request_map_stop(
+        self, observation: ObservationIdentity, *, ticket: int,
+        timeout_ms: int = 1000, budget_ms: int = 5000,
+    ) -> PssMapStopOperation:
+        """Write one explicit ticket and observe acceptance, never wait for a tile.
+
+        Caller owns the existing radio/map session. Linux requires live streaming
+        and IRQs; this method never opens, flushes, disables, drains or closes them.
+        Run between bounded refills, not concurrently on this context. A matching
+        old accepted ticket is idempotent and cannot stop a rearmed acquisition.
+        """
+        return self._map_stop_transaction(observation, request=True, ticket=ticket,
+                                          timeout_ms=timeout_ms, budget_ms=budget_ms)
 
     def close_gracefully(
         self, *, readers_joined: bool, timeout_ms: int = 1000,

@@ -160,9 +160,10 @@ def test_raw_whitespace_retained_and_construction_cannot_disagree():
 
 
 def test_schema_decode_does_not_admit_new_firmware_abi():
-    from pluto_plus.hardware.pss_iio import _HEALTH_CONTRACTS
+    from pluto_plus.hardware.pss_iio import _map_contract
 
-    assert 0x00010006 not in _HEALTH_CONTRACTS
+    assert _map_contract(15, False)[0] == 0x10001
+    assert _map_contract(15, True)[0] == 0x10005
     # Accepted ticket zero is retained for reset-idle diagnostics, not invented success.
     receipt = PssMapStopReceipt.decode(encode([0x50535354, 0x0001000C] + [0] * 10))
     assert receipt.accepted_ticket == 0 and not receipt.terminal_valid

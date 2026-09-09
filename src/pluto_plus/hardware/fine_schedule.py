@@ -51,7 +51,8 @@ def _observation(value: ObservationIdentity) -> None:
     if not isinstance(value, ObservationIdentity):
         raise ValueError("an explicit ObservationIdentity is required")
     # The fine ABI alone cannot distinguish the legacy and shared 15 MS/s paths.
-    if (value.profile is not ProcessingProfile.PAIRED_15_SHARED_XFFT_512_447_V1
+    if (value.profile not in (ProcessingProfile.PAIRED_15_SHARED_XFFT_512_447_V1,
+                             ProcessingProfile.PAIRED_15_SHARED_XFFT_512_447_STOP_V1)
             or type(value.source_rate_hz) is not int or value.source_rate_hz != 15_000_000):
         raise ValueError("only the explicit paired 15 MS/s shared-XFFT profile is supported")
 
