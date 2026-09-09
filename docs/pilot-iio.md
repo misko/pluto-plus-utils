@@ -22,10 +22,11 @@ exact finite sample counts and the actual IIO reader's received byte count.
 Passing it establishes a count/health gate for analysis, not IQ content, DDR
 integrity, disk persistence, RF settling, a GLRT detection or FPGA PSS lock.
 
-The eventual reader must independently attest serial/boot/session ownership,
-bind snapshots to the exact buffer lifecycle, hash/persist the actual IQ bytes,
-retain frequency/filter identities and every FPGA result, and use bounded waits
-and explicit stop/drain/recovery. PIL1 itself contains no boot or serial identity.
+The paired recording orchestrator must independently attest ownership and boot,
+persist the actual IQ bytes, retain frequency/filter identities and every FPGA
+result, and join the pilot and PSS records by their actual source support. The
+finite reader below provides the pilot buffer lifecycle, not this orchestrator.
+PIL1 itself contains no boot or serial identity.
 Fault coordinates are diagnostic except for the narrowly documented output-FIFO
 overflow case; they must not be relabeled as exact first-missing RF samples.
 
@@ -33,6 +34,73 @@ Live completion still requires blind host GLRT on the same capture (without
 FPGA acquisition seeds) and qualified FPGA PSS timing agreement. Synthetic test
 vectors, successful parsing, and byte-count agreement are not live-lock evidence.
 Firmware remains on its do-not-merge branch; .18 must qualify before outdoor .17.
+
+## Explicit finite reader
+
+`PilotIioClient` is a bounded first-stage reader for the experimental PIL1 device,
+not the persistent 300-second hopping recorder. It requires an explicit URI and
+exact expected serial, verifies every available serial alias in the context,
+and rejects the legacy raw/dual-RX interface. It does not discover radios,
+acquire the caller's serial-specific ownership lease, retune the PHY, enable TX,
+or flash firmware. It keeps the existing PSS map restart protection unchanged.
+
+After separately qualifying the image and acquiring the exact .18 radio lease:
+
+```python
+from pluto_plus.hardware.pilot_iio import PilotIioClient
+
+with PilotIioClient.connect(
+    "ip:192.168.1.18",
+    expected_serial="1040007c4a94000211000b009186843ef2",
+    source_rate_hz=15_000_000,
+) as pilot:
+    capture = pilot.capture(visit_id=17)  # 300000 samples, twelve 25000-sample refills
+    # Persist capture.iq, capture.iq_sha256 and its snapshots with the paired
+    # session/visit manifest before running independent host GLRT.
+```
+
+The reader verifies the upper-only ABI, ordered signed LE16 I/Q channels, the
+2.5 MS/s export rate, and the separate FPGA/actual-PHY source rate. Finite sample
+limits must be divisible by the refill length, and refill lengths must be even
+to align to an eight-byte paired DMA beat. The public buffer byte length and
+stride must agree with the request; an exposed binding sample count is checked
+but never rewritten. Buffer construction invokes the matched kernel's
+DMA-submission-before-ARM ordering. The host never writes an ARM register itself.
+
+Each successful result retains the actual IQ bytes and SHA256, context serial,
+host-generated session UUID, visit, source/output rates, and before/armed/final
+snapshots. The reader checks the final complete finite count/health gate before
+and after buffer destruction, then restores and reads back the original
+visit/limit attributes and scan selection. Multiple finite pilot captures can
+share one context; that does **not** authorize reopening the separate PSS map
+stream within its reset epoch.
+
+Memory is bounded to one second of requested IQ (2.5 million complex samples,
+10 MB); a normal 120 ms result is 1.2 MB. The default overall capture deadline is
+5 seconds and each IIO operation has a timeout of at most 1 second. The initial
+libiio context constructor uses the library's connection timeout; recovery has
+its own finite per-operation timeout budget after the capture deadline.
+`cancel()` is cooperative: it is checked between operations and after refills,
+so an outstanding read ends or times out before ordinary destruction.
+
+Native `Buffer.cancel()` is deliberately **not** used during ordinary cleanup:
+the network backend's cancellation path can skip acknowledged remote CLOSE.
+Direct destruction preserves the matched driver's STOP → drain → DMA-abort
+ordering. A terminal snapshot and direct-mode configuration restoration are
+required afterward; an unavailable or failed cleanup receipt invalidates the
+capture. Mid-descriptor hardware faults may yield no partial IIO buffer at all.
+`PilotCaptureError` preserves already-received bytes, available snapshots, and
+cleanup errors; the failed client cannot capture again without reconnection.
+
+The optional `expected_boot_id` is checked against a context `boot_id` attribute;
+if unavailable it cannot be invented from the serial or host session UUID.
+Context attributes do not constitute a continuously authenticated boot/firmware
+attestation. The external owner must supply that deployment evidence.
+`upstream_health_qualified`, `live_signal_qualified`, and `disk_persisted` remain
+false: PIL1 does not expose all upstream conditioner/PSS health, does not prove
+RF settling or timing lock, and this API only hashes/retains IQ in memory.
+The finite-reader tests use an IIO lifecycle model, not an actual DMA engine,
+Ethernet link, or radio. Real .18 qualification is still required.
 
 ## Experimental shared-transform PSS companion
 
@@ -52,3 +120,9 @@ still unsuitable for a single 120 ms hopping visit. No short-dwell sensitivity,
 live lock, firmware promotion, or hardware qualification follows from this
 additive host support. The matched kernel must reject shared-service health
 bit 14 before exposing a map. Production TAG2/HOPS exclusions are unchanged.
+
+A chunk-zero restart while a previous map is incomplete is now an explicit
+error naming the abandoned generation. It cannot silently erase a negative or
+missing visit. Intentional hop-boundary discards still require an explicit
+reset plus a recorder-owned discard receipt; this parser change does not add
+the future persistent hop lifecycle.

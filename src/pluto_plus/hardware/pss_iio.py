@@ -360,6 +360,12 @@ class PssMapReassembler:
 
     def add(self, chunk: PssMapChunk) -> PssPhaseMap | None:
         if chunk.chunk_index == 0:
+            if self._chunks:
+                generation = self._chunks[0].generation
+                self.reset()
+                raise ValueError(
+                    f"phase-map restart discarded incomplete generation {generation}"
+                )
             self.reset()
         if chunk.chunk_index != len(self._chunks):
             self.reset()

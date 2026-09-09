@@ -119,6 +119,30 @@ def test_map_reassembler_rejects_missing_chunk_and_recovers_at_next_zero() -> No
     assert reassembler.add(PssMapChunk.decode(_map_chunk(0, generation=6))) is None
 
 
+@pytest.mark.parametrize("generation", (5, 6))
+def test_map_reassembler_reports_duplicate_or_replacement_zero(generation: int) -> None:
+    reassembler = PssMapReassembler()
+    assert reassembler.add(PssMapChunk.decode(_map_chunk(0))) is None
+    with pytest.raises(ValueError, match="incomplete generation 5"):
+        reassembler.add(PssMapChunk.decode(_map_chunk(0, generation=generation)))
+    # The offending restart is not admitted. Recovery requires an explicit retry.
+    assert reassembler.add(PssMapChunk.decode(_map_chunk(0, generation=7))) is None
+
+
+def test_whole_map_helper_does_not_hide_an_abandoned_generation() -> None:
+    chunks = [PssMapChunk.decode(_map_chunk(0))] + [
+        PssMapChunk.decode(_map_chunk(index, generation=6))
+        for index in range(PSS_MAP_CHUNKS)
+    ]
+    with pytest.raises(ValueError, match="incomplete generation 5"):
+        reassemble_maps(chunks)
+
+
+def test_whole_map_helper_rejects_terminal_partial_generation() -> None:
+    with pytest.raises(ValueError, match="ended with an incomplete map"):
+        reassemble_maps([PssMapChunk.decode(_map_chunk(0))])
+
+
 class _Attr:
     def __init__(self, value: int) -> None:
         self.value = str(value)
