@@ -1,23 +1,30 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.pss_iio import (
+    PSS_MAP_CAPABILITIES,
     PSS_MAP_CHUNK_BINS,
     PSS_MAP_CHUNK_MAGIC,
     PSS_MAP_CHUNK_WORDS,
     PSS_MAP_CHUNKS,
     PSS_MAP_SCAN_BYTES,
     PSS_MAP_SCAN_WORDS,
+    PSS_MAP_SHARED_XFFT_CAPABILITIES,
+    PSS_MAP_SHARED_XFFT_VERSION,
     PSS_MAP_VERSIONS,
     PSS_PACKET_HEADER,
     PSS_PACKET_MAGIC,
+    PSS_TRACK_CAPABILITIES,
+    PSS_TRACK_GEOMETRY,
     PSS_TRACK_SCAN_BYTES,
     PSS_TRACK_SCAN_WORDS,
+    PSS_TRACK_VERSIONS,
     PssFinePacket,
     PssIioClient,
     PssMapChunk,
@@ -168,15 +175,15 @@ class _Buffer:
         self.closed = True
 
 
-def _client() -> tuple[PssIioClient, _Device, _Device]:
+def _client(*, rate: int = 60, shared_xfft: bool = False) -> tuple[PssIioClient, _Device, _Device]:
     tracker = _Device(
         "starlink-pss-track",
         {
             "fpga_identity": 0x50535354,
-            "abi_version": 0x10003,
-            "rate_msps": 60,
-            "geometry": 0x0F8C1108,
-            "capabilities": 0x1D,
+            "abi_version": PSS_TRACK_VERSIONS[rate],
+            "rate_msps": rate,
+            "geometry": PSS_TRACK_GEOMETRY[rate],
+            "capabilities": PSS_TRACK_CAPABILITIES[rate],
             "fault_flags": 0,
             "active_coefficient_generation": 7,
             "schedule_first_center": 0,
@@ -195,10 +202,12 @@ def _client() -> tuple[PssIioClient, _Device, _Device]:
         "starlink-pss-map",
         {
             "fpga_identity": 0x50534D41,
-            "abi_version": 0x10004,
-            "input_rate_msps": 60,
+            "abi_version": PSS_MAP_SHARED_XFFT_VERSION if shared_xfft else PSS_MAP_VERSIONS[rate],
+            "input_rate_msps": rate,
             "tile_geometry": 0x00401002,
-            "capabilities": 0xFF,
+            "capabilities": (
+                PSS_MAP_SHARED_XFFT_CAPABILITIES if shared_xfft else PSS_MAP_CAPABILITIES[rate]
+            ),
             "phase_bins": 20_000,
             "reassembly_chunks": 200,
             "fault_flags": 0,
@@ -209,7 +218,10 @@ def _client() -> tuple[PssIioClient, _Device, _Device]:
         [_Channel("chunk_words", PSS_MAP_SCAN_WORDS)],
     )
     context = _Context(tracker, phase_map)
-    return PssIioClient(context, SimpleNamespace(Buffer=_Buffer)), tracker, phase_map
+    client = PssIioClient(
+        context, SimpleNamespace(Buffer=_Buffer), experimental_shared_xfft=shared_xfft
+    )
+    return client, tracker, phase_map
 
 
 def test_client_discovers_contract_and_reads_both_native_iio_streams() -> None:
@@ -471,3 +483,130 @@ def test_legacy_buffer_is_destroyed_even_when_cancel_fails() -> None:
     with pytest.raises(RuntimeError, match="cancel failed"):
         client.close_maps()
     assert len(destroyed_buffers) == 1
+
+
+def _chunk_with_abi(abi: int, *, index: int = 0) -> bytes:
+    payload = bytearray(_map_chunk(index))
+    struct.pack_into("<I", payload, 4, abi)
+    return bytes(payload)
+
+
+@pytest.mark.parametrize("rate", (15, 30, 60))
+def test_legacy_contract_defaults_remain_exact(rate: int) -> None:
+    client, _, _ = _client(rate=rate)
+    assert client.map_abi_version == PSS_MAP_VERSIONS[rate]
+    assert not client.experimental_shared_xfft
+    client.close()
+
+
+def test_shared_map_decode_requires_opt_in_and_reassembles_unchanged_geometry() -> None:
+    payload = _chunk_with_abi(PSS_MAP_SHARED_XFFT_VERSION)
+    with pytest.raises(ValueError, match="ABI is unsupported"):
+        PssMapChunk.decode(payload)
+    chunks = [
+        PssMapChunk.decode(
+            _chunk_with_abi(PSS_MAP_SHARED_XFFT_VERSION, index=index),
+            allow_experimental_shared_xfft=True,
+        )
+        for index in range(PSS_MAP_CHUNKS)
+    ]
+    maps = reassemble_maps(chunks)
+    assert len(maps) == 1 and maps[0].abi_version == PSS_MAP_SHARED_XFFT_VERSION
+    assert maps[0].bins == reassemble_maps(
+        PssMapChunk.decode(_map_chunk(index)) for index in range(PSS_MAP_CHUNKS)
+    )[0].bins
+    with pytest.raises(ValueError, match="ABI is unsupported"):
+        PssMapChunk.decode(_chunk_with_abi(0x10006), allow_experimental_shared_xfft=True)
+
+
+def test_shared_contract_is_exact_and_not_admitted_by_default() -> None:
+    client, _, phase_map = _client(rate=15, shared_xfft=True)
+    assert client.map_abi_version == PSS_MAP_SHARED_XFFT_VERSION
+    with pytest.raises(RadioConfigurationError, match="abi_version"):
+        PssIioClient(client.context, client._iio)
+    phase_map.attrs["capabilities"].value = str(PSS_MAP_CAPABILITIES[15])
+    with pytest.raises(RadioConfigurationError, match="capabilities"):
+        PssIioClient(client.context, client._iio, experimental_shared_xfft=True)
+    phase_map.attrs["capabilities"].value = str(PSS_MAP_SHARED_XFFT_CAPABILITIES)
+    phase_map.attrs["fault_flags"].value = "64"
+    with pytest.raises(RadioConfigurationError, match="latched fault"):
+        PssIioClient(client.context, client._iio, experimental_shared_xfft=True)
+    client.close()
+
+
+@pytest.mark.parametrize("rate", (30, 60))
+def test_shared_contract_rejects_unqualified_source_rates(rate: int) -> None:
+    with pytest.raises(RadioConfigurationError, match="only supports 15"):
+        _client(rate=rate, shared_xfft=True)
+
+
+@pytest.mark.parametrize("shared,wrong_abi", ((True, 0x10001), (True, 0x10004), (False, 0x10002)))
+def test_map_stream_is_bound_to_attested_context(shared: bool, wrong_abi: int) -> None:
+    client, _, _ = _client(rate=15, shared_xfft=shared)
+    payload = _chunk_with_abi(wrong_abi)
+    _Buffer.payloads["starlink-pss-map"] = payload + bytes(PSS_MAP_SCAN_BYTES - len(payload))
+    client.open_maps()
+    with pytest.raises(RadioConfigurationError, match="differs from its attested context"):
+        client.read_map_chunks()
+    client.close()
+
+
+def test_shared_stream_returns_only_exact_abi_and_preserves_fault_gate() -> None:
+    client, _, phase_map = _client(rate=15, shared_xfft=True)
+    payload = _chunk_with_abi(PSS_MAP_SHARED_XFFT_VERSION)
+    _Buffer.payloads["starlink-pss-map"] = payload + bytes(PSS_MAP_SCAN_BYTES - len(payload))
+    client.open_maps()
+    assert client.read_map_chunks()[0].abi_version == PSS_MAP_SHARED_XFFT_VERSION
+    phase_map.attrs["fault_flags"].value = "64"
+    with pytest.raises(RadioConfigurationError, match="latched a stream fault"):
+        client.read_map_chunks()
+    client.close()
+
+
+@pytest.mark.parametrize("serial", (None, "", " "))
+def test_shared_connect_requires_serial_before_opening_context(serial: str | None) -> None:
+    with pytest.raises(ValueError, match="exact expected serial"):
+        PssIioClient.connect(
+            "ip:192.0.2.1", expected_serial=serial,
+            experimental_shared_xfft=True, iio_module=SimpleNamespace(),
+        )
+
+
+def test_shared_connect_attests_serial_and_closes_failed_contract() -> None:
+    client, _, phase_map = _client(rate=15, shared_xfft=True)
+    context = client.context
+    context.attrs = {"hw_serial": "CANARY"}
+    module = SimpleNamespace(Context=lambda uri: context, Buffer=_Buffer)
+    connected = PssIioClient.connect(
+        "ip:192.0.2.1", expected_serial="CANARY", experimental_shared_xfft=True,
+        iio_module=module,
+    )
+    assert connected.map_abi_version == PSS_MAP_SHARED_XFFT_VERSION
+    connected.close()
+    context.closed = False
+    phase_map.attrs["tile_geometry"].value = "0"
+    with pytest.raises(RadioConfigurationError, match="tile_geometry"):
+        PssIioClient.connect(
+            "ip:192.0.2.1", expected_serial="CANARY", experimental_shared_xfft=True,
+            iio_module=module,
+        )
+    assert context.closed
+
+
+def test_shared_map_analysis_retains_the_same_numerical_algorithm_and_units() -> None:
+    bins = [100] * 20_000
+    bins[1234] = 1000
+    shared = tuple(
+        PssPhaseMap(PSS_MAP_SHARED_XFFT_VERSION, 10 + tile, tile * 1_280_000, tuple(bins))
+        for tile in range(3)
+    )
+    legacy = tuple(replace(item, abi_version=PSS_MAP_VERSIONS[15]) for item in shared)
+    estimate = analyze_phase_maps(shared, rate_msps=15, experimental_shared_xfft=True)
+    assert estimate == analyze_phase_maps(legacy, rate_msps=15)
+    assert estimate.candidate_start_index_source_center == 1234
+    with pytest.raises(ValueError, match="ABI does not match"):
+        analyze_phase_maps(shared, rate_msps=15)
+    with pytest.raises(ValueError, match="ABI does not match"):
+        analyze_phase_maps(legacy, rate_msps=15, experimental_shared_xfft=True)
+    with pytest.raises(ValueError, match="only supports 15"):
+        analyze_phase_maps(shared, rate_msps=60, experimental_shared_xfft=True)
