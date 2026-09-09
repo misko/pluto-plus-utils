@@ -38,6 +38,13 @@ class ProcessingProfile(StrEnum):
     """Only this explicitly admitted processing geometry is currently supported."""
 
     PAIRED_15_SHARED_XFFT_512_447_V1 = "paired-15-shared-xfft-512-447-v1"
+    PAIRED_15_SHARED_XFFT_512_447_STOP_V1 = "paired-15-shared-xfft-512-447-stop-v1"
+
+    @property
+    def map_abi_version(self) -> int:
+        """Exact map identity; processing geometry alone never admits another ABI."""
+        return (0x10006 if self is ProcessingProfile.PAIRED_15_SHARED_XFFT_512_447_STOP_V1
+                else 0x10005)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +71,7 @@ class ObservationIdentity:
         _integer(self.visit_id, "visit_id", maximum=0xffffffff)
         if not self.visit_id:
             raise ValueError("visit_id must be nonzero")
-        if (self.profile is not ProcessingProfile.PAIRED_15_SHARED_XFFT_512_447_V1
+        if (not isinstance(self.profile, ProcessingProfile)
                 or type(self.source_rate_hz) is not int or self.source_rate_hz != 15_000_000):
             raise ValueError("only the explicit paired 15 MS/s shared-XFFT profile is supported")
         if (not isinstance(self.processing_fingerprint, str)
@@ -244,15 +251,18 @@ def pilot_slice_support(
 def map_support(
     phase_map: PssPhaseMap, *, observation: ObservationIdentity, fft_origin: int | None = None,
 ) -> PhaseMapSupport:
-    """Map PSMA1.5 starts into ideal and full-transform processing envelopes.
+    """Map the explicitly selected PSMA1.5/1.6 processing envelopes.
 
     The explicit profile fixes 66 template samples, 512 FFT inputs and 447
     outputs/block. With no attested scheduler origin, [a-446,b+511) is a
     conservative dependency bound, not a claim that every sample contributes
     equally. Metadata start a is never silently treated as the FFT origin.
     """
-    if phase_map.abi_version != 0x10005:
-        raise ValueError("phase map does not match the explicit shared-XFFT ABI1.5 profile")
+    _observation(observation)
+    if phase_map.abi_version != observation.profile.map_abi_version:
+        version = observation.profile.map_abi_version & 0xffff
+        raise ValueError(
+            f"phase map does not match the explicit shared-XFFT ABI1.{version} profile")
     _integer(phase_map.generation, "map generation", maximum=0xffffffff)
     if not phase_map.generation or len(phase_map.bins) != 20_000:
         raise ValueError("phase map must have a generation and 20000 complete bins")
