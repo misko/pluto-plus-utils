@@ -165,9 +165,7 @@ def require_physical_lan_uri(uri: str) -> str:
         try:
             port = int(raw_port)
         except ValueError as error:
-            raise ValueError(
-                "persistent hopping requires a canonical numeric IIO port"
-            ) from error
+            raise ValueError("persistent hopping requires a canonical numeric IIO port") from error
         if not raw_port or str(port) != raw_port or not 1 <= port <= 65_535:
             raise ValueError("persistent hopping requires a canonical numeric IIO port")
     else:
@@ -408,8 +406,7 @@ class PersistentHopPlanV1:
     def __post_init__(self) -> None:
         if self.nominal_duration_seconds != 300 or self.valid_visit_ms != 120:
             raise ValueError("persistent-hop scanner plan must be exactly 300 seconds / 120 ms")
-        if self.sample_rate_hz not in {2_500_000, 5_000_000}:
-            raise ValueError("persistent-hop scanner rate must be 2.5 or 5 MS/s")
+        self._validate_receiver_rate()
         if self.rf_bandwidth_hz != self.sample_rate_hz:
             raise ValueError("persistent-hop RF bandwidth must equal sample rate")
         if not 2 <= self.kernel_buffers <= 64:
@@ -447,6 +444,14 @@ class PersistentHopPlanV1:
         validation_request._validate()
         if self.planned_valid_duty_ppm < self.minimum_valid_duty_ppm:
             raise ValueError("persistent-hop plan cannot meet its minimum valid duty")
+
+    def _validate_receiver_rate(self) -> None:
+        if self.sample_rate_hz not in {2_500_000, 5_000_000}:
+            raise ValueError("persistent-hop scanner rate must be 2.5 or 5 MS/s")
+
+    @property
+    def receiver_ids(self) -> tuple[int, ...]:
+        return (0, 1)
 
     @property
     def dwell_samples(self) -> int:
@@ -1004,6 +1009,34 @@ class PersistentHopSampledVisitV1:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class SingleRxPersistentHopPlanV2(PersistentHopPlanV1):
+    """Explicitly negotiated 10 MS/s geometry for one physical receiver."""
+
+    receiver_id: int
+
+    def _validate_receiver_rate(self) -> None:
+        if self.sample_rate_hz != 10_000_000:
+            raise ValueError("single-RX persistent hopping requires exactly 10 MS/s")
+        if type(self.receiver_id) is not int or self.receiver_id not in (0, 1):
+            raise ValueError("single-RX persistent hopping requires RX0 or RX1")
+
+    @property
+    def receiver_ids(self) -> tuple[int, ...]:
+        return (self.receiver_id,)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SingleRxPersistentHopSampledVisitV2(PersistentHopSampledVisitV1):
+    def __post_init__(self) -> None:
+        if (
+            self.samples.dtype != np.complex64
+            or self.samples.ndim != 2
+            or self.samples.shape != (1, self.visit.valid_sample_count)
+        ):
+            raise ValueError("single-RX visit IQ does not match its attested span")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class PersistentHopInvalidSpanV1:
     visit_index: int
     from_profile_index: int
@@ -1158,12 +1191,15 @@ class PersistentHopStartClockBracketV1:
     after_monotonic_ns: int
 
     def __post_init__(self) -> None:
-        if min(
-            self.before_realtime_ns,
-            self.before_monotonic_ns,
-            self.after_realtime_ns,
-            self.after_monotonic_ns,
-        ) <= 0:
+        if (
+            min(
+                self.before_realtime_ns,
+                self.before_monotonic_ns,
+                self.after_realtime_ns,
+                self.after_monotonic_ns,
+            )
+            <= 0
+        ):
             raise ValueError("persistent-hop start clocks must be positive")
         if self.after_monotonic_ns < self.before_monotonic_ns:
             raise ValueError("persistent-hop start monotonic bracket regressed")
@@ -1256,6 +1292,11 @@ class PersistentHopClient:
                 raise PersistentHopClientError(
                     "persistent-hop exact capability negotiation failed: " + ", ".join(missing)
                 )
+            if (
+                isinstance(plan, SingleRxPersistentHopPlanV2)
+                and attributes.get("iio,buffer-persistent-hop-single-rx-10m") != "1"
+            ):
+                raise PersistentHopClientError("single-RX 10 MS/s hopping capability is absent")
             prepare_plan = getattr(backend, "prepare_plan", None)
             if callable(prepare_plan):
                 prepared_plan = prepare_plan(plan)
@@ -1407,15 +1448,12 @@ class PersistentHopSession:
                 visit = self._visits[emitted]
                 if (
                     not segments
-                    or segments[-1][1]
-                    < visit.valid_device_sample_counter_end_exclusive
+                    or segments[-1][1] < visit.valid_device_sample_counter_end_exclusive
                 ):
                     break
-                sampled = _sampled_visit_from_segments(visit, segments)
+                sampled = _sampled_visit_from_segments(visit, segments, self.plan.receiver_ids)
                 emitted += 1
-                _trim_sample_segments(
-                    segments, visit.valid_device_sample_counter_end_exclusive
-                )
+                _trim_sample_segments(segments, visit.valid_device_sample_counter_end_exclusive)
                 yield sampled
             retain_from = (
                 self._visits[emitted].valid_device_sample_counter
@@ -1434,7 +1472,7 @@ class PersistentHopSession:
                 )
         while emitted < len(self._visits):
             visit = self._visits[emitted]
-            sampled = _sampled_visit_from_segments(visit, segments)
+            sampled = _sampled_visit_from_segments(visit, segments, self.plan.receiver_ids)
             emitted += 1
             _trim_sample_segments(segments, visit.valid_device_sample_counter_end_exclusive)
             yield sampled
@@ -1456,13 +1494,19 @@ class PersistentHopSession:
                 self._accept_stream_generation(wire.stream_generation)
                 expected_bytes = (
                     evidence.block_end_counter_exclusive - evidence.block_first_counter
-                ) * 8
+                ) * (4 * len(self.plan.receiver_ids))
                 if len(wire.iq_payload) != expected_bytes:
                     raise PersistentHopClientError(
-                        "persistent-hop dual-RX payload length disagrees with device counters"
+                        "persistent-hop payload length disagrees with "
+                        "receiver geometry and counters"
                     )
                 try:
-                    samples = ci16_dual_rx(wire.iq_payload)
+                    if len(self.plan.receiver_ids) == 1:
+                        from pluto_plus.direct_radio.samples import ci16_single_rx
+
+                        samples = ci16_single_rx(wire.iq_payload)
+                    else:
+                        samples = ci16_dual_rx(wire.iq_payload)
                 except ValueError as error:
                     raise PersistentHopClientError(str(error)) from error
                 if (
@@ -1684,10 +1728,7 @@ class PersistentHopSession:
             raise PersistentHopClientError("persistent-hop session exceeded its bounded overshoot")
         if status.last_block_end_counter < status.final_counter:
             raise PersistentHopClientError("persistent-hop completion did not deliver final IQ")
-        if (
-            status.last_block_end_counter - status.final_counter
-            > self.plan.samples_per_block
-        ):
+        if status.last_block_end_counter - status.final_counter > self.plan.samples_per_block:
             raise PersistentHopClientError(
                 "persistent-hop completion retained more than one terminal refill"
             )
@@ -1757,10 +1798,7 @@ class PersistentHopSession:
         accepted_events = (
             0 if self._previous_event is None else self._previous_event.event_sequence + 1
         )
-        if (
-            status.events_emitted != accepted_events
-            or status.visits_started != accepted_events
-        ):
+        if status.events_emitted != accepted_events or status.visits_started != accepted_events:
             raise PersistentHopClientError(
                 "persistent-hop cancellation has undelivered device events"
             )
@@ -1776,9 +1814,7 @@ class PersistentHopSession:
         if final < first or (
             self._previous_block_end is not None and final < self._previous_block_end
         ):
-            raise PersistentHopClientError(
-                "persistent-hop cancellation counter envelope regressed"
-            )
+            raise PersistentHopClientError("persistent-hop cancellation counter envelope regressed")
         valid_samples = sum(visit.valid_sample_count for visit in self._visits)
         invalid_intervals = [
             (
@@ -1795,8 +1831,7 @@ class PersistentHopSession:
                 )
             )
         invalid_samples = sum(
-            max(0, min(final, end) - max(first, start))
-            for start, end in invalid_intervals
+            max(0, min(final, end) - max(first, start)) for start, end in invalid_intervals
         )
         incomplete_start = (
             first
@@ -1859,33 +1894,23 @@ class PersistentHopSession:
     def _accept_stream_generation(self, generation: int | None) -> None:
         if generation is None:
             if self._stream_generation is not None:
-                raise PersistentHopClientError(
-                    "persistent-hop ABI-3 stream generation disappeared"
-                )
+                raise PersistentHopClientError("persistent-hop ABI-3 stream generation disappeared")
             return
         if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
-            raise PersistentHopClientError(
-                "persistent-hop ABI-3 stream generation is invalid"
-            )
+            raise PersistentHopClientError("persistent-hop ABI-3 stream generation is invalid")
         if self._stream_generation is None:
             self._stream_generation = generation
         elif generation != self._stream_generation:
-            raise PersistentHopClientError(
-                "persistent-hop ABI-3 stream generation changed"
-            )
+            raise PersistentHopClientError("persistent-hop ABI-3 stream generation changed")
 
     def _backend_receipt_facts(self) -> _PersistentHopBackendReceiptFacts:
         requested = getattr(self._backend, "kernel_buffers_requested", None)
         readback = getattr(self._backend, "kernel_buffers_readback", None)
         radio_id = getattr(self._backend, "radio_id", None)
         if requested is not None and requested != self.plan.kernel_buffers:
-            raise PersistentHopClientError(
-                "persistent-hop kernel-buffer request changed"
-            )
+            raise PersistentHopClientError("persistent-hop kernel-buffer request changed")
         if readback is not None and readback != self.plan.kernel_buffers:
-            raise PersistentHopClientError(
-                "persistent-hop kernel-buffer readback changed"
-            )
+            raise PersistentHopClientError("persistent-hop kernel-buffer readback changed")
         return _PersistentHopBackendReceiptFacts(
             radio_id=radio_id if isinstance(radio_id, str) and radio_id else None,
             stream_generation=self._stream_generation,
@@ -2003,14 +2028,14 @@ def _restoration_receipt(status: PersistentHopStatusV1) -> PersistentHopRestorat
 def _sampled_visit_from_segments(
     visit: PersistentHopVisitV1,
     segments: deque[tuple[int, int, npt.NDArray[np.complex64]]],
+    receiver_ids: tuple[int, ...] = (0, 1),
 ) -> PersistentHopSampledVisitV1:
     start = visit.valid_device_sample_counter
     end = visit.valid_device_sample_counter_end_exclusive
     pieces = tuple(
         samples[
             :,
-            max(start, segment_start) - segment_start : min(end, segment_end)
-            - segment_start,
+            max(start, segment_start) - segment_start : min(end, segment_end) - segment_start,
         ]
         for segment_start, segment_end, samples in segments
         if segment_end > start and segment_start < end
@@ -2026,11 +2051,14 @@ def _sampled_visit_from_segments(
             f"retained=[{retained_start},{retained_end}) segments={len(segments)}"
         )
     output = (
-        pieces[0].copy()
-        if len(pieces) == 1
-        else np.concatenate(pieces, axis=1, dtype=np.complex64)
+        pieces[0].copy() if len(pieces) == 1 else np.concatenate(pieces, axis=1, dtype=np.complex64)
     )
-    return PersistentHopSampledVisitV1(visit=visit, samples=output)
+    visit_type = (
+        SingleRxPersistentHopSampledVisitV2
+        if len(receiver_ids) == 1
+        else PersistentHopSampledVisitV1
+    )
+    return visit_type(visit=visit, samples=output)
 
 
 def _trim_sample_segments(

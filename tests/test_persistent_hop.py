@@ -71,6 +71,40 @@ def _plan() -> PersistentHopPlanV1:
     )
 
 
+@pytest.mark.parametrize("receiver_id", [0, 1])
+def test_single_rx_negotiates_before_start_and_decodes_one_row(receiver_id: int) -> None:
+    from pluto_plus.persistent_hop import SingleRxPersistentHopPlanV2
+
+    values = dataclasses.asdict(_plan())
+    values.update(
+        profiles=_profiles(),
+        sample_rate_hz=10_000_000,
+        rf_bandwidth_hz=10_000_000,
+        receiver_id=receiver_id,
+    )
+    plan = SingleRxPersistentHopPlanV2(**values)
+    assert plan.receiver_ids == (receiver_id,)
+    assert plan.capture_span_samples == 3_000_000_000
+    backend = _Backend(URI)
+    with pytest.raises(PersistentHopClientError, match="capability is absent"):
+        _client(backend).start(
+            plan, session_id=SESSION_ID, tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD)
+        )
+    assert backend.started_request is None and backend.closed
+    words = np.tile(np.array([123, -456], dtype="<i2"), (1024, 1))
+    wire = dataclasses.replace(_wire_block(), iq_payload=words.tobytes())
+    backend = _Backend(URI, blocks=(wire,))
+    backend.capabilities["iio,buffer-persistent-hop-single-rx-10m"] = "1"
+    session = _client(backend).start(
+        plan, session_id=SESSION_ID, tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD)
+    )
+    blocks = session.blocks()
+    block = next(blocks)
+    assert block.samples.shape == (1, 1024)
+    np.testing.assert_array_equal(block.samples, np.full((1, 1024), 123 - 456j))
+    session.cancel()
+
+
 def _event(
     *,
     sequence: int = 0,
@@ -325,7 +359,10 @@ def _extension_session(
         )
     ]
     session = PersistentHopSession(
-        _client(backend), backend, plan, request,
+        _client(backend),
+        backend,
+        plan,
+        request,
         dataclasses.replace(_active_status(), planned_dwells=1),
     )
     return session, backend, extension
@@ -390,9 +427,7 @@ def test_metadata_extension_never_accepts_invalid_capture_evidence(corruption: s
 
 def test_metadata_extension_cancel_drains_after_validating_partial_capture():
     session, backend, extension = _extension_session()
-    backend.wire_blocks = (
-        dataclasses.replace(_wire_block(), extension_metadata=b"envelope"),
-    )
+    backend.wire_blocks = (dataclasses.replace(_wire_block(), extension_metadata=b"envelope"),)
     backend.statuses = [dataclasses.replace(_cancelled_status(), planned_dwells=1)]
     blocks = session.blocks()
     next(blocks)
@@ -550,9 +585,7 @@ def test_client_rejects_every_nonphysical_or_noncanonical_uri(uri: str) -> None:
 
 
 def test_client_accepts_canonical_physical_lan_uri_with_explicit_port() -> None:
-    assert require_physical_lan_uri("ip:192.168.1.18:30432") == (
-        "ip:192.168.1.18:30432"
-    )
+    assert require_physical_lan_uri("ip:192.168.1.18:30432") == ("ip:192.168.1.18:30432")
 
 
 def test_client_rejects_wrong_and_excluded_serial_before_capture() -> None:
@@ -604,8 +637,7 @@ def test_client_compiles_zero_crc_plan_before_composing_hopr() -> None:
     plan = dataclasses.replace(
         _plan(),
         profiles=tuple(
-            dataclasses.replace(profile, profile_crc32=0)
-            for profile in _plan().profiles
+            dataclasses.replace(profile, profile_crc32=0) for profile in _plan().profiles
         ),
     )
     backend = _PreparingBackend(URI)
@@ -630,9 +662,7 @@ def test_client_compiles_zero_crc_plan_before_composing_hopr() -> None:
 
     assert backend.started_request is not None
     request = PersistentHopRequestV1.unpack(backend.started_request[-288:])
-    assert tuple(profile.profile_crc32 for profile in request.profiles) == tuple(
-        range(101, 109)
-    )
+    assert tuple(profile.profile_crc32 for profile in request.profiles) == tuple(range(101, 109))
     session.close()
 
 
@@ -762,9 +792,7 @@ def test_visit_iterator_slices_split_boundaries_and_emits_final_visit() -> None:
     assert visits[0].samples[0, 148_988] == 1 + 0j
     assert visits[0].samples[0, 148_989] == 2 + 0j
     assert visits[1].samples[0, -1] == 3 + 0j
-    assert session.receipt.visits[-1].valid_device_sample_counter_end_exclusive == (
-        final_counter
-    )
+    assert session.receipt.visits[-1].valid_device_sample_counter_end_exclusive == (final_counter)
     assert session.receipt.status.last_block_end_counter == terminal_block_end
     assert session.receipt.status.restore_before_counter >= terminal_block_end
     assert backend.closed
@@ -1062,7 +1090,8 @@ def test_failure_diagnostics_retain_successful_host_lifecycle_without_iq_receipt
 
     backend = Backend(URI, blocks=(_wire_block(buffer_sequence=5),))
     session = _client(backend).start(
-        _plan(), session_id=SESSION_ID,
+        _plan(),
+        session_id=SESSION_ID,
         tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
     )
     with pytest.raises(PersistentHopClientError, match="buffer sequence"):

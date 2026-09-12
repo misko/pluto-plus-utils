@@ -8,6 +8,17 @@ import numpy.typing as npt
 from .usb import ProtocolError
 
 
+def ci16_single_rx(payload: bytes | bytearray | memoryview) -> npt.NDArray[np.complex64]:
+    """Decode the selected physical RX's interleaved I/Q into one payload row."""
+
+    if len(payload) == 0 or len(payload) % 4:
+        raise ProtocolError("CI16 single-RX payload requires complete non-empty 4-byte rows")
+    words = np.frombuffer(payload, dtype="<i2").reshape(-1, 2)
+    result = np.empty((1, words.shape[0]), dtype=np.complex64)
+    result[0] = words[:, 0].astype(np.float32) + 1j * words[:, 1].astype(np.float32)
+    return result
+
+
 def ci16_dual_rx(payload: bytes | bytearray | memoryview) -> npt.NDArray[np.complex64]:
     """Convert ``[rx1_i, rx1_q, rx2_i, rx2_q]`` time rows to shape ``(2, N)``."""
 

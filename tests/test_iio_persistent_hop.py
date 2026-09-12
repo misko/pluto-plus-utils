@@ -328,7 +328,8 @@ class _QuantizedLoRadio(_FakeRadio):
         return tuple((profile + index) & 0xFF for index in range(16))
 
 
-def test_backend_prearm_compiles_profiles_and_composes_exact_open_request() -> None:
+@pytest.mark.parametrize("receiver_id", [None, 0, 1])
+def test_backend_prearm_compiles_profiles_and_composes_exact_open_request(receiver_id) -> None:
     radio = _FakeRadio()
     backend = IioPersistentHopBackend(
         URI,
@@ -340,10 +341,19 @@ def test_backend_prearm_compiles_profiles_and_composes_exact_open_request() -> N
     requested = dataclasses.replace(
         _plan(),
         profiles=tuple(
-            dataclasses.replace(profile, profile_crc32=0)
-            for profile in _plan().profiles
+            dataclasses.replace(profile, profile_crc32=0) for profile in _plan().profiles
         ),
     )
+    if receiver_id is not None:
+        from pluto_plus.persistent_hop import SingleRxPersistentHopPlanV2
+
+        values = {
+            field.name: getattr(requested, field.name) for field in dataclasses.fields(requested)
+        }
+        values.update(
+            sample_rate_hz=10_000_000, rf_bandwidth_hz=10_000_000, receiver_id=receiver_id
+        )
+        requested = SingleRxPersistentHopPlanV2(**values)
     prepared = backend.prepare_plan(requested)
     request = prepared.request(session_id=SESSION).append_to_tandem_request(
         TandemSessionRequestV1(mode=TandemMode.HOLD),
@@ -352,7 +362,12 @@ def test_backend_prearm_compiles_profiles_and_composes_exact_open_request() -> N
     )
     backend.start(request, samples_per_block=SAMPLES, kernel_buffers=2)
 
-    assert radio.geometry == (2_500_000, 2_500_000, (0, 1), 40.0)
+    assert radio.geometry == (
+        requested.sample_rate_hz,
+        requested.sample_rate_hz,
+        requested.receiver_ids,
+        40.0,
+    )
     assert radio.open_shape == (SAMPLES, 2)
     assert radio.open_request == request
     assert len(request) == 104 + 288
@@ -376,8 +391,7 @@ def test_backend_crc_attests_stable_post_recall_fastlock_words() -> None:
     requested = dataclasses.replace(
         _plan(),
         profiles=tuple(
-            dataclasses.replace(profile, profile_crc32=0)
-            for profile in _plan().profiles
+            dataclasses.replace(profile, profile_crc32=0) for profile in _plan().profiles
         ),
     )
 
@@ -388,8 +402,7 @@ def test_backend_crc_attests_stable_post_recall_fastlock_words() -> None:
         for slot in range(8)
     )
     final_crcs = tuple(
-        zlib.crc32(bytes(radio.saved_profiles[slot])) & 0xFFFFFFFF
-        for slot in range(8)
+        zlib.crc32(bytes(radio.saved_profiles[slot])) & 0xFFFFFFFF for slot in range(8)
     )
     assert tuple(profile.profile_crc32 for profile in prepared.profiles) == final_crcs
     assert final_crcs != stale_pre_recall_crcs
@@ -407,8 +420,7 @@ def test_backend_compensates_bounded_lo_quantization_before_fastlock_store() -> 
     requested = dataclasses.replace(
         _plan(),
         profiles=tuple(
-            dataclasses.replace(profile, profile_crc32=0)
-            for profile in _plan().profiles
+            dataclasses.replace(profile, profile_crc32=0) for profile in _plan().profiles
         ),
     )
 
@@ -462,10 +474,7 @@ def test_backend_extracts_hops_then_reads_cancelled_hopt_before_close() -> None:
     assert radio.capture.closed and radio.closed
     assert radio.restored == radio.original
     assert receipt.host_lifecycle is not None
-    assert (
-        receipt.host_lifecycle.original_settings
-        == receipt.host_lifecycle.restored_settings
-    )
+    assert receipt.host_lifecycle.original_settings == receipt.host_lifecycle.restored_settings
     assert receipt.host_lifecycle.receive_buffer_closed
     assert receipt.host_lifecycle.fastlock_inactive
     assert session.receipt.capture_outcome == "cancelled"
@@ -581,11 +590,9 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         metadata_status_reader=lambda item, capacity: _read_metadata_status(
             SimpleNamespace(), item, capacity
         ),
-        metadata_canceller=lambda item: _cancel_metadata_session(
-            SimpleNamespace(), item
-        ),
+        metadata_canceller=lambda item: _cancel_metadata_session(SimpleNamespace(), item),
         status_capacity=160,
-        metadata_unwrapper=(lambda raw: raw[len(b"extension"):]) if extended else None,
+        metadata_unwrapper=(lambda raw: raw[len(b"extension") :]) if extended else None,
     )
     session.open()
     assert session.open_clock_bracket == IioBufferOpenClockBracket(
@@ -730,9 +737,7 @@ def test_raw_sidecar_read_failure_preserves_buffer_for_in_band_cleanup() -> None
         metadata_status_reader=lambda item, capacity: _read_metadata_status(
             SimpleNamespace(), item, capacity
         ),
-        metadata_canceller=lambda item: _cancel_metadata_session(
-            SimpleNamespace(), item
-        ),
+        metadata_canceller=lambda item: _cancel_metadata_session(SimpleNamespace(), item),
         status_capacity=160,
     )
     session.open()

@@ -153,14 +153,12 @@ class IioPersistentHopBackend(PersistentHopBackend):
         radio.configure_source_locked_receiver_geometry(
             sample_rate_hz=plan.sample_rate_hz,
             rf_bandwidth_hz=plan.rf_bandwidth_hz,
-            channels=(0, 1),
+            channels=plan.receiver_ids,
             manual_gain_db=plan.manual_gain_db,
         )
         for profile in plan.profiles:
             _write_exact_center_frequency(radio, profile.lo_hz)
-            saved_words = radio.store_rx_fastlock_profile(
-                profile.fastlock_profile_index
-            )
+            saved_words = radio.store_rx_fastlock_profile(profile.fastlock_profile_index)
             if radio.save_rx_fastlock_profile(profile.fastlock_profile_index) != saved_words:
                 raise RadioConfigurationError(
                     f"Fast Lock profile {profile.fastlock_profile_index} save readback changed"
@@ -187,9 +185,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
         # race window before the provider independently checks the same bytes.
         prepared_profiles = []
         for profile in plan.profiles:
-            saved_words = radio.save_rx_fastlock_profile(
-                profile.fastlock_profile_index
-            )
+            saved_words = radio.save_rx_fastlock_profile(profile.fastlock_profile_index)
             if radio.save_rx_fastlock_profile(profile.fastlock_profile_index) != saved_words:
                 raise RadioConfigurationError(
                     f"Fast Lock profile {profile.fastlock_profile_index} "
@@ -200,9 +196,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
                 raise RadioConfigurationError(
                     f"Fast Lock profile {profile.fastlock_profile_index} has zero CRC32"
                 )
-            prepared_profiles.append(
-                dataclasses.replace(profile, profile_crc32=profile_crc32)
-            )
+            prepared_profiles.append(dataclasses.replace(profile, profile_crc32=profile_crc32))
         prepared = dataclasses.replace(plan, profiles=tuple(prepared_profiles))
         self._prepared_plan = prepared
         return prepared
@@ -434,11 +428,7 @@ def _write_exact_center_frequency(
         raise ValueError("maximum Fast Lock LO offset cannot be negative")
     offsets = (
         0,
-        *tuple(
-            value
-            for step in range(1, maximum_offset_hz + 1)
-            for value in (-step, step)
-        ),
+        *tuple(value for step in range(1, maximum_offset_hz + 1) for value in (-step, step)),
     )
     last = 0
     for offset in offsets:
@@ -483,9 +473,7 @@ def _read_metadata_status(module: Any, buffer: Any, capacity: int) -> bytes:
     reader = getattr(module, "_buffer_get_metadata_status", None)
     handle = getattr(buffer, "_buffer", None)
     if not callable(reader) or handle is None:
-        raise RadioConfigurationError(
-            "installed pylibiio cannot return raw metadata status bytes"
-        )
+        raise RadioConfigurationError("installed pylibiio cannot return raw metadata status bytes")
     storage = ctypes.create_string_buffer(capacity)
     status_bytes = int(reader(handle, storage, capacity))
     if status_bytes != capacity:
@@ -508,9 +496,7 @@ def _cancel_metadata_session(module: Any, buffer: Any) -> None:
         )
     result = canceller(handle)
     if isinstance(result, int) and result < 0:
-        raise RadioConfigurationError(
-            f"IIO persistent-hop in-band cancellation failed: {result}"
-        )
+        raise RadioConfigurationError(f"IIO persistent-hop in-band cancellation failed: {result}")
 
 
 def _receiver_settings_receipt(
