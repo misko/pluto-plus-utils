@@ -140,3 +140,19 @@ def test_source_installer_fails_fast_when_setuptools_is_missing(tmp_path: Path) 
     assert result.returncode == 1
     assert "build dependency setuptools is missing" in result.stderr
     assert "uv sync --extra hardware" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("--metadata-abi", "1", "--counter-rx"),
+        ("--metadata-abi", "2", "--counter-rx"),
+        ("--metadata-abi", "4", "--counter-rx"),
+        ("--metadata-abi", "3", "--counter-rx", "--scanner-glrt"),
+    ],
+)
+def test_counter_runtime_rejects_incompatible_selections(arguments):
+    script = Path(__file__).parents[1] / "scripts/install_native_libiio.sh"
+    result = subprocess.run((str(script), *arguments), capture_output=True, text=True, timeout=10)
+    assert result.returncode == 2
+    assert "--counter-rx requires --metadata-abi 3 and excludes --scanner-glrt" in result.stderr

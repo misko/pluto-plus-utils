@@ -419,3 +419,33 @@ Each successful cell also records `tandem_metadata_frames`, the exact
 counts. It separately records aggregate FPGA gain-event and event-overflow counts,
 so sampler-cadence changes and AUTO transition preservation are directly auditable
 from the canonical report without a separate capture parser.
+
+## Physical 1R1T counter runtime
+
+For the v0.50 counter RX firmware, explicitly install the published counter
+runtime (the default ABI 3 and scanner runtime selections remain unchanged):
+
+```sh
+scripts/install_native_libiio.sh --uv-bin /absolute/path/to/uv --metadata-abi 3 --counter-rx
+```
+
+This selects immutable libiio commit `47a75cbc5e7d24a063b8b54eb531fdba6602b85c`
+from `counter-rx-v1-source/libiio-v1`. Use the physical AD9361 1R1T target
+profile, RX0, manual gain, and `begin_metadata_capture(counter_only=True)`.
+The SPFC1 stream reports sample counters and exact gaps; it does not provide
+paired AGC, gain, RSSI, or detector metadata. Paired capture remains an explicit
+separate mode. The counter runtime is mutually exclusive with `--scanner-glrt`.
+
+The v0.50 release profiles bind DFU `435a26369018e86ee66262b79c32895dbaaacef510a1efb71c566d6409555344`
+and FIT `a53efc46f3c65d1a15e5063374551d2daa3cb9d0df51257de53b6af80be39493`.
+Choose the profile for the radio's physical mode:
+
+| Mode | RAM profile | Persistent profile |
+| --- | --- | --- |
+| 1R1T | `counter-rx-v1-1r1t-release-ram` | `counter-rx-v1-1r1t-release-persistent-promotion` |
+| 2R2T | `counter-rx-v1-release-ram` | `counter-rx-v1-release-persistent-promotion` |
+
+The persistent-upgrade target advances to v0.50; older qualified setup policies
+remain recognized. Qualification covered one AD9361 unit, both physical modes,
+finite counter captures through 60 MS/s, loss accounting, lifecycle recovery,
+and QSPI reboot return. It does not qualify continuous lossless Ethernet at 60 MS/s.

@@ -383,6 +383,15 @@ IQ_DIRECT_ASYNC_V4_RELEASE_PROFILE = DiagnosticProfile(
     release_rank=36,
 )
 
+COUNTER_RX_V1_RELEASE_PROFILE = DiagnosticProfile(
+    profile_id="counter-rx-v1-release",
+    firmware_version="v0.50-plutoplus-spf-counter-rx-v1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="hardware-qualified physical 1R1T counter metadata release",
+    release_rank=37,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -420,6 +429,7 @@ DIAGNOSTIC_PROFILES = (
     IQ_DIRECT_ASYNC_V2_RELEASE_PROFILE,
     IQ_DIRECT_ASYNC_V3_RELEASE_PROFILE,
     IQ_DIRECT_ASYNC_V4_RELEASE_PROFILE,
+    COUNTER_RX_V1_RELEASE_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 

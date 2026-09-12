@@ -13,6 +13,7 @@ metadata_abi=1
 source_ref=""
 source_commit=""
 scanner_glrt=0
+counter_rx=0
 source_repository="https://github.com/misko/libiio.git"
 local_source_repository=""
 
@@ -20,12 +21,15 @@ usage() {
     cat <<EOF
 Usage: scripts/install_native_libiio.sh --uv-bin ABSOLUTE_PATH
        [--python PATH] [--prefix PATH] [--jobs N] [--metadata-abi 1|2|3|4]
-       [--scanner-glrt] [--source-repository ABSOLUTE_LOCAL_PATH]
+       [--scanner-glrt | --counter-rx] [--source-repository ABSOLUTE_LOCAL_PATH]
 
 Builds the exact host libiio matched to the selected firmware metadata ABI with
 USB support. The default ABI is 1 for the currently deployed production radios.
 The source-checkout script defaults to that checkout's .venv; the installed
 entry point defaults to its own Python environment.
+
+--counter-rx selects the published physical 1R1T counter metadata runtime and
+requires --metadata-abi 3. It is mutually exclusive with --scanner-glrt.
 
 --scanner-glrt explicitly selects the pinned scanner GLRT/adaptive host runtime
 and requires --metadata-abi 3. Existing defaults are unchanged. Before its commit
@@ -43,6 +47,7 @@ while (($#)); do
     --uv-bin) uv_bin="${2:?missing value for --uv-bin}"; shift 2 ;;
     --metadata-abi) metadata_abi="${2:?missing value for --metadata-abi}"; shift 2 ;;
     --scanner-glrt) scanner_glrt=1; shift ;;
+    --counter-rx) counter_rx=1; shift ;;
     --source-repository) local_source_repository="${2:?missing value for --source-repository}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; printf 'ERROR: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -71,6 +76,15 @@ case "$metadata_abi" in
     exit 2
     ;;
 esac
+
+if ((counter_rx)); then
+    [[ "$metadata_abi" == 3 && "$scanner_glrt" == 0 ]] || {
+        printf 'ERROR: --counter-rx requires --metadata-abi 3 and excludes --scanner-glrt\n' >&2
+        exit 2
+    }
+    source_ref="counter-rx-v1-source/libiio-v1"
+    source_commit="47a75cbc5e7d24a063b8b54eb531fdba6602b85c"
+fi
 
 if ((scanner_glrt)); then
     [[ "$metadata_abi" == 3 ]] || {

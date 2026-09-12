@@ -199,8 +199,8 @@ def test_metadata_runtime_gate_binds_release_local_hashes_and_constructor(
     (
         (
             3,
-            "persistent-hop-duty-v1-source/libiio-v1",
-            "f6c450eada95ce99fe8756ebc244bfcf6ddcc72a",
+            "counter-rx-v1-rc1-source/libiio-v1",
+            "47a75cbc5e7d24a063b8b54eb531fdba6602b85c",
         ),
         (
             4,

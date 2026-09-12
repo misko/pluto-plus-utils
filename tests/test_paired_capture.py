@@ -7,6 +7,7 @@ import json
 import queue
 import struct
 import threading
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -138,8 +139,15 @@ class NativeHarness:
             self.pilot_started.set()
 
             def refill():
-                # Source-rate simulation is deliberately not a timing proof.
-                threading.Event().wait(0.01)
+                # This native double has no DMA clock. Pace it by consumer
+                # progress, so slow CI disks/CPython versions do not turn a
+                # successful finite-envelope test into a queue-overflow test.
+                # Explicit queue.Full injection below still tests that failure.
+                deadline = time.monotonic() + 5
+                while self.progress_events.qsize() > 4 and not self.capture_cancelled.is_set():
+                    assert time.monotonic() < deadline, "fake DMA consumer stopped progressing"
+                    self.capture_cancelled.wait(0.001)
+                self.capture_cancelled.wait(0.01)
                 if self.fault == "pilot_short":
                     buffer.read_delta = -4
 
@@ -147,6 +155,14 @@ class NativeHarness:
 
         self.module.configure = pilot_buffer
         self.backend = paired.NativePairedBackend(self.pilot, self.maps, self.fine)
+        native_capture = self.backend.capture_pilot
+
+        def capture_pilot(observation, events, cancelled):
+            self.progress_events = events
+            self.capture_cancelled = cancelled
+            return native_capture(observation, events, cancelled)
+
+        self.backend.capture_pilot = capture_pilot
 
     def health(self):
         self.generation += 1

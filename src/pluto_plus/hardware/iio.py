@@ -196,10 +196,7 @@ def configure_exact_usb_rx_only_source_locked_rate(
             raise RadioConfigurationError(
                 f"opened Pluto model {observed_model!r}, expected {expected_hardware_model!r}"
             )
-        if (
-            expected_firmware_version is not None
-            and observed_firmware != expected_firmware_version
-        ):
+        if expected_firmware_version is not None and observed_firmware != expected_firmware_version:
             raise RadioConfigurationError(
                 f"opened Pluto firmware {observed_firmware!r}, "
                 f"expected {expected_firmware_version!r}"
@@ -328,9 +325,9 @@ class IioRadioDevice:
         self._device: Any | None = None
         self._rx_layout_expectation: RxLayoutExpectation | None = None
         self._buffer_size: int | None = None
-        self._metadata_capture: (
-            IioMetadataCaptureSession | IioRawSidecarCaptureSession | None
-        ) = None
+        self._metadata_capture: IioMetadataCaptureSession | IioRawSidecarCaptureSession | None = (
+            None
+        )
         self._kernel_buffer_configuration_basis: Literal[
             "not_configured", "setter_accepted", "readback"
         ] = "not_configured"
@@ -497,9 +494,7 @@ class IioRadioDevice:
             _mute_transmit(device)
             _require_rx_layout(facts, self._rx_layout_expectation)
             if self._rx_layout_expectation is not None:
-                device.rx_enabled_channels = list(
-                    self._rx_layout_expectation.receiver_channels
-                )
+                device.rx_enabled_channels = list(self._rx_layout_expectation.receiver_channels)
                 enabled_channels = tuple(int(item) for item in device.rx_enabled_channels)
                 if enabled_channels != self._rx_layout_expectation.receiver_channels:
                     raise RadioConfigurationError(
@@ -638,8 +633,7 @@ class IioRadioDevice:
     def apply_settings(self, settings: RadioSettings) -> RadioSettings:
         device = self._require_device()
         if any(
-            channel not in self._capabilities.receiver_channels
-            for channel in settings.channels
+            channel not in self._capabilities.receiver_channels for channel in settings.channels
         ):
             raise RadioConfigurationError(
                 "requested receiver channels are outside the selected RX layout"
@@ -1066,6 +1060,7 @@ class IioRadioDevice:
         sample_count: int,
         *,
         kernel_buffers: int,
+        counter_only: bool = False,
         batch_frames: int = 1,
         tandem_request: TandemSessionRequestV1 | None = None,
         ddr_burst_bytes: int = 0,
@@ -1086,9 +1081,7 @@ class IioRadioDevice:
             or not isinstance(batch_frames, int)
             or not 1 <= batch_frames <= METADATA_BATCH_FRAMES_MAX
         ):
-            raise ValueError(
-                f"batch_frames must be in [1, {METADATA_BATCH_FRAMES_MAX}]"
-            )
+            raise ValueError(f"batch_frames must be in [1, {METADATA_BATCH_FRAMES_MAX}]")
         if isinstance(ddr_burst_bytes, bool) or not isinstance(ddr_burst_bytes, int):
             raise TypeError("ddr_burst_bytes must be an integer")
         if ddr_burst_bytes < 0:
@@ -1099,22 +1092,16 @@ class IioRadioDevice:
             raise TypeError("ddr_ring_frames must be an integer")
         if not isinstance(ddr_ring_continuous, bool):
             raise TypeError("ddr_ring_continuous must be a bool")
-        if isinstance(direct_async_frames, bool) or not isinstance(
-            direct_async_frames, int
-        ):
+        if isinstance(direct_async_frames, bool) or not isinstance(direct_async_frames, int):
             raise TypeError("direct_async_frames must be an integer")
         if not 0 <= direct_async_frames <= DIRECT_ASYNC_FRAME_TARGET_MAX:
-            raise ValueError(
-                f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]"
-            )
+            raise ValueError(f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]")
         if not isinstance(drop_backlog_on_overrun, bool):
             raise TypeError("drop_backlog_on_overrun must be a bool")
         if direct_async_frames and kernel_buffers < 2:
             raise ValueError("direct async capture requires at least two kernel buffers")
         if direct_async_frames and ddr_ring_bytes and kernel_buffers < 3:
-            raise ValueError(
-                "direct async RAM extension requires at least three kernel buffers"
-            )
+            raise ValueError("direct async RAM extension requires at least three kernel buffers")
         if ddr_ring_bytes < 0 or ddr_ring_frames < 0:
             raise ValueError("DDR ring values must not be negative")
         if ddr_burst_bytes and ddr_ring_bytes:
@@ -1122,14 +1109,10 @@ class IioRadioDevice:
         if direct_async_frames and ddr_burst_bytes:
             raise ValueError("direct async capture cannot use the sealed DDR burst")
         if batch_frames > 1 and (ddr_burst_bytes or ddr_ring_bytes or direct_async_frames):
-            raise ValueError(
-                "metadata refill batching is only supported by ordinary capture"
-            )
+            raise ValueError("metadata refill batching is only supported by ordinary capture")
         if ddr_ring_bytes:
             if direct_async_frames and (ddr_ring_frames or ddr_ring_continuous):
-                raise ValueError(
-                    "direct async RAM extension owns the finite frame target"
-                )
+                raise ValueError("direct async RAM extension owns the finite frame target")
             if ddr_ring_continuous and ddr_ring_frames:
                 raise ValueError("continuous DDR ring must not specify a frame target")
             if not direct_async_frames and not ddr_ring_continuous and not ddr_ring_frames:
@@ -1137,15 +1120,43 @@ class IioRadioDevice:
         elif ddr_ring_frames or ddr_ring_continuous:
             raise ValueError("DDR ring mode requires a positive byte budget")
         device = self._require_device()
+        if counter_only:
+            from pluto_plus.counter_metadata import CAPABILITY, PROFILE
+            from pluto_plus.hardware.preflight import COUNTER_RX_RUNTIME_SOURCE_COMMIT
+
+            if (
+                self._metadata_runtime is not None
+                and self._metadata_runtime.source_commit != COUNTER_RX_RUNTIME_SOURCE_COMMIT
+            ):
+                raise RadioConfigurationError(
+                    "counter-only capture requires the --counter-rx host runtime"
+                )
+
+            attrs = dict(device.ctx.attrs)
+            scan = tuple(
+                sorted(ch.id for ch in device._rxadc.channels if ch.scan_element and not ch.output)
+            )
+            if (
+                attrs.get(CAPABILITY) != "1"
+                or attrs.get("iio,buffer-counter-metadata-profile") != PROFILE
+            ):
+                raise RadioConfigurationError("radio does not support SPFC1 counter-only metadata")
+            if (
+                scan != ("voltage0", "voltage1")
+                or tuple(device.rx_enabled_channels) != (0,)
+                or device.gain_control_mode_chan0 != "manual"
+                or tandem_request is not None
+            ):
+                raise RadioConfigurationError(
+                    "counter-only mode requires physical 1R1T RX0/manual and no tandem request"
+                )
         self.reset_receive_buffer()
         channels = tuple(int(item) for item in device.rx_enabled_channels)
         if channels not in {(0,), (1,), (0, 1)}:
             raise RadioConfigurationError("metadata capture receiver selection is not canonical")
         require_safe_iio_buffer(sample_count, len(channels))
         facts = context_facts(device.ctx)
-        metadata_abi = _select_context_metadata_abi(
-            facts, expected=self._expected_metadata_abi
-        )
+        metadata_abi = _select_context_metadata_abi(facts, expected=self._expected_metadata_abi)
         if metadata_abi != self._selected_metadata_abi:
             raise RadioConfigurationError(
                 "metadata ABI capability changed after the radio was opened"
@@ -1159,13 +1170,10 @@ class IioRadioDevice:
             raise RadioConfigurationError("metadata ABI 1 and 2 require paired RX channels")
         if metadata_abi in {3, 4}:
             layouts = facts.get("buffer_metadata_layouts")
-            expected_layouts = (
-                ABI3_METADATA_LAYOUTS if metadata_abi == 3 else ABI4_METADATA_LAYOUTS
-            )
+            expected_layouts = ABI3_METADATA_LAYOUTS if metadata_abi == 3 else ABI4_METADATA_LAYOUTS
             if layouts != expected_layouts:
                 raise RadioConfigurationError(
-                    f"metadata ABI {metadata_abi} requires the exact canonical RX "
-                    "layout capability"
+                    f"metadata ABI {metadata_abi} requires the exact canonical RX layout capability"
                 )
             expected_mask = {(0,): 0x03, (1,): 0x0C, (0, 1): 0x0F}[channels]
             layout = next(item for item in layouts if item.scan_mask == expected_mask)
@@ -1186,9 +1194,7 @@ class IioRadioDevice:
                     "device DDR burst v1 requires metadata ABI 3/4 and exactly one receiver"
                 )
             if facts.get("buffer_ddr_burst") is not True:
-                raise RadioConfigurationError(
-                    "IIO context does not advertise device DDR burst v1"
-                )
+                raise RadioConfigurationError("IIO context does not advertise device DDR burst v1")
             maximum_burst_bytes = facts.get("buffer_ddr_burst_max_iq_bytes")
             if not isinstance(maximum_burst_bytes, int) or maximum_burst_bytes <= 0:
                 raise RadioConfigurationError("IIO DDR burst byte limit is invalid")
@@ -1257,9 +1263,7 @@ class IioRadioDevice:
                     "IIO context does not advertise direct async RAM queue extension"
                 )
             policies = facts.get("buffer_direct_async_overrun_policies")
-            requested_policy = (
-                "drop-backlog" if drop_backlog_on_overrun else "preserve-backlog"
-            )
+            requested_policy = "drop-backlog" if drop_backlog_on_overrun else "preserve-backlog"
             if not isinstance(policies, tuple) or requested_policy not in policies:
                 raise RadioConfigurationError(
                     f"IIO context does not advertise {requested_policy} direct async "
@@ -1296,6 +1300,7 @@ class IioRadioDevice:
         session = IioMetadataCaptureSession(
             device,
             metadata_buffer_type,
+            counter_only=counter_only,
             sample_rate_hz=sample_rate_hz,
             samples_per_channel=sample_count,
             kernel_buffers=actual_kernel_buffers,
@@ -1345,9 +1350,7 @@ class IioRadioDevice:
             raise RadioConfigurationError("raw sidecar metadata requires paired RX channels")
         require_safe_iio_buffer(sample_count, 2)
         facts = context_facts(device.ctx)
-        metadata_abi = _select_context_metadata_abi(
-            facts, expected=self._expected_metadata_abi
-        )
+        metadata_abi = _select_context_metadata_abi(facts, expected=self._expected_metadata_abi)
         if metadata_abi != 3 or self._selected_metadata_abi != 3:
             raise RadioConfigurationError("raw sidecar metadata requires exact ABI 3")
         if facts.get("buffer_metadata_layouts") != ABI3_METADATA_LAYOUTS:
@@ -1402,8 +1405,7 @@ class IioRadioDevice:
 
         raw = dict(getattr(self._require_device().ctx, "attrs", {}) or {})
         if any(
-            not isinstance(key, str) or not isinstance(value, str)
-            for key, value in raw.items()
+            not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
         ):
             raise RadioConfigurationError("IIO context attributes are not canonical strings")
         return raw
@@ -1473,12 +1475,7 @@ def exact_usb_iio_uri(
         raise RadioConfigurationError(f"cannot resolve exact USB-IIO identity: {error}") from error
     if resolved.name != usb_sysfs_path.name or ":" in usb_sysfs_path.name:
         raise RadioConfigurationError("USB sysfs path must name one direct device")
-    if (
-        vendor != PLUTO_USB_VENDOR
-        or product != PLUTO_RUNTIME_PRODUCT
-        or bus <= 0
-        or device <= 0
-    ):
+    if vendor != PLUTO_USB_VENDOR or product != PLUTO_RUNTIME_PRODUCT or bus <= 0 or device <= 0:
         raise RadioConfigurationError("exact USB path is not one runtime Pluto")
     if observed_serial != serial or not _SERIAL_PATTERN.fullmatch(serial):
         raise RadioConfigurationError("exact USB path serial does not match the requested radio")
@@ -1610,9 +1607,7 @@ def _select_context_metadata_abi(
     if selected is None and expected is None:
         return None
     if selected not in SUPPORTED_METADATA_ABIS:
-        raise RadioConfigurationError(
-            "metadata capture requires a supported radio metadata ABI"
-        )
+        raise RadioConfigurationError("metadata capture requires a supported radio metadata ABI")
     if expected is not None and selected != expected:
         raise RadioConfigurationError(
             "radio metadata ABI does not match the release-local host runtime: "
@@ -1655,17 +1650,11 @@ def context_facts(context: Any) -> dict[str, object]:
         ddr_ring_max_iq_bytes = None
     ddr_ring_modes_raw = attrs.get("iio,buffer-ddr-ring-modes")
     direct_async_raw = attrs.get("iio,buffer-direct-async")
-    direct_async_exact_kernel_queue_raw = attrs.get(
-        "iio,buffer-direct-async-exact-kernel-queue"
-    )
+    direct_async_exact_kernel_queue_raw = attrs.get("iio,buffer-direct-async-exact-kernel-queue")
     direct_async_ring_raw = attrs.get("iio,buffer-direct-async-ring")
-    direct_async_overrun_policies_raw = attrs.get(
-        "iio,buffer-direct-async-overrun-policies"
-    )
+    direct_async_overrun_policies_raw = attrs.get("iio,buffer-direct-async-overrun-policies")
     direct_async_overrun_policies = tuple(
-        item
-        for item in str(direct_async_overrun_policies_raw or "").split(",")
-        if item
+        item for item in str(direct_async_overrun_policies_raw or "").split(",") if item
     )
     direct_async_default_overrun_policy = attrs.get(
         "iio,buffer-direct-async-default-overrun-policy"
@@ -1719,21 +1708,13 @@ def context_facts(context: Any) -> dict[str, object]:
         "buffer_ddr_ring_modes_raw": ddr_ring_modes_raw,
         "buffer_direct_async": direct_async_raw == "1",
         "buffer_direct_async_raw": direct_async_raw,
-        "buffer_direct_async_exact_kernel_queue": (
-            direct_async_exact_kernel_queue_raw == "1"
-        ),
-        "buffer_direct_async_exact_kernel_queue_raw": (
-            direct_async_exact_kernel_queue_raw
-        ),
+        "buffer_direct_async_exact_kernel_queue": (direct_async_exact_kernel_queue_raw == "1"),
+        "buffer_direct_async_exact_kernel_queue_raw": (direct_async_exact_kernel_queue_raw),
         "buffer_direct_async_ring": direct_async_ring_raw == "1",
         "buffer_direct_async_ring_raw": direct_async_ring_raw,
-        "buffer_direct_async_overrun_policies_raw": (
-            direct_async_overrun_policies_raw
-        ),
+        "buffer_direct_async_overrun_policies_raw": (direct_async_overrun_policies_raw),
         "buffer_direct_async_overrun_policies": direct_async_overrun_policies,
-        "buffer_direct_async_default_overrun_policy": (
-            direct_async_default_overrun_policy
-        ),
+        "buffer_direct_async_default_overrun_policy": (direct_async_default_overrun_policy),
         "buffer_metadata_status": metadata_status_max_version is not None,
         "buffer_metadata_status_raw": metadata_status_raw,
         "buffer_metadata_status_legacy_version": legacy_metadata_status_version,
@@ -1855,9 +1836,7 @@ def _validate_rx_signal_path_request(
 ) -> None:
     requested = (rf_bandwidth_hz is not None, gain_mode is not None, fir_enabled is not None)
     if any(requested) and not all(requested):
-        raise ValueError(
-            "RF bandwidth, gain mode, and FIR state must be requested together"
-        )
+        raise ValueError("RF bandwidth, gain mode, and FIR state must be requested together")
     if not any(requested):
         if manual_gain_db is not None:
             raise ValueError("manual RX gain requires a complete signal-path request")
@@ -1945,9 +1924,7 @@ def _configure_context_rx_signal_path(
                 f"AD936x PHY is missing receiver channel {receiver_channel}"
             )
         for name in ("rf_bandwidth", "gain_control_mode", "hardwaregain", "filter_fir_en"):
-            _required_iio_attribute(
-                channel, name, label=f"AD936x RX{receiver_channel} channel"
-            )
+            _required_iio_attribute(channel, name, label=f"AD936x RX{receiver_channel} channel")
         channels.append(channel)
 
     try:
@@ -1964,8 +1941,7 @@ def _configure_context_rx_signal_path(
         )
         fir_states = tuple(bool(int(channel.attrs["filter_fir_en"].value)) for channel in channels)
         gain_modes = tuple(
-            GainMode(str(channel.attrs["gain_control_mode"].value).strip())
-            for channel in channels
+            GainMode(str(channel.attrs["gain_control_mode"].value).strip()) for channel in channels
         )
         hardware_gains = tuple(
             _parse_iio_float(channel.attrs["hardwaregain"].value, label="hardware gain")
@@ -2068,7 +2044,7 @@ def _attest_context_sample_counter_slope(
     )
     if not within_tolerance:
         raise RadioConfigurationError(
-            "FPGA sample-counter slope is outside tolerance: " f"{attestation!r}"
+            f"FPGA sample-counter slope is outside tolerance: {attestation!r}"
         )
     return attestation
 
@@ -2093,9 +2069,7 @@ def _configure_context_source_locked_rx_rate(
         capture_rate_hz = int(capture_frequency.value)
         capture_rates_available_hz = tuple(
             int(value)
-            for value in str(
-                capture_channel.attrs["sampling_frequency_available"].value
-            )
+            for value in str(capture_channel.attrs["sampling_frequency_available"].value)
             .strip()
             .replace("[", "")
             .replace("]", "")
