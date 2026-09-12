@@ -25,7 +25,11 @@ from pluto_plus.setup_helper import (
             SetupSshHostKeyChangedError,
             "host key changed",
         ),
-        (b"unclassified EOF\r\nPRIVATE_SENTINEL", SetupHelperError, "closed before accepting stdin"),
+        (
+            b"unclassified EOF\r\nPRIVATE_SENTINEL",
+            SetupHelperError,
+            "closed before accepting stdin",
+        ),
     ],
 )
 def test_pre_stdin_trust_failure_is_actionable_without_transcript_disclosure(
@@ -50,7 +54,9 @@ def test_pre_stdin_trust_failure_is_actionable_without_transcript_disclosure(
             return 2
 
         def sendline(self, value: bytes) -> None:
-            pytest.fail(f"credentials must not be sent before trust validation ({len(value)} bytes)")
+            pytest.fail(
+                f"credentials must not be sent before trust validation ({len(value)} bytes)"
+            )
 
         def close(self, force: bool = False) -> None:
             del force
