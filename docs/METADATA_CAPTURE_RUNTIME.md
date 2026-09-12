@@ -435,3 +435,17 @@ profile, RX0, manual gain, and `begin_metadata_capture(counter_only=True)`.
 The SPFC1 stream reports sample counters and exact gaps; it does not provide
 paired AGC, gain, RSSI, or detector metadata. Paired capture remains an explicit
 separate mode. The counter runtime is mutually exclusive with `--scanner-glrt`.
+
+The v0.50 release profiles bind DFU `435a26369018e86ee66262b79c32895dbaaacef510a1efb71c566d6409555344`
+and FIT `a53efc46f3c65d1a15e5063374551d2daa3cb9d0df51257de53b6af80be39493`.
+Choose the profile for the radio's physical mode:
+
+| Mode | RAM profile | Persistent profile |
+| --- | --- | --- |
+| 1R1T | `counter-rx-v1-1r1t-release-ram` | `counter-rx-v1-1r1t-release-persistent-promotion` |
+| 2R2T | `counter-rx-v1-release-ram` | `counter-rx-v1-release-persistent-promotion` |
+
+The persistent-upgrade target advances to v0.50; older qualified setup policies
+remain recognized. Qualification covered one AD9361 unit, both physical modes,
+finite counter captures through 60 MS/s, loss accounting, lifecycle recovery,
+and QSPI reboot return. It does not qualify continuous lossless Ethernet at 60 MS/s.

@@ -791,6 +791,32 @@ IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V4_RELEASE_RAM_PO
     }
 )
 
+
+# Trusted run 34722030151; exact DFU/FIT passed RAM and persistent
+# 1R1T/2R2T qualification on serial 1040007c4a94000211000b009186843ef2.
+COUNTER_RX_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
+    profile_id="counter-rx-v1-release-ram",
+    release_tag="v0.50-plutoplus-spf-counter-rx-v1",
+    device_firmware="v0.50-plutoplus-spf-counter-rx-v1",
+    asset_name="plutoplus-spf-counter-rx-v1-619ecedf23a3-pluto.dfu",
+    asset_sha256="435a26369018e86ee66262b79c32895dbaaacef510a1efb71c566d6409555344",
+    release_url="https://github.com/misko/plutosdr-fw/releases/tag/v0.50-plutoplus-spf-counter-rx-v1",
+    source_commit="619ecedf23a3fd2103e1237d69db830e26d8959c",
+    fit_body_sha256="a53efc46f3c65d1a15e5063374551d2daa3cb9d0df51257de53b6af80be39493",
+    fit_body_size=12829435,
+    hardware_qualified=False,
+    published_at=datetime(2026, 9, 12, tzinfo=UTC),
+)
+COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY = COUNTER_RX_V1_RELEASE_RAM_POLICY.model_copy(
+    update={"profile_id": "counter-rx-v1-release-persistent-promotion", "hardware_qualified": True}
+)
+COUNTER_RX_V1_1R1T_RAM_POLICY = COUNTER_RX_V1_RELEASE_RAM_POLICY.model_copy(
+    update={"profile_id": "counter-rx-v1-1r1t-release-ram"}
+)
+COUNTER_RX_V1_1R1T_PERSISTENT_POLICY = COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY.model_copy(
+    update={"profile_id": "counter-rx-v1-1r1t-release-persistent-promotion"}
+)
+
 # Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
 # ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a
 # local, recoverable-radio persistent canary only: ``hardware_qualified=False``
@@ -985,7 +1011,7 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 # repair. USB and enrolled-network upgrades select the newest release that has
 # completed the persistent hardware gate; setup keeps the immutable U-Boot
 # tuple but accepts only an exact QSPI image in the allowlist below.
-PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY
+PERSISTENT_UPGRADE_POLICY = COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY
 
 # Canonical U-Boot repair may run only while one of these exact, reviewed,
 # hardware-qualified QSPI images is active. The tuple itself remains fixed;
@@ -998,6 +1024,7 @@ SETUP_REPAIR_POLICIES = (
     DDR_RING_PREFILL_V1_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
+    IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY,
     PERSISTENT_UPGRADE_POLICY,
 )
 
@@ -1007,6 +1034,8 @@ SETUP_REPAIR_POLICIES = (
 # permission to alter U-Boot or firmware. Keep this list explicit and exact.
 SETUP_INSPECTION_POLICIES = (
     *SETUP_REPAIR_POLICIES,
+    COUNTER_RX_V1_RELEASE_RAM_POLICY,
+    COUNTER_RX_V1_1R1T_RAM_POLICY,
     IQ_DIRECT_ASYNC_V2_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V3_CANDIDATE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY,

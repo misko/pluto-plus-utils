@@ -31,6 +31,10 @@ from typing import Any, Literal, Protocol, cast
 from pluto_plus.diagnostic_profiles import DIAGNOSTIC_PROFILES, SUPPORTED_AD936X_PHY_MODELS
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
+    COUNTER_RX_V1_1R1T_PERSISTENT_POLICY,
+    COUNTER_RX_V1_1R1T_RAM_POLICY,
+    COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY,
+    COUNTER_RX_V1_RELEASE_RAM_POLICY,
     DDR_BURST_V1_RC1_RAM_POLICY,
     DDR_BURST_V1_RC2_RAM_POLICY,
     DDR_BURST_V1_RC3_RAM_POLICY,
@@ -880,6 +884,35 @@ STANDALONE_FLASH_PROFILES = {
         ddr_burst_reserve_bytes=128 * 1024 * 1024,
     ),
 }
+
+
+# Preserve every v0.49 return requirement and add exact counter discovery.
+# Physical topology is explicit: a one-receiver transfer mask is not 1R1T.
+for _counter_policy, _counter_layout, _counter_persistent in (
+    (COUNTER_RX_V1_RELEASE_RAM_POLICY, PAIRED_RX_TX_CAPABLE_LAYOUT, False),
+    (COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY, PAIRED_RX_TX_CAPABLE_LAYOUT, True),
+    (COUNTER_RX_V1_1R1T_RAM_POLICY, SINGLE_RX_TX_CAPABLE_LAYOUT, False),
+    (COUNTER_RX_V1_1R1T_PERSISTENT_POLICY, SINGLE_RX_TX_CAPABLE_LAYOUT, True),
+):
+    _counter_base = STANDALONE_FLASH_PROFILES[
+        IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY.profile_id
+    ]
+    STANDALONE_FLASH_PROFILES[_counter_policy.profile_id] = replace(
+        _counter_base,
+        policy=_counter_policy,
+        persistent_allowed=_counter_persistent,
+        source_iio_layout=_counter_layout,
+        return_iio_layout=_counter_layout,
+        required_iio_capabilities=_counter_base.required_iio_capabilities
+        + (
+            ("iio,buffer-counter-metadata", "1"),
+            ("iio,buffer-counter-metadata-profile", "ad9361:1r1t:rx0:manual:decimation1:spfc1"),
+            (
+                "iio,buffer-counter-metadata-topology-supported",
+                "1" if _counter_layout == SINGLE_RX_TX_CAPABLE_LAYOUT else "0",
+            ),
+        ),
+    )
 
 
 # Reuse the qualified v0.49 bytes and every return-side capability requirement.
