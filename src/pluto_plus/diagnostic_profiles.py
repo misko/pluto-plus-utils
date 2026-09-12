@@ -374,6 +374,15 @@ IQ_DIRECT_ASYNC_V3_RELEASE_PROFILE = DiagnosticProfile(
     release_rank=35,
 )
 
+IQ_DIRECT_ASYNC_V4_RELEASE_PROFILE = DiagnosticProfile(
+    profile_id="iq-direct-async-v4-release",
+    firmware_version="v0.49-plutoplus-spf-iq-direct-async-v4",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="hardware-qualified exact DMA admission release",
+    release_rank=36,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -410,6 +419,7 @@ DIAGNOSTIC_PROFILES = (
     IQ_DIRECT_ASYNC_RING_V1_RELEASE_PROFILE,
     IQ_DIRECT_ASYNC_V2_RELEASE_PROFILE,
     IQ_DIRECT_ASYNC_V3_RELEASE_PROFILE,
+    IQ_DIRECT_ASYNC_V4_RELEASE_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
