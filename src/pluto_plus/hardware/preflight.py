@@ -154,13 +154,9 @@ def verify_metadata_runtime(expected_abi: int = 1) -> MetadataRuntimeVerificatio
     mapped_before = _mapped_libiio_paths()
     if mapped_before and not _is_exact_native_loaded(native_path):
         cause = (
-            "pylibiio was imported"
-            if already_imported is not None
-            else "native libiio was loaded"
+            "pylibiio was imported" if already_imported is not None else "native libiio was loaded"
         )
-        raise RuntimeError(
-            f"{cause} before the release-local metadata runtime was preloaded"
-        )
+        raise RuntimeError(f"{cause} before the release-local metadata runtime was preloaded")
     try:
         CDLL(str(native_path), mode=RTLD_GLOBAL)
     except OSError as error:
@@ -193,9 +189,7 @@ def verify_metadata_runtime(expected_abi: int = 1) -> MetadataRuntimeVerificatio
             if tuple(inspect.signature(method).parameters) != expected:
                 raise RuntimeError(f"scanner runtime MetadataBuffer.{name} has the wrong ABI")
     if not _is_exact_native_loaded(native_path):
-        raise RuntimeError(
-            f"release-local metadata libiio is not the loaded libiio: {native_path}"
-        )
+        raise RuntimeError(f"release-local metadata libiio is not the loaded libiio: {native_path}")
     environment = inspect_iio_environment(require_usb=False)
     if not environment.healthy:
         raise RuntimeError(environment.actionable_message)
@@ -263,7 +257,9 @@ def _validate_metadata_runtime_receipt(
     source_commit = str(document.get("source_commit") or "")
     allowed_commits = {METADATA_RUNTIME_SOURCE_COMMITS[expected_abi]}
     if expected_abi == 3:
-        allowed_commits.update({SCANNER_GLRT_RUNTIME_SOURCE_COMMIT, COUNTER_RX_RUNTIME_SOURCE_COMMIT})
+        allowed_commits.update(
+            {SCANNER_GLRT_RUNTIME_SOURCE_COMMIT, COUNTER_RX_RUNTIME_SOURCE_COMMIT}
+        )
     if source_commit not in allowed_commits:
         raise RuntimeError("metadata runtime receipt has the wrong source commit")
     parameters = tuple(document.get("metadata_buffer_parameters") or ())
@@ -508,10 +504,7 @@ def _loaded_library_path(iio: ModuleType, candidate: str, *, maps_path: Path) ->
         and fields[-1].startswith("/")
         and (
             Path(fields[-1]).name == basename
-            or (
-                basename.startswith("libiio.so")
-                and Path(fields[-1]).name.startswith("libiio.so")
-            )
+            or (basename.startswith("libiio.so") and Path(fields[-1]).name.startswith("libiio.so"))
         )
     }
     if not paths:

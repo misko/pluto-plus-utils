@@ -662,8 +662,10 @@ class IioMetadataCaptureSession:
         elif self._metadata_abi == 1:
             request = None
         elif self._metadata_abi in {2, 3}:
+            assert self._tandem_request is not None
             request = self._tandem_request.pack(self._samples_per_channel)
         else:
+            assert self._tandem_request is not None
             transport_kind = (
                 MetadataTransportKind.DDR_BURST
                 if self.ddr_burst_enabled

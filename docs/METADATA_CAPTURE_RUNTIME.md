@@ -419,3 +419,19 @@ Each successful cell also records `tandem_metadata_frames`, the exact
 counts. It separately records aggregate FPGA gain-event and event-overflow counts,
 so sampler-cadence changes and AUTO transition preservation are directly auditable
 from the canonical report without a separate capture parser.
+
+## Physical 1R1T counter runtime
+
+For the v0.50 counter RX firmware, explicitly install the published counter
+runtime (the default ABI 3 and scanner runtime selections remain unchanged):
+
+```sh
+scripts/install_native_libiio.sh --uv-bin /absolute/path/to/uv --metadata-abi 3 --counter-rx
+```
+
+This selects immutable libiio commit `47a75cbc5e7d24a063b8b54eb531fdba6602b85c`
+from `counter-rx-v1-source/libiio-v1`. Use the physical AD9361 1R1T target
+profile, RX0, manual gain, and `begin_metadata_capture(counter_only=True)`.
+The SPFC1 stream reports sample counters and exact gaps; it does not provide
+paired AGC, gain, RSSI, or detector metadata. Paired capture remains an explicit
+separate mode. The counter runtime is mutually exclusive with `--scanner-glrt`.

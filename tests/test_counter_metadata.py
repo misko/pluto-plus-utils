@@ -137,3 +137,15 @@ def test_corrupt_counter_frame_closes_capture() -> None:
         assert buf.closed and capture._buffer is None
     finally:
         radio.close()
+
+
+def test_counter_mode_rejects_wrong_verified_host_before_open() -> None:
+    radio, adi, factory = counter_radio([])
+    radio._metadata_runtime = SimpleNamespace(
+        source_commit="f6c450eada95ce99fe8756ebc244bfcf6ddcc72a"
+    )
+    try:
+        with pytest.raises(RadioConfigurationError, match="--counter-rx host runtime"):
+            radio.begin_metadata_capture(4, kernel_buffers=4, counter_only=True)
+    finally:
+        radio.close()
