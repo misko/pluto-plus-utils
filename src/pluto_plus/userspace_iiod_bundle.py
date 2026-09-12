@@ -249,6 +249,16 @@ class BundledIiodTransport:
     def inspect(self, paths: RemoteIiodPaths) -> UserspaceIiodProcessIdentity | None:
         return self._transport.inspect(paths)
 
+    def read_log_tail(
+        self, paths: RemoteIiodPaths, process: UserspaceIiodProcessIdentity
+    ) -> bytes:
+        if paths != self._paths or self._bundle is None:
+            raise UserspaceIiodLifecycleError("diagnostic log belongs to a different bundle")
+        read = getattr(self._transport, "read_log_tail", None)
+        if not callable(read):
+            raise UserspaceIiodLifecycleError("transport lacks bounded daemon diagnostics")
+        return read(paths, process)
+
     def terminate(
         self, paths: RemoteIiodPaths, process: UserspaceIiodProcessIdentity, *, timeout_s: float
     ) -> bool:

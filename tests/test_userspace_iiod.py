@@ -558,6 +558,8 @@ class _RecordingRunner:
             output = b"PPU\tstate\trunning\n" + self.process_report
         elif stdin == lifecycle_module._TERMINATE_SCRIPT:
             output = b"PPU\texit_confirmed\t1\n"
+        elif stdin == lifecycle_module._LOG_TAIL_SCRIPT:
+            output = b"PPU\tlog_hex\t" + b"counter gap\n\x00\xff".hex().encode() + b"\n"
         elif stdin == lifecycle_module._CLEANUP_SCRIPT:
             output = (
                 f"PPU\tremoved_binary\t{self.paths.binary}\n"
@@ -590,6 +592,10 @@ def test_pinned_ssh_transport_has_only_fixed_semantic_commands(tmp_path: Path) -
     binary = transport.stage(paths, PAYLOAD, expected_sha256=digest)
     process = transport.start(paths, binary)
     assert transport.inspect(paths) == process
+    assert transport.read_log_tail(paths, process) == b"counter gap\n\x00\xff"
+    assert runner.calls[-1][2] == 5
+    with pytest.raises(UserspaceIiodLifecycleError, match="another owner"):
+        transport.read_log_tail(paths, replace(process, radio_serial="OTHER"))
     assert transport.terminate(paths, process, timeout_s=2)
     assert transport.cleanup(paths, binary) == (paths.binary, paths.pid, paths.log)
 
@@ -610,11 +616,80 @@ def test_pinned_ssh_transport_has_only_fixed_semantic_commands(tmp_path: Path) -
             lifecycle_module._START_SCRIPT,
             lifecycle_module._INSPECT_SCRIPT,
             lifecycle_module._TERMINATE_SCRIPT,
+            lifecycle_module._LOG_TAIL_SCRIPT,
             lifecycle_module._CLEANUP_SCRIPT,
         )
     ).lower()
     for forbidden in (b"qspi", b"flash_erase", b"mtd", b"fw_setenv", b"mount", b"reboot"):
         assert forbidden not in all_remote_source
+
+
+@pytest.mark.parametrize("encoded", ["0", "FF", "gg", "00" * 8193])
+def test_diagnostic_transport_rejects_invalid_or_oversize_reports(tmp_path, encoded):
+    known_hosts, password = _credentials(tmp_path)
+    paths = RemoteIiodPaths(
+        f"/tmp/ppu-iiod-{SESSION}.bin",
+        f"/tmp/ppu-iiod-{SESSION}.pid",
+        f"/tmp/ppu-iiod-{SESSION}.log",
+    )
+
+    class Runner(_RecordingRunner):
+        def run(self, argv, *, stdin, timeout_s):
+            if stdin == lifecycle_module._LOG_TAIL_SCRIPT:
+                return SshCommandResult(0, f"PPU\tlog_hex\t{encoded}\n".encode(), b"")
+            return super().run(argv, stdin=stdin, timeout_s=timeout_s)
+
+    transport = PinnedPasswordSshIiodTransport(
+        host=HOST,
+        expected_serial=SERIAL,
+        known_hosts_file=known_hosts,
+        password_file=password,
+        runner=Runner(paths),
+    )
+    binary = transport.stage(paths, PAYLOAD, expected_sha256=hashlib.sha256(PAYLOAD).hexdigest())
+    process = transport.start(paths, binary)
+    with pytest.raises(UserspaceIiodLifecycleError, match="byte/encoding bound"):
+        transport.read_log_tail(paths, process)
+
+
+@pytest.mark.parametrize("payload", [b"counter gap\n\xff", b"", b"x" * 8192])
+def test_lifecycle_diagnostics_decode_without_mutating_owned_process(tmp_path, payload):
+    class Transport(_FakeTransport):
+        def read_log_tail(self, paths, process):
+            assert process == self.process and paths.binary == process.exe_path
+            self.events.append("diagnostic")
+            return payload
+
+    transport = Transport()
+    lifecycle = _lifecycle(tmp_path, transport)
+    lifecycle.start(PAYLOAD)
+    assert lifecycle.diagnostic_tail() == payload.decode("utf-8", errors="replace")
+    assert transport.alive
+    lifecycle.stop()
+    assert transport.events.index("diagnostic") < transport.events.index("terminate")
+    with pytest.raises(UserspaceIiodLifecycleError, match="not active"):
+        lifecycle.diagnostic_tail()
+
+
+@pytest.mark.parametrize("payload", [b"x" * 8193, "not bytes"])
+def test_lifecycle_rejects_invalid_diagnostics_without_preventing_stop(tmp_path, payload):
+    class Transport(_FakeTransport):
+        def read_log_tail(self, paths, process):
+            return payload
+
+    lifecycle = _lifecycle(tmp_path, Transport())
+    lifecycle.start(PAYLOAD)
+    with pytest.raises(UserspaceIiodLifecycleError, match="invalid bounded"):
+        lifecycle.diagnostic_tail()
+    lifecycle.stop()
+
+
+def test_lifecycle_legacy_transport_reports_unavailable_diagnostics(tmp_path):
+    lifecycle = _lifecycle(tmp_path, _FakeTransport())
+    lifecycle.start(PAYLOAD)
+    with pytest.raises(UserspaceIiodLifecycleError, match="lacks bounded"):
+        lifecycle.diagnostic_tail()
+    lifecycle.stop()
 
 
 def test_credential_change_is_detected_before_next_remote_operation(tmp_path: Path) -> None:

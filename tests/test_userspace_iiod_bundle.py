@@ -292,6 +292,10 @@ def test_new_session_cannot_remove_dependencies_of_failed_previous_start(release
     with pytest.raises(UserspaceIiodLifecycleError, match="earlier stage"):
         wrapped.stage(other, PAYLOAD, expected_sha256=digest)
     before = list(transport.events)
+    with pytest.raises(UserspaceIiodLifecycleError, match="different bundle"):
+        wrapped.read_log_tail(other, transport.process)
+    with pytest.raises(UserspaceIiodLifecycleError, match="lacks bounded"):
+        wrapped.read_log_tail(paths, transport.process)
     with pytest.raises(UserspaceIiodLifecycleError, match="different session"):
         wrapped.cleanup(other, RemoteIiodBinaryIdentity(other.binary, len(PAYLOAD), digest))
     assert transport.events == before and transport.companions and transport.alive
@@ -301,7 +305,14 @@ def test_new_session_cannot_remove_dependencies_of_failed_previous_start(release
 
 
 def test_deployment_explicit_opt_in_uses_existing_lifecycle(release, tmp_path):
-    transport = CompanionTransport()
+    class DiagnosticTransport(CompanionTransport):
+        def read_log_tail(self, paths, process):
+            assert self.companions and self.alive
+            assert paths.binary == process.exe_path
+            self.events.append("diagnostic")
+            return b"counter gap"
+
+    transport = DiagnosticTransport()
     known, password = _credentials(tmp_path / "creds")
     deployment = UserspaceIiodDeployment(
         host=HOST,
@@ -318,7 +329,9 @@ def test_deployment_explicit_opt_in_uses_existing_lifecycle(release, tmp_path):
     assert not transport.events
     with deployment.session():
         assert transport.companions
+        assert deployment.diagnostic_tail() == "counter gap"
     assert not transport.companions and not transport.alive
+    assert transport.events.index("diagnostic") < transport.events.index("terminate")
 
 
 class LocalScriptRunner:

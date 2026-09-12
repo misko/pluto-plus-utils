@@ -36,6 +36,7 @@ USERSPACE_IIOD_PORT: Final[Literal[30432]] = 30_432
 STOCK_IIOD_PORT: Final[Literal[30431]] = 30_431
 _MAX_BINARY_BYTES = 64 * 1024 * 1024
 _MAX_CREDENTIAL_BYTES = 4_096
+_MAX_DIAGNOSTIC_BYTES = 8_192
 _SYSTEMD_CREDENTIALS_ROOT = Path("/run/credentials")
 _TOKEN = re.compile(r"^[0-9a-f]{32}$")
 _SERIAL = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -486,6 +487,31 @@ done
 printf 'PPU\\texit_confirmed\\t1\\n'
 """
 
+_LOG_TAIL_SCRIPT = b"""set -eu
+binary=$1
+pidfile=$2
+log=$3
+expected_pid=$4
+expected_start=$5
+expected_sha=$6
+expected_serial=$7
+serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serialnumber)
+test "$serial" = "$expected_serial"
+test -f "$binary" && test ! -L "$binary"
+test "$(sha256sum "$binary" | awk '{print $1}')" = "$expected_sha"
+test -f "$pidfile" && test ! -L "$pidfile"
+test "$(cat "$pidfile")" = "$expected_pid"
+if [ -e "/proc/$expected_pid" ]; then
+  test "$(awk '{print $22}' "/proc/$expected_pid/stat")" = "$expected_start"
+  test "$(readlink -f "/proc/$expected_pid/exe")" = "$binary"
+fi
+test -f "$log" && test ! -L "$log"
+exec 3<"$log"
+hex=$(tail -c 8192 <&3 | od -An -v -tx1 | tr -d ' \\n')
+exec 3<&-
+printf 'PPU\\tlog_hex\\t%s\\n' "$hex"
+"""
+
 _CLEANUP_SCRIPT = b"""set -eu
 binary=$1
 pidfile=$2
@@ -730,6 +756,33 @@ class PinnedPasswordSshIiodTransport:
             _required(fields, "removed_log"),
         )
 
+    def read_log_tail(self, paths: RemoteIiodPaths, process: UserspaceIiodProcessIdentity) -> bytes:
+        """Read at most 8 KiB from the owned log, including after daemon exit."""
+        if process.exe_path != paths.binary or process.radio_serial != self.expected_serial:
+            raise UserspaceIiodLifecycleError("diagnostic process belongs to another owner")
+        fields = self._script(
+            _LOG_TAIL_SCRIPT,
+            (
+                paths.binary,
+                paths.pid,
+                paths.log,
+                str(process.pid),
+                str(process.start_ticks),
+                process.binary_sha256,
+                self.expected_serial,
+            ),
+            timeout_s=5,
+        )
+        _require_keys(fields, {"log_hex"})
+        encoded = fields["log_hex"]
+        if len(encoded) > 2 * _MAX_DIAGNOSTIC_BYTES or not re.fullmatch(
+            r"(?:[0-9a-f]{2})*", encoded
+        ):
+            raise UserspaceIiodLifecycleError(
+                "diagnostic log snapshot exceeds its byte/encoding bound"
+            )
+        return bytes.fromhex(encoded)
+
     def stage_companions(self, bundle: IiodCompanionBundle, owner: str) -> None:
         arguments = _bundle_arguments(bundle, owner)
         root = arguments[0]
@@ -926,6 +979,20 @@ class UserspaceIiodLifecycle:
             )
         self._active = None
         return receipt
+
+    def diagnostic_tail(self) -> str:
+        """Bounded advisory text; not a capture, loss or restoration receipt."""
+        active = self._active
+        if active is None:
+            raise UserspaceIiodLifecycleError("userspace iiOD lifecycle is not active")
+        self._credentials.verify()
+        read = getattr(self._transport, "read_log_tail", None)
+        if not callable(read):
+            raise UserspaceIiodLifecycleError("transport lacks bounded daemon diagnostics")
+        payload = read(active.paths, active.process)
+        if not isinstance(payload, bytes) or len(payload) > _MAX_DIAGNOSTIC_BYTES:
+            raise UserspaceIiodLifecycleError("invalid bounded daemon diagnostic payload")
+        return payload.decode("utf-8", errors="replace")
 
     @contextmanager
     def session(self, binary_payload: bytes) -> Iterator[UserspaceIiodStartReceipt]:
@@ -1156,6 +1223,9 @@ class UserspaceIiodDeployment:
         """Stop only the attested process and prove exact cleanup/restoration."""
 
         return self._lifecycle.stop()
+
+    def diagnostic_tail(self) -> str:
+        return self._lifecycle.diagnostic_tail()
 
     @contextmanager
     def session(self) -> Iterator[UserspaceIiodStartReceipt]:
