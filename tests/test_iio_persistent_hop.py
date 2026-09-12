@@ -525,9 +525,11 @@ class _FakeMetadataBuffer:
 
 
 @pytest.mark.parametrize("extended", [False, True])
+@pytest.mark.parametrize("receiver_ids", [(0, 1), (0,), (1,)])
 def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     monkeypatch: Any,
     extended: bool,
+    receiver_ids: tuple[int, ...],
 ) -> None:
     base_bytes = 64
     metadata = bytearray(base_bytes)
@@ -535,7 +537,7 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     metadata += _sidecar()
     buffer = _FakeMetadataBuffer(
         (b"extension" if extended else b"") + bytes(metadata),
-        bytes(SAMPLES * 8),
+        bytes(SAMPLES * 4 * len(receiver_ids)),
         _status(PersistentHopSessionState.RUNNING),
     )
     calls: list[tuple[Any, ...]] = []
@@ -554,16 +556,19 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     sdr = SimpleNamespace(
         _rxadc=_FakeRxAdc(),
         _rxbuf=None,
-        rx_enabled_channels=[0, 1],
+        rx_enabled_channels=list(receiver_ids),
         rx_buffer_size=0,
     )
     sdr.rx_destroy_buffer = lambda: setattr(sdr, "_rxbuf", None)
-    sdr.rx = lambda: np.zeros((2, SAMPLES), dtype=np.complex64)
+    sdr.rx = lambda: np.zeros(
+        (len(receiver_ids), SAMPLES) if len(receiver_ids) == 2 else (SAMPLES,),
+        dtype=np.complex64,
+    )
     parsed_base = SimpleNamespace(
         samples_per_channel=SAMPLES,
-        iq_payload_bytes=SAMPLES * 8,
-        enabled_scan_mask=0x0F,
-        channel_count=2,
+        iq_payload_bytes=SAMPLES * 4 * len(receiver_ids),
+        enabled_scan_mask=sum(3 << (2 * rx) for rx in receiver_ids),
+        channel_count=len(receiver_ids),
         flags=MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID,
     )
     monkeypatch.setattr(
@@ -584,6 +589,7 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     session = IioRawSidecarCaptureSession(
         sdr,
         factory,
+        receiver_ids=receiver_ids,
         request=request,
         samples_per_channel=SAMPLES,
         kernel_buffers=2,
@@ -604,13 +610,16 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     block = session.read_block()
     assert calls == [(sdr._rxadc, SAMPLES, request, 64 * 1024)]
     assert block.sidecar == _sidecar()
-    assert block.iq_payload == bytes(SAMPLES * 8)
+    assert block.iq_payload == bytes(SAMPLES * 4 * len(receiver_ids))
     assert block.extension_metadata == (b"extension" + bytes(metadata) if extended else None)
     buffer.refilled = False
     assert session.drain_metadata() == b"terminal metadata"
     assert drains == [65536]
     assert not buffer.refilled and buffer.iq == block.iq_payload
     assert session.read_status() == _status(PersistentHopSessionState.RUNNING)
+    parsed_base.enabled_scan_mask ^= 0x0F
+    with pytest.raises(RuntimeError, match="geometry disagrees"):
+        session.read_block()
     session.request_cancel()
     assert buffer.in_band_cancelled
     assert not buffer.generic_cancelled

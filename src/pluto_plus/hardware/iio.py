@@ -973,8 +973,7 @@ class IioRadioDevice:
 
         if rf_bandwidth_hz != sample_rate_hz:
             raise ValueError("source-locked receiver bandwidth must equal sample rate")
-        if channels != (0, 1):
-            raise ValueError("persistent sidecar capture requires paired RX channels")
+        self._require_persistent_receiver_geometry(channels, sample_rate_hz)
         self.configure_source_locked_rx_rate(sample_rate_hz)
         device = self._require_bufferless_device()
         device.rx_rf_bandwidth = rf_bandwidth_hz
@@ -988,13 +987,28 @@ class IioRadioDevice:
             round(readback.sample_rate_hz) != sample_rate_hz
             or round(readback.bandwidth_hz) != rf_bandwidth_hz
             or readback.channels != channels
-            or readback.gain_modes != (GainMode.MANUAL, GainMode.MANUAL)
-            or readback.gain_db != (manual_gain_db, manual_gain_db)
+            or readback.gain_modes != (GainMode.MANUAL,) * len(channels)
+            or readback.gain_db != (manual_gain_db,) * len(channels)
         ):
             raise RadioConfigurationError(
                 "source-locked receiver geometry did not read back exactly"
             )
         return readback
+
+    def _require_persistent_receiver_geometry(
+        self, channels: tuple[int, ...], sample_rate_hz: int
+    ) -> None:
+        if channels == (0, 1):
+            return
+        if (
+            channels not in ((0,), (1,))
+            or any(type(channel) is not int for channel in channels)
+            or sample_rate_hz != 10_000_000
+            or self.iio_context_attributes().get("iio,buffer-persistent-hop-single-rx-10m") != "1"
+        ):
+            raise ValueError(
+                "persistent sidecar requires paired RX or negotiated single-RX 10 MS/s"
+            )
 
     def store_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
         """Store the current RX synthesizer state in one volatile AD9361 profile."""
@@ -1341,13 +1355,10 @@ class IioRadioDevice:
         device = self._require_device()
         self.reset_receive_buffer()
         channels = tuple(int(item) for item in device.rx_enabled_channels)
-        if channels != (0, 1):
-            raise RadioConfigurationError("raw sidecar metadata requires paired RX channels")
-        require_safe_iio_buffer(sample_count, 2)
+        self._require_persistent_receiver_geometry(channels, round(float(device.sample_rate)))
+        require_safe_iio_buffer(sample_count, len(channels))
         facts = context_facts(device.ctx)
-        metadata_abi = _select_context_metadata_abi(
-            facts, expected=self._expected_metadata_abi
-        )
+        metadata_abi = _select_context_metadata_abi(facts, expected=self._expected_metadata_abi)
         if metadata_abi != 3 or self._selected_metadata_abi != 3:
             raise RadioConfigurationError("raw sidecar metadata requires exact ABI 3")
         if facts.get("buffer_metadata_layouts") != ABI3_METADATA_LAYOUTS:
@@ -1380,6 +1391,7 @@ class IioRadioDevice:
         session = IioRawSidecarCaptureSession(
             device,
             metadata_buffer_type,
+            receiver_ids=channels,
             request=request,
             samples_per_channel=sample_count,
             kernel_buffers=actual_kernel_buffers,

@@ -497,22 +497,33 @@ def test_iio_adapter_configures_and_attests_source_locked_capture_rate() -> None
         radio.close()
 
 
-def test_iio_adapter_attests_paired_manual_gain_geometry() -> None:
+@pytest.mark.parametrize("channels", [(0, 1), (0,), (1,)])
+def test_iio_adapter_attests_paired_manual_gain_geometry(channels) -> None:
     module = CaptureRateFakeAdi()
     radio = IioRadioDevice("ip:192.168.1.18", serial="SERIAL_A", adi_module=module)
     radio.open()
     try:
+        rate = 5_000_000 if len(channels) == 2 else 10_000_000
+        if len(channels) == 1:
+            with pytest.raises(ValueError, match="negotiated single-RX"):
+                radio.configure_source_locked_receiver_geometry(
+                    sample_rate_hz=rate,
+                    rf_bandwidth_hz=rate,
+                    channels=channels,
+                    manual_gain_db=40.0,
+                )
+            module.device.ctx.attrs["iio,buffer-persistent-hop-single-rx-10m"] = "1"
         readback = radio.configure_source_locked_receiver_geometry(
-            sample_rate_hz=5_000_000,
-            rf_bandwidth_hz=5_000_000,
-            channels=(0, 1),
+            sample_rate_hz=rate,
+            rf_bandwidth_hz=rate,
+            channels=channels,
             manual_gain_db=40.0,
         )
-        assert readback.sample_rate_hz == 5_000_000
-        assert readback.bandwidth_hz == 5_000_000
-        assert readback.channels == (0, 1)
-        assert readback.gain_modes == (GainMode.MANUAL, GainMode.MANUAL)
-        assert readback.gain_db == (40.0, 40.0)
+        assert readback.sample_rate_hz == rate
+        assert readback.bandwidth_hz == rate
+        assert readback.channels == channels
+        assert readback.gain_modes == (GainMode.MANUAL,) * len(channels)
+        assert readback.gain_db == (40.0,) * len(channels)
     finally:
         radio.close()
 

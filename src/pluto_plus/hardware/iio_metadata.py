@@ -1157,7 +1157,13 @@ class IioRawSidecarCaptureSession:
         status_capacity: int,
         metadata_capacity: int = DEFAULT_METADATA_CAPACITY,
         metadata_unwrapper: Callable[[bytes], bytes] | None = None,
+        receiver_ids: tuple[int, ...] = (0, 1),
     ) -> None:
+        if receiver_ids not in ((0,), (1,), (0, 1)) or any(
+            type(receiver_id) is not int for receiver_id in receiver_ids
+        ):
+            raise ValueError("raw sidecar receiver selection is invalid")
+        self._receiver_ids = receiver_ids
         if not request:
             raise ValueError("raw sidecar metadata request must be nonempty")
         if samples_per_channel <= 0:
@@ -1233,7 +1239,7 @@ class IioRawSidecarCaptureSession:
         self._open_clock_bracket = None
         self._start_time_anchors = []
         self._start_realtime_mapping = None
-        self._prime_dual_rx_layout()
+        self._prime_rx_layout()
         actual = getattr(self._sdr._rxadc, "kernel_buffers_count", None)
         if actual is None or int(actual) != self._kernel_buffers:
             raise RuntimeError("raw sidecar kernel-buffer readback changed before OPEN")
@@ -1293,9 +1299,9 @@ class IioRawSidecarCaptureSession:
                 time.sleep(0.005)
         self._start_realtime_mapping = capture_host_realtime_mapping()
 
-    def _prime_dual_rx_layout(self) -> None:
-        if tuple(int(item) for item in self._sdr.rx_enabled_channels) != (0, 1):
-            raise RuntimeError("raw sidecar capture requires paired RX channels")
+    def _prime_rx_layout(self) -> None:
+        if tuple(int(item) for item in self._sdr.rx_enabled_channels) != self._receiver_ids:
+            raise RuntimeError("raw sidecar capture receiver selection changed")
         self._sdr.rx_destroy_buffer()
         self._sdr.rx_buffer_size = self._samples_per_channel
         setter = getattr(self._sdr._rxadc, "set_kernel_buffers_count", None)
@@ -1309,8 +1315,13 @@ class IioRawSidecarCaptureSession:
         ordinary_buffer = None
         try:
             signal = np.asarray(self._sdr.rx())
-            if signal.shape != (2, self._samples_per_channel) or not np.iscomplexobj(signal):
-                raise RuntimeError("raw sidecar prime did not establish paired complex RX")
+            if len(self._receiver_ids) == 1 and signal.ndim == 1:
+                signal = signal[np.newaxis, :]
+            if signal.shape != (
+                len(self._receiver_ids),
+                self._samples_per_channel,
+            ) or not np.iscomplexobj(signal):
+                raise RuntimeError("raw sidecar prime did not establish the selected complex RX")
             ordinary_buffer = getattr(self._sdr, "_rxbuf", None)
         finally:
             self._sdr.rx_destroy_buffer()
@@ -1322,9 +1333,7 @@ class IioRawSidecarCaptureSession:
                 if prime_count != self._kernel_buffers:
                     result = setter(self._kernel_buffers)
                     if isinstance(result, int) and result < 0:
-                        raise RuntimeError(
-                            "raw sidecar final kernel-buffer configuration failed"
-                        )
+                        raise RuntimeError("raw sidecar final kernel-buffer configuration failed")
 
     def read_block(self) -> IioRawSidecarBlock:
         buffer = self._buffer
@@ -1350,11 +1359,11 @@ class IioRawSidecarCaptureSession:
         base = parsed.base
         if (
             base.samples_per_channel != self._samples_per_channel
-            or base.iq_payload_bytes != self._samples_per_channel * 8
-            or base.enabled_scan_mask != 0x0F
-            or base.channel_count != 2
+            or base.iq_payload_bytes != self._samples_per_channel * 4 * len(self._receiver_ids)
+            or base.enabled_scan_mask != sum(3 << (2 * rx) for rx in self._receiver_ids)
+            or base.channel_count != len(self._receiver_ids)
         ):
-            raise RuntimeError("raw sidecar ABI-3 geometry is not paired RX CI16")
+            raise RuntimeError("raw sidecar ABI-3 geometry disagrees with selected RX CI16")
         if not base.flags & MetadataFlags.HARDWARE_SAMPLE_COUNTER_VALID:
             raise RuntimeError("raw sidecar ABI-3 header lacks a hardware counter")
         if len(iq_payload) != base.iq_payload_bytes:
