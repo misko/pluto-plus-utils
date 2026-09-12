@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 from pydantic import ValidationError
 
+from pluto_plus.counter_metadata import CAPABILITY, PROFILE, CounterMetadataV1, pack_counter_request
 from pluto_plus.ddr_ring import DdrRingStatusSnapshot
 from pluto_plus.direct_radio.usb import (
     MetadataFlags,
@@ -310,6 +311,7 @@ class IioMetadataCaptureSession:
         sdr: Any,
         metadata_buffer_type: Any,
         *,
+        counter_only: bool = False,
         sample_rate_hz: int,
         samples_per_channel: int,
         kernel_buffers: int,
@@ -372,6 +374,25 @@ class IioMetadataCaptureSession:
             )
         if ddr_ring_bytes < 0 or ddr_ring_frames < 0:
             raise ValueError("DDR ring values must not be negative")
+        if not isinstance(counter_only, bool):
+            raise ValueError("counter_only must be boolean")
+        if counter_only:
+            if metadata_abi != 3 or tandem_request is not None:
+                raise ValueError("counter-only mode requires ABI 3 transport and no tandem request")
+            if ddr_burst_bytes or ddr_ring_bytes or batch_frames != 1:
+                raise ValueError(
+                    "counter-only v1 supports ordinary or direct capture without RAM rings"
+                )
+            attrs = dict(getattr(sdr.ctx, "attrs", {}) or {})
+            if (
+                attrs.get(CAPABILITY) != "1"
+                or attrs.get("iio,buffer-counter-metadata-profile") != PROFILE
+            ):
+                raise ValueError("radio does not advertise the SPFC1 counter-only profile")
+            if tuple(sdr.rx_enabled_channels) != (0,):
+                raise ValueError("counter-only v1 requires RX0")
+            pack_counter_request(samples_per_channel, sample_rate_hz)
+        self._counter_only = counter_only
         if ddr_burst_bytes and ddr_ring_bytes:
             raise ValueError("device DDR burst and DDR ring are mutually exclusive")
         if direct_async_frames and ddr_burst_bytes:
@@ -406,12 +427,15 @@ class IioMetadataCaptureSession:
         self._ddr_ring_capture_frames = ddr_ring_frames
         self._ddr_ring_continuous = ddr_ring_continuous
         self._direct_async_frames = direct_async_frames
-        self._drop_backlog_on_overrun = bool(
-            direct_async_frames and drop_backlog_on_overrun
-        )
-        self._tandem_request = tandem_request or TandemSessionRequestV1.auto_for_sample_count(
-            samples_per_channel,
-            retention_frames=(kernel_buffers + 1 if metadata_abi == 4 else 2),
+        self._drop_backlog_on_overrun = bool(direct_async_frames and drop_backlog_on_overrun)
+        self._tandem_request = (
+            None
+            if counter_only
+            else tandem_request
+            or TandemSessionRequestV1.auto_for_sample_count(
+                samples_per_channel,
+                retention_frames=(kernel_buffers + 1 if metadata_abi == 4 else 2),
+            )
         )
         self._channels = tuple(int(item) for item in sdr.rx_enabled_channels)
         if self._channels not in {(0,), (1,), (0, 1)}:
@@ -632,7 +656,9 @@ class IioMetadataCaptureSession:
 
     def _open_metadata_buffer(self) -> Any:
         request: bytes | None
-        if self._metadata_abi == 1:
+        if self._counter_only:
+            request = pack_counter_request(self._samples_per_channel, self._sample_rate_hz)
+        elif self._metadata_abi == 1:
             request = None
         elif self._metadata_abi in {2, 3}:
             request = self._tandem_request.pack(self._samples_per_channel)
@@ -779,7 +805,12 @@ class IioMetadataCaptureSession:
         tandem_metadata: RadioMetadataV5 | RadioMetadataV7 | None = None
         parsed_v7: RadioMetadataV7 | None = None
         metadata: Any
-        if self._metadata_abi == 1:
+        if self._counter_only:
+            metadata = CounterMetadataV1.unpack(raw_metadata)
+            if metadata.sample_rate_hz != self._sample_rate_hz:
+                raise RuntimeError("counter metadata sample rate changed during capture")
+            declared_missing = metadata.missing_samples_before
+        elif self._metadata_abi == 1:
             metadata = RadioMetadataV3.unpack(raw_metadata)
         elif self._metadata_abi == 2:
             parsed = RadioMetadataV5.unpack(raw_metadata)

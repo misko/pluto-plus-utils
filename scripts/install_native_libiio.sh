@@ -12,11 +12,13 @@ uv_bin=""
 metadata_abi=1
 source_ref=""
 source_commit=""
+source_directory=""
 
 usage() {
     cat <<EOF
 Usage: scripts/install_native_libiio.sh --uv-bin ABSOLUTE_PATH
        [--python PATH] [--prefix PATH] [--jobs N] [--metadata-abi 1|2|3|4]
+       [--source-directory ABSOLUTE_CLEAN_GIT_CHECKOUT]
 
 Builds the exact host libiio matched to the selected firmware metadata ABI with
 USB support. The default ABI is 1 for the currently deployed production radios.
@@ -31,6 +33,7 @@ while (($#)); do
     --prefix) prefix="${2:?missing value for --prefix}"; shift 2 ;;
     --jobs) jobs="${2:?missing value for --jobs}"; shift 2 ;;
     --uv-bin) uv_bin="${2:?missing value for --uv-bin}"; shift 2 ;;
+    --source-directory) source_directory="${2:?missing source directory}"; shift 2 ;;
     --metadata-abi) metadata_abi="${2:?missing value for --metadata-abi}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; printf 'ERROR: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -47,8 +50,8 @@ case "$metadata_abi" in
     source_commit="6305ea1d43436ff8bdd83aa6c9e5abf7244aa5f7"
     ;;
 3)
-    source_ref="persistent-hop-duty-v1-source/libiio-v1"
-    source_commit="f6c450eada95ce99fe8756ebc244bfcf6ddcc72a"
+    source_ref="counter-rx-v1-rc1-source/libiio-v1"
+    source_commit="47a75cbc5e7d24a063b8b54eb531fdba6602b85c"
     ;;
 4)
     source_ref="iio-gain-timeline-v8-rc1-source/libiio-v4"
@@ -98,7 +101,18 @@ trap cleanup EXIT
 
 git -C "$worktree" init --quiet src
 git -C "$worktree/src" remote add origin https://github.com/misko/libiio.git
-git -C "$worktree/src" fetch --quiet --depth 1 origin "$source_ref"
+if [[ -n "$source_directory" ]]; then
+    [[ "$source_directory" == /* && -d "$source_directory" ]] || {
+        printf 'ERROR: --source-directory must be an absolute git checkout\n' >&2; exit 1;
+    }
+    [[ "$(git -C "$source_directory" rev-parse HEAD)" == "$source_commit" &&
+       -z "$(git -C "$source_directory" status --porcelain --untracked-files=normal)" ]] || {
+        printf 'ERROR: local source must be clean at the immutable runtime pin\n' >&2; exit 1;
+    }
+    git -C "$worktree/src" fetch --quiet "$source_directory" "$source_commit"
+else
+    git -C "$worktree/src" fetch --quiet --depth 1 origin "$source_ref"
+fi
 git -C "$worktree/src" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
 actual_commit="$(git -C "$worktree/src" rev-parse HEAD)"
 [[ "$actual_commit" == "$source_commit" ]] || {

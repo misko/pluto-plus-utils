@@ -1066,6 +1066,7 @@ class IioRadioDevice:
         sample_count: int,
         *,
         kernel_buffers: int,
+        counter_only: bool = False,
         batch_frames: int = 1,
         tandem_request: TandemSessionRequestV1 | None = None,
         ddr_burst_bytes: int = 0,
@@ -1137,6 +1138,27 @@ class IioRadioDevice:
         elif ddr_ring_frames or ddr_ring_continuous:
             raise ValueError("DDR ring mode requires a positive byte budget")
         device = self._require_device()
+        if counter_only:
+            from pluto_plus.counter_metadata import CAPABILITY, PROFILE
+
+            attrs = dict(device.ctx.attrs)
+            scan = tuple(
+                sorted(ch.id for ch in device._rxadc.channels if ch.scan_element and not ch.output)
+            )
+            if (
+                attrs.get(CAPABILITY) != "1"
+                or attrs.get("iio,buffer-counter-metadata-profile") != PROFILE
+            ):
+                raise RadioConfigurationError("radio does not support SPFC1 counter-only metadata")
+            if (
+                scan != ("voltage0", "voltage1")
+                or tuple(device.rx_enabled_channels) != (0,)
+                or device.gain_control_mode_chan0 != "manual"
+                or tandem_request is not None
+            ):
+                raise RadioConfigurationError(
+                    "counter-only mode requires physical 1R1T RX0/manual and no tandem request"
+                )
         self.reset_receive_buffer()
         channels = tuple(int(item) for item in device.rx_enabled_channels)
         if channels not in {(0,), (1,), (0, 1)}:
@@ -1296,6 +1318,7 @@ class IioRadioDevice:
         session = IioMetadataCaptureSession(
             device,
             metadata_buffer_type,
+            counter_only=counter_only,
             sample_rate_hz=sample_rate_hz,
             samples_per_channel=sample_count,
             kernel_buffers=actual_kernel_buffers,
