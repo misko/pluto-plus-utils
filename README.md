@@ -832,6 +832,8 @@ and additionally require `--host-address`. Every plan is bound to the selected
 serial, enrolled endpoint and host key, fresh canonical-network-value digest, exact
 change set, expiry, and one-time token. Execution writes a private complete
 environment backup, performs one batch update, and verifies persistent read-back.
+Firmware with BusyBox `uuencode -m` but no `base64` applet is supported. A missing
+or failed encoder stops the operation before any persistent settings are written.
 
 Saving intentionally does **not** restart the radio. Before restarting after an
 Ethernet address change, update the daemon's `--iio-ip` target and the pinned-SSH

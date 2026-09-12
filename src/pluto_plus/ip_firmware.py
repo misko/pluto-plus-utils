@@ -429,7 +429,25 @@ printf 'PPU\tfit_size\t%s\n' "$actual"
 printf 'PPU\tfit_sha256\t%s\n' "$digest"
 """
 
-_NETWORK_INSPECT_SCRIPT = rb"""set -eu
+# Pluto BusyBox builds may provide uuencode -m without the base64 applet.
+# Capture encoder status before filtering its output: a pipeline can otherwise
+# hide a missing/failed encoder and allow a persistent write without a backup.
+_NETWORK_BASE64_HELPER = rb"""
+encode_base64() {
+  if command -v base64 >/dev/null 2>&1; then
+    encoded=$(base64) || return 1
+  elif command -v uuencode >/dev/null 2>&1; then
+    encoded=$(uuencode -m -) || return 1
+    encoded=$(printf '%s\n' "$encoded" | sed '1d;$d') || return 1
+  else
+    printf 'network configuration requires base64 or uuencode -m\n' >&2
+    return 1
+  fi
+  printf '%s' "$encoded" | tr -d '\n'
+}
+"""
+
+_NETWORK_INSPECT_SCRIPT = b"set -eu\n" + _NETWORK_BASE64_HELPER + rb"""
 serial_expected="$1"
 emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
 read_env() { fw_printenv -n "$1" 2>/dev/null || true; }
@@ -456,10 +474,9 @@ env_sha=$({
 } | sha256sum | awk '{print $1}')
 config_sha=$(sha256sum /opt/config.txt | awk '{print $1}')
 config_redacted=$(
-  sed -e 's/^\([[:space:]]*pwd_wlan[[:space:]]*=[[:space:]]*\).*$/\1<redacted>/' \
+  sed -e 's/^\([[:blank:]]*pwd_wlan[[:blank:]]*=[[:blank:]]*\).*$/\1<redacted>/' \
     /opt/config.txt |
-  base64 |
-  tr -d '\n'
+  encode_base64
 )
 emit serial "$serial"
 emit hostname "$hostname"
@@ -474,7 +491,7 @@ emit config_txt_sha256 "$config_sha"
 emit config_txt_redacted_b64 "$config_redacted"
 """
 
-_NETWORK_APPLY_SCRIPT = rb"""set -eu
+_NETWORK_APPLY_SCRIPT = b"set -eu\n" + _NETWORK_BASE64_HELPER + rb"""
 serial_expected="$1"; expected_digest="$2"; plan_id="$3"; shift 3
 emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
 read_env() { fw_printenv -n "$1" 2>/dev/null || true; }
@@ -502,7 +519,8 @@ fw_printenv >"$backup"
 chmod 600 "$backup"
 sync
 backup_sha=$(sha256sum "$backup" | awk '{print $1}')
-backup_b64=$(base64 "$backup" | tr -d '\n')
+backup_b64=$(encode_base64 <"$backup")
+test -n "$backup_b64"
 batch="$backup_dir/$plan_id.batch"
 : >"$batch"; chmod 600 "$batch"
 count=0
