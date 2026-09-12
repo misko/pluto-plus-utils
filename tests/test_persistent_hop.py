@@ -588,7 +588,7 @@ def test_client_accepts_canonical_physical_lan_uri_with_explicit_port() -> None:
     assert require_physical_lan_uri("ip:192.168.1.18:30432") == ("ip:192.168.1.18:30432")
 
 
-def test_client_rejects_wrong_and_excluded_serial_before_capture() -> None:
+def test_client_rejects_wrong_serial_before_capture() -> None:
     wrong = _Backend(URI, serial="wrong")
     with pytest.raises(PersistentHopClientError, match="does not match"):
         _client(wrong).start(
@@ -598,21 +598,26 @@ def test_client_rejects_wrong_and_excluded_serial_before_capture() -> None:
         )
     assert wrong.started_request is None and wrong.closed
 
-    with pytest.raises(ValueError, match="forbidden"):
-        PersistentHopClient(
-            URI,
-            expected_serial=PERSISTENT_HOP_EXCLUDED_SERIAL,
-            backend_factory=lambda _uri: wrong,
-        )
-
     excluded = _Backend(URI, serial=PERSISTENT_HOP_EXCLUDED_SERIAL)
-    with pytest.raises(PersistentHopClientError, match="forbidden"):
+    with pytest.raises(PersistentHopClientError, match="does not match"):
         _client(excluded).start(
             _plan(),
             session_id=SESSION_ID,
             tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
         )
     assert excluded.started_request is None and excluded.closed
+
+
+def test_client_accepts_exact_selected_formerly_excluded_serial() -> None:
+    backend = _Backend(URI, serial=PERSISTENT_HOP_EXCLUDED_SERIAL, blocks=(_wire_block(),))
+    session = _client(backend, expected_serial=PERSISTENT_HOP_EXCLUDED_SERIAL).start(
+        _plan(),
+        session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+    assert backend.started_request is not None
+    next(session.blocks())
+    session.close()
 
 
 def test_client_requires_every_exact_capability_literal() -> None:

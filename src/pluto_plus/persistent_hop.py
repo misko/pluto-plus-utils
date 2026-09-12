@@ -42,6 +42,8 @@ PERSISTENT_HOP_REQUIRED_FLAGS: Final = 0x03
 PERSISTENT_HOP_NONE_PROFILE: Final = 0xFF
 PERSISTENT_HOP_DUAL_RX_SCAN_MASK: Final = 0x0F
 PERSISTENT_HOP_METADATA_ABI: Final = "3"
+# Historical identifier retained for import compatibility. Radio admission now
+# uses the caller's exact serial and negotiated capabilities; it is not a denylist.
 PERSISTENT_HOP_EXCLUDED_SERIAL: Final = "104000bac4950008230026001b440a003a"
 PERSISTENT_HOP_CAPABILITIES: Final = (
     "iio,buffer-persistent-hop",
@@ -184,8 +186,6 @@ def require_physical_lan_uri(uri: str) -> str:
 def require_allowed_serial(serial: str) -> str:
     if not isinstance(serial, str) or not serial or serial != serial.strip():
         raise ValueError("persistent-hop serial must be one trimmed nonempty value")
-    if serial == PERSISTENT_HOP_EXCLUDED_SERIAL:
-        raise ValueError(f"persistent hopping is forbidden on excluded serial {serial}")
     return serial
 
 
@@ -1274,10 +1274,6 @@ class PersistentHopClient:
             opened = True
             attributes = dict(backend.context_attributes())
             observed_serial = attributes.get("hw_serial")
-            if observed_serial == PERSISTENT_HOP_EXCLUDED_SERIAL:
-                raise PersistentHopClientError(
-                    f"persistent hopping is forbidden on excluded serial {observed_serial}"
-                )
             if observed_serial != self.expected_serial:
                 raise PersistentHopClientError(
                     f"persistent-hop serial readback {observed_serial!r} does not match "

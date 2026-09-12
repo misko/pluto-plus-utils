@@ -18,7 +18,6 @@ from pluto_plus.hardware.iio_metadata import IioRawSidecarCaptureSession
 from pluto_plus.metadata_extension import PersistentHopMetadataExtension
 from pluto_plus.models import Transport
 from pluto_plus.persistent_hop import (
-    PERSISTENT_HOP_EXCLUDED_SERIAL,
     PERSISTENT_HOP_REQUEST_BYTES,
     PERSISTENT_HOP_STATUS_BYTES,
     PersistentHopBackend,
@@ -124,8 +123,7 @@ class IioPersistentHopBackend(PersistentHopBackend):
             raise
         identity = radio.identity
         if (
-            identity.serial == PERSISTENT_HOP_EXCLUDED_SERIAL
-            or identity.serial != self._expected_serial
+            identity.serial != self._expected_serial
             or identity.uri != self._uri
             or identity.transport is not Transport.IIO_IP
         ):

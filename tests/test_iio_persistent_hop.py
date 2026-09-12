@@ -286,6 +286,24 @@ class _FakeRadio:
         return snapshot
 
 
+@pytest.mark.parametrize("matching", [True, False])
+def test_backend_attests_newly_selected_radio_without_historical_denylist(matching):
+    selected = "104000bac4950008230026001b440a003a"
+    radio = _FakeRadio()
+    radio.identity = radio.identity.model_copy(update={"serial": selected})
+    backend = IioPersistentHopBackend(
+        URI, expected_serial=selected if matching else SERIAL,
+        iio_module=SimpleNamespace(), radio_factory=lambda *_: radio,
+    )
+    if matching:
+        backend.open()
+        backend.close()
+    else:
+        with pytest.raises(RuntimeError, match="identity does not match"):
+            backend.open()
+    assert radio.closed
+
+
 class _RecallMutatingFastlockRadio(_FakeRadio):
     """Model the AD9361 unlock workaround rewriting saved word 15 on recall."""
 
