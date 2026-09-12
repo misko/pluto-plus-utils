@@ -13,7 +13,11 @@ from typing import Any
 
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.base import DEFAULT_RESTORE_LO_SEARCH_HZ
-from pluto_plus.hardware.iio import IioRadioDevice, IioReceiverSettingsReadback
+from pluto_plus.hardware.iio import (
+    IioRadioDevice,
+    IioReceiverSettingsReadback,
+    _receiver_settings_restored,
+)
 from pluto_plus.hardware.iio_metadata import IioRawSidecarCaptureSession
 from pluto_plus.metadata_extension import PersistentHopMetadataExtension
 from pluto_plus.models import Transport
@@ -348,9 +352,15 @@ class IioPersistentHopBackend(PersistentHopBackend):
                 try:
                     restored = radio.restore_receiver_settings_readback(original)
                     fastlock_inactive = radio.read_active_rx_fastlock_profile() is None
-                    if restored != original or not fastlock_inactive:
+                    # Use the same settable-state check as the radio restore
+                    # operation. AGC gain readings can change after restoration;
+                    # retain both observations in the receipt rather than
+                    # confusing them with manual gain configuration.
+                    if not _receiver_settings_restored(original, restored) or not fastlock_inactive:
                         raise RadioConfigurationError(
-                            "persistent-hop host settings restoration was not exact"
+                            "persistent-hop host settings restoration was not exact: "
+                            f"expected={original!r} observed={restored!r} "
+                            f"fastlock_inactive={fastlock_inactive}"
                         )
                 except BaseException as error:
                     errors.append(error)

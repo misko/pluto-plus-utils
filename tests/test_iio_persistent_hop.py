@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from pluto_plus.direct_radio.usb import MetadataFlags, TimeAnchorFlags, TimeAnchorV1
+from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.iio import IioReceiverSettingsReadback
 from pluto_plus.hardware.iio_metadata import (
     IioBufferOpenClockBracket,
@@ -395,6 +396,66 @@ def test_backend_prearm_compiles_profiles_and_composes_exact_open_request(receiv
         zlib.crc32(bytes((slot + index) & 0xFF for index in range(16))) & 0xFFFFFFFF
         for slot in range(8)
     )
+
+
+@pytest.mark.parametrize("mode", [GainMode.SLOW_ATTACK, GainMode.FAST_ATTACK, GainMode.MANUAL])
+def test_backend_restoration_distinguishes_agc_observations_from_manual_settings(mode) -> None:
+    class GainReadbackRadio(_FakeRadio):
+        def restore_receiver_settings_readback(self, snapshot):
+            super().restore_receiver_settings_readback(snapshot)
+            return dataclasses.replace(snapshot, gain_db=(9.0, 13.0))
+
+    radio = GainReadbackRadio()
+    radio.original = dataclasses.replace(radio.original, gain_modes=(mode, mode))
+    backend = IioPersistentHopBackend(
+        URI, expected_serial=SERIAL, iio_module=SimpleNamespace(),
+        radio_factory=lambda _uri, _serial: radio,
+    )
+    backend.open()
+    backend.prepare_plan(_plan())
+    if mode is GainMode.MANUAL:
+        with pytest.raises(RadioConfigurationError, match="observed=.*gain_db=\\(9.0, 13.0\\)"):
+            backend.close()
+    else:
+        receipt = backend.close()
+        assert receipt is not None
+        assert receipt.original_settings.gain_db == (11.0, 12.0)
+        assert receipt.restored_settings.gain_db == (9.0, 13.0)
+        assert receipt.restored_settings.gain_modes == (mode.value, mode.value)
+        assert receipt.receive_buffer_closed and receipt.fastlock_inactive
+    assert radio.closed
+    assert backend.close() is None
+
+
+@pytest.mark.parametrize("changed", [
+    {"center_frequency_hz": 916_000_000.0},
+    {"sample_rate_hz": 2_000_000.0},
+    {"bandwidth_hz": 2_000_000.0},
+    {"channels": (1,), "gain_modes": (GainMode.SLOW_ATTACK,), "gain_db": (12.0,)},
+    {"gain_modes": (GainMode.FAST_ATTACK, GainMode.SLOW_ATTACK)},
+    {"active_profile": 3},
+])
+def test_backend_rejects_changed_restoration_configuration_and_closes_radio(changed) -> None:
+    class WrongReadbackRadio(_FakeRadio):
+        def restore_receiver_settings_readback(self, snapshot):
+            super().restore_receiver_settings_readback(snapshot)
+            self.active_profile = changed.get("active_profile")
+            return dataclasses.replace(
+                snapshot,
+                **{key: value for key, value in changed.items() if key != "active_profile"},
+            )
+
+    radio = WrongReadbackRadio()
+    backend = IioPersistentHopBackend(
+        URI, expected_serial=SERIAL, iio_module=SimpleNamespace(),
+        radio_factory=lambda _uri, _serial: radio,
+    )
+    backend.open()
+    backend.prepare_plan(_plan())
+    with pytest.raises(RadioConfigurationError, match="settings restoration was not exact"):
+        backend.close()
+    assert radio.closed
+    assert backend.close() is None
 
 
 def test_backend_crc_attests_stable_post_recall_fastlock_words() -> None:
