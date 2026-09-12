@@ -484,7 +484,14 @@ class CanonicalSetupManager:
             raise SetupPreconditionError("setup receipt does not require reconciliation")
         started = self._now()
         observation = self.inspect(original.identity)
-        if "reboot_observed" in original.completed_phases:
+        # Target-aware executors qualify phase names with the bounded boot
+        # profile. Keep legacy receipts valid without accepting arbitrary or
+        # different-target phase suffixes as evidence of an observed reboot.
+        reboot_phases = {"reboot_observed"} | {
+            f"reboot_observed:{profile.profile_id}"
+            for profile in setup_target_profile(original.target).environment_profiles
+        }
+        if reboot_phases.intersection(original.completed_phases):
             observation = observation.model_copy(update={"boot_provenance": "qspi_reboot_verified"})
         error: str | None = None
         try:

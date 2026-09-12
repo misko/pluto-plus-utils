@@ -31,6 +31,7 @@ from pluto_plus.diagnostic_profiles import (
     IQ_DIRECT_ASYNC_RING_V1_RC1_PROFILE,
     IQ_DIRECT_ASYNC_RING_V1_RELEASE_PROFILE,
     IQ_DIRECT_ASYNC_V2_RELEASE_PROFILE,
+    IQ_DIRECT_ASYNC_V4_RELEASE_PROFILE,
     SINGLE_RX_METADATA_RC1_PROFILE,
     TANDEM_AGC_V7_RELEASE_CANDIDATE_PROFILE,
     V5_PROFILE,
@@ -113,6 +114,7 @@ def test_metadata_abi_preserves_exact_observation(
         (IQ_DIRECT_ASYNC_RING_V1_RC1_PROFILE, 3, True),
         (IQ_DIRECT_ASYNC_RING_V1_RELEASE_PROFILE, 3, True),
         (IQ_DIRECT_ASYNC_V2_RELEASE_PROFILE, 3, True),
+        (IQ_DIRECT_ASYNC_V4_RELEASE_PROFILE, 3, True),
     ],
 )
 def test_known_profiles_are_accepted_without_changing_mutation_policy(

@@ -20,12 +20,14 @@ import math
 import struct
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import suppress
 from typing import Final, Protocol
 
 import numpy as np
 import numpy.typing as npt
 
 from pluto_plus.direct_radio.samples import ci16_dual_rx
+from pluto_plus.metadata_extension import PersistentHopMetadataExtension
 from pluto_plus.tandem import TandemSessionRequestV1
 
 PERSISTENT_HOP_PROTOCOL_VERSION: Final = 1
@@ -975,6 +977,7 @@ class PersistentHopWireBlock:
     evidence: bytes
     iq_payload: bytes
     stream_generation: int | None = None
+    extension_metadata: bytes | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1081,6 +1084,22 @@ class PersistentHopCancellationReceiptV1:
     final_counter: int
     restoration: PersistentHopRestorationReceiptV1
     host_lifecycle: PersistentHopHostLifecycleReceiptV1 | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PersistentHopFailureDiagnosticsV1:
+    """Read-only diagnostics after a failed iterator released its client.
+
+    This is not a capture or cancellation receipt and never attests IQ coverage.
+    A missing host lifecycle or any cleanup error does not prove restoration.
+    The optional status is decoded, terminal and bound to this session, but may
+    explicitly report continuity loss or failed restoration.
+    """
+
+    session_id: int
+    terminal_status: PersistentHopStatusV1 | None
+    host_lifecycle: PersistentHopHostLifecycleReceiptV1 | None
+    cleanup_errors: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1319,8 +1338,20 @@ class PersistentHopSession:
         self._stream_generation: int | None = None
         self._visits: list[PersistentHopVisitV1] = []
         self._receipt: PersistentHopSessionReceiptV1 | None = None
+        self._failure_diagnostics: PersistentHopFailureDiagnosticsV1 | None = None
         self._initial_status = initial_status
         self._start_clock_bracket = start_clock_bracket
+        self._metadata_extension: PersistentHopMetadataExtension | None = getattr(
+            backend, "metadata_extension", None
+        )
+        self._metadata_extension_error: str | None = getattr(
+            backend, "metadata_extension_error", None
+        )
+
+    @property
+    def metadata_extension_error(self) -> str | None:
+        """Advisory result faults are independent of the capture receipt."""
+        return self._metadata_extension_error
 
     @property
     def start_clock_bracket(self) -> PersistentHopStartClockBracketV1 | None:
@@ -1336,6 +1367,11 @@ class PersistentHopSession:
     @property
     def completed_visits(self) -> tuple[PersistentHopVisitV1, ...]:
         return tuple(self._visits)
+
+    @property
+    def failure_diagnostics(self) -> PersistentHopFailureDiagnosticsV1 | None:
+        """Retained cleanup evidence; never a substitute for ``receipt``."""
+        return self._failure_diagnostics
 
     @property
     def receipt(self) -> PersistentHopSessionReceiptV1:
@@ -1429,6 +1465,17 @@ class PersistentHopSession:
                     samples = ci16_dual_rx(wire.iq_payload)
                 except ValueError as error:
                     raise PersistentHopClientError(str(error)) from error
+                if (
+                    self._metadata_extension is not None
+                    and self._metadata_extension_error is None
+                    and wire.extension_metadata is not None
+                ):
+                    try:
+                        self._metadata_extension.consume(
+                            wire.extension_metadata, wire.iq_payload, evidence=evidence
+                        )
+                    except Exception as error:
+                        self._fail_metadata_extension(f"result consumption failed: {error}")
                 yield PersistentHopDecodedBlockV1(
                     evidence=evidence,
                     samples=samples,
@@ -1436,9 +1483,8 @@ class PersistentHopSession:
                 )
             self._finish_completed()
         except BaseException as error:
-            cleanup_error = self._cancel_after_failure()
-            if cleanup_error is not None:
-                error.add_note(f"persistent-hop cleanup also failed: {cleanup_error!r}")
+            for message in self._cancel_after_failure():
+                error.add_note(f"persistent-hop cleanup also failed: {message}")
             raise
 
     def cancel(self) -> PersistentHopCancellationReceiptV1:
@@ -1460,6 +1506,10 @@ class PersistentHopSession:
                 restoration=_restoration_receipt(status),
             )
             full_receipt = self._cancelled_full_receipt(status)
+            self._finish_metadata_extension(status)
+        except BaseException:
+            self._fail_metadata_extension("capture cancellation validation failed")
+            raise
         finally:
             host_lifecycle = self._release()
         assert receipt is not None and full_receipt is not None
@@ -1595,6 +1645,14 @@ class PersistentHopSession:
     def _finish_completed(self) -> None:
         status = PersistentHopStatusV1.unpack(self._backend.read_status())
         self._require_terminal_status(status, PersistentHopSessionState.COMPLETED)
+        if (
+            self._previous_block_sequence is None
+            or status.last_block_sequence != self._previous_block_sequence
+            or status.last_block_end_counter != self._previous_block_end
+        ):
+            raise PersistentHopClientError(
+                "persistent-hop completion status disagrees with delivered IQ"
+            )
         if not 1 <= status.visits_started <= self.request.dwell_count:
             raise PersistentHopClientError("persistent-hop completion has an invalid visit count")
         if status.events_emitted != status.visits_started:
@@ -1686,6 +1744,7 @@ class PersistentHopSession:
         )
         if not receipt.duty_target_met:
             raise PersistentHopClientError("persistent-hop session missed its minimum valid duty")
+        self._finish_metadata_extension(status)
         self._receipt = dataclasses.replace(
             receipt,
             host_lifecycle=self._release(),
@@ -1853,21 +1912,68 @@ class PersistentHopSession:
         if restoration.status != "restored":
             raise PersistentHopClientError("persistent-hop settings restoration was not attested")
 
-    def _cancel_after_failure(self) -> BaseException | None:
+    def _cancel_after_failure(self) -> tuple[str, ...]:
+        errors: list[str] = []
+        try:
+            self._fail_metadata_extension("capture validation failed")
+        except BaseException as error:
+            errors.append(f"metadata extension: {type(error).__name__}: {str(error)[:2048]}")
         if self._closed:
-            return None
+            return tuple(errors)
+        status: PersistentHopStatusV1 | None = None
+        host_lifecycle: PersistentHopHostLifecycleReceiptV1 | None = None
         try:
             self._backend.cancel()
-            status = PersistentHopStatusV1.unpack(self._backend.read_status())
-            if status.session_id != self.request.session_id:
+            observed = PersistentHopStatusV1.unpack(self._backend.read_status())
+            if observed.session_id != self.request.session_id:
                 raise PersistentHopClientError("cleanup status belongs to a different session")
+            if observed.state not in _TERMINAL_STATES:
+                raise PersistentHopClientError("cleanup status is not terminal")
+            status = observed
             if _restoration_receipt(status).status != "restored":
                 raise PersistentHopClientError("cleanup did not attest exact settings restoration")
         except BaseException as error:
-            return error
-        finally:
-            self._release()
-        return None
+            errors.append(f"cancel/status: {type(error).__name__}: {str(error)[:2048]}")
+        try:
+            host_lifecycle = self._release()
+        except BaseException as error:
+            errors.append(f"backend release: {type(error).__name__}: {str(error)[:2048]}")
+        # _release marks the client closed even if backend restoration failed.
+        # Retain both failures, and never let close replace the original IQ error.
+        self._failure_diagnostics = PersistentHopFailureDiagnosticsV1(
+            session_id=self.request.session_id,
+            terminal_status=status,
+            host_lifecycle=host_lifecycle,
+            cleanup_errors=tuple(errors),
+        )
+        return tuple(errors)
+
+    def _fail_metadata_extension(self, reason: str) -> None:
+        if self._metadata_extension is None:
+            return
+        if self._metadata_extension_error is None:
+            self._metadata_extension_error = reason
+        with suppress(Exception):
+            self._metadata_extension.fail(self._metadata_extension_error)
+
+    def _finish_metadata_extension(self, status: PersistentHopStatusV1) -> None:
+        extension = self._metadata_extension
+        if extension is None or self._metadata_extension_error is not None:
+            return
+
+        def drain(capacity: int) -> bytes:
+            callback = getattr(self._backend, "drain_metadata", None)
+            if not callable(callback):
+                raise NotImplementedError("backend lacks metadata-only drain")
+            result = callback(capacity)
+            if not isinstance(result, bytes) or not 0 < len(result) <= capacity:
+                raise ValueError("metadata-only drain returned an invalid byte payload")
+            return result
+
+        try:
+            extension.finish(status, drain)
+        except Exception as error:
+            self._fail_metadata_extension(f"terminal result drain failed: {error}")
 
     def _release(self) -> PersistentHopHostLifecycleReceiptV1 | None:
         if not self._closed:
@@ -1911,8 +2017,13 @@ def _sampled_visit_from_segments(
     )
     covered = sum(piece.shape[1] for piece in pieces)
     if covered != visit.valid_sample_count:
+        retained_start = segments[0][0] if segments else None
+        retained_end = segments[-1][1] if segments else None
         raise PersistentHopClientError(
-            "persistent-hop IQ blocks do not cover the attested valid visit"
+            "persistent-hop IQ blocks do not cover the attested valid visit: "
+            f"visit={visit.visit_index} expected={visit.valid_sample_count} "
+            f"covered={covered} valid=[{start},{end}) "
+            f"retained=[{retained_start},{retained_end}) segments={len(segments)}"
         )
     output = (
         pieces[0].copy()

@@ -15,7 +15,9 @@ from pluto_plus.doctor import (
 from pluto_plus.setup import (
     CanonicalSetupManager,
     SetupAuthorizationError,
+    SetupExecutionError,
     SetupExecutionResult,
+    SetupExecutorFailure,
     SetupHostKeyRotation,
     SetupIdentity,
     SetupObservation,
@@ -154,6 +156,60 @@ def test_setup_plan_is_exact_identity_environment_and_policy_bound(tmp_path: Pat
     assert "mode" not in planned.plan.changes
     assert planned.plan.tx_mute_required is False
     assert planned.plan.target is DEFAULT_SETUP_TARGET
+
+
+@pytest.mark.parametrize(
+    ("phase", "verified"),
+    (
+        ("reboot_observed", True),
+        ("reboot_observed:ad9361-2r2t-clear-attr-pair", True),
+        ("reboot_observed:ad9361-2r2t-set-attr-pair", True),
+        ("reboot_observed:ad9363a-1r1t-clear-attr-pair", False),
+        ("reboot_observed:unknown-profile", False),
+        ("mutation_dispatched:ad9361-2r2t-clear-attr-pair", False),
+    ),
+)
+def test_setup_reconciliation_recognizes_only_target_bound_reboot_phases(
+    tmp_path: Path, phase: str, verified: bool
+) -> None:
+    class InterruptedBackend(FakeSetupBackend):
+        def provision(self, plan: object) -> SetupExecutionResult:
+            super().provision(plan)
+            # A fresh inspector proves the image and runtime, while the original
+            # receipt is the evidence that the guarded executor observed reboot.
+            self.current = self.current.model_copy(
+                update={"boot_provenance": "qspi_image_verified"}
+            )
+            raise SetupExecutorFailure(
+                "SSH host key changed after reboot",
+                backup_path="backups/SERIAL_A-before.txt",
+                backup_sha256="4" * 64,
+                completed_phases=("preflight", "backup", phase),
+                failure_phase="post_reboot_attestation",
+                reconciliation_required=True,
+            )
+
+    backend = InterruptedBackend(_observation())
+    manager = CanonicalSetupManager(
+        receipt_directory=tmp_path / "receipts",
+        inspector=backend.inspect,
+        executor=backend,
+    )
+    planned = manager.create_plan(_identity())
+    with pytest.raises(SetupExecutionError) as caught:
+        manager.execute(planned.plan, planned.confirmation_token)
+    original = caught.value.receipt
+    # Exercise durable reload, as an operator does after LAN key enrollment.
+    resumed = CanonicalSetupManager(
+        receipt_directory=tmp_path / "receipts",
+        inspector=backend.inspect,
+        executor=backend,
+    )
+    reconciled = resumed.reconcile(original.receipt_id)
+    assert reconciled.success is verified
+    assert reconciled.reconciliation_of == original.receipt_id
+    assert len(backend.plans) == 1  # Reconciliation never retries the write.
+    assert original.completed_phases == ("preflight", "backup", phase)
 
 
 def test_setup_plan_binds_an_explicit_native_single_stream_target(tmp_path: Path) -> None:

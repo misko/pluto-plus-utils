@@ -508,6 +508,14 @@ class BoundSshTransport:
         if "REMOTE HOST IDENTIFICATION HAS CHANGED" in output:
             raise SetupSshHostKeyChangedError("pinned radio SSH host key changed after reboot")
         if closed_before_stdin:
+            # A missing/wrong-endpoint pin fails before the stdin handshake,
+            # just like a rotated key. Preserve the actionable trust failure
+            # without including remote transcript text or weakening SSH policy.
+            if "Host key verification failed" in output:
+                raise SetupHelperError(
+                    "radio SSH host-key verification failed before accepting stdin; "
+                    "check the pinned known-hosts entry for this endpoint"
+                )
             raise SetupHelperError("radio SSH closed before accepting stdin")
         # A reboot intentionally tears down SSH before it can return a status.
         rebooting = "/usr/sbin/device_reboot " in command

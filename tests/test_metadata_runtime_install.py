@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import pluto_plus.metadata_runtime_install as installer
+from pluto_plus.hardware.preflight import SCANNER_GLRT_RUNTIME_SOURCE_COMMIT
 
 
 def test_installed_entrypoint_uses_its_own_python_prefix(
@@ -68,6 +69,44 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     assert 'fetch --quiet --depth 1 origin "$source_ref"' in text
     assert "iio-gain-timeline-v8-rc1-source/libiio-v4" in text
     assert "98a5e6139459a01a5a42ca7cd3e98d807156b6b0" in text
+    assert SCANNER_GLRT_RUNTIME_SOURCE_COMMIT in text
+    assert 'remote add origin "$source_repository"' in text
+    assert '[[ "$actual_commit" == "$source_commit" ]]' in text
+
+
+@pytest.mark.parametrize("abi", ("1", "2", "4"))
+def test_scanner_runtime_rejects_other_metadata_abis_before_build(abi: str) -> None:
+    script = Path(__file__).parents[1] / "scripts/install_native_libiio.sh"
+    result = subprocess.run(
+        (str(script), "--metadata-abi", abi, "--scanner-glrt"),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "--scanner-glrt requires --metadata-abi 3" in result.stderr
+
+
+@pytest.mark.parametrize("repository", ("relative/repository", "/missing/pluto-libiio-source"))
+def test_runtime_rejects_invalid_local_source_before_build(repository: str) -> None:
+    script = Path(__file__).parents[1] / "scripts/install_native_libiio.sh"
+    result = subprocess.run(
+        (
+            str(script),
+            "--metadata-abi",
+            "3",
+            "--scanner-glrt",
+            "--source-repository",
+            repository,
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "existing absolute local directory" in result.stderr
 
 
 def test_source_installer_fails_fast_when_setuptools_is_missing(tmp_path: Path) -> None:

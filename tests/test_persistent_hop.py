@@ -271,6 +271,139 @@ def _client(backend: _Backend, *, expected_serial: str = SERIAL) -> PersistentHo
     )
 
 
+class _MetadataExtension:
+    def __init__(self, backend: _Backend, fault: str | None = None) -> None:
+        self.backend, self.fault = backend, fault
+        self.consumed: list[int] = []
+        self.finished: list[int] = []
+        self.errors: list[str] = []
+
+    def consume(self, metadata: bytes, iq: bytes, *, evidence: PersistentHopEvidenceV1) -> None:
+        assert metadata == b"envelope"
+        assert len(iq) == (evidence.block_end_counter_exclusive - evidence.block_first_counter) * 8
+        assert not self.backend.closed
+        self.consumed.append(evidence.buffer_sequence)
+        if self.fault == "consume":
+            raise ValueError("injected result fault")
+
+    def finish(self, status: PersistentHopStatusV1, drain: object) -> None:
+        assert not self.backend.closed
+        assert callable(drain)
+        assert drain(65536) == b"final"
+        self.finished.append(status.visits_started)
+        if self.fault == "finish":
+            raise OSError("injected drain fault")
+
+    def fail(self, reason: str) -> None:
+        self.errors.append(reason)
+        if self.fault == "fail":
+            raise RuntimeError("failure reporter also failed")
+
+
+def _extension_session(
+    fault: str | None = None,
+) -> tuple[PersistentHopSession, _Backend, _MetadataExtension]:
+    plan = _plan()
+    request = dataclasses.replace(
+        plan.request(session_id=SESSION_ID), dwell_count=1, capture_span_samples=300_000
+    )
+    wire = dataclasses.replace(_wire_block(end_counter=301_011), extension_metadata=b"envelope")
+    backend = _Backend(URI, blocks=(wire,))
+    extension = _MetadataExtension(backend, fault)
+    backend.metadata_extension = extension
+    backend.drain_metadata = lambda capacity: b"final" if capacity == 65536 else b"bad"
+    backend.statuses = [
+        dataclasses.replace(
+            _cancelled_status(),
+            state=PersistentHopSessionState.COMPLETED,
+            reason=PersistentHopTerminalReason.PLAN_COMPLETE,
+            planned_dwells=1,
+            final_counter=301_011,
+            last_block_end_counter=301_011,
+            restore_before_counter=301_011,
+            restore_after_counter=301_012,
+        )
+    ]
+    session = PersistentHopSession(
+        _client(backend), backend, plan, request,
+        dataclasses.replace(_active_status(), planned_dwells=1),
+    )
+    return session, backend, extension
+
+
+@pytest.mark.parametrize("fault", [None, "consume", "finish"])
+def test_metadata_extension_finishes_before_close_without_changing_iq_receipt(fault: str | None):
+    session, backend, extension = _extension_session(fault)
+    visits = list(session.visits())
+    assert len(visits) == 1 and visits[0].samples.shape == (2, 300_000)
+    assert np.count_nonzero(visits[0].samples) == 0
+    assert session.receipt.capture_outcome == "complete"
+    assert session.receipt.valid_sample_count == 300_000
+    assert session.receipt.missing_sample_count == 0
+    assert extension.consumed == [0]
+    assert extension.finished == ([] if fault == "consume" else [1])
+    assert bool(session.metadata_extension_error) == bool(fault)
+    assert bool(extension.errors) == bool(fault)
+    assert backend.closed and not backend.cancelled
+
+
+def test_visit_coverage_failure_reports_bounded_counter_geometry():
+    session, backend, _extension = _extension_session()
+    wire = backend.wire_blocks[0]
+    evidence = PersistentHopEvidenceV1.unpack(wire.evidence)
+    first = evidence.events[0].invalid_end_counter_exclusive + 17
+    skipped = first - evidence.block_first_counter
+    backend.wire_blocks = (
+        dataclasses.replace(
+            wire,
+            evidence=dataclasses.replace(evidence, block_first_counter=first).pack(),
+            iq_payload=wire.iq_payload[skipped * 8 :],
+        ),
+    )
+    with pytest.raises(
+        PersistentHopClientError,
+        match=r"visit=0.*expected=300000.*covered=299983.*retained=",
+    ):
+        list(session.visits())
+    assert backend.closed
+
+
+@pytest.mark.parametrize("corruption", ["iq", "hops", "terminal", "fail"])
+def test_metadata_extension_never_accepts_invalid_capture_evidence(corruption: str):
+    session, backend, extension = _extension_session(corruption)
+    wire = backend.wire_blocks[0]
+    if corruption in {"iq", "fail"}:
+        backend.wire_blocks = (dataclasses.replace(wire, iq_payload=b"short"),)
+    elif corruption == "hops":
+        bad = dataclasses.replace(PersistentHopEvidenceV1.unpack(wire.evidence), session_id=99)
+        backend.wire_blocks = (dataclasses.replace(wire, evidence=bad.pack()),)
+    else:
+        backend.statuses[0] = dataclasses.replace(backend.statuses[0], last_block_sequence=1)
+        backend.statuses.append(_cancelled_status())
+    with pytest.raises(PersistentHopClientError):
+        list(session.visits())
+    assert extension.consumed == ([0] if corruption == "terminal" else [])
+    assert not extension.finished
+    assert extension.errors and session.metadata_extension_error
+    assert backend.closed and backend.cancelled
+
+
+def test_metadata_extension_cancel_drains_after_validating_partial_capture():
+    session, backend, extension = _extension_session()
+    backend.wire_blocks = (
+        dataclasses.replace(_wire_block(), extension_metadata=b"envelope"),
+    )
+    backend.statuses = [dataclasses.replace(_cancelled_status(), planned_dwells=1)]
+    blocks = session.blocks()
+    next(blocks)
+    receipt = session.cancel()
+    assert receipt.visits_started == 1
+    assert extension.consumed == [0] and extension.finished == [1]
+    assert not extension.errors
+    assert session.receipt.capture_outcome == "cancelled"
+    assert backend.closed
+
+
 def test_hopr_layout_round_trips_exact_final_wire() -> None:
     request = _plan().request(session_id=SESSION_ID)
     payload = request.pack()
@@ -800,3 +933,143 @@ def test_client_rejects_abi3_stream_generation_change() -> None:
     with pytest.raises(PersistentHopClientError, match="stream generation changed"):
         list(session.blocks())
     assert backend.cancelled and backend.closed
+
+
+@pytest.mark.parametrize("cleanup_fault", ["none", "cancel", "status", "close", "both"])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_failed_capture_keeps_primary_error_and_released_cleanup_diagnostics(
+    cleanup_fault: str,
+    interrupted: bool,
+) -> None:
+    primary = KeyboardInterrupt("capture interrupted") if interrupted else OSError(84, "IQ gap")
+
+    class Backend(_Backend):
+        close_count = 0
+
+        def blocks(self) -> Iterator[PersistentHopWireBlock]:
+            yield _wire_block()
+            raise primary
+
+        def cancel(self) -> None:
+            super().cancel()
+            if cleanup_fault in {"cancel", "both"}:
+                raise RuntimeError("cancel transport failed")
+
+        def read_status(self) -> bytes:
+            if self.cancelled and cleanup_fault == "status":
+                raise RuntimeError("terminal transport failed")
+            return super().read_status()
+
+        def close(self) -> None:
+            self.close_count += 1
+            super().close()
+            if cleanup_fault in {"close", "both"}:
+                raise RuntimeError("host restoration failed")
+
+    backend = Backend(URI)
+    status = dataclasses.replace(
+        _cancelled_status(),
+        state=PersistentHopSessionState.FAILED,
+        reason=PersistentHopTerminalReason.COUNTER_DISCONTINUITY,
+        error_code=-84,
+        flags=_cancelled_status().flags | PersistentHopStatusFlag.CONTINUITY_FAULT,
+    )
+    backend.statuses[-1] = status
+    session = _client(backend).start(
+        _plan(),
+        session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+    blocks = session.blocks()
+    first = next(blocks)
+    assert first.evidence.block_first_counter == 1_000
+    with pytest.raises(type(primary)) as caught:
+        next(blocks)
+    assert caught.value is primary
+    assert backend.cancelled and backend.closed and backend.close_count == 1
+    diagnostic = session.failure_diagnostics
+    assert diagnostic is not None and diagnostic.session_id == SESSION_ID
+    assert diagnostic.terminal_status == (
+        None if cleanup_fault in {"cancel", "status", "both"} else status
+    )
+    assert diagnostic.host_lifecycle is None  # This minimal backend supplies none.
+    assert len(diagnostic.cleanup_errors) == (
+        0 if cleanup_fault == "none" else 2 if cleanup_fault == "both" else 1
+    )
+    assert all(message in "\n".join(primary.__notes__) for message in diagnostic.cleanup_errors)
+    assert session.close() is None and backend.close_count == 1
+    with pytest.raises(PersistentHopClientError, match="no terminal receipt"):
+        _ = session.receipt
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        diagnostic.session_id = 3  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("status_kind", ["foreign", "active", "restore_failed"])
+def test_failure_diagnostics_never_attest_wrong_session_or_nonterminal_status(
+    status_kind: str,
+) -> None:
+    backend = _Backend(URI, blocks=(_wire_block(buffer_sequence=5),))
+    status = _cancelled_status()
+    if status_kind == "foreign":
+        status = dataclasses.replace(status, session_id=SESSION_ID + 1)
+    elif status_kind == "active":
+        status = _active_status()
+    else:
+        status = dataclasses.replace(
+            status,
+            flags=status.flags & ~PersistentHopStatusFlag.RESTORE_SUCCEEDED,
+            state=PersistentHopSessionState.FAILED,
+            reason=PersistentHopTerminalReason.RESTORE_ERROR,
+            error_code=-5,
+            restore_error_code=-5,
+        )
+    backend.statuses[-1] = status
+    session = _client(backend).start(
+        _plan(),
+        session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+    assert session.failure_diagnostics is None
+    with pytest.raises(PersistentHopClientError, match="buffer sequence"):
+        list(session.blocks())
+    diagnostic = session.failure_diagnostics
+    assert diagnostic is not None
+    assert diagnostic.terminal_status == (status if status_kind == "restore_failed" else None)
+    assert len(diagnostic.cleanup_errors) == 1
+    assert backend.closed
+
+
+def test_failure_diagnostics_retain_successful_host_lifecycle_without_iq_receipt() -> None:
+    from pluto_plus.persistent_hop import (
+        PersistentHopHostLifecycleReceiptV1,
+        PersistentHopReceiverSettingsV1,
+    )
+
+    settings = PersistentHopReceiverSettingsV1(
+        center_frequency_hz=915_000_000,
+        sample_rate_hz=2_500_000,
+        bandwidth_hz=2_500_000,
+        channels=(0, 1),
+        gain_modes=("manual", "manual"),
+        gain_db=(40.0, 40.0),
+    )
+    lifecycle = PersistentHopHostLifecycleReceiptV1(settings, settings, True, True)
+
+    class Backend(_Backend):
+        def close(self) -> PersistentHopHostLifecycleReceiptV1:
+            super().close()
+            return lifecycle
+
+    backend = Backend(URI, blocks=(_wire_block(buffer_sequence=5),))
+    session = _client(backend).start(
+        _plan(), session_id=SESSION_ID,
+        tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+    )
+    with pytest.raises(PersistentHopClientError, match="buffer sequence"):
+        list(session.blocks())
+    diagnostic = session.failure_diagnostics
+    assert diagnostic is not None and diagnostic.host_lifecycle is lifecycle
+    assert diagnostic.terminal_status == _cancelled_status()
+    assert diagnostic.cleanup_errors == ()
+    with pytest.raises(PersistentHopClientError, match="no terminal receipt"):
+        _ = session.receipt

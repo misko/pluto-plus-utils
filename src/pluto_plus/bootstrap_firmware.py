@@ -23,7 +23,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -177,6 +177,21 @@ SINGLE_RX_DETECTOR_ONLY_LAYOUT = StandaloneIioLayout(
     device_tree_contract="detector-only",
 )
 
+# The stripped GLRT image exposes its samples through starlink-glrt-iq; its
+# cf-ad9361-lpc device has no scan elements, although the RX DMA DT node is on.
+GLRT_STRIPPED_RX_ONLY_LAYOUT = StandaloneIioLayout(
+    layout_id="glrt-stripped-rx-only-v1",
+    rx_scan_channels=(),
+    dds_present=False,
+    tandem_agc=False,
+    tx_hardwaregain_count=1,
+    tx_scan_count=0,
+    tx_dds_tone_count=0,
+    minimum_buffer_count=1,
+    tx_lo_powerdown_count=1,
+    device_tree_contract="rx-only",
+)
+
 _IIO_LAYOUTS = {
     layout.layout_id: layout
     for layout in (
@@ -184,6 +199,7 @@ _IIO_LAYOUTS = {
         SINGLE_RX_TX_CAPABLE_LAYOUT,
         SINGLE_RX_RX_ONLY_LAYOUT,
         SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+        GLRT_STRIPPED_RX_ONLY_LAYOUT,
     )
 }
 
@@ -866,6 +882,20 @@ STANDALONE_FLASH_PROFILES = {
 }
 
 
+# Reuse the qualified v0.49 bytes and every return-side capability requirement.
+# This distinct transition authorizes only the observed stripped source, without
+# relaxing the ordinary v0.49 promotion profile or qualifying new firmware bytes.
+_GLRT_V049_RESTORE_ID = "iq-direct-async-v4-from-glrt-stripped-restore"
+STANDALONE_FLASH_PROFILES[_GLRT_V049_RESTORE_ID] = replace(
+    STANDALONE_FLASH_PROFILES[IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY.profile_id],
+    policy=IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY.model_copy(
+        update={"profile_id": _GLRT_V049_RESTORE_ID}
+    ),
+    source_iio_layout=GLRT_STRIPPED_RX_ONLY_LAYOUT,
+    allowed_before_firmwares=("glrt-native-exact-r60000000-stripped-v1",),
+)
+
+
 def _layout_tandem(profile: StandaloneFlashProfile, layout: StandaloneIioLayout) -> bool:
     return profile.tandem_agc if layout.tandem_agc is None else layout.tandem_agc
 
@@ -910,6 +940,8 @@ def _require_iio_layout_shape(
         raise BootstrapFirmwareError(
             f"{transport} runtime lacks the required AD936x PHY/RX IIO devices"
         )
+    if layout is GLRT_STRIPPED_RX_ONLY_LAYOUT and "starlink-glrt-iq" not in names:
+        raise BootstrapFirmwareError(f"{transport} runtime lacks the GLRT IQ device")
     raw_scan = facts.get("cf-ad9361-lpc,scan_channels", ())
     scan = (
         {str(value) for value in raw_scan}

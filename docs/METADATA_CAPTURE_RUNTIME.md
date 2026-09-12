@@ -256,7 +256,7 @@ An installed release can invoke the same package-owned script through
 release-sealed, non-symlink executable; the installer never upgrades pip or
 setuptools and never falls back to an ambient `uv`.
 
-The installer resolves an immutable Git tag, verifies its exact commit, builds
+The installer resolves an immutable Git source ref, verifies its exact commit, builds
 native and Python pieces together, and validates the `MetadataBuffer`
 constructor for the selected ABI. It writes a release-local
 `share/pluto-plus-utils/metadata-runtime.json` receipt containing both installed
@@ -266,6 +266,30 @@ loaded native and Python paths, and checks the constructor ABI before radio
 capture. `begin_metadata_capture()` invokes this gate automatically. A missing
 or mismatched receipt is an admission failure; ambient stock libiio is never a
 fallback.
+
+### Opt-in scanner GLRT/adaptive host runtime
+
+The original ABI-3 source pin remains the default. Scanner GLRT's terminal
+result drain requires the newer host runtime, selected explicitly by adding
+`--scanner-glrt` to the ABI-3 installer command. This selects exactly
+`a1088b61de3c57762cfed5533e1baf8076a7b726`; it is rejected for other metadata ABIs.
+The verifier accepts this additional pinned ABI-3 runtime and checks the public
+cancel, status and metadata-drain method signatures as well as the existing
+native/binding hashes and loaded paths. The receipt schema and metadata
+constructor are unchanged; arbitrary source commits are still rejected.
+
+Before that commit is available remotely, an isolated canary environment can
+install from `--source-repository /absolute/path/to/libiio-checkout`. This fetches
+only the pinned committed objects into a temporary detached checkout. It cannot
+select another commit, build dirty working-tree edits or override the hashes.
+Use a separate virtual environment; do not replace a running release's library.
+
+This is host userspace packaging, not a firmware/FPGA change or proof of live
+scanner duty. The radio still needs the canonical four I/Q scan elements for
+dual-RX recording, the compatible persistent-hop provider, and normal exclusive
+ownership/admission checks. Production release staging and its inventory pin
+must explicitly qualify the same runtime before promotion; this option alone
+does not enable the detector or adaptive mode.
 
 Staging should record and compare all of the following before opening a radio:
 
