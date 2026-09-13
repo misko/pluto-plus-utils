@@ -1375,6 +1375,17 @@ class IioRawSidecarCaptureSession:
             extension_metadata=extension_metadata,
         )
 
+    def submit_metadata_feedback(self, payload: bytes) -> None:
+        """Submit on the owned buffer; the acquisition owner serializes calls."""
+        if not isinstance(payload, bytes) or not 0 < len(payload) <= 256:
+            raise ValueError("metadata feedback requires 1..256 bytes")
+        if self._buffer is None:
+            raise RuntimeError("raw sidecar metadata capture is not open")
+        submit = getattr(self._buffer, "submit_metadata_feedback", None)
+        if not callable(submit):
+            raise NotImplementedError("installed pylibiio lacks owned-buffer feedback")
+        submit(payload)
+
     def drain_metadata(self, capacity: int = DEFAULT_METADATA_CAPACITY) -> bytes:
         """Metadata only: never refill or replace the last received IQ block."""
         if type(capacity) is not int or not 1 <= capacity <= 65536:

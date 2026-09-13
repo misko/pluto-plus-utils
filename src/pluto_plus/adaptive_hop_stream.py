@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 from collections import deque
+from collections.abc import Callable
+from typing import Generic, Protocol, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -16,6 +18,7 @@ import numpy.typing as npt
 from .adaptive_hop import (
     AdaptiveHopChoiceV2,
     AdaptiveHopEvidenceV2,
+    AdaptiveHopPolicyV2,
     AdaptiveHopRequestV2,
     AdaptiveHopStatusV2,
 )
@@ -24,9 +27,12 @@ from .persistent_hop import (
     PersistentHopClientError,
     PersistentHopEventKind,
     PersistentHopEventV1,
+    PersistentHopEvidenceV1,
     PersistentHopProfileV1,
+    PersistentHopRequestV1,
     PersistentHopSessionState,
     PersistentHopStatusFlag,
+    PersistentHopStatusV1,
     PersistentHopTargetCoverageV1,
     PersistentHopWireBlock,
 )
@@ -38,6 +44,26 @@ _TERMINAL = {
     PersistentHopSessionState.CANCELLED,
     PersistentHopSessionState.FAILED,
 }
+
+
+class _Request(Protocol):
+    @property
+    def geometry(self) -> PersistentHopRequestV1: ...
+    @property
+    def policy(self) -> AdaptiveHopPolicyV2: ...
+    def pack(self) -> bytes: ...
+
+
+class _Status(Protocol):
+    @property
+    def geometry(self) -> PersistentHopStatusV1: ...
+    def pack(self) -> bytes: ...
+
+
+_R = TypeVar("_R", bound=_Request)
+_S = TypeVar("_S", bound=_Status)
+_V = TypeVar("_V")
+_T = TypeVar("_T")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -72,7 +98,7 @@ class AdaptiveHopSampledVisitV2:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class AdaptiveHopStreamReceiptV2:
+class _AdaptiveHopStreamReceipt(Generic[_R, _S]):
     """Stream facts, not proof of host cleanup, detector quality or publication.
 
     On cancellation, unclassified time is never reported as a complete dwell.
@@ -80,8 +106,8 @@ class AdaptiveHopStreamReceiptV2:
     Both-RX samples count once in duty, not twice.
     """
 
-    request: AdaptiveHopRequestV2
-    status: AdaptiveHopStatusV2
+    request: _R
+    status: _S
     stream_generation: int | None
     visits: tuple[AdaptiveHopVisitV2, ...]
     events: tuple[PersistentHopEventV1, ...]
@@ -97,7 +123,14 @@ class AdaptiveHopStreamReceiptV2:
     source_span_attested: bool
 
 
-class AdaptiveHopStreamV2:
+@dataclasses.dataclass(frozen=True, slots=True)
+class AdaptiveHopStreamReceiptV2(
+    _AdaptiveHopStreamReceipt[AdaptiveHopRequestV2, AdaptiveHopStatusV2]
+):
+    """Explicit major-2 dual-RX stream receipt."""
+
+
+class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
     """Single-owner consumer. A malformed block permanently poisons the stream.
 
     Retains bounded IQ plus at most the requested 2,500 event/decision records.
@@ -106,13 +139,30 @@ class AdaptiveHopStreamV2:
 
     def __init__(
         self,
-        request: AdaptiveHopRequestV2,
+        request: _R,
         *,
+        request_type: type[_R],
+        status_type: type[_S],
+        decode_evidence: Callable[
+            [bytes, _R], tuple[PersistentHopEvidenceV1, tuple[AdaptiveHopChoiceV2, ...]]
+        ],
+        decode_samples: Callable[[bytes], npt.NDArray[np.complex64]],
+        bytes_per_sample: int,
+        sampled_visit: Callable[[AdaptiveHopVisitV2, npt.NDArray[np.complex64]], _V],
+        receipt: Callable[..., _T],
         samples_per_block: int,
         minimum_valid_duty_ppm: int = 900_000,
         maximum_event_lag_blocks: int = 2,
     ) -> None:
+        if type(request) is not request_type:
+            raise PersistentHopClientError("adaptive stream request major mismatch")
         request.pack()
+        self._status_type = status_type
+        self._decode_evidence = decode_evidence
+        self._decode_samples = decode_samples
+        self._bytes_per_sample = bytes_per_sample
+        self._sampled_visit = sampled_visit
+        self._make_receipt = receipt
         if (
             type(samples_per_block) is not int
             or not 0 < samples_per_block <= 1 << 24
@@ -134,17 +184,21 @@ class AdaptiveHopStreamV2:
         self._choices: list[AdaptiveHopChoiceV2] = []
         self._visits: list[AdaptiveHopVisitV2] = []
         self._emitted = 0
-        self._previous: AdaptiveHopEvidenceV2 | None = None
+        self._previous: PersistentHopEvidenceV1 | None = None
         self._first_block_counter: int | None = None
         self._generation: int | None = None
         self._failed = False
-        self._receipt: AdaptiveHopStreamReceiptV2 | None = None
+        self._receipt: _T | None = None
+
+    @property
+    def stream_generation(self) -> int | None:
+        return self._generation
 
     @property
     def retained_sample_count(self) -> int:
         return sum(end - start for start, end, _ in self._segments)
 
-    def feed(self, wire: PersistentHopWireBlock) -> tuple[AdaptiveHopSampledVisitV2, ...]:
+    def feed(self, wire: PersistentHopWireBlock) -> tuple[_V, ...]:
         self._require_open()
         try:
             return self._feed(wire)
@@ -153,11 +207,9 @@ class AdaptiveHopStreamV2:
             self._segments.clear()
             raise
 
-    def _feed(self, wire: PersistentHopWireBlock) -> tuple[AdaptiveHopSampledVisitV2, ...]:
-        evidence = AdaptiveHopEvidenceV2.unpack(wire.evidence)
-        evidence.validate_binding(self.request)
-        base = evidence.geometry
-        previous = self._previous.geometry if self._previous is not None else None
+    def _feed(self, wire: PersistentHopWireBlock) -> tuple[_V, ...]:
+        base, choices = self._decode_evidence(wire.evidence, self.request)
+        previous = self._previous
         if base.flags & _LOST or base.state not in {PersistentHopSessionState.RUNNING, *_TERMINAL}:
             raise PersistentHopClientError("adaptive stream reports lost/invalid capture state")
         if previous is not None and previous.state in _TERMINAL:
@@ -170,8 +222,8 @@ class AdaptiveHopStreamV2:
         ):
             raise PersistentHopClientError("adaptive block counters are not contiguous")
         count = base.block_end_counter_exclusive - base.block_first_counter
-        if count > self.samples_per_block or len(wire.iq_payload) != count * 8:
-            raise PersistentHopClientError("adaptive dual-RX IQ length disagrees with block bounds")
+        if count > self.samples_per_block or len(wire.iq_payload) != count * self._bytes_per_sample:
+            raise PersistentHopClientError("adaptive IQ length disagrees with block bounds")
         generation = wire.stream_generation
         if type(generation) is not int or not 0 < generation < 1 << 64:
             raise PersistentHopClientError("adaptive ABI-3 stream generation is missing/invalid")
@@ -180,16 +232,16 @@ class AdaptiveHopStreamV2:
         if self._first_block_counter is None:
             self._first_block_counter = base.block_first_counter
         self._generation = generation
-        for event, choice in zip(base.events, evidence.choices, strict=True):
+        for event, choice in zip(base.events, choices, strict=True):
             self._accept_event(event, choice)
         self._segments.append(
             (
                 base.block_first_counter,
                 base.block_end_counter_exclusive,
-                ci16_dual_rx(wire.iq_payload),
+                self._decode_samples(wire.iq_payload),
             )
         )
-        self._previous = evidence
+        self._previous = base
         output = self._emit_ready()
         retain_from = (
             self._visits[self._emitted].valid_start_counter
@@ -261,7 +313,7 @@ class AdaptiveHopStreamV2:
             )
         )
 
-    def _emit_ready(self) -> tuple[AdaptiveHopSampledVisitV2, ...]:
+    def _emit_ready(self) -> tuple[_V, ...]:
         output = []
         while self._emitted < len(self._visits):
             visit = self._visits[self._emitted]
@@ -283,7 +335,7 @@ class AdaptiveHopStreamV2:
                     "adaptive IQ does not cover the complete valid dwell"
                 )
             samples = pieces[0].copy() if len(pieces) == 1 else np.concatenate(pieces, axis=1)
-            output.append(AdaptiveHopSampledVisitV2(visit, samples))
+            output.append(self._sampled_visit(visit, samples))
             self._emitted += 1
             self._trim(visit.valid_end_counter_exclusive)
         return tuple(output)
@@ -295,9 +347,7 @@ class AdaptiveHopStreamV2:
             start, end, samples = self._segments[0]
             self._segments[0] = (first, end, samples[:, first - start :])
 
-    def finish(
-        self, status: AdaptiveHopStatusV2
-    ) -> tuple[AdaptiveHopStreamReceiptV2, tuple[AdaptiveHopSampledVisitV2, ...]]:
+    def finish(self, status: _S) -> tuple[_T, tuple[_V, ...]]:
         self._require_open()
         try:
             return self._finish(status)
@@ -306,9 +356,9 @@ class AdaptiveHopStreamV2:
             self._segments.clear()
             raise
 
-    def _finish(
-        self, wrapped: AdaptiveHopStatusV2
-    ) -> tuple[AdaptiveHopStreamReceiptV2, tuple[AdaptiveHopSampledVisitV2, ...]]:
+    def _finish(self, wrapped: _S) -> tuple[_T, tuple[_V, ...]]:
+        if type(wrapped) is not self._status_type:
+            raise PersistentHopClientError("adaptive terminal status major mismatch")
         wrapped.pack()
         status = wrapped.geometry
         geometry = self.request.geometry
@@ -325,7 +375,7 @@ class AdaptiveHopStreamV2:
             raise PersistentHopClientError(
                 "adaptive terminal identity/inventory/restoration is invalid"
             )
-        previous = self._previous.geometry if self._previous is not None else None
+        previous = self._previous
         if previous is not None and (
             status.last_block_sequence != previous.buffer_sequence
             or status.last_block_end_counter != previous.block_end_counter_exclusive
@@ -416,7 +466,7 @@ class AdaptiveHopStreamV2:
             )
             for profile in geometry.profiles
         )
-        receipt = AdaptiveHopStreamReceiptV2(
+        receipt = self._make_receipt(
             self.request,
             wrapped,
             self._generation,
@@ -446,3 +496,44 @@ class AdaptiveHopStreamV2:
     def _require_open(self) -> None:
         if self._failed or self._receipt is not None:
             raise PersistentHopClientError("adaptive stream is failed or already finished")
+
+
+def _decode_v2(
+    payload: bytes, request: AdaptiveHopRequestV2
+) -> tuple[PersistentHopEvidenceV1, tuple[AdaptiveHopChoiceV2, ...]]:
+    evidence = AdaptiveHopEvidenceV2.unpack(payload)
+    evidence.validate_binding(request)
+    return evidence.geometry, evidence.choices
+
+
+class AdaptiveHopStreamV2(
+    _AdaptiveHopStream[
+        AdaptiveHopRequestV2,
+        AdaptiveHopStatusV2,
+        AdaptiveHopSampledVisitV2,
+        AdaptiveHopStreamReceiptV2,
+    ]
+):
+    """Explicit major-2 dual-RX reconstruction over the shared counter engine."""
+
+    def __init__(
+        self,
+        request: AdaptiveHopRequestV2,
+        *,
+        samples_per_block: int,
+        minimum_valid_duty_ppm: int = 900_000,
+        maximum_event_lag_blocks: int = 2,
+    ) -> None:
+        super().__init__(
+            request,
+            request_type=AdaptiveHopRequestV2,
+            status_type=AdaptiveHopStatusV2,
+            decode_evidence=_decode_v2,
+            decode_samples=ci16_dual_rx,
+            bytes_per_sample=8,
+            sampled_visit=AdaptiveHopSampledVisitV2,
+            receipt=AdaptiveHopStreamReceiptV2,
+            samples_per_block=samples_per_block,
+            minimum_valid_duty_ppm=minimum_valid_duty_ppm,
+            maximum_event_lag_blocks=maximum_event_lag_blocks,
+        )

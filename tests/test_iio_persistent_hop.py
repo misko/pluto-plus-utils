@@ -627,6 +627,8 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         return b"terminal metadata"
 
     buffer.drain_metadata = drain
+    feedback_packets = []
+    buffer.submit_metadata_feedback = feedback_packets.append
 
     def factory(*args: Any) -> _FakeMetadataBuffer:
         calls.append(args)
@@ -695,6 +697,12 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert session.drain_metadata() == b"terminal metadata"
     assert drains == [65536]
     assert not buffer.refilled and buffer.iq == block.iq_payload
+    session.submit_metadata_feedback(b"source-bound feedback")
+    assert feedback_packets == [b"source-bound feedback"]
+    assert not buffer.refilled and buffer.iq == block.iq_payload
+    for bad in (b"", bytes(257), "not bytes"):
+        with pytest.raises(ValueError, match="feedback"):
+            session.submit_metadata_feedback(bad)
     assert session.read_status() == _status(PersistentHopSessionState.RUNNING)
     parsed_base.enabled_scan_mask ^= 0x0F
     with pytest.raises(RuntimeError, match="geometry disagrees"):
@@ -704,6 +712,8 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert not buffer.generic_cancelled
     session.close()
     assert buffer.closed
+    with pytest.raises(RuntimeError, match="not open"):
+        session.submit_metadata_feedback(b"closed")
 
 
 @pytest.mark.parametrize("mode", ["wrapped", "unsupported", "exception", "invalid"])

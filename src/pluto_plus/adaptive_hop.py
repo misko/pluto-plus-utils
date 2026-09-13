@@ -281,34 +281,44 @@ class AdaptiveHopEvidenceV2:
         """Per-record binding only; does not assert cross-frame continuity."""
         request.pack()
         self.pack()
-        if self.geometry.session_id != request.geometry.session_id:
-            raise PersistentHopProtocolError("adaptive session identity mismatch")
-        previous = None
-        for event, choice in zip(self.geometry.events, self.choices, strict=True):
-            profile = request.geometry.profiles[event.to_profile_index]
-            if (
-                choice.generation != request.policy.generation
-                or choice.mode != request.policy.mode
-                or choice.consecutive_misses > request.policy.missed_dwells
-                or choice.cooldown_remaining_samples
-                > request.geometry.sample_rate_hz * request.policy.cooldown_ms // 1000
-                or event.actual_lo_frequency_hz != profile.lo_hz
-                or event.actual_if_offset_hz != request.geometry.if_offset_hz
-                or event.fastlock_slot != profile.fastlock_profile_index
-                or event.invalid_end_counter_exclusive
-                != event.transition_after_counter + request.geometry.transition_guard_samples
-                or (
-                    previous is not None
-                    and (
-                        event.from_profile_index != previous.to_profile_index
-                        or event.invalid_start_counter
-                        != previous.invalid_end_counter_exclusive + request.geometry.dwell_samples
-                        or choice.decision_counter < event.invalid_start_counter
-                    )
+        _validate_event_binding(self.geometry, self.choices, request.geometry, request.policy)
+
+
+def _validate_event_binding(
+    evidence: PersistentHopEvidenceV1,
+    choices: tuple[AdaptiveHopChoiceV2, ...],
+    geometry: PersistentHopRequestV1,
+    policy: AdaptiveHopPolicyV2,
+) -> None:
+    """Shared numeric checks after each version validates its own discriminator."""
+    if evidence.session_id != geometry.session_id:
+        raise PersistentHopProtocolError("adaptive session identity mismatch")
+    previous = None
+    for event, choice in zip(evidence.events, choices, strict=True):
+        profile = geometry.profiles[event.to_profile_index]
+        if (
+            choice.generation != policy.generation
+            or choice.mode != policy.mode
+            or choice.consecutive_misses > policy.missed_dwells
+            or choice.cooldown_remaining_samples
+            > geometry.sample_rate_hz * policy.cooldown_ms // 1000
+            or event.actual_lo_frequency_hz != profile.lo_hz
+            or event.actual_if_offset_hz != geometry.if_offset_hz
+            or event.fastlock_slot != profile.fastlock_profile_index
+            or event.invalid_end_counter_exclusive
+            != event.transition_after_counter + geometry.transition_guard_samples
+            or (
+                previous is not None
+                and (
+                    event.from_profile_index != previous.to_profile_index
+                    or event.invalid_start_counter
+                    != previous.invalid_end_counter_exclusive + geometry.dwell_samples
+                    or choice.decision_counter < event.invalid_start_counter
                 )
-            ):
-                raise PersistentHopProtocolError("adaptive event/request binding mismatch")
-            previous = event
+            )
+        ):
+            raise PersistentHopProtocolError("adaptive event/request binding mismatch")
+        previous = event
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
