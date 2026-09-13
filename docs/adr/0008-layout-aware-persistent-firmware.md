@@ -60,3 +60,9 @@ local-only.
 - LAN receipts schema v2 include both layouts and a post-key-rotation, read-only
   return attestation of the boot ID, full-QSPI and FIT hashes, device-tree state,
   and TX safety.
+# Amendment: release approval is independent of address qualification (#113)
+
+Existing profile and IIO-layout gates remain required. They do not authorize
+extended physical addressing. The [shared flash safety policy](../FLASH_SAFETY.md)
+requires a separate exact hardware/writer/bootloader qualification and applies the
+conservative physical 16 MiB limit when such a record is absent.

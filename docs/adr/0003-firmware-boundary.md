@@ -13,3 +13,9 @@ separate operation after RAM acceptance. It accepts only a validated
 `pluto.frm`, writes only that filename through the selected radio's updater
 volume, and refuses archives or `boot.frm` so the bootloader partitions are not
 part of the operation.
+# Amendment: physical integrity (#113)
+
+The [physical flash safety contract](../FLASH_SAFETY.md) additionally binds
+observed geometry and writer evidence. Legacy mass-storage and helper protocol v1
+persistence are now refused; writing only the name `pluto.frm` does not constrain
+physical bank addressing or other eject-triggered effects.

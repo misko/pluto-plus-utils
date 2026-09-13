@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
+from flash_fakes import FlashMemoryTransport, decision
 
 from pluto_plus.firmware import (
     FIT_MAGIC,
@@ -65,8 +66,7 @@ def _ip_json_reader(
             {
                 "ifname": name,
                 "addr_info": [
-                    {"family": "inet", "local": address, "prefixlen": 24}
-                    for address in values
+                    {"family": "inet", "local": address, "prefixlen": 24} for address in values
                 ],
             }
             for name, values in addresses.items()
@@ -236,6 +236,8 @@ class FakeTransport:
 
     def __init__(self) -> None:
         self.events: list[str] = []
+        self.memory = FlashMemoryTransport("SERIAL_A", _fit())
+        self.memory.on_update = lambda: self._event("update")
         self.attestations: list[IpFirmwareAttestation | BaseException] = [
             _attestation(),
             _attestation(firmware="new-v2", boot_id="boot-after"),
@@ -266,6 +268,10 @@ class FakeTransport:
         return self.staged_override or IpFirmwareStagedFile(
             hashlib.sha256(data).hexdigest(), len(data)
         )
+
+    def flash_safety_transport(self):
+        self.memory.updater_output = self.update_output
+        return self.memory
 
     def invoke_update_frm(self) -> str:
         self._event("update")
@@ -324,7 +330,12 @@ def test_happy_path_is_fixed_order_hashes_fit_and_journals(tmp_path: Path) -> No
     transport = FakeTransport()
     executor = _executor(tmp_path, transport)
 
-    executor.flash_persistent_qspi(_radio(), _image(tmp_path), target_name="pluto.frm")
+    executor.flash_persistent_qspi(
+        _radio(),
+        _image(tmp_path),
+        target_name="pluto.frm",
+        expected_safety=decision("SERIAL_A", _fit()),
+    )
 
     assert transport.events == [
         "attest",
@@ -357,7 +368,12 @@ def test_identity_or_active_firmware_change_fails_before_upload(tmp_path: Path) 
     executor = _executor(tmp_path, transport)
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
-        executor.flash_persistent_qspi(_radio(), _image(tmp_path), target_name="pluto.frm")
+        executor.flash_persistent_qspi(
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
+        )
 
     assert caught.value.outcome == "failed"
     assert caught.value.failure_phase == "remote_preflight"
@@ -367,15 +383,18 @@ def test_identity_or_active_firmware_change_fails_before_upload(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("failure", ["tx_safe", "stage"])
-def test_pre_updater_faults_never_invoke_update(
-    tmp_path: Path, failure: str
-) -> None:
+def test_pre_updater_faults_never_invoke_update(tmp_path: Path, failure: str) -> None:
     transport = FakeTransport()
     transport.fail_at = failure
     executor = _executor(tmp_path, transport)
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
-        executor.flash_persistent_qspi(_radio(), _image(tmp_path), target_name="pluto.frm")
+        executor.flash_persistent_qspi(
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
+        )
 
     assert caught.value.outcome == "failed"
     assert "update" not in transport.events
@@ -389,7 +408,10 @@ def test_remote_stage_hash_mismatch_never_invokes_updater(tmp_path: Path) -> Non
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
         _executor(tmp_path, transport).flash_persistent_qspi(
-            _radio(), _image(tmp_path), target_name="pluto.frm"
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
         )
 
     assert caught.value.outcome == "failed"
@@ -405,7 +427,12 @@ def test_update_requires_done_and_rejects_failed_even_exit_zero(
     executor = _executor(tmp_path, transport)
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
-        executor.flash_persistent_qspi(_radio(), _image(tmp_path), target_name="pluto.frm")
+        executor.flash_persistent_qspi(
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
+        )
 
     assert caught.value.outcome == "unknown"
     assert caught.value.failure_phase == "update_frm"
@@ -425,7 +452,10 @@ def test_qspi_body_mismatch_prevents_reset_and_is_uncertain(tmp_path: Path) -> N
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
         _executor(tmp_path, transport).flash_persistent_qspi(
-            _radio(), _image(tmp_path), target_name="pluto.frm"
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
         )
 
     assert caught.value.failure_phase == "qspi_verification"
@@ -442,7 +472,10 @@ def test_post_update_transport_faults_are_reconcilable_unknown(
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
         _executor(tmp_path, transport).flash_persistent_qspi(
-            _radio(), _image(tmp_path), target_name="pluto.frm"
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
         )
 
     assert caught.value.outcome == "unknown"
@@ -456,7 +489,10 @@ def test_return_timeout_is_unknown_after_qspi_verification(tmp_path: Path) -> No
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
         _executor(tmp_path, transport).flash_persistent_qspi(
-            _radio(), _image(tmp_path), target_name="pluto.frm"
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
         )
 
     assert caught.value.failure_phase == "post_reset_attestation"
@@ -481,7 +517,10 @@ def test_post_reset_tx_guard_failure_is_unknown(tmp_path: Path) -> None:
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
         _executor(tmp_path, transport).flash_persistent_qspi(
-            _radio(), _image(tmp_path), target_name="pluto.frm"
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
         )
 
     assert caught.value.failure_phase == "tx_safe_after_reset"
@@ -496,7 +535,12 @@ def test_host_key_rotation_never_auto_trusts_and_locks_future_mutation(
     executor = _executor(tmp_path, transport)
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
-        executor.flash_persistent_qspi(_radio(), _image(tmp_path), target_name="pluto.frm")
+        executor.flash_persistent_qspi(
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
+        )
 
     assert caught.value.outcome == "unknown"
     assert executor.key_reconciliation_required is True
@@ -527,7 +571,10 @@ def test_independent_return_and_tx_guard_remain_unknown_after_stale_key(
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
         executor.flash_persistent_qspi(
-            _radio(), _image(tmp_path), target_name="pluto.frm"
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
         )
 
     assert caught.value.outcome == "unknown"
@@ -536,9 +583,7 @@ def test_independent_return_and_tx_guard_remain_unknown_after_stale_key(
     assert executor.last_evidence is not None
     assert executor.last_evidence.outcome == "unknown"
     assert executor.last_evidence.after is not None
-    assert executor.last_evidence.after.host_key_fingerprint == (
-        "unverified:host-key-changed"
-    )
+    assert executor.last_evidence.after.host_key_fingerprint == ("unverified:host-key-changed")
     assert executor.last_evidence.key_reconciliation_required is True
     assert executor.key_reconciliation_required is True
 
@@ -586,9 +631,7 @@ def test_rejects_volatile_mode_direct_paths_and_generic_target(tmp_path: Path) -
     with pytest.raises(FirmwareExecutorFailure, match="does not permit volatile"):
         executor.load_volatile_dfu(_radio(), _image(tmp_path))
     with pytest.raises(FirmwareExecutorFailure) as caught:
-        executor.flash_persistent_qspi(
-            _radio(), _image(tmp_path), target_name="/dev/mtd3"
-        )
+        executor.flash_persistent_qspi(_radio(), _image(tmp_path), target_name="/dev/mtd3")
     assert caught.value.outcome == "failed"
     assert transport.events == []
 
@@ -601,7 +644,12 @@ def test_evidence_directory_symlink_fails_before_any_remote_action(tmp_path: Pat
     executor = _executor(tmp_path, transport)
 
     with pytest.raises(FirmwareExecutorFailure) as caught:
-        executor.flash_persistent_qspi(_radio(), _image(tmp_path), target_name="pluto.frm")
+        executor.flash_persistent_qspi(
+            _radio(),
+            _image(tmp_path),
+            target_name="pluto.frm",
+            expected_safety=decision("SERIAL_A", _fit()),
+        )
 
     assert caught.value.outcome == "failed"
     assert caught.value.reconciliation_required is False
@@ -624,9 +672,7 @@ class RecordingSshRunner:
 def _ssh_transport(tmp_path: Path, runner: RecordingSshRunner) -> PinnedSshFirmwareTransport:
     key_bytes = b"test host key bytes"
     known_hosts = tmp_path / "known_hosts"
-    known_hosts.write_text(
-        f"192.168.2.15 ssh-ed25519 {base64.b64encode(key_bytes).decode()}\n"
-    )
+    known_hosts.write_text(f"192.168.2.15 ssh-ed25519 {base64.b64encode(key_bytes).decode()}\n")
     private_key = tmp_path / "id_ed25519"
     private_key.write_text("not-used-by-fake-runner")
     known_hosts.chmod(0o600)
@@ -645,14 +691,19 @@ def test_pinned_ssh_transport_uses_key_only_strict_host_checking_and_fixed_updat
     runner = RecordingSshRunner([SshCommandResult(0, b"Done\n", b"")])
     transport = _ssh_transport(tmp_path, runner)
 
-    assert transport.invoke_update_frm() == "Done\n"
+    assert (
+        transport.flash_safety_transport().run(
+            "/bin/sh -s -- ppu-flash-safety-v1", stdin=b"set -eu\n"
+        )
+        == "Done\n"
+    )
     argv, stdin, _timeout = runner.calls[0]
-    assert stdin is None
+    assert stdin == b"set -eu\n"
     assert "BatchMode=yes" in argv
     assert "StrictHostKeyChecking=yes" in argv
     assert "GlobalKnownHostsFile=/dev/null" in argv
     assert "PasswordAuthentication=no" in argv
-    assert argv[-1] == "/sbin/update_frm.sh /root/.pluto-plus-ip-firmware/pluto.frm"
+    assert argv[-1] == "/bin/sh -s -- ppu-flash-safety-v1"
     assert all("mtd" not in argument for argument in argv)
 
 
@@ -778,9 +829,7 @@ def test_pinned_transport_reads_redacted_config_and_applies_only_bound_network_p
     assert receipt.backup_path is not None
     assert Path(receipt.backup_path).read_bytes() == backup
     apply_argv, apply_stdin, _timeout = runner.calls[3]
-    assert apply_argv[-1].endswith(
-        " ipaddr_eth 192.168.1.165"
-    )
+    assert apply_argv[-1].endswith(" ipaddr_eth 192.168.1.165")
     assert apply_stdin is not None
     assert b"fw_setenv -s" in apply_stdin
     assert b"device_reboot" not in apply_stdin
@@ -805,9 +854,7 @@ def test_pinned_transport_accepts_an_empty_generated_config_txt(tmp_path: Path) 
     ]
     transport = _ssh_transport(
         tmp_path,
-        RecordingSshRunner(
-            [SshCommandResult(0, ("\n".join(lines) + "\n").encode(), b"")]
-        ),
+        RecordingSshRunner([SshCommandResult(0, ("\n".join(lines) + "\n").encode(), b"")]),
     )
 
     observed = transport.inspect_network_config("SERIAL_A")
@@ -841,7 +888,7 @@ def test_pinned_transport_rejects_hostnames_loose_files_and_changed_key(
     )
     transport = _ssh_transport(tmp_path, good_runner)
     with pytest.raises(IpFirmwareHostKeyChanged):
-        transport.invoke_update_frm()
+        transport.attest()
 
     private_key = tmp_path / "id_ed25519"
     private_key.chmod(0o644)
@@ -884,6 +931,6 @@ def test_pinned_transport_rejects_credential_file_changes_after_enrollment(
     )
 
     with pytest.raises(IpFirmwareError, match="changed after enrollment"):
-        transport.invoke_update_frm()
+        transport.attest()
 
     assert runner.calls == []

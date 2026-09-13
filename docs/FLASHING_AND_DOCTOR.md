@@ -1,5 +1,12 @@
 # Pluto+ doctor, AD9361/2R2T setup, and safe firmware updates
 
+**Physical flash safety update**
+
+Persistent updates now obey the [physical flash safety contract](FLASH_SAFETY.md).
+Legacy mass-storage/eject and helper-v1 persistent instructions below are disabled;
+use explicitly selected, attested SSH/FRM for supported layouts. Release-profile
+approval cannot bypass the physical range or pre-reboot integrity checks.
+
 This guide is the Pluto+ Utils policy. It was independently derived from the local
 `spf`, Rover 3.1, and `plutosdr-fw` safety contracts; it does not copy their scripts.
 The three source trees contain stale and conflicting instructions, so do not combine

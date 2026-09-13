@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from pluto_plus.dfu_safety import guard_dfu_download
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
 from pluto_plus.radio_lock import RadioLockError, acquire_radio_lock, shared_radio_lock_root
 from pluto_plus.release_candidate import (
@@ -127,6 +128,7 @@ class SubprocessLinuxCommandRunner:
         pass_fds: Sequence[int] = (),
         allowed_returncodes: Sequence[int] = (0,),
     ) -> str:
+        guard_dfu_download(argv)
         try:
             completed = subprocess.run(
                 tuple(argv),

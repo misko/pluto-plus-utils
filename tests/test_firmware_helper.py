@@ -291,9 +291,7 @@ def test_symlinked_staging_file_is_refused_server_side(
     assert executor.calls == []
 
 
-def test_digest_drift_is_refused_server_side(
-    tmp_path: Path, radio: RadioFirmwareIdentity
-) -> None:
+def test_digest_drift_is_refused_server_side(tmp_path: Path, radio: RadioFirmwareIdentity) -> None:
     original = _dfu()
     image = tmp_path / "stage" / "digest" / "firmware.dfu"
     image.parent.mkdir(parents=True)
@@ -321,9 +319,7 @@ def test_live_identity_is_rechecked_by_privileged_server(
     image.parent.mkdir(parents=True)
     image.write_bytes(data)
     executor = RecordingExecutor()
-    other = RadioFirmwareIdentity(
-        radio.serial, radio.usb_sysfs_path, "different-firmware"
-    )
+    other = RadioFirmwareIdentity(radio.serial, radio.usb_sysfs_path, "different-firmware")
     server = UnixFirmwareHelperServer(
         socket_path=tmp_path / "firmware.sock",
         staging_root=tmp_path / "stage",
@@ -387,7 +383,10 @@ def test_success_uses_only_the_two_domain_operations_and_private_copy(
         if mode is FirmwareMode.VOLATILE_DFU:
             client.load_volatile_dfu(radio, image)
         else:
-            client.flash_persistent_qspi(radio, image, target_name="pluto.frm")
+            with pytest.raises(FirmwareImageError, match="flash_transport_unqualified"):
+                client.flash_persistent_qspi(radio, image, target_name="pluto.frm")
+            assert executor.calls == []
+            return
     assert executor.calls == [
         (
             "load_volatile_dfu" if mode is FirmwareMode.VOLATILE_DFU else "flash_persistent_qspi",
@@ -427,9 +426,7 @@ def test_executor_timeout_is_mapped_without_retry(
     image = tmp_path / "stage" / "digest" / "firmware.dfu"
     image.parent.mkdir(parents=True)
     image.write_bytes(_dfu())
-    executor = RecordingExecutor(
-        failure=subprocess.TimeoutExpired(cmd=("dfu-util",), timeout=120)
-    )
+    executor = RecordingExecutor(failure=subprocess.TimeoutExpired(cmd=("dfu-util",), timeout=120))
     server = _server(tmp_path, radio, executor)
     with (
         _running(server, tmp_path / "firmware.sock"),

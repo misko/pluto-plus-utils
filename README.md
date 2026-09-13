@@ -5,6 +5,11 @@ firmware, and web tooling for one or more Pluto+ radios. `pluto radio inventory`
 runs directly on the host; stateful control commands and the embedded browser UI
 use `plutod` as the sole hardware owner.
 
+Persistent updates now enforce [physical flash safety](docs/FLASH_SAFETY.md):
+unqualified writers stay below physical 16 MiB, and supported SSH updates verify
+protected boot regions before reboot. Legacy mass-storage/eject and helper-v1
+persistence are disabled. Release-profile approval cannot override this boundary.
+
 ## Quick start
 
 ```bash

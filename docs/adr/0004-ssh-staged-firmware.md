@@ -75,3 +75,10 @@ cannot bypass a later reconciliation lock.
   succeeded.
 - Recovery remains the documented USB `firmware.dfu` procedure when the radio no
   longer boots far enough for authenticated SSH.
+# Amendment: physical addressing and protected regions (#113)
+
+The [shared physical flash policy](../FLASH_SAFETY.md) runs at planning and final
+dispatch. SSH persistence saves recovery evidence and checks boot/protected bytes
+and the precise expected environment change before reboot. A logical FIT hash
+alone cannot prove safe physical placement. Integrity failure retains an uncertain
+deployment outcome and blocks automatic reboot/retry and FIT-only reconciliation.

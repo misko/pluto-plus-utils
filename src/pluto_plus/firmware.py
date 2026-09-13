@@ -26,6 +26,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol
 
+from pluto_plus.dfu_safety import guard_dfu_download
+from pluto_plus.flash_safety import (
+    FlashDecision,
+    FlashSafetyError,
+    reject_uncontrolled_persistence,
+    require_same_flash,
+    validate_flash,
+)
+
 FIT_MAGIC = b"\xd0\x0d\xfe\xed"
 PLUTO_FRM_MAGIC = b"ITB PlutoSDR (ADALM-PLUTO)"
 DFU_SUFFIX_LENGTH = 16
@@ -147,6 +156,7 @@ class FirmwarePlan:
     fit_size: int
     phases: tuple[str, ...]
     expected_firmware: str | None = None
+    flash_safety: FlashDecision | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +235,12 @@ class PrivilegedFirmwareExecutor(Protocol):
     def load_volatile_dfu(self, radio: RadioFirmwareIdentity, image: Path) -> None: ...
 
     def flash_persistent_qspi(
-        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str
+        self,
+        radio: RadioFirmwareIdentity,
+        image: Path,
+        *,
+        target_name: str,
+        expected_safety: FlashDecision | None = None,
     ) -> None: ...
 
 
@@ -260,6 +275,7 @@ class CommandRunner(Protocol):
 
 class SubprocessCommandRunner:
     def run(self, argv: Sequence[str], *, timeout_s: float) -> None:
+        guard_dfu_download(argv)
         subprocess.run(argv, check=True, timeout=timeout_s)  # noqa: S603
 
 
@@ -388,52 +404,10 @@ class MassStorageQspiUpdater:
             raise FirmwareError("mass-storage updater accepts only pluto.frm")
         source_data = self._filesystem.read_bytes(source)
         validate_frm(source_data)
-        selected = self._resolve_one(radio.serial)
-        self._filesystem.prepare_private_mountpoint(self._mountpoint)
-
-        mount_attempted = False
-        operation_error: Exception | None = None
-        cleanup_error: Exception | None = None
         try:
-            mount_attempted = True
-            self._commands.run(
-                (
-                    "mount",
-                    "-o",
-                    "rw,nodev,nosuid,noexec",
-                    str(selected.partition),
-                    str(self._mountpoint),
-                ),
-                timeout_s=30,
-            )
-            if not self._filesystem.is_file(self._mountpoint / "info.html"):
-                raise FirmwareError("selected updater volume has no info.html")
-            destination = self._mountpoint / "pluto.frm"
-            self._filesystem.write_fat_atomic(destination, source_data)
-            self._commands.run(("sync", "-f", str(destination)), timeout_s=30)
-        except Exception as caught:
-            operation_error = caught
-        finally:
-            if mount_attempted:
-                try:
-                    self._commands.run(("umount", str(self._mountpoint)), timeout_s=30)
-                except Exception as caught:
-                    cleanup_error = caught
-
-        if operation_error is not None or cleanup_error is not None:
-            details = []
-            if operation_error is not None:
-                details.append(f"operation failed: {operation_error}")
-            if cleanup_error is not None:
-                details.append(f"unmount failed: {cleanup_error}")
-            raise FirmwareError("; ".join(details))
-
-        try:
-            self._commands.run(("eject", str(selected.device)), timeout_s=30)
-        except Exception as caught:
-            raise FirmwareError(f"eject failed: {caught}") from caught
-        self._wait_for_absence(radio.serial)
-        self._wait_for_reappearance(radio.serial)
+            reject_uncontrolled_persistence()
+        except FlashSafetyError as error:
+            raise FirmwareImageError(str(error)) from error
 
     def _matches(self, serial: str) -> tuple[UpdaterBlockDevice, ...]:
         try:
@@ -456,9 +430,7 @@ class MassStorageQspiUpdater:
         while self._monotonic() < deadline:
             matches = self._matches(serial)
             if len(matches) > 1:
-                raise FirmwareError(
-                    f"duplicate updater identities appeared for serial {serial!r}"
-                )
+                raise FirmwareError(f"duplicate updater identities appeared for serial {serial!r}")
             if not matches:
                 return
             self._sleep(self._poll_interval)
@@ -469,9 +441,7 @@ class MassStorageQspiUpdater:
         while self._monotonic() < deadline:
             matches = self._matches(serial)
             if len(matches) > 1:
-                raise FirmwareError(
-                    f"duplicate updater identities appeared for serial {serial!r}"
-                )
+                raise FirmwareError(f"duplicate updater identities appeared for serial {serial!r}")
             if len(matches) == 1:
                 return
             self._sleep(self._poll_interval)
@@ -570,11 +540,20 @@ class SystemFirmwareExecutor:
         self._commands.run((*common, "-e"), timeout_s=30)
 
     def flash_persistent_qspi(
-        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str
+        self,
+        radio: RadioFirmwareIdentity,
+        image: Path,
+        *,
+        target_name: str,
+        expected_safety: FlashDecision | None = None,
     ) -> None:
         if target_name != "pluto.frm":
-            raise FirmwareError("persistent updater target must be exactly pluto.frm")
-        self._qspi.install(radio, image, target_name=target_name)
+            raise FirmwareImageError("persistent updater target must be exactly pluto.frm")
+        validate_frm(image.read_bytes())
+        try:
+            reject_uncontrolled_persistence()
+        except FlashSafetyError as error:
+            raise FirmwareImageError(str(error)) from error
 
 
 def _sha256(data: bytes) -> str:
@@ -605,20 +584,15 @@ def validate_dfu(data: bytes) -> bytes:
         raise FirmwareImageError("DFU image is too short")
     body, suffix = data[:-DFU_SUFFIX_LENGTH], data[-DFU_SUFFIX_LENGTH:]
     device, product, vendor, specification = (
-        int.from_bytes(suffix[offset : offset + 2], "little")
-        for offset in range(0, 8, 2)
+        int.from_bytes(suffix[offset : offset + 2], "little") for offset in range(0, 8, 2)
     )
     del device  # The release build intentionally permits any device revision.
     if suffix[8:11] != b"UFD" or suffix[11] != DFU_SUFFIX_LENGTH:
         raise FirmwareImageError("invalid DFU suffix signature or length")
     if vendor != DFU_VENDOR_ID or product != DFU_PRODUCT_ID:
-        raise FirmwareImageError(
-            f"DFU targets {vendor:04x}:{product:04x}, expected 0456:b673"
-        )
+        raise FirmwareImageError(f"DFU targets {vendor:04x}:{product:04x}, expected 0456:b673")
     if specification != DFU_SPECIFICATION:
-        raise FirmwareImageError(
-            f"unsupported DFU specification 0x{specification:04x}"
-        )
+        raise FirmwareImageError(f"unsupported DFU specification 0x{specification:04x}")
     expected_crc = int.from_bytes(suffix[12:16], "little")
     actual_crc = _dfu_crc(data[:-4])
     if not hmac.compare_digest(
@@ -733,6 +707,26 @@ class FirmwareManager:
         self._validate_transport_identity(identity)
         return identity
 
+    def _flash_safety(self, radio: RadioFirmwareIdentity, fit: bytes) -> FlashDecision:
+        observer = getattr(self._executor, "prepare_flash_safety", None)
+        if observer is None:
+            raise FirmwareImageError(
+                "flash_transport_unqualified: persistent executor has no physical flash observer"
+            )
+        try:
+            result = observer(radio, fit)
+        except FlashSafetyError as error:
+            raise FirmwareImageError(str(error)) from error
+        if not isinstance(result, FlashDecision):
+            raise FirmwareImageError("persistent executor returned no physical flash decision")
+        if result.observation.serial != radio.serial:
+            raise FirmwareImageError("physical flash observer returned a different radio")
+        try:
+            require_same_flash(result, validate_flash(result.observation, fit))
+        except FlashSafetyError as safety_error:
+            raise FirmwareImageError(str(safety_error)) from safety_error
+        return result
+
     @property
     def key_reconciliation_required(self) -> bool:
         """Whether this transport has blocked further mutation pending re-enrollment."""
@@ -775,10 +769,7 @@ class FirmwareManager:
             and mode is not FirmwareMode.PERSISTENT_QSPI
         ):
             raise FirmwareImageError("ssh_frm supports persistent_qspi plans only")
-        if (
-            selected_transport is FirmwareTransport.SSH_FRM
-            and self.key_reconciliation_required
-        ):
+        if selected_transport is FirmwareTransport.SSH_FRM and self.key_reconciliation_required:
             raise FirmwareAuthorizationError(
                 "ssh_frm is blocked until unresolved durable receipts are reconciled"
             )
@@ -811,6 +802,9 @@ class FirmwareManager:
         else:  # pragma: no cover - StrEnum protects normal callers
             raise FirmwareImageError(f"unsupported firmware mode: {mode}")
 
+        flash_safety = (
+            self._flash_safety(radio, fit_body) if mode is FirmwareMode.PERSISTENT_QSPI else None
+        )
         image_digest = _sha256(staged_data)
         staged_path = self._staging / image_digest / staged_name
         try:
@@ -831,6 +825,7 @@ class FirmwareManager:
             if not normalized_expected:
                 raise FirmwareImageError("expected firmware version cannot be empty")
         plan = FirmwarePlan(
+            flash_safety=flash_safety,
             plan_id=uuid.uuid4().hex,
             created_at=now,
             expires_at=now + self._ttl,
@@ -920,15 +915,16 @@ class FirmwareManager:
         else:
             if staged_path.name != "pluto.frm":
                 raise FirmwareImageError("persistent staged filename must be exactly pluto.frm")
-            validate_frm(staged_data)
+            fit = validate_frm(staged_data)
+            try:
+                require_same_flash(plan.flash_safety, self._flash_safety(plan.radio, fit))
+            except FlashSafetyError as safety_error:
+                raise FirmwareImageError(str(safety_error)) from safety_error
 
         # A second plan may have been issued before an earlier attempt became
         # uncertain. Recheck the durable lock at the last non-mutating boundary
         # so a pre-issued token cannot replay an SSH update.
-        if (
-            plan.transport is FirmwareTransport.SSH_FRM
-            and self.key_reconciliation_required
-        ):
+        if plan.transport is FirmwareTransport.SSH_FRM and self.key_reconciliation_required:
             raise FirmwareAuthorizationError(
                 "ssh_frm is blocked until unresolved durable receipts are reconciled"
             )
@@ -955,7 +951,10 @@ class FirmwareManager:
                 self._executor.load_volatile_dfu(plan.radio, staged_path)
             else:
                 self._executor.flash_persistent_qspi(
-                    plan.radio, staged_path, target_name="pluto.frm"
+                    plan.radio,
+                    staged_path,
+                    target_name="pluto.frm",
+                    expected_safety=plan.flash_safety,
                 )
             if plan.transport is FirmwareTransport.SSH_FRM:
                 (
@@ -1100,11 +1099,14 @@ class FirmwareManager:
             with self._receipt_lock:
                 parent = self._receipt_records.get(parent_id)
             if parent is None:
-                raise FirmwareImageError(
-                    "firmware receipt reconciliation parent is unavailable"
-                )
+                raise FirmwareImageError("firmware receipt reconciliation parent is unavailable")
             original = parent
 
+        if original.failure_phase == "protected_integrity":
+            raise FirmwareImageError(
+                "protected integrity failure requires recovery; "
+                "logical FIT reconciliation is insufficient"
+            )
         started = self._normalized_now()
         error: str | None = None
         reconciliation_phases: tuple[str, ...] = ()
@@ -1116,9 +1118,7 @@ class FirmwareManager:
                         "ssh_frm executor has no read-only persistent reconciliation"
                     )
                 if original.fit_sha256 is None or original.fit_size is None:
-                    raise FirmwareIdentityError(
-                        "legacy receipt has no FIT-body attestation target"
-                    )
+                    raise FirmwareIdentityError("legacy receipt has no FIT-body attestation target")
                 raw_reconciliation_phases = reconcile(
                     original.radio,
                     expected_firmware=original.expected_firmware,
@@ -1126,23 +1126,15 @@ class FirmwareManager:
                     expected_fit_size=original.fit_size,
                 )
                 if not isinstance(raw_reconciliation_phases, (tuple, list)):
-                    raise FirmwareIdentityError(
-                        "SSH reconciliation phases are malformed"
-                    )
-                reconciliation_phases = tuple(
-                    str(item) for item in raw_reconciliation_phases
-                )
+                    raise FirmwareIdentityError("SSH reconciliation phases are malformed")
+                reconciliation_phases = tuple(str(item) for item in raw_reconciliation_phases)
             observed = self.observe_identity(original.radio.serial)
             if observed.serial != original.radio.serial:
                 raise FirmwareIdentityError("reconciled serial does not match the receipt")
             if original.transport is FirmwareTransport.USB:
                 if observed.usb_sysfs_path != original.radio.usb_sysfs_path:
-                    raise FirmwareIdentityError(
-                        "reconciled USB path does not match the receipt"
-                    )
-            elif (
-                observed.endpoint != original.radio.endpoint
-            ):
+                    raise FirmwareIdentityError("reconciled USB path does not match the receipt")
+            elif observed.endpoint != original.radio.endpoint:
                 raise FirmwareIdentityError(
                     "reconciled network endpoint does not match the receipt"
                 )
@@ -1325,14 +1317,10 @@ class FirmwareManager:
                     image_sha256=str(document["image_sha256"]),
                     image_size=int(document["image_size"]),
                     fit_sha256=(
-                        None
-                        if document.get("fit_sha256") is None
-                        else str(document["fit_sha256"])
+                        None if document.get("fit_sha256") is None else str(document["fit_sha256"])
                     ),
                     fit_size=(
-                        None
-                        if document.get("fit_size") is None
-                        else int(document["fit_size"])
+                        None if document.get("fit_size") is None else int(document["fit_size"])
                     ),
                     expected_firmware=(
                         None

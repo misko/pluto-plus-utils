@@ -1,5 +1,14 @@
 # Hardware acceptance gates
 
+**Physical flash qualification**
+
+See [the #113 flash safety contract](FLASH_SAFETY.md). Extended ranges remain
+disabled until firmware #99 records independent physical readback, protected-region
+integrity, warm/cold boot, identity/service return and rollback for each exact
+board/flash/writer/bootloader combination. Boundary tests belong on dedicated
+recoverable boards. Logical MTD SHA-256 and a different fleet canary do not grant
+qualification. Offline tests do not replace this hardware evidence.
+
 No command in this document should be run against an unspecified radio. Record
 the stable serial, USB sysfs path, current firmware, host, operator, and artifact
 digests before beginning.

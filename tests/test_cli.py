@@ -1841,7 +1841,9 @@ def test_usb_bootstrap_cli_is_dry_run_by_default(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["mode"] == "dry_run"
+    assert payload["mode"] == "inspection"
+    assert payload["executable"] is False
+    assert payload["requires_flash_attestation"] is True
     assert payload["will_write"] is False
     assert payload["plan"]["confirmation_phrase"] == "BOOTSTRAP 3-11"
     assert execute_calls == []

@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from flash_fakes import FlashMemoryTransport, decision
 
 import pluto_plus.bootstrap_firmware as bootstrap
 from pluto_plus.firmware import (
@@ -18,6 +19,7 @@ from pluto_plus.firmware import (
     FIT_MAGIC,
     PLUTO_FRM_MAGIC,
 )
+from pluto_plus.flash_safety_io import FLASH_COMMAND
 from pluto_plus.inventory import HostNetworkInterface, LocalUsbPluto
 
 
@@ -1871,111 +1873,8 @@ def test_execute_requires_exact_confirmation_before_operations(
     assert not (tmp_path / "receipts").exists()
 
 
-def test_execute_writes_only_pluto_frm_and_attests_return(
-    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan, frm, target = planned
-    mountpoint = tmp_path / "mount"
-    mountpoint.mkdir()
-    (mountpoint / "info.html").write_text("Pluto")
-    commands: list[tuple[str, ...]] = []
-    path_waits: list[tuple[bool, float]] = []
-
-    monkeypatch.setattr(
-        bootstrap,
-        "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
-    )
-    monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
-    monkeypatch.setattr(bootstrap, "_resolve_udisks_drive", lambda device: "/drives/pluto")
-    monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
-    monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: commands.append(tuple(argv)))
-    monkeypatch.setattr(bootstrap, "_validate_scsi_eject_target", lambda **kwargs: None)
-    monkeypatch.setattr(bootstrap, "_eject_scsi_media", lambda **kwargs: None)
-    monkeypatch.setattr(
-        bootstrap,
-        "_wait_for_path",
-        lambda path, present, timeout_s: path_waits.append((present, timeout_s)),
-    )
-    monkeypatch.setattr(
-        bootstrap,
-        "_one_local_target",
-        lambda path: _local(target, serial="SERIAL_NEW"),
-    )
-    monkeypatch.setattr(
-        bootstrap,
-        "inspect_bound_iiod",
-        lambda interface: {
-            "hw_serial": "SERIAL_NEW",
-            "fw_version": plan.expected_firmware,
-            "ad9361-phy,model": "ad9363a",
-            "iio,buffer-metadata": "1",
-        },
-    )
-
-    result = bootstrap.execute_bootstrap_plan(
-        plan,
-        frm,
-        confirmation=plan.confirmation_phrase,
-        receipt_directory=tmp_path / "receipts",
-        return_timeout_s=75,
-    )
-
-    assert result.outcome == "success"
-    assert result.returned_serial == "SERIAL_NEW"
-    assert (mountpoint / "pluto.frm").read_bytes() == frm
-    assert sorted(path.name for path in mountpoint.iterdir()) == ["info.html", "pluto.frm"]
-    assert commands == [
-        ("sync", "-f", str(mountpoint / "pluto.frm")),
-        ("udisksctl", "unmount", "--block-device", "/dev/sdb1"),
-    ]
-    assert "media_ejected" in result.phases
-    assert path_waits == [(False, 75), (True, 75)]
-    receipt_path = Path(result.receipt_path)
-    assert receipt_path.stat().st_mode & 0o777 == 0o600
-    assert json.loads(receipt_path.read_text())["outcome"] == "success"
 
 
-def test_failure_after_staging_proves_qspi_write_never_started(
-    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan, frm, _ = planned
-    mountpoint = tmp_path / "mount"
-    mountpoint.mkdir()
-    (mountpoint / "info.html").write_text("Pluto")
-    monkeypatch.setattr(
-        bootstrap,
-        "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
-    )
-    monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
-    monkeypatch.setattr(bootstrap, "_resolve_udisks_drive", lambda device: "/drives/pluto")
-    monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
-
-    def fail_sync(argv: tuple[str, ...], *, timeout_s: float) -> None:
-        del timeout_s
-        if argv[0] == "sync":
-            raise bootstrap.BootstrapFirmwareError("sync failed")
-
-    monkeypatch.setattr(bootstrap, "_run", fail_sync)
-
-    result = bootstrap.execute_bootstrap_plan(
-        plan,
-        frm,
-        confirmation=plan.confirmation_phrase,
-        receipt_directory=tmp_path / "receipts",
-    )
-
-    assert result.outcome == "failed"
-    assert result.retryable is True
-    assert result.failure_phase == "sync"
-    assert result.failure_classification == "qspi_write_not_started"
-    assert "sync failed" in (result.error or "")
-    assert json.loads(Path(result.receipt_path).read_text())["outcome"] == "failed"
 
 
 def test_resolve_udisks_drive_requires_one_exact_object(
@@ -2143,78 +2042,8 @@ def test_udisks_preflight_classifies_already_mounted_and_disappeared(
     assert disappeared.value.classification == "device_disappeared"
 
 
-def test_failed_udisks_preflight_does_not_create_or_consume_receipt(
-    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan, frm, _ = planned
-    receipts = tmp_path / "receipts"
-    monkeypatch.setattr(
-        bootstrap,
-        "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
-    )
-
-    def fail(**kwargs: object) -> None:
-        del kwargs
-        raise bootstrap.UdisksFailure(
-            "daemon_timeout",
-            "status timed out",
-            "Restore udisks2.service and retry.",
-        )
-
-    monkeypatch.setattr(bootstrap, "_preflight_udisks", fail)
-
-    with pytest.raises(bootstrap.UdisksFailure, match="daemon_timeout"):
-        bootstrap.execute_bootstrap_plan(
-            plan,
-            frm,
-            confirmation=plan.confirmation_phrase,
-            receipt_directory=receipts,
-        )
-
-    assert not receipts.exists()
 
 
-def test_mount_failure_is_failed_and_receipt_allows_retry(
-    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan, frm, _ = planned
-    monkeypatch.setattr(
-        bootstrap,
-        "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
-    )
-    monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
-    monkeypatch.setattr(bootstrap, "_resolve_udisks_drive", lambda device: "/drives/pluto")
-
-    def fail_mount(partition: Path) -> Path:
-        del partition
-        raise bootstrap.UdisksFailure(
-            "authorization_denied",
-            "mount denied",
-            "Correct the host policy and retry.",
-        )
-
-    monkeypatch.setattr(bootstrap, "_mount_partition", fail_mount)
-
-    result = bootstrap.execute_bootstrap_plan(
-        plan,
-        frm,
-        confirmation=plan.confirmation_phrase,
-        receipt_directory=tmp_path / "receipts",
-    )
-
-    assert result.outcome == "failed"
-    assert result.failure_phase == "mount"
-    assert result.failure_classification == "authorization_denied"
-    assert result.retryable is True
-    receipt = json.loads(Path(result.receipt_path).read_text())
-    assert receipt["retryable"] is True
-    assert "pluto_frm_written" not in receipt["phases"]
 
 
 @pytest.mark.parametrize(
@@ -2272,88 +2101,12 @@ def test_mount_partition_enforces_requested_safety_options(
     assert calls == ["mount", "unmount"]
 
 
-@pytest.mark.parametrize("failed_operation", ("unmount", "pre-eject", "eject"))
-def test_post_staging_classification_tracks_eject_dispatch(
-    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failed_operation: str,
-) -> None:
-    plan, frm, _ = planned
-    mountpoint = tmp_path / "mount"
-    mountpoint.mkdir()
-    (mountpoint / "info.html").write_text("Pluto")
-    monkeypatch.setattr(
-        bootstrap,
-        "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
-    )
-    monkeypatch.setattr(bootstrap, "_preflight_udisks", lambda **kwargs: None)
-    monkeypatch.setattr(bootstrap, "_resolve_udisks_drive", lambda device: "/drives/pluto")
-    monkeypatch.setattr(bootstrap, "_mount_partition", lambda partition: mountpoint)
-
-    def udisks(operation: str, device: Path | None, *, timeout_s: float) -> None:
-        del device, timeout_s
-        if operation == failed_operation:
-            raise bootstrap.UdisksFailure(
-                "daemon_timeout",
-                f"{operation} timed out",
-                "Restore udisks2.service; reconcile before retrying.",
-            )
-
-    monkeypatch.setattr(bootstrap, "_run_udisks", udisks)
-    monkeypatch.setattr(bootstrap, "_run", lambda argv, timeout_s: None)
-
-    def validate(**kwargs: object) -> None:
-        del kwargs
-        if failed_operation == "pre-eject":
-            raise bootstrap.UdisksFailure(
-                "device_disappeared",
-                "target disappeared before eject",
-                "Reconnect and re-plan.",
-            )
-
-    monkeypatch.setattr(bootstrap, "_validate_scsi_eject_target", validate)
-
-    def eject(**kwargs: object) -> None:
-        del kwargs
-        if failed_operation == "eject":
-            raise bootstrap.UdisksFailure(
-                "media_removal_timeout",
-                "media removal timed out",
-                "Reconcile before retrying.",
-            )
-
-    monkeypatch.setattr(bootstrap, "_eject_scsi_media", eject)
-
-    result = bootstrap.execute_bootstrap_plan(
-        plan,
-        frm,
-        confirmation=plan.confirmation_phrase,
-        receipt_directory=tmp_path / "receipts",
-    )
-
-    if failed_operation == "unmount":
-        assert result.outcome == "failed"
-        assert result.failure_phase == "unmount"
-        assert result.failure_classification == "daemon_timeout"
-        assert result.retryable is True
-    elif failed_operation == "pre-eject":
-        assert result.outcome == "failed"
-        assert result.failure_phase == "scsi_eject"
-        assert result.failure_classification == "device_disappeared"
-        assert result.retryable is True
-    else:
-        assert result.outcome == "unknown"
-        assert result.failure_phase == "scsi_eject"
-        assert result.failure_classification == "media_removal_timeout"
-        assert result.retryable is False
-    assert "pluto_frm_written" in result.phases
 
 
 class FakeSshTransport:
     def __init__(self, plan: bootstrap.BootstrapPlan, *, updater_output: str = "Done\n") -> None:
         self.plan = plan
+        self.memory = FlashMemoryTransport(plan.target_serial or "", _fit())
         self.updater_output = updater_output
         self.calls: list[tuple[str, bytes | None]] = []
 
@@ -2370,9 +2123,12 @@ class FakeSshTransport:
     ) -> str:
         del timeout_s
         self.calls.append((command, stdin))
+        if command == FLASH_COMMAND:
+            self.memory.updater_output = self.updater_output
+            return self.memory.run(command, stdin=stdin)
         if command == bootstrap._REMOTE_ATTEST_COMMAND:
             return (
-                "serial=\n"
+                f"serial={self.plan.target_serial or ''}\n"
                 f"model={self.plan.before_model}\n"
                 f"firmware={self.plan.before_firmware}\n"
                 "updater=/sbin/update_frm.sh\n"
@@ -2426,7 +2182,7 @@ def lan_planned(
         host="192.168.1.20",
         mutation_profile_id=profile_id,
     )
-    return plan, frm, image
+    return replace(plan, flash_safety=decision("SERIAL_LAN", _fit())), frm, image
 
 
 class FakeLanSshTransport:
@@ -2438,6 +2194,7 @@ class FakeLanSshTransport:
         tx_gain: str = "-80,-80",
     ) -> None:
         self.plan = plan
+        self.memory = FlashMemoryTransport(plan.target_serial or "", _fit())
         self.updater_output = updater_output
         self.tx_gain = tx_gain
         self.calls: list[tuple[str, bytes | None]] = []
@@ -2456,6 +2213,9 @@ class FakeLanSshTransport:
     ) -> str:
         del timeout_s
         self.calls.append((command, stdin))
+        if command == FLASH_COMMAND:
+            self.memory.updater_output = self.updater_output
+            return self.memory.run(command, stdin=stdin)
         if command == bootstrap._REMOTE_ATTEST_COMMAND:
             return (
                 f"serial={self.plan.target_serial}\n"
@@ -2804,80 +2564,8 @@ def test_rotate_lan_ssh_key_archives_old_key_after_exact_iio_return(
     assert evidence["replacement_known_hosts_sha256"] == hashlib.sha256(new_key).hexdigest()
 
 
-def test_bound_ssh_force_flash_verifies_stage_mtd3_and_return(
-    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan, frm, target = planned
-    transport = FakeSshTransport(plan)
-    path_waits: list[tuple[bool, float]] = []
-    monkeypatch.setattr(
-        bootstrap,
-        "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
-    )
-    monkeypatch.setattr(
-        bootstrap,
-        "_wait_for_path",
-        lambda path, present, timeout_s: path_waits.append((present, timeout_s)),
-    )
-    monkeypatch.setattr(
-        bootstrap,
-        "_one_local_target",
-        lambda path: _local(target, serial="SERIAL_NEW"),
-    )
-    monkeypatch.setattr(
-        bootstrap,
-        "inspect_bound_iiod",
-        lambda interface: {
-            "hw_serial": "SERIAL_NEW",
-            "fw_version": plan.expected_firmware,
-            "ad9361-phy,model": "ad9363a",
-            "iio,buffer-metadata": "1",
-        },
-    )
-
-    result = bootstrap.execute_usb_flash_plan_ssh(
-        plan,
-        frm,
-        confirmation=plan.confirmation_phrase,
-        receipt_directory=tmp_path / "receipts",
-        transport=transport,
-        return_timeout_s=75,
-    )
-
-    assert result.outcome == "success"
-    assert "mtd3_fit_verified" in result.phases
-    stage = next(call for call in transport.calls if call[0] == "upload_frm")
-    assert stage[1] == frm
-    assert transport.calls[-1][0] == bootstrap._REMOTE_REBOOT_COMMAND
-    assert path_waits == [(False, 75), (True, 75)]
 
 
-def test_bound_ssh_ambiguous_updater_result_is_unknown(
-    planned: tuple[bootstrap.BootstrapPlan, bytes, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan, frm, _ = planned
-    transport = FakeSshTransport(plan, updater_output="Failed\nDone\n")
-    monkeypatch.setattr(
-        bootstrap,
-        "prepare_usb_flash_plan",
-        lambda image, path, force_blank_serial, **kwargs: (plan, frm),
-    )
-
-    result = bootstrap.execute_usb_flash_plan_ssh(
-        plan,
-        frm,
-        confirmation=plan.confirmation_phrase,
-        receipt_directory=tmp_path / "receipts",
-        transport=transport,
-    )
-
-    assert result.outcome == "unknown"
-    assert "unambiguous Done" in (result.error or "")
 
 
 class ReadOnlyReconciliationTransport:
@@ -3596,3 +3284,38 @@ def test_rx_only_iio_safety_readback_is_non_mutating(
     bootstrap._require_rx_only_iio_safe("ip:192.168.1.17", "SERIAL_A")
 
     assert closed == [True]
+
+
+@pytest.mark.parametrize("operation", ["force_flash", "flash"])
+def test_legacy_eject_refused_before_staging(planned, tmp_path, monkeypatch, operation):
+    plan, frm, _ = planned
+    plan = replace(plan, operation=operation)
+    mutations = []
+    monkeypatch.setattr(bootstrap, "_mount_partition", lambda *a: mutations.append("mount"))
+    monkeypatch.setattr(bootstrap, "_write_fat_atomic", lambda *a: mutations.append("write"))
+    monkeypatch.setattr(bootstrap, "_eject_scsi_media", lambda **kw: mutations.append("eject"))
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="flash_transport_unqualified"):
+        bootstrap.execute_bootstrap_plan(plan, frm, confirmation=plan.confirmation_phrase,
+                                         receipt_directory=tmp_path / "receipts")
+    assert mutations == []
+
+
+@pytest.mark.parametrize("corrupt,output,outcome", [(False, "Done\n", "success"),
+    (True, "Done\n", "unknown"), (False, "Failed\nDone\n", "unknown")])
+def test_usb_ssh_checks_protected_flash_before_reboot(planned, tmp_path, monkeypatch,
+                                                   corrupt, output, outcome):
+    plan, frm, _ = planned
+    plan = replace(plan, target_serial="SERIAL_A", operation="flash",
+                   flash_safety=decision("SERIAL_A", _fit()))
+    transport = FakeSshTransport(plan, updater_output=output)
+    transport.memory.corrupt_boot = corrupt
+    monkeypatch.setattr(bootstrap, "prepare_usb_flash_plan", lambda *a, **kw: (plan, frm))
+    monkeypatch.setattr(bootstrap, "_wait_for_path", lambda *a, **kw: None)
+    monkeypatch.setattr(bootstrap, "_attest_return_when_ready", lambda *a, **kw:
+                        (plan.target_serial, plan.expected_firmware, "ad9361"))
+    result = bootstrap.execute_usb_flash_plan_ssh(plan, frm, confirmation=plan.confirmation_phrase,
+        receipt_directory=tmp_path / "receipts", transport=transport)
+    assert result.outcome == outcome, result.error
+    rebooted = any(cmd == bootstrap._REMOTE_REBOOT_COMMAND for cmd, _ in transport.calls)
+    assert rebooted == (outcome == "success")
+    assert transport.memory.locked

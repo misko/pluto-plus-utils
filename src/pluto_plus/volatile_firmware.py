@@ -23,6 +23,7 @@ from pluto_plus.bootstrap_firmware import (
     inspect_bound_iiod,
     mute_returned_radio_at_path,
 )
+from pluto_plus.dfu_safety import guard_dfu_download
 from pluto_plus.firmware import FirmwareImageError, validate_dfu
 from pluto_plus.hardware.iio_metadata import require_metadata_abi_capability
 from pluto_plus.inventory import LocalUsbPluto, scan_local_usb_plutos
@@ -98,6 +99,7 @@ class DfuCommandRunner(Protocol):
 
 class SubprocessDfuRunner:
     def run(self, argv: Sequence[str], *, timeout_s: float) -> str:
+        guard_dfu_download(argv)
         try:
             completed = subprocess.run(
                 tuple(argv),

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from flash_fakes import decision
 
 import pluto_plus.service as service_module
 from pluto_plus.admin import AdminMutationPolicy
@@ -63,6 +64,9 @@ class UncertainExecution(RuntimeError):
 
 
 class FakeIpExecutor:
+    def prepare_flash_safety(self, radio, fit):
+        return decision(radio.serial, fit)
+
     def __init__(self, identity: RadioFirmwareIdentity) -> None:
         self.identity = identity
         self.flash_calls = 0
@@ -79,7 +83,7 @@ class FakeIpExecutor:
         raise AssertionError("SSH transport must never dispatch DFU")
 
     def flash_persistent_qspi(
-        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str
+        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str, expected_safety=None
     ) -> None:
         self.flash_calls += 1
         raise UncertainExecution()
@@ -105,7 +109,7 @@ class VerifiedRotatedKeyExecutor(FakeIpExecutor):
         self.key_reconciliation_required = False
 
     def flash_persistent_qspi(
-        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str
+        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str, expected_safety=None
     ) -> None:
         from pluto_plus.firmware import validate_frm
 
@@ -134,9 +138,7 @@ class VerifiedRotatedKeyExecutor(FakeIpExecutor):
             frm_size=len(data),
             fit_sha256=hashlib.sha256(fit).hexdigest(),
             fit_size=len(fit),
-            qspi=SimpleNamespace(
-                fit_sha256=hashlib.sha256(fit).hexdigest(), fit_size=len(fit)
-            ),
+            qspi=SimpleNamespace(fit_sha256=hashlib.sha256(fit).hexdigest(), fit_size=len(fit)),
             after=SimpleNamespace(
                 serial=radio.serial,
                 endpoint=radio.endpoint,
@@ -312,9 +314,7 @@ def test_ssh_only_canonical_plan_confirmation_unknown_and_reconcile(
         assert "mtd_verified" in receipt["completed_phases"]
         blocked_doctor = client.get(f"{API_PREFIX}/radios/{serial}/doctor").json()
         blocked_helper = next(
-            item
-            for item in blocked_doctor["findings"]
-            if item["code"] == "firmware.helper"
+            item for item in blocked_doctor["findings"] if item["code"] == "firmware.helper"
         )
         assert blocked_helper["status"] == "warn"
 
@@ -327,9 +327,7 @@ def test_ssh_only_canonical_plan_confirmation_unknown_and_reconcile(
         assert reconciled.json()["outcome"] == "success"
         healthy_doctor = client.get(f"{API_PREFIX}/radios/{serial}/doctor").json()
         healthy_helper = next(
-            item
-            for item in healthy_doctor["findings"]
-            if item["code"] == "firmware.helper"
+            item for item in healthy_doctor["findings"] if item["code"] == "firmware.helper"
         )
         assert healthy_helper["status"] == "pass"
         assert executor.flash_calls == 1
@@ -426,9 +424,7 @@ def test_rotated_key_remains_unknown_and_blocks_preissued_plan_without_auto_trus
 
     real_reconcile = executor.reconcile_persistent_qspi
 
-    def failed_reconcile(
-        radio: RadioFirmwareIdentity, **kwargs: object
-    ) -> tuple[str, ...]:
+    def failed_reconcile(radio: RadioFirmwareIdentity, **kwargs: object) -> tuple[str, ...]:
         del radio, kwargs
         raise RuntimeError("pinned host identity is still unavailable")
 
@@ -439,9 +435,7 @@ def test_rotated_key_remains_unknown_and_blocks_preissued_plan_without_auto_trus
     assert manager.key_reconciliation_required is True
 
     executor.reconcile_persistent_qspi = real_reconcile  # type: ignore[method-assign]
-    successful_reconciliation = manager.reconcile(
-        failed_reconciliation.receipt_id
-    )
+    successful_reconciliation = manager.reconcile(failed_reconciliation.receipt_id)
     assert successful_reconciliation.success is True
     assert successful_reconciliation.reconciliation_of == receipt.receipt_id
     assert manager.key_reconciliation_required is False

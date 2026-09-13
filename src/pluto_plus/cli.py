@@ -4822,7 +4822,9 @@ def firmware_flash_lan(
         if not execute:
             _emit(
                 {
-                    "mode": "dry_run",
+                    "mode": "inspection",
+                    "executable": False,
+                    "requires_flash_attestation": True,
                     "will_write": False,
                     "will_rotate_ephemeral_ssh_key": False,
                     "plan": asdict(plan),
@@ -4860,6 +4862,11 @@ def firmware_flash_lan(
             password=password,
             known_hosts_file=resolved_known_hosts,
             host=plan.host,
+        )
+
+        plan, frm = prepare_lan_flash_plan(
+            image, serial=serial, host=host, mutation_profile_id=profile,
+            flash_transport=transport,
         )
 
         def rotate_host_key() -> dict[str, str]:
@@ -6727,7 +6734,9 @@ def _standalone_usb_flash(
         if not execute:
             _emit(
                 {
-                    "mode": "dry_run",
+                    "mode": "inspection",
+                    "executable": False,
+                    "requires_flash_attestation": True,
                     "will_write": False,
                     "plan": asdict(plan),
                     "next_command": (
@@ -6778,6 +6787,10 @@ def _standalone_usb_flash(
                 password=password,
                 known_hosts_file=ssh_known_hosts_file.expanduser().resolve(),
                 host=ssh_host,
+            )
+            plan, frm = prepare_usb_flash_plan(
+                image, usb_sysfs_path, force_blank_serial=force_blank_serial,
+                mutation_profile_id=mutation_profile_id, flash_transport=ssh_transport,
             )
             result = execute_usb_flash_plan_ssh(
                 plan,
