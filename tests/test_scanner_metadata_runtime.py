@@ -61,6 +61,9 @@ def scanner_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNa
         def drain_metadata(self, capacity=65536):
             pass
 
+        def submit_metadata_feedback(self, feedback):
+            pass
+
     native_loads: list[str] = []
     module = SimpleNamespace(MetadataBuffer=MetadataBuffer, __file__=str(binding))
     monkeypatch.setattr(preflight.sys, "prefix", str(prefix))
