@@ -52,11 +52,11 @@ def setup(caps=None):
     return radio, backend
 
 
-def start(backend, rx=0):
+def start(backend, rx=0, *, requested_plan=None):
     return HostAdaptiveHopClient(
         URI, expected_serial=SERIAL, backend_factory=lambda _: backend
     ).start(
-        plan(rx),
+        plan(rx) if requested_plan is None else requested_plan,
         policy=AdaptiveHopPolicyV2(9),
         session_id=17,
         decision=HostDecisionConfigurationV1(rx, bytes(range(32))),
@@ -78,6 +78,34 @@ def test_major_three_open_selects_exact_rx_and_submits_on_existing_capture(rx):
     receipt = backend.close()
     assert receipt.receive_buffer_closed and receipt.fastlock_inactive
     assert radio.restored == radio.original
+
+
+@pytest.mark.parametrize("rx", [0, 1])
+def test_unprepared_fastlock_crcs_are_bound_before_wire_validation(rx):
+    radio, backend = setup()
+    original = plan(rx)
+    unprepared = dc.replace(original, profiles=tuple(
+        dc.replace(profile, profile_crc32=0) for profile in original.profiles
+    ))
+    session = start(backend, rx, requested_plan=unprepared)
+    request = HostAdaptiveHopRequestV3.unpack(radio.open_request[104:])
+    assert all(profile.profile_crc32 for profile in request.geometry.profiles)
+    assert request == session.request
+    assert all(profile.profile_crc32 == 0 for profile in unprepared.profiles)
+    assert backend.close().fastlock_inactive
+    assert radio.restored == radio.original
+
+
+def test_missing_prepared_crc_still_fails_before_buffer_start():
+    radio, backend = setup()
+    original = plan()
+    unprepared = dc.replace(original, profiles=tuple(
+        dc.replace(profile, profile_crc32=0) for profile in original.profiles
+    ))
+    backend.prepare_plan = lambda _: unprepared
+    with pytest.raises(ValueError, match="CRC must be non-zero"):
+        start(backend, requested_plan=unprepared)
+    assert radio.open_request is None and radio.closed
 
 
 @pytest.mark.parametrize("name", [*CAPS, "hw_serial"])

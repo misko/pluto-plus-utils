@@ -80,7 +80,8 @@ class HostAdaptiveHopClient:
             plan.receiver_id != decision.receiver_id
         ):
             raise PersistentHopClientError("host adaptive plan must bind one physical RX")
-        HostAdaptiveHopRequestV3(plan.request(session_id=session_id), policy, decision).pack()
+        policy.require_pinned_policy()
+        decision.pack()
         if self._active:
             raise PersistentHopClientError("host adaptive client already owns a session")
         backend = self._backend_factory(self.uri)
@@ -112,6 +113,9 @@ class HostAdaptiveHopClient:
             request = HostAdaptiveHopRequestV3(
                 plan.request(session_id=session_id), policy, decision
             )
+            # Fastlock CRCs are hardware evidence populated by prepare_plan.
+            # Validate the complete wire request only after that preparation.
+            request.pack()
             stream = HostAdaptiveHopStreamV3(
                 request,
                 samples_per_block=plan.samples_per_block,
