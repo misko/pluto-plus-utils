@@ -164,6 +164,7 @@ class HostAdaptiveHopSession:
         self.plan, self.request = plan, stream.request
         self._thread = threading.get_ident()
         self._closed = self._iterated = self._cancel_requested = False
+        self._source_ended = False
         self._receipt: HostAdaptiveHopCaptureReceiptV3 | None = None
         self._ready: deque[HostAdaptiveHopSampledVisitV3] = deque()
         self._awaiting_feedback: deque[AdaptiveHopVisitV2] = deque()
@@ -216,7 +217,7 @@ class HostAdaptiveHopSession:
             raise PersistentHopClientError(
                 "host feedback does not bind the next actual source visit"
             )
-        accepted = not self._closed
+        accepted = not (self._closed or self._source_ended)
         if accepted:
             try:
                 self._backend.submit_metadata_feedback(payload)
@@ -234,7 +235,9 @@ class HostAdaptiveHopSession:
             yield sampled
             self._require_owner()
 
-    def visits(self) -> Iterator[HostAdaptiveHopSampledVisitV3]:
+    def visits(
+        self, *, before_release: Callable[[], None] | None = None
+    ) -> Iterator[HostAdaptiveHopSampledVisitV3]:
         self._require_owner()
         if self._iterated or self._closed:
             raise PersistentHopClientError("host adaptive visit iterator is single-use")
@@ -248,7 +251,7 @@ class HostAdaptiveHopSession:
                         return
                     if self._cancel_requested:
                         break
-            self._finish()
+            self._finish(before_release=before_release)
             yield from self._yield_ready()
         except BaseException as error:
             if threading.get_ident() != self._thread:
@@ -270,7 +273,7 @@ class HostAdaptiveHopSession:
             self._backend.cancel()
             self._cancel_requested = True
 
-    def _finish(self) -> None:
+    def _finish(self, *, before_release: Callable[[], None] | None = None) -> None:
         deadline = time.monotonic() + 10
         while True:
             status = HostAdaptiveHopStatusV3.unpack(self._backend.read_status())
@@ -285,6 +288,7 @@ class HostAdaptiveHopSession:
                 )
             time.sleep(0.01)
         stream, terminal = self._stream.finish(status)
+        self._source_ended = True
         self._ready.extend(terminal)
         bracket = self.start_clock_bracket
         requested = getattr(self._backend, "kernel_buffers_requested", self.plan.kernel_buffers)
@@ -294,6 +298,10 @@ class HostAdaptiveHopSession:
             self.plan.kernel_buffers,
         ):
             raise PersistentHopClientError("host adaptive kernel-buffer geometry changed")
+        # Drain already emitted host work before slow hardware restoration.
+        # Terminal status proves the source ended; feedback is explicitly unapplied.
+        if before_release is not None:
+            before_release()
         lifecycle = self._release()
         self._receipt = HostAdaptiveHopCaptureReceiptV3(
             stream,
@@ -305,12 +313,14 @@ class HostAdaptiveHopSession:
             readback,
         )
 
-    def close(self) -> HostAdaptiveHopCaptureReceiptV3 | None:
+    def close(
+        self, *, before_release: Callable[[], None] | None = None
+    ) -> HostAdaptiveHopCaptureReceiptV3 | None:
         self._require_owner()
         if not self._closed:
             try:
                 self.request_cancel()
-                self._finish()
+                self._finish(before_release=before_release)
             finally:
                 self._release()
         return self._receipt

@@ -100,6 +100,38 @@ def test_full_replay_submits_ordered_feedback_and_marks_terminal_tail_unapplied(
     assert s.close() == s.receipt and backend.closed == 1
 
 
+def test_pending_host_result_drains_before_restoration_and_remains_unapplied():
+    s, backend = session()
+    pending = []
+    callbacks = []
+
+    def before_release():
+        assert backend.closed == 0
+        assert len(pending) == 1
+        callbacks.append(s.submit_feedback(pending.pop()))
+
+    for sampled in s.visits(before_release=before_release):
+        feedback = result(s, sampled)
+        if sampled.visit.event.dwell_index == 32:
+            pending.append(feedback)
+        else:
+            s.submit_feedback(feedback)
+    assert callbacks == [False] and not pending
+    assert backend.closed == 1 and len(backend.feedback) == 32
+
+
+def test_terminal_drain_failure_still_releases_backend():
+    s, backend = session()
+
+    def fail():
+        raise RuntimeError("injected host drain failure")
+
+    with pytest.raises(RuntimeError, match="drain failure"):
+        for sampled in s.visits(before_release=fail):
+            s.submit_feedback(result(s, sampled))
+    assert backend.closed == 1
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
