@@ -28,6 +28,28 @@ from pluto_plus.flash_safety import (
 FLASH_COMMAND = "/bin/sh -s -- ppu-flash-safety-v1"
 _LOCK = "/tmp/ppu-physical-flash.lock"
 
+# Keep the read and encoder statuses separate: a pipeline can hide an MTD error.
+# Released Pluto BusyBox has uuencode -m, but no base64 applet.
+FLASH_READ_SCRIPT = rb"""set -eu
+umask 077
+size=$1; device=$2; lock=$3; owner=$4
+test "$(cat "$lock/owner")" = "$owner"
+chunk="$lock/read.bin"
+trap 'rm -f "$chunk"' EXIT
+trap 'exit 1' HUP INT TERM
+head -c "$size" "$device" >"$chunk"
+test "$(wc -c <"$chunk")" = "$size"
+if command -v base64 >/dev/null 2>&1; then
+  base64 "$chunk"
+elif command -v uuencode >/dev/null 2>&1; then
+  encoded=$(uuencode -m - <"$chunk")
+  printf '%s\n' "$encoded" | sed '1d;$d'
+else
+  echo 'flash backup requires base64 or uuencode -m' >&2
+  exit 1
+fi
+"""
+
 # No unbounded upper-bank reads. Protected partitions are read here only after
 # their observed physical ranges have been checked. Offsets come from MTD sysfs,
 # not cumulative /proc/mtd sizes. The fixed updater's config is also constrained.
@@ -265,7 +287,7 @@ class FlashSession:
         ):
             raise FlashSafetyError("protected_verification_unavailable", "invalid read range")
         raw = self._run(
-            b"set -eu\n" + self._owns_lock() + f"head -c {size} /dev/mtd{index} | base64\n".encode()
+            f"set -- {size} /dev/mtd{index} {_LOCK} {self.token}\n".encode() + FLASH_READ_SCRIPT
         )
         if len(raw) > size * 2 + 128:
             raise FlashSafetyError("protected_verification_unavailable", "oversized flash read")

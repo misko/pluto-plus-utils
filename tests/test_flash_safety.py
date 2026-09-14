@@ -326,3 +326,56 @@ def test_remote_observation_parser_fails_closed(alteration):
     memory.run = lambda *args, **kwargs: report
     with pytest.raises(FlashSafetyError):
         observe_flash(memory)
+
+
+@pytest.mark.parametrize("problem", [None, "short", "read-error", "encoder-error", "owner"])
+def test_flash_reader_without_base64(tmp_path, problem):
+    """Execute the production reader with only BusyBox's uuencode available."""
+    import base64
+    import os
+    import shlex
+    import shutil
+    import subprocess
+
+    from pluto_plus.flash_safety_io import FLASH_READ_SCRIPT
+
+    # The optional prefix runs the released ARM BusyBox under qemu-user as well.
+    prefix = shlex.split(os.environ.get("PPU_TEST_BUSYBOX", shutil.which("busybox") or ""))
+    if not prefix:
+        pytest.skip("BusyBox is required for the firmware shell regression")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in ("cat", "head", "wc", "rm", "sed", "uuencode"):
+        executable = tools / name
+        executable.write_text("#!/bin/sh\nexec " + shlex.join([*prefix, name]) + ' "$@"\n')
+        executable.chmod(0o755)
+    if problem == "read-error":
+        (tools / "head").write_text("#!/bin/sh\nprintf 'abcd'\nexit 1\n")
+    if problem == "encoder-error":
+        (tools / "uuencode").write_text(
+            "#!/bin/sh\nprintf 'begin-base64 644 -\\nYWJjZA==\\n====\\n'\nexit 1\n"
+        )
+    lock = tmp_path / "lock"
+    lock.mkdir()
+    (lock / "owner").write_text("wrong" if problem == "owner" else "token")
+    device = tmp_path / "mtd"
+    data = bytes(range(256)) * 257
+    device.write_bytes(data[:-1] if problem == "short" else data)
+    # Explicit paths prevent BusyBox's standalone applet lookup from bypassing
+    # fault injection or finding the host's base64 outside the device inventory.
+    script = FLASH_READ_SCRIPT.decode().replace(
+        "command -v base64", f"test -x {tools / 'base64'}"
+    )
+    for name in ("cat", "head", "wc", "rm", "sed", "uuencode"):
+        script = script.replace(name + " ", str(tools / name) + " ")
+    result = subprocess.run(
+        [*prefix, "sh", "-s", "--", str(len(data)), str(device), str(lock), "token"],
+        input=script, text=True, capture_output=True, check=False,
+        env=os.environ | {"PATH": str(tools)},
+    )
+    if problem is None:
+        assert result.returncode == 0, result.stderr
+        assert base64.b64decode("".join(result.stdout.split()), validate=True) == data
+    else:
+        assert result.returncode != 0
+    assert not (lock / "read.bin").exists()
