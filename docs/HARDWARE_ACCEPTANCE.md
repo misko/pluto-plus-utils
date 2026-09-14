@@ -9,6 +9,12 @@ board/flash/writer/bootloader combination. Boundary tests belong on dedicated
 recoverable boards. Logical MTD SHA-256 and a different fleet canary do not grant
 qualification. Offline tests do not replace this hardware evidence.
 
+SD recovery has an additional [#114 acceptance gate](SD_RECOVERY.md): controlled
+boot corruption, interrupted sector repairs, independent complete physical
+verification, local/second-host SD transfer, and repeated actual QSPI cold boots.
+The shipped incident profile is restricted to the exact radio and retained image
+used to produce its evidence; wider live recovery support remains unqualified.
+
 No command in this document should be run against an unspecified radio. Record
 the stable serial, USB sysfs path, current firmware, host, operator, and artifact
 digests before beginning.

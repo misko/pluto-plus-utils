@@ -91,6 +91,7 @@ from pluto_plus.metadata_soak import (
     prepare_metadata_soak,
     run_live_metadata_slot,
 )
+from pluto_plus.recovery.cli import app as recovery_app
 from pluto_plus.seeded_hop import (
     DEFAULT_FRAME_SIZE,
     DEFAULT_HOP_SECONDS,
@@ -152,6 +153,7 @@ job_app = typer.Typer(no_args_is_help=True, help="Inspect stream and capture job
 artifact_app = typer.Typer(no_args_is_help=True, help="Inspect captured artifacts.")
 scan_app = typer.Typer(no_args_is_help=True, help="Run exclusive frequency scans.")
 firmware_app = typer.Typer(no_args_is_help=True, help="Plan and execute guarded firmware updates.")
+firmware_app.add_typer(recovery_app, name="recover")
 candidate_ram_app = typer.Typer(
     no_args_is_help=True,
     help="Plan, execute, and verify local release-candidate RAM deployments.",

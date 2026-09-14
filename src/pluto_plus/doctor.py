@@ -903,6 +903,59 @@ STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_PROMOTION_POLICY = (
         }
     )
 )
+
+# Exact native-IIO 60 MS/s detector bytes from the deliberately isolated
+# ``codex/starlink-rx-only-do-not-merge`` firmware branch.  The candidate has
+# passed routed timing, repeated RAM boots, cabled coarse and full-rate timing,
+# and Ethernet result transport.  It is intentionally local-only until an
+# attached-radio 30 -> 60 -> 30 persistent round trip proves the exact bytes,
+# detector-only topology, functional map transport, and rollback path.
+STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY = FirmwarePolicy(
+    profile_id="starlink-pss-60m-iio-v5-dnm-persistent-canary",
+    release_tag="starlink-pss-60m-iio-v5-dnm-cc2fca840807",
+    device_firmware="starlink-pss-iio-v5-dnm",
+    asset_name="starlink-pss-60m-iio-v5-dnm-cc2fca840807-pluto.dfu",
+    asset_sha256="7c5f5c3b8307cc49fadbe416da5f19ceb86350c0ddd9e6bd15f98cd423dd1038",
+    release_url=(
+        "https://github.com/misko/plutosdr-fw/commit/"
+        "cc2fca8408074f8793d4f53bc11fbfdb51f45921"
+    ),
+    source_commit="cc2fca8408074f8793d4f53bc11fbfdb51f45921",
+    fit_body_sha256="ee4fa9448f9b40af04abfdc4b889e4741003d6ed5298e977271d914d268f702f",
+    fit_body_size=13_179_767,
+    hardware_qualified=False,
+    published_at=datetime(2026, 9, 7, 22, 11, 14, tzinfo=UTC),
+)
+
+# Rollback uses the already frozen 30 MS/s bytes, but receives a distinct
+# transition identity.  This does not broaden the original 30 MS/s canary;
+# only the exact detector-only 60 MS/s source may use this path.
+STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_CANARY_POLICY = (
+    STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY.model_copy(
+        update={
+            "profile_id": "starlink-pss-30m-iio-v1-dnm-from-60m-canary",
+        }
+    )
+)
+
+# LAN authority is represented by separate immutable policy objects and is
+# added only after the local canary and rollback receipts have been reviewed.
+STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_PROMOTION_POLICY = (
+    STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY.model_copy(
+        update={
+            "profile_id": "starlink-pss-60m-iio-v5-dnm-persistent-promotion",
+            "hardware_qualified": True,
+        }
+    )
+)
+STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_PROMOTION_POLICY = (
+    STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_CANARY_POLICY.model_copy(
+        update={
+            "profile_id": "starlink-pss-30m-iio-v1-dnm-from-60m-promotion",
+            "hardware_qualified": True,
+        }
+    )
+)
 STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_PROMOTION_POLICY = (
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_CANARY_POLICY.model_copy(
         update={

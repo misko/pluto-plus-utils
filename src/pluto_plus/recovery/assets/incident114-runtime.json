@@ -1,0 +1,15 @@
+{
+  "bin/busybox": {
+    "sha256": "941fd5811f306527f2f86c4b23231c00473e44b2ea1a83e51445032f949f58ac",
+    "size": 902820
+  },
+  "etc/os-release": {
+    "sha256": "0556cb94ed7ce247d5650fc6aeb458159232929ba371e98b479f5957767ed2cb",
+    "size": 165
+  },
+  "kernel_version": "Linux version 5.15.0-00017-g42fb1cd17aff (mouse9911@gauss) (arm-linux-gnueabihf-gcc (Linaro GCC 7.3-2018.05) 7.3.1 20180425 [linaro-7.3-2018.05 revision d29120a424ecfbc167ef90065c0eeb7f91977701], GNU ld (Linaro_Binutils-2018.05) 2.28.2.20170706) #1 SMP PREEMPT Thu Sep 10 02:23:42 UTC 2026",
+  "usr/sbin/iiod": {
+    "sha256": "c06fc3fadadbcfa25fc8864ee615421286ce450ed2b77960816924b8dd04510e",
+    "size": 124320
+  }
+}

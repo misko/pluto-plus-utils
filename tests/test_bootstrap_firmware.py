@@ -3155,9 +3155,83 @@ def test_30m_detector_canary_is_local_only_and_has_exact_transition() -> None:
     (
         "starlink-pss-30m-iio-v1-dnm-persistent-canary",
         "starlink-pss-15m-rx-only-dnm-v7-from-30m-iio-canary",
+        "starlink-pss-60m-iio-v5-dnm-persistent-canary",
+        "starlink-pss-30m-iio-v1-dnm-from-60m-canary",
     ),
 )
-def test_30m_detector_canary_round_trip_cannot_plan_lan_writes(
+def test_detector_canary_round_trips_cannot_plan_lan_writes(
+    tmp_path: Path, profile_id: str
+) -> None:
+    image = tmp_path / "candidate.dfu"
+    image.write_bytes(b"not inspected because LAN authority fails first")
+
+    with pytest.raises(bootstrap.BootstrapFirmwareError, match="not qualified"):
+        bootstrap.prepare_lan_flash_plan(
+            image,
+            serial="SERIAL_A",
+            host="192.168.1.17",
+            mutation_profile_id=profile_id,
+        )
+
+
+def test_60m_detector_canary_has_exact_30m_round_trip_and_distinct_promotions() -> None:
+    candidate = bootstrap.STANDALONE_FLASH_PROFILES[
+        "starlink-pss-60m-iio-v5-dnm-persistent-canary"
+    ]
+    rollback = bootstrap.STANDALONE_FLASH_PROFILES[
+        "starlink-pss-30m-iio-v1-dnm-from-60m-canary"
+    ]
+    promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "starlink-pss-60m-iio-v5-dnm-persistent-promotion"
+    ]
+    rollback_promotion = bootstrap.STANDALONE_FLASH_PROFILES[
+        "starlink-pss-30m-iio-v1-dnm-from-60m-promotion"
+    ]
+    detector = bootstrap.SINGLE_RX_DETECTOR_ONLY_LAYOUT
+
+    assert candidate.persistent_allowed is True
+    assert candidate.policy.hardware_qualified is False
+    assert candidate.policy.asset_sha256 == (
+        "7c5f5c3b8307cc49fadbe416da5f19ceb86350c0ddd9e6bd15f98cd423dd1038"
+    )
+    assert candidate.policy.fit_body_sha256 == (
+        "ee4fa9448f9b40af04abfdc4b889e4741003d6ed5298e977271d914d268f702f"
+    )
+    assert candidate.policy.fit_body_size == 13_179_767
+    assert candidate.policy.source_commit == (
+        "cc2fca8408074f8793d4f53bc11fbfdb51f45921"
+    )
+    assert candidate.source_iio_layout is detector
+    assert candidate.return_iio_layout is detector
+    assert candidate.allowed_before_firmwares == ("starlink-pss30-iio-v1-dnm",)
+
+    assert rollback.policy.hardware_qualified is False
+    assert rollback.policy.asset_sha256 == (
+        "ec00dfcbcc999f6011c980c98ffc5ee21f61172296b7865df795a7c28dd28931"
+    )
+    assert rollback.source_iio_layout is detector
+    assert rollback.return_iio_layout is detector
+    assert rollback.allowed_before_firmwares == ("starlink-pss-iio-v5-dnm",)
+
+    assert promotion.policy.profile_id != candidate.policy.profile_id
+    assert promotion.policy.hardware_qualified is True
+    assert promotion.policy.asset_sha256 == candidate.policy.asset_sha256
+    assert promotion.policy.fit_body_sha256 == candidate.policy.fit_body_sha256
+    assert promotion.allowed_before_firmwares == candidate.allowed_before_firmwares
+    assert rollback_promotion.policy.profile_id != rollback.policy.profile_id
+    assert rollback_promotion.policy.hardware_qualified is True
+    assert rollback_promotion.policy.asset_sha256 == rollback.policy.asset_sha256
+    assert rollback_promotion.allowed_before_firmwares == rollback.allowed_before_firmwares
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    (
+        "starlink-pss-60m-iio-v5-dnm-persistent-canary",
+        "starlink-pss-30m-iio-v1-dnm-from-60m-canary",
+    ),
+)
+def test_60m_detector_canary_round_trip_cannot_plan_lan_writes(
     tmp_path: Path, profile_id: str
 ) -> None:
     image = tmp_path / "candidate.dfu"

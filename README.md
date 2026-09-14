@@ -10,6 +10,61 @@ unqualified writers stay below physical 16 MiB, and supported SSH updates verify
 protected boot regions before reboot. Legacy mass-storage/eject and helper-v1
 persistence are disabled. Release-profile approval cannot override this boundary.
 
+For radios that cannot boot normally, [guided SD recovery](docs/SD_RECOVERY.md)
+adds private diagnostic sessions and a resumable repair engine. A shipped incident
+recipe supports the exactly identified #114 radio and its retained image, with
+writes restricted below 16 MiB. General hardware qualification remains pending;
+use `pluto firmware recover profiles` to inspect shipped support.
+
+### Run guided SD repair
+
+Use one private session for the complete recovery and every retry:
+
+```bash
+~/.local/bin/pluto firmware recover guide --session ~/pluto-recovery-14
+```
+
+The guide prints both a `repair-*` directory and a complete `ppu-repair-*.zip`.
+Copy the ZIP from the recovery host to the Mac, then extract it at the SD-card
+root. The card must contain `BOOT.bin`, `uEnv.txt`, and one `ppu-repair/`
+directory. Replace an old `ppu-repair` directory instead of merging or nesting
+directories. With a card mounted as `AKASO`, verify the **directory**, not the
+volume root:
+
+```bash
+unzip -o ~/Downloads/ppu-repair-PLAN_SHA256.zip -d /Volumes/AKASO
+python3 /Volumes/AKASO/ppu-repair/verify-repair.py /Volumes/AKASO/ppu-repair
+diskutil eject /Volumes/AKASO
+```
+
+Compare the verifier's manifest SHA-256 with the value printed by PPU. A passed
+verifier proves every transfer file is present, including the larger rollback
+FIT used for the RAM boot.
+
+Start each requested boot with the radio powered off. Run or leave the guide at
+its `[y/N]` question; at that point PPU already owns and listens to the bound
+UART. While the question remains open, insert the card and select SD boot as
+directed, power on, wait 15 seconds, then type `y`. Do not type `y` before the
+power cycle. Every prompt that explicitly requests a boot requires the radio to
+begin fully powered off, even when it is already sitting at a `Pluto+>` prompt.
+An interrupted session requests one SD boot to reread physical flash and create
+a successor plan. In the same guide invocation, that verified SD console proceeds
+directly into the RAM test without another power cycle.
+
+The RAM trial uses `rdinit=/bin/sh` because the rollback FIT contains an initramfs.
+The guide tests the proposed image in RAM, asks for another SD power cycle to
+prove flash is unchanged, and only then displays the exact `RECOVER SESSION_ID
+PLAN_SHA256` confirmation. Persistent writes begin only after that entire phrase
+is entered. Keep power connected during programming and complete readback. For
+the final prompt, leave PPU listening, fully power off, remove the SD card, select
+normal QSPI boot, power on, wait 15 seconds, and type `y`. A recovery receipt is
+emitted only after machine checks confirm the QSPI power-on boot, image, services,
+preserved settings, and inactive RF state.
+
+If a step fails, do not create a new session. Keep the session directory and run
+the same command again. Consult [the full SD recovery guide](docs/SD_RECOVERY.md)
+for card rebuilding, state reconciliation, and evidence details.
+
 ## Quick start
 
 ```bash
@@ -1279,6 +1334,13 @@ local persistent return, workload, reboot/cold-return, and rollback testing.
 The qualified 15 MS/s RX-only PSS v7 bytes use
 `starlink-pss-15m-rx-only-dnm-v7-persistent-promotion` for LAN deployment; the
 otherwise byte-identical `persistent-canary` profile remains local-only.
+The detector-only native-IIO ladder preserves the same separation. Exact
+30 MS/s bytes use `starlink-pss-30m-iio-v1-dnm-persistent-promotion`. Exact
+60 MS/s bytes first use the local-only
+`starlink-pss-60m-iio-v5-dnm-persistent-canary`, followed by the separately
+guarded `starlink-pss-30m-iio-v1-dnm-from-60m-canary` rollback. The corresponding
+60 MS/s and 30 MS/s `promotion` profiles exist as distinct identities for LAN
+use only after that exact local round trip and functional workload have passed.
 
 A firmware-provisioned persistent host key would remove routine rotation, but it must
 be generated per device and stored in protected persistent storage. Reusing one key

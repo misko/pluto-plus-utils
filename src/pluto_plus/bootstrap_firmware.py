@@ -82,8 +82,12 @@ from pluto_plus.doctor import (
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_PROMOTION_POLICY,
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY,
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_PROMOTION_POLICY,
+    STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_CANARY_POLICY,
+    STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_PROMOTION_POLICY,
     STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY,
     STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_PROMOTION_POLICY,
+    STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY,
+    STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_PROMOTION_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
     TANDEM_V6_DEVELOPMENT_POLICY,
@@ -743,6 +747,54 @@ STANDALONE_FLASH_PROFILES = {
             return_iio_layout=SINGLE_RX_RX_ONLY_LAYOUT,
             allowed_before_firmwares=(
                 STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_CANARY_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_CANARY_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_PROMOTION_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_PROMOTION_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_PROMOTION_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_PROMOTION_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
             ),
         )
     ),
