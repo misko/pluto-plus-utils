@@ -23,6 +23,8 @@ from contextlib import contextmanager
 from importlib.resources import files
 from pathlib import Path
 
+from pluto_plus.flash_safety import LEGACY_ADDRESS_LIMIT
+
 from .contracts import (
     Blob,
     Observation,
@@ -484,6 +486,23 @@ class PlutoSdBackend(SdUbootBackend):
             "boot_timeout", "expected ordered SD boot markers were not observed; inspect UART log"
         )
 
+    def _verify_cold_fit(self) -> str:
+        """Verify the persisted FIT without reading an unqualified upper bank."""
+        region = self.profile.geometry.region("fit")
+        fit = self.profile.rollback
+        if not region.start < region.start + fit.size <= min(region.end, LEGACY_ADDRESS_LIMIT):
+            raise RecoveryError("flash_range_unqualified", "cold-boot FIT exceeds safe read range")
+        self.console.command(
+            f'test "$(cat /sys/class/mtd/mtd3/offset)" = {region.start} && '
+            f'test "$(cat /sys/class/mtd/mtd3/size)" = {region.size} && '
+            'test "$(cat /sys/class/mtd/mtd3/name)" = qspi-linux'
+        )
+        output = self.console.command(f"head -c {fit.size} /dev/mtd3 | sha256sum")
+        match = re.fullmatch(rb"([0-9a-f]{64})  -", output.strip())
+        if match is None or match[1].decode() != fit.sha256:
+            raise RecoveryError("return_unverified", "cold-boot firmware FIT readback differs")
+        return match[1].decode()
+
     def _runtime(self, source: str, *, cold: bool = False) -> ReturnEvidence:
         if self.target is None:
             raise RecoveryError("target_unbound", "missing prior target observation")
@@ -550,12 +569,13 @@ class PlutoSdBackend(SdUbootBackend):
             want = digest(expected[region.start : region.end]).encode()
             if not re.search(rb"(?m)^" + want + rb"\s+", out):
                 raise RecoveryError("return_unverified", "boot or preserved target settings differ")
+        fit_sha256 = self._verify_cold_fit() if cold else self.profile.rollback.sha256
         self._log(b"network_context_sha256=" + digest(network_context()).encode() + b"\n")
         transcript = self.store.put(bytes(self.capture))
         self.capture.clear()
         return ReturnEvidence(
             target=self.target,
-            fit_sha256=self.profile.rollback.sha256,
+            fit_sha256=fit_sha256,
             firmware=self.profile.rollback.expected_firmware,
             layout=self.profile.rollback.expected_layout,
             network_ok=True,

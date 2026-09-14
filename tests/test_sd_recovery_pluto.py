@@ -571,3 +571,86 @@ def test_ram_boot_uses_initramfs_rdinit_and_detaches_iiod(tmp_path, monkeypatch)
     assert "</dev/null >/tmp/ppu-iiod.log 2>&1 &" in iiod
     assert "ppu_iiod_pid=$!" in iiod
     assert "kill -0 $ppu_iiod_pid" in iiod
+
+
+@pytest.mark.parametrize("case", ["valid", "changed_fit", "short_read", "wrong_geometry"])
+def test_cold_acceptance_reads_actual_fit_before_recording_recovered(tmp_path, monkeypatch, case):
+    import json
+    from contextlib import nullcontext
+    from importlib.resources import files
+
+    values, backend, console, commands = backend_fixture(tmp_path, monkeypatch)
+    store, _, nor, workflow, boot, fit, provenance, history = values
+    workflow.capture()
+    plan = workflow.plan(boot, fit, provenance, history)
+    workflow.ram_test()
+    workflow.execute(f"RECOVER {plan.session_id} {plan.sha256}")
+    assert store.status()["state"] == "awaiting_cold_boot"
+    if case == "changed_fit":
+        nor.flash[0x200000 + len(fit) - 1] ^= 1
+    pins = json.loads(files("pluto_plus.recovery").joinpath(
+        "assets/incident114-runtime.json"
+    ).read_text())
+    labels = ("qspi-fsbl-uboot", "qspi-uboot-env", "qspi-nvmfs", "qspi-linux")
+
+    def command(text, **kwargs):
+        commands.append(text)
+        if text == "cat /proc/version":
+            return pins["kernel_version"].encode()
+        if text.startswith('test "$(wc -c </'):
+            name = text.rsplit("/", 1)[-1]
+            claim = next(v for k, v in pins.items() if k.endswith("/" + name))
+            return claim["sha256"].encode() + b"  /" + name.encode()
+        if text.startswith("devmem "):
+            return b"0x00400000\n0x00000002"
+        if text == "cat /sys/bus/iio/devices/iio:device*/name":
+            return b"ad9361-phy\ncf-ad9361-lpc"
+        if text == "cat /proc/mtd":
+            return "\n".join(
+                f'mtd{i}: {r.size:08x} {r.erase_size:08x} "{label}"'
+                for i, (r, label) in enumerate(
+                    zip(backend.profile.geometry.regions, labels, strict=True)
+                )
+            ).encode()
+        if text.startswith("sha256sum /dev/mtd"):
+            region = backend.profile.geometry.regions[int(text[-1])]
+            return digest(bytes(nor.flash[region.start:region.end])).encode() + b"  /dev/mtd"
+        if text.startswith('test "$(cat /sys/class/mtd/mtd3/offset)"'):
+            if case == "wrong_geometry":
+                raise RecoveryError("command_failed", "observed offset differs")
+            return b""
+        if text == f"head -c {len(fit)} /dev/mtd3 | sha256sum":
+            size = len(fit) - (1 if case == "short_read" else 0)
+            return digest(bytes(nor.flash[0x200000:0x200000 + size])).encode() + b"  -"
+        if text.startswith(("(for ", "ip -4 ", "pidof ")):
+            return b""
+        raise AssertionError(text)
+
+    monkeypatch.setattr(console, "command", command)
+    monkeypatch.setattr(backend, "lease", nullcontext)
+    monkeypatch.setattr(backend, "_wait", lambda *a, **kw: b"/ # ")
+    monkeypatch.setattr(pluto_sd, "network_context", lambda: b"synthetic verified context")
+    backend.operator_cold_actions = True
+    workflow._backend = backend
+    if case == "valid":
+        evidence = workflow.attest()
+        assert evidence.fit_sha256 == digest(fit)
+        assert store.status()["state"] == "recovered"
+    else:
+        with pytest.raises(RecoveryError, match="command_failed|return_unverified"):
+            workflow.attest()
+        assert store.status()["state"] == "awaiting_cold_boot"
+        assert not any(event.kind == "recovered" for event in store.events())
+    if case != "wrong_geometry":
+        assert f"head -c {len(fit)} /dev/mtd3 | sha256sum" in commands
+    assert "sha256sum /dev/mtd3" not in commands
+
+
+def test_cold_fit_read_refuses_upper_bank_before_console_io(tmp_path, monkeypatch):
+    _, backend, _, commands = backend_fixture(tmp_path, monkeypatch, capacity=0x2000000)
+    backend.profile = backend.profile.model_copy(update={
+        "rollback": backend.profile.rollback.model_copy(update={"size": 0xE00001}),
+    })
+    with pytest.raises(RecoveryError, match="flash_range_unqualified"):
+        backend._verify_cold_fit()
+    assert commands == []
