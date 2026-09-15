@@ -71,3 +71,32 @@ prefix followed by `-L ROOT ROOT/bin/busybox`, running
 
 No hardware was accessed or flashed by this review. Raw recovery images and
 identity evidence remain outside the repository.
+
+## Implemented integration, 2026-09-15
+
+The integration branch now includes current main through `9a4dc78`, the BusyBox
+backup fix, and a pinned conservative writer footprint in
+`src/pluto_plus/flash_writer_issue99.json`. Its aggregate covers 36 file paths,
+including the wrapper, implementation/range helpers, resolved external commands,
+shell, dynamic loader and required libraries. Unknown helper bytes or changed
+PATH resolution are refused. No extended qualification is added.
+
+Live `.14` preflight exposed and corrected authentication diagnostics leaking
+into SSH command results and quadratic prompt scanning during large backups.
+The stdin handshake now separates authentication from command output, with a
+bounded prompt-search window and a real-PTY binary-text capture regression.
+The reviewed update transaction accepts CRC-valid opaque environment tail bytes
+using U-Boot's double-NUL termination semantics; strict recovery parsing remains
+the default. All original bytes are backed up and active settings remain protected.
+
+Firmware packaging also needed a separate fix: the released BusyBox lacks `stat`,
+so the common updater now uses `wc -c`. That change is Buildroot `857c1a817` and
+produces candidate FIT SHA-256
+`11248f8b028c5f1b09693c7c7ab9dddcbc63a2cb94ffdc4dab65ef8b5bea4562`.
+It has the same kernel/FPGA as the RAM-tested candidate, with updated updater and
+source provenance. Its persistent deployment is a new acceptance milestone.
+
+Validation: 681 related PPU tests passed before the bounded-search change;
+147 SSH/setup/bootstrap tests passed afterward, including the large-output PTY
+regression. Ruff and type checks passed. The live protected-region and exact
+rollback FIT backup then completed and matched the retained recovered baseline.
