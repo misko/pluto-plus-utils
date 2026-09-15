@@ -111,12 +111,15 @@ class IioBufferOpenClockBracket:
     after_monotonic_ns: int
 
     def __post_init__(self) -> None:
-        if min(
-            self.before_realtime_ns,
-            self.before_monotonic_ns,
-            self.after_realtime_ns,
-            self.after_monotonic_ns,
-        ) <= 0:
+        if (
+            min(
+                self.before_realtime_ns,
+                self.before_monotonic_ns,
+                self.after_realtime_ns,
+                self.after_monotonic_ns,
+            )
+            <= 0
+        ):
             raise ValueError("metadata-buffer OPEN clocks must be positive")
         if self.after_monotonic_ns < self.before_monotonic_ns:
             raise ValueError("metadata-buffer OPEN monotonic bracket regressed")
@@ -159,9 +162,7 @@ def parse_metadata_version_capabilities(value: object) -> tuple[int, ...]:
     return tuple(versions)
 
 
-def require_metadata_abi_capability(
-    attrs: Mapping[str, object], expected_abi: int
-) -> int:
+def require_metadata_abi_capability(attrs: Mapping[str, object], expected_abi: int) -> int:
     """Select one release-local metadata ABI from canonical context attributes.
 
     ABI 4 is additive: firmware keeps the legacy scalar at ABI 3 for old hosts
@@ -175,18 +176,12 @@ def require_metadata_abi_capability(
     legacy_raw = attrs.get("iio,buffer-metadata")
     if expected_abi < 4:
         if legacy_raw != str(expected_abi):
-            raise ValueError(
-                f"metadata ABI scalar is {legacy_raw!r}, expected {expected_abi}"
-            )
+            raise ValueError(f"metadata ABI scalar is {legacy_raw!r}, expected {expected_abi}")
         return expected_abi
 
     if legacy_raw != "3":
-        raise ValueError(
-            "metadata ABI 4 requires the compatibility-preserving legacy scalar '3'"
-        )
-    versions = parse_metadata_version_capabilities(
-        attrs.get("iio,buffer-metadata-abi-versions")
-    )
+        raise ValueError("metadata ABI 4 requires the compatibility-preserving legacy scalar '3'")
+    versions = parse_metadata_version_capabilities(attrs.get("iio,buffer-metadata-abi-versions"))
     if 3 not in versions:
         raise ValueError("metadata ABI version set is inconsistent with legacy scalar 3")
     if expected_abi not in versions:
@@ -246,9 +241,7 @@ def metadata_iio_context_timeout_ms(
         or not isinstance(batch_frames, int)
         or not 1 <= batch_frames <= METADATA_BATCH_FRAMES_MAX
     ):
-        raise ValueError(
-            f"batch_frames must be in [1, {METADATA_BATCH_FRAMES_MAX}]"
-        )
+        raise ValueError(f"batch_frames must be in [1, {METADATA_BATCH_FRAMES_MAX}]")
     for name, value in (("ddr_burst_frames", ddr_burst_frames),):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
@@ -342,9 +335,7 @@ class IioMetadataCaptureSession:
             or not isinstance(batch_frames, int)
             or not 1 <= batch_frames <= METADATA_BATCH_FRAMES_MAX
         ):
-            raise ValueError(
-                f"batch_frames must be in [1, {METADATA_BATCH_FRAMES_MAX}]"
-            )
+            raise ValueError(f"batch_frames must be in [1, {METADATA_BATCH_FRAMES_MAX}]")
         if isinstance(ddr_burst_bytes, bool) or not isinstance(ddr_burst_bytes, int):
             raise TypeError("ddr_burst_bytes must be an integer")
         if ddr_burst_bytes < 0:
@@ -355,22 +346,16 @@ class IioMetadataCaptureSession:
             raise TypeError("ddr_ring_frames must be an integer")
         if not isinstance(ddr_ring_continuous, bool):
             raise TypeError("ddr_ring_continuous must be a bool")
-        if isinstance(direct_async_frames, bool) or not isinstance(
-            direct_async_frames, int
-        ):
+        if isinstance(direct_async_frames, bool) or not isinstance(direct_async_frames, int):
             raise TypeError("direct_async_frames must be an integer")
         if not 0 <= direct_async_frames <= DIRECT_ASYNC_FRAME_TARGET_MAX:
-            raise ValueError(
-                f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]"
-            )
+            raise ValueError(f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]")
         if not isinstance(drop_backlog_on_overrun, bool):
             raise TypeError("drop_backlog_on_overrun must be a bool")
         if direct_async_frames and kernel_buffers < 2:
             raise ValueError("direct async capture requires at least two kernel buffers")
         if direct_async_frames and ddr_ring_bytes and kernel_buffers < 3:
-            raise ValueError(
-                "direct async RAM extension requires at least three kernel buffers"
-            )
+            raise ValueError("direct async RAM extension requires at least three kernel buffers")
         if ddr_ring_bytes < 0 or ddr_ring_frames < 0:
             raise ValueError("DDR ring values must not be negative")
         if ddr_burst_bytes and ddr_ring_bytes:
@@ -378,14 +363,10 @@ class IioMetadataCaptureSession:
         if direct_async_frames and ddr_burst_bytes:
             raise ValueError("direct async capture cannot use the sealed DDR burst")
         if batch_frames > 1 and (ddr_burst_bytes or ddr_ring_bytes or direct_async_frames):
-            raise ValueError(
-                "metadata refill batching is only supported by ordinary capture"
-            )
+            raise ValueError("metadata refill batching is only supported by ordinary capture")
         if ddr_ring_bytes:
             if direct_async_frames and (ddr_ring_frames or ddr_ring_continuous):
-                raise ValueError(
-                    "direct async RAM extension owns the finite frame target"
-                )
+                raise ValueError("direct async RAM extension owns the finite frame target")
             if ddr_ring_continuous and ddr_ring_frames:
                 raise ValueError("continuous DDR ring must not specify a frame target")
             if not direct_async_frames and not ddr_ring_continuous and not ddr_ring_frames:
@@ -407,9 +388,7 @@ class IioMetadataCaptureSession:
         self._ddr_ring_capture_frames = ddr_ring_frames
         self._ddr_ring_continuous = ddr_ring_continuous
         self._direct_async_frames = direct_async_frames
-        self._drop_backlog_on_overrun = bool(
-            direct_async_frames and drop_backlog_on_overrun
-        )
+        self._drop_backlog_on_overrun = bool(direct_async_frames and drop_backlog_on_overrun)
         self._tandem_request = tandem_request or TandemSessionRequestV1.auto_for_sample_count(
             samples_per_channel,
             retention_frames=(kernel_buffers + 1 if metadata_abi == 4 else 2),
@@ -611,16 +590,12 @@ class IioMetadataCaptureSession:
             raise RuntimeError("RX kernel-buffer count does not support configuration")
         result = setter(count)
         if isinstance(result, int) and result < 0:
-            raise RuntimeError(
-                f"libiio rejected RX kernel-buffer count {count}: error {result}"
-            )
+            raise RuntimeError(f"libiio rejected RX kernel-buffer count {count}: error {result}")
         actual = getattr(self._sdr._rxadc, "kernel_buffers_count", None)
         if actual is None:
             raise RuntimeError("RX kernel-buffer count does not support readback")
         if int(actual) != count:
-            raise RuntimeError(
-                f"RX kernel-buffer readback is {actual}, expected {count}"
-            )
+            raise RuntimeError(f"RX kernel-buffer readback is {actual}, expected {count}")
 
     def _verify_kernel_buffers(self) -> None:
         actual = getattr(self._sdr._rxadc, "kernel_buffers_count", None)
@@ -803,9 +778,7 @@ class IioMetadataCaptureSession:
             if len(raw_metadata) != parsed_v7.header_bytes:
                 raise RuntimeError("metadata refill returned trailing bytes")
         self._validate_header(metadata)
-        pending_sequence = self._validate_sequence(
-            metadata, declared_missing=declared_missing
-        )
+        pending_sequence = self._validate_sequence(metadata, declared_missing=declared_missing)
         if parsed_v7 is not None:
             self._validate_v7_ledger(parsed_v7)
         # A finite standalone ring can finish capture and restore the FPGA
@@ -962,8 +935,7 @@ class IioMetadataCaptureSession:
             hidden_transition_count = 0
         else:
             hidden_transition_count = (
-                metadata.tandem_transition_count_start
-                - previous.tandem_transition_count
+                metadata.tandem_transition_count_start - previous.tandem_transition_count
             ) & 0xFFFFFFFF
             hidden_event_count = (
                 metadata.event_sequence_start - expected_event_sequence
@@ -997,14 +969,10 @@ class IioMetadataCaptureSession:
                 else:
                     direction_matches = event.rx1_gain_index < current_index
                 if not direction_matches:
-                    raise RuntimeError(
-                        "ABI4 frame-boundary gain event contradicts its direction"
-                    )
+                    raise RuntimeError("ABI4 frame-boundary gain event contradicts its direction")
                 current_index = event.rx1_gain_index
             if current_index != metadata.rx1_gain_index_start:
-                raise RuntimeError(
-                    "ABI4 frame-boundary gain events disagree with the start index"
-                )
+                raise RuntimeError("ABI4 frame-boundary gain events disagree with the start index")
             index_delta = metadata.rx1_gain_index_start - previous_index
             db_delta = metadata.rx1_gain_db_start - previous.rx1_gain_db_end
             if (
@@ -1012,9 +980,7 @@ class IioMetadataCaptureSession:
                 or (index_delta < 0 and db_delta > 0)
                 or (index_delta == 0 and db_delta != 0)
             ):
-                raise RuntimeError(
-                    "ABI4 frame-boundary gain index and dB direction disagree"
-                )
+                raise RuntimeError("ABI4 frame-boundary gain index and dB direction disagree")
         elif (
             metadata.rx1_gain_index_start,
             metadata.rx2_gain_index_start,
@@ -1177,9 +1143,7 @@ class IioRawSidecarCaptureSession:
         if isinstance(direct_async_frames, bool) or not isinstance(direct_async_frames, int):
             raise TypeError("direct_async_frames must be an integer")
         if not 0 <= direct_async_frames <= DIRECT_ASYNC_FRAME_TARGET_MAX:
-            raise ValueError(
-                f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]"
-            )
+            raise ValueError(f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]")
         if not isinstance(drop_backlog_on_overrun, bool):
             raise TypeError("drop_backlog_on_overrun must be a bool")
         self._sdr = sdr
@@ -1194,6 +1158,7 @@ class IioRawSidecarCaptureSession:
         self._metadata_unwrapper = metadata_unwrapper
         self._direct_async_frames = direct_async_frames
         self._drop_backlog_on_overrun = drop_backlog_on_overrun
+        self._direct_async_rearm_pending = False
         self._buffer: Any | None = None
         self._open_clock_bracket: IioBufferOpenClockBracket | None = None
         self._start_time_anchors: list[HostTimeAnchorMeasurement] = []
@@ -1221,9 +1186,7 @@ class IioRawSidecarCaptureSession:
 
         if not self._start_time_anchors or self._start_realtime_mapping is None:
             return self.open_clock_bracket
-        extended = [
-            item.extend_near(first_sample_counter) for item in self._start_time_anchors
-        ]
+        extended = [item.extend_near(first_sample_counter) for item in self._start_time_anchors]
         fit = fit_sample_clock(
             extended,
             nominal_sample_rate_hz=sample_rate_hz,
@@ -1237,9 +1200,7 @@ class IioRawSidecarCaptureSession:
         before_monotonic_ns = estimate_monotonic_ns - uncertainty_ns
         after_monotonic_ns = estimate_monotonic_ns + uncertainty_ns
         return IioBufferOpenClockBracket(
-            before_realtime_ns=self._start_realtime_mapping.realtime_ns(
-                before_monotonic_ns
-            ),
+            before_realtime_ns=self._start_realtime_mapping.realtime_ns(before_monotonic_ns),
             before_monotonic_ns=before_monotonic_ns,
             after_realtime_ns=self._start_realtime_mapping.realtime_ns(after_monotonic_ns),
             after_monotonic_ns=after_monotonic_ns,
@@ -1359,7 +1320,14 @@ class IioRawSidecarCaptureSession:
         buffer = self._buffer
         if buffer is None:
             raise RuntimeError("raw sidecar metadata capture is not open")
-        buffer.refill()
+        try:
+            buffer.refill()
+        except OSError as error:
+            if error.errno != errno.ENODATA or not self._direct_async_rearm_pending:
+                raise
+            buffer.rearm_direct_async(self._direct_async_frames)
+            self._direct_async_rearm_pending = False
+            buffer.refill()
         iq_payload = bytes(buffer.read())
         raw_metadata = buffer.metadata
         if raw_metadata is None:
@@ -1415,7 +1383,16 @@ class IioRawSidecarCaptureSession:
         rearm = getattr(self._buffer, "rearm_direct_async", None)
         if not callable(rearm):
             raise NotImplementedError("installed pylibiio lacks direct async rearm")
-        rearm(self._direct_async_frames)
+        try:
+            rearm(self._direct_async_frames)
+            self._direct_async_rearm_pending = False
+        except OSError as error:
+            if error.errno != errno.EBUSY:
+                raise
+            # Feedback may arrive before the current finite segment has been
+            # consumed.  Preserve that causal authorization and rearm exactly
+            # when the following refill reports the segment boundary.
+            self._direct_async_rearm_pending = True
 
     def drain_metadata(self, capacity: int = DEFAULT_METADATA_CAPACITY) -> bytes:
         """Metadata only: never refill or replace the last received IQ block."""
@@ -1447,6 +1424,7 @@ class IioRawSidecarCaptureSession:
     def close(self) -> None:
         buffer = self._buffer
         self._buffer = None
+        self._direct_async_rearm_pending = False
         if getattr(self._sdr, "_rxbuf", None) is buffer:
             self._sdr._rxbuf = None
         try:

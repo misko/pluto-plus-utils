@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import struct
 import zlib
 from types import SimpleNamespace
@@ -295,8 +296,10 @@ def test_backend_attests_newly_selected_radio_without_historical_denylist(matchi
     radio = _FakeRadio()
     radio.identity = radio.identity.model_copy(update={"serial": selected})
     backend = IioPersistentHopBackend(
-        URI, expected_serial=selected if matching else SERIAL,
-        iio_module=SimpleNamespace(), radio_factory=lambda *_: radio,
+        URI,
+        expected_serial=selected if matching else SERIAL,
+        iio_module=SimpleNamespace(),
+        radio_factory=lambda *_: radio,
     )
     if matching:
         backend.open()
@@ -434,7 +437,9 @@ def test_backend_restoration_distinguishes_agc_observations_from_manual_settings
     radio = GainReadbackRadio()
     radio.original = dataclasses.replace(radio.original, gain_modes=(mode, mode))
     backend = IioPersistentHopBackend(
-        URI, expected_serial=SERIAL, iio_module=SimpleNamespace(),
+        URI,
+        expected_serial=SERIAL,
+        iio_module=SimpleNamespace(),
         radio_factory=lambda _uri, _serial: radio,
     )
     backend.open()
@@ -453,14 +458,17 @@ def test_backend_restoration_distinguishes_agc_observations_from_manual_settings
     assert backend.close() is None
 
 
-@pytest.mark.parametrize("changed", [
-    {"center_frequency_hz": 916_000_000.0},
-    {"sample_rate_hz": 2_000_000.0},
-    {"bandwidth_hz": 2_000_000.0},
-    {"channels": (1,), "gain_modes": (GainMode.SLOW_ATTACK,), "gain_db": (12.0,)},
-    {"gain_modes": (GainMode.FAST_ATTACK, GainMode.SLOW_ATTACK)},
-    {"active_profile": 3},
-])
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"center_frequency_hz": 916_000_000.0},
+        {"sample_rate_hz": 2_000_000.0},
+        {"bandwidth_hz": 2_000_000.0},
+        {"channels": (1,), "gain_modes": (GainMode.SLOW_ATTACK,), "gain_db": (12.0,)},
+        {"gain_modes": (GainMode.FAST_ATTACK, GainMode.SLOW_ATTACK)},
+        {"active_profile": 3},
+    ],
+)
 def test_backend_rejects_changed_restoration_configuration_and_closes_radio(changed) -> None:
     class WrongReadbackRadio(_FakeRadio):
         def restore_receiver_settings_readback(self, snapshot):
@@ -473,7 +481,9 @@ def test_backend_rejects_changed_restoration_configuration_and_closes_radio(chan
 
     radio = WrongReadbackRadio()
     backend = IioPersistentHopBackend(
-        URI, expected_serial=SERIAL, iio_module=SimpleNamespace(),
+        URI,
+        expected_serial=SERIAL,
+        iio_module=SimpleNamespace(),
         radio_factory=lambda _uri, _serial: radio,
     )
     backend.open()
@@ -734,6 +744,30 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert block.sidecar == _sidecar()
     assert block.iq_payload == bytes(SAMPLES * 4 * len(receiver_ids))
     assert block.extension_metadata == (b"extension" + bytes(metadata) if extended else None)
+    rearm_attempts = 0
+    refill_attempts = 0
+
+    def boundary_rearm(frames: int) -> None:
+        nonlocal rearm_attempts
+        rearm_attempts += 1
+        if rearm_attempts == 1:
+            raise OSError(errno.EBUSY, "segment is still active")
+        buffer.rearmed.append(frames)
+
+    def boundary_refill() -> None:
+        nonlocal refill_attempts
+        refill_attempts += 1
+        if refill_attempts == 1:
+            raise OSError(errno.ENODATA, "segment is exhausted")
+        buffer.refilled = True
+
+    buffer.rearm_direct_async = boundary_rearm
+    buffer.refill = boundary_refill
+    session.rearm_direct_async()
+    boundary_block = session.read_block()
+    assert boundary_block.iq_payload == block.iq_payload
+    assert rearm_attempts == 2 and refill_attempts == 2
+    assert buffer.rearmed == [1]
     buffer.refilled = False
     assert session.drain_metadata() == b"terminal metadata"
     assert drains == [65536]
@@ -741,7 +775,7 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     session.submit_metadata_feedback(b"source-bound feedback")
     assert feedback_packets == [b"source-bound feedback"]
     session.rearm_direct_async()
-    assert buffer.rearmed == [1]
+    assert buffer.rearmed == [1, 1]
     assert not buffer.refilled and buffer.iq == block.iq_payload
     for bad in (b"", bytes(257), "not bytes"):
         with pytest.raises(ValueError, match="feedback"):
