@@ -63,7 +63,28 @@ add its hash alone to bypass that review.
    by PPU and the firmware updater. Match actual hardware, layout, running writer
    and installed bootloader; keep all untested combinations restricted.
 
-At preparation time, no bench target has been confirmed for this new sequence.
-No candidate boot, scratch write, new bootloader installation or extended-range
-qualification was performed by this handoff. Artifact hash verification and the
-successful GLRT incident recovery do not establish candidate compatibility.
+## Radio .14 bench preparation, 2026-09-15
+
+The user dedicated recovered `.14` to disruptive qualification testing with its
+SD recovery card and UART. Read-only probes on the bound FTDI console confirmed
+its recovered GLRT firmware, QSPI power-on boot, expected partition geometry and
+disabled IIO buffer. A new private directory, `~/pluto-qualification-99-radio14`,
+retains the probe transcript separately from the completed recovery session.
+
+The prepared `issue99-radio14-sd.zip` contains the unchanged, pinned console-only
+SD bootstrap, the candidate under `issue99-candidate.itb`, the recovered rollback
+FIT under `radio14-rollback.itb`, and a manifest verifier. No automatic candidate
+boot or flash command is added. Candidate FIT `config@9`, selected component
+hashes, Z7010 FPGA part metadata, load bounds and the 47,270,912-byte expanded
+ramdisk passed offline validation. This is preparation evidence, not a new
+production qualification profile.
+
+ZIP SHA-256: `fec62345b5674a3552b742924cb03c8884bba2fa3d2445af420557416015d284`.
+Manifest SHA-256: `65376df534aa2e69c9cc556497e5754caf1365fd8337bc617736b466d847e801`.
+
+Next, transfer and verify the bundle on the recovery SD card with the radio
+powered off. Keep existing backups. Once the card is ready, acquire UART before
+powering on in SD mode, then independently capture the fresh recovered flash
+baseline. No candidate boot, scratch write, bootloader installation or extended
+qualification has yet been performed. The old Linux writer must not be used for
+unbounded full-flash reads.
