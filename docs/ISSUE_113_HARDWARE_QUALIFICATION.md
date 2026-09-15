@@ -166,6 +166,25 @@ a complete expected-image comparison after every mutation. The final candidate
 Linux readback returned the recovered baseline hash
 `70ab950899687290560e3bfe86044bd26fa462a5abc37f4277c1687648889afa`.
 
-An independent SD physical comparison after full power removal remains required
-before returning the target to normal QSPI boot. Extended production access is
-still disabled.
+After full power removal, the final independent SD physical comparison returned
+the recovered baseline hash exactly. Native endpoint reads around the 16 MiB
+boundary also matched. The radio was then powered off, the SD card removed and
+the jumper returned to normal QSPI boot.
+
+The final QSPI power-on return attested target `winbond-db620818a328172c`, boot
+mode `0x1`, power-on reset, recovered firmware
+`glrt-scheduled-eth-r60000000-v1`, the protected partition hashes, FIT SHA-256
+`56391f5da4569189bdcbf4e80c2d76553bda8d271d23aa529a1d71728a90a84a`,
+running IIOD and disabled IIO buffers. The two-sector boundary test is complete,
+and `.14` is restored to its verified pre-test flash image and normal boot path.
+
+The initial QSPI listener expired before late boot output arrived. A subsequent
+read-only console probe found the normal login prompt and service startup; final
+attestation then completed from that running power-on boot. This timing issue did
+not involve a flash operation.
+
+This result is live evidence for the repaired candidate kernel's complete read,
+erase and program behavior immediately below and above 16 MiB on this exact
+Winbond target. Extended production access remains disabled: persistent
+candidate boot, a crossing FIT, bootloader behavior, rollback under that
+candidate and a second Winbond sample are separate qualification milestones.
