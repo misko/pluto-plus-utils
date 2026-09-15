@@ -98,4 +98,5 @@ class HostAdaptiveHopStreamV3(
             minimum_valid_duty_ppm=minimum_valid_duty_ppm,
             maximum_event_lag_blocks=maximum_event_lag_blocks,
             allow_counter_gaps=isinstance(request, HostAdaptiveHopRequestV4),
+            close_visits_from_geometry=True,
         )

@@ -172,6 +172,7 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         minimum_valid_duty_ppm: int = 900_000,
         maximum_event_lag_blocks: int = 2,
         allow_counter_gaps: bool = False,
+        close_visits_from_geometry: bool = False,
     ) -> None:
         if type(request) is not request_type:
             raise PersistentHopClientError("adaptive stream request major mismatch")
@@ -189,12 +190,14 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
             or not 0 <= minimum_valid_duty_ppm <= 1_000_000
             or type(maximum_event_lag_blocks) is not int
             or not 0 <= maximum_event_lag_blocks <= 8
+            or type(close_visits_from_geometry) is not bool
         ):
             raise ValueError("invalid adaptive stream block/duty bounds")
         self.request = request
         self.samples_per_block = samples_per_block
         self.minimum_valid_duty_ppm = minimum_valid_duty_ppm
         self.allow_counter_gaps = allow_counter_gaps
+        self.close_visits_from_geometry = close_visits_from_geometry
         # One dwell, the explicitly bounded delivery lag, and a boundary refill.
         self.maximum_retained_samples = (
             request.geometry.dwell_samples + (maximum_event_lag_blocks + 1) * samples_per_block
@@ -247,9 +250,7 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         ):
             raise PersistentHopClientError("adaptive block counters are not contiguous")
         if previous is not None and base.block_first_counter > previous.block_end_counter_exclusive:
-            self._gaps.append(
-                (previous.block_end_counter_exclusive, base.block_first_counter)
-            )
+            self._gaps.append((previous.block_end_counter_exclusive, base.block_first_counter))
         count = base.block_end_counter_exclusive - base.block_first_counter
         if count > self.samples_per_block or len(wire.iq_payload) != count * self._bytes_per_sample:
             raise PersistentHopClientError("adaptive IQ length disagrees with block bounds")
@@ -271,6 +272,8 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
             )
         )
         self._previous = base
+        if self.close_visits_from_geometry and base.state == PersistentHopSessionState.RUNNING:
+            self._close_current_visit_from_geometry()
         output = self._emit_ready()
         retain_from = (
             self._visits[self._emitted].valid_start_counter
@@ -327,9 +330,25 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         ):
             raise PersistentHopClientError("adaptive decision uses an unfinished source dwell")
         if previous is not None:
-            self._close_visit(previous, self._choices[-1], event.invalid_start_counter)
+            if len(self._visits) == len(self._events):
+                if self._visits[-1].valid_end_counter_exclusive != event.invalid_start_counter:
+                    raise PersistentHopClientError(
+                        "adaptive geometry-closed visit disagrees with the next actual event"
+                    )
+            else:
+                self._close_visit(previous, self._choices[-1], event.invalid_start_counter)
         self._events.append(event)
         self._choices.append(choice)
+
+    def _close_current_visit_from_geometry(self) -> None:
+        if not self._events or len(self._visits) == len(self._events):
+            return
+        if len(self._visits) != len(self._events) - 1:
+            raise PersistentHopClientError("adaptive visit closure inventory is invalid")
+        event = self._events[-1]
+        end = event.invalid_end_counter_exclusive + self.request.geometry.dwell_samples
+        if self._segments and self._segments[-1][1] >= end:
+            self._close_visit(event, self._choices[-1], end)
 
     def _close_visit(
         self, event: PersistentHopEventV1, choice: AdaptiveHopChoiceV2, end: int
@@ -471,7 +490,13 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
                 <= self.samples_per_block
             ):
                 raise PersistentHopClientError("adaptive completion duration/overshoot is invalid")
-            self._close_visit(last, self._choices[-1], status.final_counter)
+            if len(self._visits) == len(self._events):
+                if self._visits[-1].valid_end_counter_exclusive != status.final_counter:
+                    raise PersistentHopClientError(
+                        "adaptive geometry-closed visit disagrees with terminal status"
+                    )
+            else:
+                self._close_visit(last, self._choices[-1], status.final_counter)
         output = self._emit_ready()
         if self._emitted != len(self._visits):
             raise PersistentHopClientError("adaptive terminal has undelivered complete visit IQ")
@@ -497,8 +522,7 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
                 target_index=profile.target_index,
                 target=profile.target,
                 visit_count=sum(
-                    v.profile.target_index == profile.target_index
-                    for v in self._retained_visits
+                    v.profile.target_index == profile.target_index for v in self._retained_visits
                 ),
                 valid_sample_count=sum(
                     v.valid_sample_count

@@ -262,7 +262,7 @@ class HostAdaptiveHopSession:
         return accepted
 
     def _yield_ready(self) -> Iterator[HostAdaptiveHopSampledVisitV3]:
-        while self._ready:
+        while self._ready and (not self._rolling_direct_async or not self._awaiting_feedback):
             sampled = self._ready.popleft()
             self._awaiting_feedback.append(sampled.visit)
             yield sampled

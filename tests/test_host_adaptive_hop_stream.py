@@ -181,9 +181,7 @@ def test_wide_request_retains_sparse_complete_visits_across_accounted_gap():
         seen.extend(stream.feed(wire))
     status = capture.status(sequence=last_original, cancelled=True)
     receipt, final = stream.finish(
-        HostAdaptiveHopStatusV3(
-            dc.replace(status.geometry, last_block_sequence=last_original - 1)
-        )
+        HostAdaptiveHopStatusV3(dc.replace(status.geometry, last_block_sequence=last_original - 1))
     )
     seen.extend(final)
     assert receipt.sparse is not None
@@ -193,3 +191,29 @@ def test_wide_request_retains_sparse_complete_visits_across_accounted_gap():
     )
     assert len(receipt.visits) == len(seen) < len(receipt.events)
     assert receipt.unclassified_sample_count >= block
+
+
+def test_wide_stream_releases_complete_visit_before_delayed_next_event():
+    block = 1_000_000
+    capture = Capture(20_000_000, AdaptiveHopMode.ADAPTIVE, block, delay=1)
+    request = HostAdaptiveHopRequestV4(
+        capture.request.geometry,
+        capture.request.policy,
+        HostDecisionConfigurationV2(0, bytes(range(32)), 20_000_000),
+    )
+    stream = HostAdaptiveHopStreamV3(request, samples_per_block=block)
+    wires = [single_wire(wire, 0) for wire in capture.wires()]
+
+    assert not stream.feed(wires[0])
+    assert not stream.feed(wires[1])
+    ready = stream.feed(wires[2])
+
+    assert len(ready) == 1
+    assert ready[0].visit.event.dwell_index == 0
+    assert (
+        sum(
+            len(HostAdaptiveHopEvidenceV3.unpack(wire.evidence).geometry.events)
+            for wire in wires[:3]
+        )
+        == 1
+    )
