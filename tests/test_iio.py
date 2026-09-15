@@ -528,6 +528,54 @@ def test_iio_adapter_attests_paired_manual_gain_geometry(channels) -> None:
         radio.close()
 
 
+@pytest.mark.parametrize("rate", [15_000_000, 20_000_000])
+def test_iio_adapter_accepts_negotiated_multirate_host_adaptive_rx0(rate) -> None:
+    module = CaptureRateFakeAdi()
+    radio = IioRadioDevice("ip:192.168.1.17", serial="SERIAL_A", adi_module=module)
+    radio.open()
+    try:
+        module.device.ctx.attrs.update(
+            {
+                "iio,buffer-host-adaptive-hop-request": "3,4",
+                "iio,buffer-host-adaptive-hop-feedback": "1,2",
+            }
+        )
+        readback = radio.configure_source_locked_receiver_geometry(
+            sample_rate_hz=rate,
+            rf_bandwidth_hz=rate,
+            channels=(0,),
+            manual_gain_db=40.0,
+        )
+        assert readback.sample_rate_hz == rate
+        assert readback.channels == (0,)
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize("channels", [(1,), (0,)])
+def test_iio_adapter_rejects_unnegotiated_multirate_single_rx(channels) -> None:
+    module = CaptureRateFakeAdi()
+    radio = IioRadioDevice("ip:192.168.1.17", serial="SERIAL_A", adi_module=module)
+    radio.open()
+    try:
+        if channels == (1,):
+            module.device.ctx.attrs.update(
+                {
+                    "iio,buffer-host-adaptive-hop-request": "3,4",
+                    "iio,buffer-host-adaptive-hop-feedback": "1,2",
+                }
+            )
+        with pytest.raises(ValueError, match="host-adaptive RX0"):
+            radio.configure_source_locked_receiver_geometry(
+                sample_rate_hz=15_000_000,
+                rf_bandwidth_hz=15_000_000,
+                channels=channels,
+                manual_gain_db=40.0,
+            )
+    finally:
+        radio.close()
+
+
 def test_iio_adapter_rejects_stuck_capture_decimation() -> None:
     radio = IioRadioDevice(
         "usb:3.49.5",

@@ -1000,14 +1000,25 @@ class IioRadioDevice:
     ) -> None:
         if channels == (0, 1):
             return
+        attributes = self.iio_context_attributes()
+        legacy_single_rx = (
+            channels in ((0,), (1,))
+            and sample_rate_hz == 10_000_000
+            and attributes.get("iio,buffer-persistent-hop-single-rx-10m") == "1"
+        )
+        multirate_host_rx0 = (
+            channels == (0,)
+            and sample_rate_hz in (15_000_000, 20_000_000)
+            and attributes.get("iio,buffer-host-adaptive-hop-request") == "3,4"
+            and attributes.get("iio,buffer-host-adaptive-hop-feedback") == "1,2"
+        )
         if (
-            channels not in ((0,), (1,))
-            or any(type(channel) is not int for channel in channels)
-            or sample_rate_hz != 10_000_000
-            or self.iio_context_attributes().get("iio,buffer-persistent-hop-single-rx-10m") != "1"
+            any(type(channel) is not int for channel in channels)
+            or not (legacy_single_rx or multirate_host_rx0)
         ):
             raise ValueError(
-                "persistent sidecar requires paired RX or negotiated single-RX 10 MS/s"
+                "persistent sidecar requires paired RX, negotiated single-RX 10 MS/s, "
+                "or negotiated host-adaptive RX0 at 15/20 MS/s"
             )
 
     def store_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]:
