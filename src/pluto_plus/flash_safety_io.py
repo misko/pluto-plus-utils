@@ -24,14 +24,39 @@ from pluto_plus.flash_safety import (
     validate_flash,
     verify_protected,
 )
+from pluto_plus.flash_writer import tools_observation_script
 
 FLASH_COMMAND = "/bin/sh -s -- ppu-flash-safety-v1"
 _LOCK = "/tmp/ppu-physical-flash.lock"
+
+# Keep the read and encoder statuses separate: a pipeline can hide an MTD error.
+# Released Pluto BusyBox has uuencode -m, but no base64 applet.
+FLASH_READ_SCRIPT = rb"""set -eu
+umask 077
+size=$1; device=$2; lock=$3; owner=$4
+test "$(cat "$lock/owner")" = "$owner"
+chunk="$lock/read.bin"
+trap 'rm -f "$chunk"' EXIT
+trap 'exit 1' HUP INT TERM
+head -c "$size" "$device" >"$chunk"
+test "$(wc -c <"$chunk")" = "$size"
+if command -v base64 >/dev/null 2>&1; then
+  base64 "$chunk"
+elif command -v uuencode >/dev/null 2>&1; then
+  encoded=$(uuencode -m - <"$chunk")
+  printf '%s\n' "$encoded" | sed '1d;$d'
+else
+  echo 'flash backup requires base64 or uuencode -m' >&2
+  exit 1
+fi
+"""
 
 # No unbounded upper-bank reads. Protected partitions are read here only after
 # their observed physical ranges have been checked. Offsets come from MTD sysfs,
 # not cumulative /proc/mtd sizes. The fixed updater's config is also constrained.
 OBSERVE_SCRIPT = rb"""set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 emit() { printf '%s=%s\n' "$1" "$2"; }
 digest() { sha256sum "$1" | awk '{print $1}'; }
 test "$(id -u)" = 0
@@ -39,10 +64,11 @@ emit serial "$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/
 emit boot_id "$(cat /proc/sys/kernel/random/boot_id)"
 emit kernel "$(uname -r):$(digest /opt/VERSIONS)"
 emit board_identity "$(digest /sys/firmware/fdt)"
-emit updater_sha256 "$(digest /sbin/update_frm.sh)"
+updater=$(digest /sbin/update_frm.sh)
+emit updater_sha256 "$updater"
 config_digest=$(digest /etc/device_config)
 test "$config_digest" = 8938c87cd4949f07c33ec2f638d339a45c1c6d5bd0c4e777b64dcaf00577c3f9
-tools=$(sha256sum /bin/busybox /usr/sbin/fw_setenv /etc/device_config)
+""" + tools_observation_script() + rb"""
 emit tools_sha256 "$(printf '%s\n' "$tools" | sha256sum | awk '{print $1}')"
 env_config=$(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' /etc/fw_env.config | awk '{$1=$1;print}')
 test "$env_config" = '/dev/mtd1 0x0000 0x20000 0x20000'
@@ -215,7 +241,9 @@ class FlashSession:
         fresh = validate_flash(observe_flash(self.transport), self.fit)
         require_same_flash(self.decision, fresh)
         self.before = self._protected()
-        decode_environment(self.before[1])
+        # Reviewed U-Boot import stops at the double NUL; CRC covers all bytes.
+        # fw_setenv may retain old bytes in the inactive tail. Back up all of it.
+        decode_environment(self.before[1], opaque_padding=True)
         if hashlib.sha256(self.before[0]).hexdigest() != fresh.observation.boot_sha256:
             raise FlashSafetyError("flash_observation_changed", "boot changed during backup")
         for index, data in self.before.items():
@@ -265,7 +293,7 @@ class FlashSession:
         ):
             raise FlashSafetyError("protected_verification_unavailable", "invalid read range")
         raw = self._run(
-            b"set -eu\n" + self._owns_lock() + f"head -c {size} /dev/mtd{index} | base64\n".encode()
+            f"set -- {size} /dev/mtd{index} {_LOCK} {self.token}\n".encode() + FLASH_READ_SCRIPT
         )
         if len(raw) > size * 2 + 128:
             raise FlashSafetyError("protected_verification_unavailable", "oversized flash read")
@@ -334,7 +362,7 @@ class FlashSession:
                 sort_keys=True,
             ).encode(),
         )
-        verify_protected(self.before, after, len(self.fit))
+        verify_protected(self.before, after, len(self.fit), opaque_padding=True)
         _save(
             self.directory / "integrity-verified.json",
             json.dumps(

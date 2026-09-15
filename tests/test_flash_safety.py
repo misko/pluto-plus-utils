@@ -326,3 +326,151 @@ def test_remote_observation_parser_fails_closed(alteration):
     memory.run = lambda *args, **kwargs: report
     with pytest.raises(FlashSafetyError):
         observe_flash(memory)
+
+
+@pytest.mark.parametrize("problem", [None, "short", "read-error", "encoder-error", "owner"])
+def test_flash_reader_without_base64(tmp_path, problem):
+    """Execute the production reader with only BusyBox's uuencode available."""
+    import base64
+    import os
+    import shlex
+    import shutil
+    import subprocess
+
+    from pluto_plus.flash_safety_io import FLASH_READ_SCRIPT
+
+    # The optional prefix runs the released ARM BusyBox under qemu-user as well.
+    prefix = shlex.split(os.environ.get("PPU_TEST_BUSYBOX", shutil.which("busybox") or ""))
+    if not prefix:
+        pytest.skip("BusyBox is required for the firmware shell regression")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in ("cat", "head", "wc", "rm", "sed", "uuencode"):
+        executable = tools / name
+        executable.write_text("#!/bin/sh\nexec " + shlex.join([*prefix, name]) + ' "$@"\n')
+        executable.chmod(0o755)
+    if problem == "read-error":
+        (tools / "head").write_text("#!/bin/sh\nprintf 'abcd'\nexit 1\n")
+    if problem == "encoder-error":
+        (tools / "uuencode").write_text(
+            "#!/bin/sh\nprintf 'begin-base64 644 -\\nYWJjZA==\\n====\\n'\nexit 1\n"
+        )
+    lock = tmp_path / "lock"
+    lock.mkdir()
+    (lock / "owner").write_text("wrong" if problem == "owner" else "token")
+    device = tmp_path / "mtd"
+    data = bytes(range(256)) * 257
+    device.write_bytes(data[:-1] if problem == "short" else data)
+    # Explicit paths prevent BusyBox's standalone applet lookup from bypassing
+    # fault injection or finding the host's base64 outside the device inventory.
+    script = FLASH_READ_SCRIPT.decode().replace("command -v base64", f"test -x {tools / 'base64'}")
+    for name in ("cat", "head", "wc", "rm", "sed", "uuencode"):
+        script = script.replace(name + " ", str(tools / name) + " ")
+    result = subprocess.run(
+        [*prefix, "sh", "-s", "--", str(len(data)), str(device), str(lock), "token"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=os.environ | {"PATH": str(tools)},
+    )
+    if problem is None:
+        assert result.returncode == 0, result.stderr
+        assert base64.b64decode("".join(result.stdout.split()), validate=True) == data
+    else:
+        assert result.returncode != 0
+    assert not (lock / "read.bin").exists()
+
+
+def test_reviewed_issue99_writer_preserves_conservative_limit():
+    from pluto_plus.flash_writer import ISSUE99_TOOLS_SHA256, ISSUE99_UPDATER_SHA256
+
+    observed = replace(
+        observation(), updater_sha256=ISSUE99_UPDATER_SHA256, tools_sha256=ISSUE99_TOOLS_SHA256
+    )
+    assert validate_flash(observed, fit_bytes()).address_limit == 0x1000000
+    with pytest.raises(FlashSafetyError, match="flash_range_unqualified"):
+        validate_flash(observed, fit_bytes(0xE00001))
+    with pytest.raises(FlashSafetyError, match="flash_writer_unknown"):
+        validate_flash(replace(observed, tools_sha256="a" * 64), fit_bytes())
+
+
+def test_each_writer_dependency_is_bound_to_the_reviewed_digest():
+    from pluto_plus.flash_writer import (
+        ISSUE99_FILES,
+        ISSUE99_TOOLS_SHA256,
+        ISSUE99_UPDATER_SHA256,
+    )
+
+    def aggregate(items):
+        return hashlib.sha256(
+            "".join(f"{sha}  {path}\n" for path, sha in items).encode()
+        ).hexdigest()
+
+    assert aggregate(ISSUE99_FILES.items()) == ISSUE99_TOOLS_SHA256
+    observed = replace(observation(), updater_sha256=ISSUE99_UPDATER_SHA256)
+    for path in ISSUE99_FILES:
+        for changed in (dict(ISSUE99_FILES),):
+            changed[path] = "0" * 64
+            with pytest.raises(FlashSafetyError, match="flash_writer_unknown"):
+                validate_flash(
+                    replace(observed, tools_sha256=aggregate(changed.items())), fit_bytes()
+                )
+            del changed[path]
+            with pytest.raises(FlashSafetyError, match="flash_writer_unknown"):
+                validate_flash(
+                    replace(observed, tools_sha256=aggregate(changed.items())), fit_bytes()
+                )
+
+
+def test_second_update_uses_new_writer_and_rejects_changed_helpers(tmp_path):
+    from pluto_plus.flash_safety import LEGACY_UPDATER_SHA256
+    from pluto_plus.flash_writer import ISSUE99_TOOLS_SHA256, ISSUE99_UPDATER_SHA256
+
+    transport = FlashMemoryTransport()
+    old_report = transport.report
+    changed = False
+
+    def report():
+        return (
+            old_report()
+            .replace(LEGACY_UPDATER_SHA256, ISSUE99_UPDATER_SHA256)
+            .replace(
+                "tools_sha256=" + "a" * 64,
+                "tools_sha256=" + ("b" * 64 if changed else ISSUE99_TOOLS_SHA256),
+            )
+        )
+
+    transport.report = report
+    fit = fit_bytes()
+    session = FlashSession(
+        transport, validate_flash(observe_flash(transport), fit), fit, tmp_path / "second-update"
+    )
+    session.prepare()
+    changed = True
+    with pytest.raises(FlashSafetyError, match="flash_writer_unknown"):
+        session.invoke("/tmp/pluto-plus-utils/pluto.frm", hashlib.sha256(frm_bytes()).hexdigest())
+    assert not session.dispatched
+    changed = False
+    session.invoke("/tmp/pluto-plus-utils/pluto.frm", hashlib.sha256(frm_bytes()).hexdigest())
+    session.verify()
+    assert session.verified
+
+
+def test_reviewed_environment_ignores_inactive_tail_but_checks_crc_and_active_keys():
+    import zlib
+
+    raw = environment()
+    data = bytearray(raw[4:])
+    data[-64:-47] = b"old=inactive-key!"
+    padded = zlib.crc32(data).to_bytes(4, "little") + data
+    with pytest.raises(FlashSafetyError, match="encoding/padding"):
+        decode_environment(padded)
+    assert decode_environment(padded, opaque_padding=True) == decode_environment(raw)
+    with pytest.raises(FlashSafetyError, match="size/CRC"):
+        decode_environment(padded[:-1] + b"x", opaque_padding=True)
+    before = {0: b"boot", 1: padded, 2: b"settings"}
+    verify_protected(before, before, 96, opaque_padding=True)
+    changed = before | {1: environment({b"fit_size": b"60", b"bootcmd": b"changed"})}
+    with pytest.raises(FlashSafetyError, match="unexpected U-Boot"):
+        verify_protected(before, changed, 96, opaque_padding=True)

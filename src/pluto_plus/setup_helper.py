@@ -470,6 +470,8 @@ class BoundSshTransport:
             arguments,
             encoding=None,
             timeout=timeout_s,
+            maxread=65536,
+            searchwindowsize=4096,
         )
         transcript = bytearray()
         closed_before_stdin = False
@@ -491,6 +493,9 @@ class BoundSshTransport:
                 if matched == 1:
                     if stdin is None:
                         raise SetupHelperError("radio SSH emitted an unexpected stdin marker")
+                    # Authentication prompts and SSH diagnostics precede this
+                    # protocol marker; they are not remote command output.
+                    transcript.clear()
                     transcript.extend(
                         _stream_pexpect_stdin(child.child_fd, stdin, timeout_s=timeout_s)
                     )

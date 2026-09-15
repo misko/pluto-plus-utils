@@ -9,6 +9,7 @@ import zlib
 from dataclasses import asdict, dataclass
 
 from pluto_plus.flash_ranges import Interval, validate_write_intervals
+from pluto_plus.flash_writer import ISSUE99_TOOLS_SHA256, ISSUE99_UPDATER_SHA256
 
 POLICY_VERSION = "ppu-physical-flash-v1"
 LEGACY_ADDRESS_LIMIT = 0x1000000
@@ -135,7 +136,10 @@ def validate_flash(
     ):
         if not _DIGEST.fullmatch(digest):
             raise FlashSafetyError("flash_observation_invalid", "missing build/content digest")
-    if observation.updater_sha256 != LEGACY_UPDATER_SHA256:
+    if observation.updater_sha256 == ISSUE99_UPDATER_SHA256:
+        if observation.tools_sha256 != ISSUE99_TOOLS_SHA256:
+            raise FlashSafetyError("flash_writer_unknown", "updater dependencies are not reviewed")
+    elif observation.updater_sha256 != LEGACY_UPDATER_SHA256:
         raise FlashSafetyError("flash_writer_unknown", "updater footprint is not reviewed")
     parts = observation.partitions
     # The reviewed updater targets mtd3 and fw_env.config targets mtd1. Different
@@ -269,13 +273,15 @@ def reject_uncontrolled_persistence() -> None:
     )
 
 
-def decode_environment(raw: bytes) -> dict[bytes, bytes]:
+def decode_environment(raw: bytes, *, opaque_padding: bool = False) -> dict[bytes, bytes]:
     """Decode the reviewed single-copy, little-endian U-Boot environment."""
     if len(raw) != 0x20000 or int.from_bytes(raw[:4], "little") != zlib.crc32(raw[4:]):
         raise FlashSafetyError("protected_region_changed", "invalid environment size/CRC")
     data = raw[4:]
     terminator = data.find(b"\0\0")
-    if terminator < 0 or any(byte not in (0, 255) for byte in data[terminator + 2 :]):
+    if terminator < 0 or (
+        not opaque_padding and any(byte not in (0, 255) for byte in data[terminator + 2 :])
+    ):
         raise FlashSafetyError("protected_region_changed", "invalid environment encoding/padding")
     values: dict[bytes, bytes] = {}
     for entry in data[:terminator].split(b"\0"):
@@ -290,6 +296,8 @@ def verify_protected(
     before: dict[int, bytes],
     after: dict[int, bytes],
     fit_size: int,
+    *,
+    opaque_padding: bool = False,
 ) -> None:
     if set(before) != {0, 1, 2} or set(after) != set(before):
         raise FlashSafetyError(
@@ -298,7 +306,7 @@ def verify_protected(
     for index in (0, 2):
         if not before[index] or after[index] != before[index]:
             raise FlashSafetyError("protected_region_changed", f"mtd{index} changed; do not reboot")
-    expected = decode_environment(before[1])
+    expected = decode_environment(before[1], opaque_padding=opaque_padding)
     expected[b"fit_size"] = f"{fit_size:X}".encode()
-    if decode_environment(after[1]) != expected:
+    if decode_environment(after[1], opaque_padding=opaque_padding) != expected:
         raise FlashSafetyError("protected_region_changed", "unexpected U-Boot environment changes")

@@ -106,7 +106,7 @@ class FlashMemoryTransport:
         elif "rmdir /tmp/ppu-physical-flash.lock" in script:
             self.locked = False
             self.events.append("unlock")
-        elif match := re.search(r"head -c (\d+) /dev/mtd([0-3])", script):
+        elif match := re.search(r"set -- (\d+) /dev/mtd([0-3])", script):
             size, index = map(int, match.groups())
             self.events.append(f"read{index}")
             offset = (0, 0x100000, 0x120000, 0x200000)[index]
