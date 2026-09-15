@@ -142,3 +142,30 @@ read completed; no erase/program intent existed at that point. Suppressing
 informational UART printk messages with `dmesg -n 1` for the RAM bench session
 allowed re-attestation to complete. Kernel messages remain available in dmesg.
 No uncertain flash operation was retried.
+
+## Independent placement check and Linux restoration
+
+After full power removal, SD U-Boot independently read the complete patterned
+flash image as
+`0b95dd4d195a501cf33bc8aaf9633e025fe8711c9d8683011da2ac27c123ef4c`.
+Both sector hashes and representative native four-byte reads at each sector's
+start and end matched. Replacing the two planned sectors in that image with the
+saved originals reconstructed the exact recovered baseline, proving no changes
+outside the planned sectors.
+
+The first native endpoint implementation attempted every byte through 16-byte
+SPI console transactions. It was interrupted during read-only verification
+because it was unnecessarily slow; no mutation command was active. The bounded
+endpoint version retained the full-image SF hash and used independent native
+reads at the four relevant endpoints.
+
+The candidate was then RAM-booted again. Both original sector payloads were
+transferred and hash-verified before restoration began. Each sector at
+`0x00FF0000` and `0x01000000` passed erase verification, program verification and
+a complete expected-image comparison after every mutation. The final candidate
+Linux readback returned the recovered baseline hash
+`70ab950899687290560e3bfe86044bd26fa462a5abc37f4277c1687648889afa`.
+
+An independent SD physical comparison after full power removal remains required
+before returning the target to normal QSPI boot. Extended production access is
+still disabled.
