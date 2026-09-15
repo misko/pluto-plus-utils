@@ -1158,6 +1158,8 @@ class IioRawSidecarCaptureSession:
         metadata_capacity: int = DEFAULT_METADATA_CAPACITY,
         metadata_unwrapper: Callable[[bytes], bytes] | None = None,
         receiver_ids: tuple[int, ...] = (0, 1),
+        direct_async_frames: int = 0,
+        drop_backlog_on_overrun: bool = True,
     ) -> None:
         if receiver_ids not in ((0,), (1,), (0, 1)) or any(
             type(receiver_id) is not int for receiver_id in receiver_ids
@@ -1172,6 +1174,14 @@ class IioRawSidecarCaptureSession:
             raise ValueError("raw sidecar kernel buffer count must be within 2..64")
         if metadata_capacity <= 0 or status_capacity <= 0:
             raise ValueError("raw sidecar metadata/status capacities must be positive")
+        if isinstance(direct_async_frames, bool) or not isinstance(direct_async_frames, int):
+            raise TypeError("direct_async_frames must be an integer")
+        if not 0 <= direct_async_frames <= DIRECT_ASYNC_FRAME_TARGET_MAX:
+            raise ValueError(
+                f"direct_async_frames must be in [0, {DIRECT_ASYNC_FRAME_TARGET_MAX}]"
+            )
+        if not isinstance(drop_backlog_on_overrun, bool):
+            raise TypeError("drop_backlog_on_overrun must be a bool")
         self._sdr = sdr
         self._metadata_buffer_type = metadata_buffer_type
         self._request = bytes(request)
@@ -1182,6 +1192,8 @@ class IioRawSidecarCaptureSession:
         self._status_capacity = status_capacity
         self._metadata_capacity = metadata_capacity
         self._metadata_unwrapper = metadata_unwrapper
+        self._direct_async_frames = direct_async_frames
+        self._drop_backlog_on_overrun = drop_backlog_on_overrun
         self._buffer: Any | None = None
         self._open_clock_bracket: IioBufferOpenClockBracket | None = None
         self._start_time_anchors: list[HostTimeAnchorMeasurement] = []
@@ -1246,11 +1258,19 @@ class IioRawSidecarCaptureSession:
         try:
             before_monotonic_ns = time.monotonic_ns()
             before_realtime_ns = time.time_ns()
+            options: dict[str, Any] = {}
+            if self._direct_async_frames:
+                options = {
+                    "batch_frames": 1,
+                    "direct_async_frames": self._direct_async_frames,
+                    "drop_backlog_on_overrun": self._drop_backlog_on_overrun,
+                }
             self._buffer = self._metadata_buffer_type(
                 self._sdr._rxadc,
                 self._samples_per_channel,
                 self._request,
                 self._metadata_capacity,
+                **options,
             )
             after_realtime_ns = time.time_ns()
             after_monotonic_ns = time.monotonic_ns()

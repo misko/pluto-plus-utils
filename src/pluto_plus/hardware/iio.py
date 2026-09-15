@@ -1354,6 +1354,8 @@ class IioRadioDevice:
         metadata_status_reader: Callable[[Any, int], bytes],
         metadata_canceller: Callable[[Any], None],
         metadata_unwrapper: Callable[[bytes], bytes] | None = None,
+        direct_async_frames: int = 0,
+        drop_backlog_on_overrun: bool = True,
     ) -> IioRawSidecarCaptureSession:
         """Arm one exact dual-RX ABI-3 buffer with an additive raw sidecar."""
 
@@ -1410,6 +1412,8 @@ class IioRadioDevice:
             metadata_canceller=metadata_canceller,
             metadata_unwrapper=metadata_unwrapper,
             status_capacity=status_capacity,
+            direct_async_frames=direct_async_frames,
+            drop_backlog_on_overrun=drop_backlog_on_overrun,
         )
         try:
             session.open()

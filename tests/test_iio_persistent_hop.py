@@ -645,7 +645,7 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         bytes(SAMPLES * 4 * len(receiver_ids)),
         _status(PersistentHopSessionState.RUNNING),
     )
-    calls: list[tuple[Any, ...]] = []
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     drains: list[int] = []
 
     def drain(capacity: int) -> bytes:
@@ -656,8 +656,8 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     feedback_packets = []
     buffer.submit_metadata_feedback = feedback_packets.append
 
-    def factory(*args: Any) -> _FakeMetadataBuffer:
-        calls.append(args)
+    def factory(*args: Any, **kwargs: Any) -> _FakeMetadataBuffer:
+        calls.append((args, kwargs))
         return buffer
 
     sdr = SimpleNamespace(
@@ -706,6 +706,8 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         metadata_canceller=lambda item: _cancel_metadata_session(SimpleNamespace(), item),
         status_capacity=160,
         metadata_unwrapper=(lambda raw: raw[len(b"extension") :]) if extended else None,
+        direct_async_frames=8192,
+        drop_backlog_on_overrun=False,
     )
     session.open()
     assert session.open_clock_bracket == IioBufferOpenClockBracket(
@@ -715,7 +717,16 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         after_monotonic_ns=102_000_000,
     )
     block = session.read_block()
-    assert calls == [(sdr._rxadc, SAMPLES, request, 64 * 1024)]
+    assert calls == [
+        (
+            (sdr._rxadc, SAMPLES, request, 64 * 1024),
+            {
+                "batch_frames": 1,
+                "direct_async_frames": 8192,
+                "drop_backlog_on_overrun": False,
+            },
+        )
+    ]
     assert block.sidecar == _sidecar()
     assert block.iq_payload == bytes(SAMPLES * 4 * len(receiver_ids))
     assert block.extension_metadata == (b"extension" + bytes(metadata) if extended else None)
