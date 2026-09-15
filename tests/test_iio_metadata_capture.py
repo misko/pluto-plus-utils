@@ -583,11 +583,11 @@ def test_direct_async_capture_fails_closed_outside_qualified_contract() -> None:
                 direct_async_frames=3,
             )
         adi.device.ctx.attrs["iio,buffer-direct-async-exact-kernel-queue"] = "1"
-        with pytest.raises(ValueError, match=r"\[0, 4096\]"):
+        with pytest.raises(ValueError, match=r"\[0, 8192\]"):
             radio.begin_metadata_capture(
                 SAMPLE_COUNT,
                 kernel_buffers=4,
-                direct_async_frames=4097,
+                direct_async_frames=8193,
             )
         with pytest.raises(ValueError, match="at least two"):
             radio.begin_metadata_capture(

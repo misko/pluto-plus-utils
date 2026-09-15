@@ -46,6 +46,11 @@ class HostAdaptiveHopStreamReceiptV3(
     """Actual native sample spans; selected physical RX is bound by request."""
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class HostAdaptiveHopStreamReceiptV4(HostAdaptiveHopStreamReceiptV3):
+    """Wide-rate receipt with explicit sparse retention after source gaps."""
+
+
 def _decode_v3(
     payload: bytes, request: HostAdaptiveHopRequestV3
 ) -> tuple[PersistentHopEvidenceV1, tuple[AdaptiveHopChoiceV2, ...]]:
@@ -84,8 +89,13 @@ class HostAdaptiveHopStreamV3(
             sampled_visit=lambda visit, samples: HostAdaptiveHopSampledVisitV3(
                 visit, samples, request.decision.receiver_id
             ),
-            receipt=HostAdaptiveHopStreamReceiptV3,
+            receipt=(
+                HostAdaptiveHopStreamReceiptV4
+                if isinstance(request, HostAdaptiveHopRequestV4)
+                else HostAdaptiveHopStreamReceiptV3
+            ),
             samples_per_block=samples_per_block,
             minimum_valid_duty_ppm=minimum_valid_duty_ppm,
             maximum_event_lag_blocks=maximum_event_lag_blocks,
+            allow_counter_gaps=isinstance(request, HostAdaptiveHopRequestV4),
         )

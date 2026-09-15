@@ -78,6 +78,7 @@ class HostAdaptiveHopClient:
         decision: HostDecisionConfigurationV1,
         session_id: int,
         tandem_request: TandemSessionRequestV1,
+        direct_async_frames: int = 0,
     ) -> HostAdaptiveHopSession:
         if not isinstance(plan, SingleRxPersistentHopPlanV2) or (
             plan.receiver_id != decision.receiver_id
@@ -130,12 +131,21 @@ class HostAdaptiveHopClient:
                 samples_per_block=plan.samples_per_block,
                 minimum_valid_duty_ppm=plan.minimum_valid_duty_ppm,
             )
+            direct_options = (
+                {
+                    "direct_async_frames": direct_async_frames,
+                    "drop_backlog_on_overrun": False,
+                }
+                if direct_async_frames
+                else {}
+            )
             backend.start(
                 request.append_to_tandem_request(
                     tandem_request, plan.samples_per_block, retention_frames=plan.kernel_buffers + 1
                 ),
                 samples_per_block=plan.samples_per_block,
                 kernel_buffers=plan.kernel_buffers,
+                **direct_options,
             )
             status = HostAdaptiveHopStatusV3.unpack(backend.read_status()).geometry
             if (

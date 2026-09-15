@@ -11,8 +11,10 @@ from pluto_plus.adaptive_hop_stream import AdaptiveHopStreamV2
 from pluto_plus.host_adaptive_hop import (
     HostAdaptiveHopEvidenceV3,
     HostAdaptiveHopRequestV3,
+    HostAdaptiveHopRequestV4,
     HostAdaptiveHopStatusV3,
     HostDecisionConfigurationV1,
+    HostDecisionConfigurationV2,
 )
 from pluto_plus.host_adaptive_hop_stream import HostAdaptiveHopStreamV3
 from pluto_plus.persistent_hop import PersistentHopClientError, PersistentHopProtocolError
@@ -142,3 +144,52 @@ def test_corrupt_source_cannot_be_used_for_decisions(fault):
     with pytest.raises(PersistentHopClientError):
         stream.feed(wire)
     assert stream.retained_sample_count == 0
+
+
+def test_wide_request_retains_sparse_complete_visits_across_accounted_gap():
+    block = 1_000_000
+    capture = Capture(15_000_000, AdaptiveHopMode.ADAPTIVE, block)
+    request = HostAdaptiveHopRequestV4(
+        capture.request.geometry,
+        capture.request.policy,
+        HostDecisionConfigurationV2(0, bytes(range(32)), 15_000_000),
+    )
+    stream = HostAdaptiveHopStreamV3(request, samples_per_block=block)
+    wires = [single_wire(wire, 0) for wire in capture.wires()]
+    gap_index = next(
+        index
+        for index, wire in enumerate(wires[2:-2], start=2)
+        if not HostAdaptiveHopEvidenceV3.unpack(wire.evidence).geometry.events
+    )
+    seen = []
+    last_original = gap_index + 5
+    for original_index, wire in enumerate(wires[: last_original + 1]):
+        if original_index == gap_index:
+            continue
+        if original_index > gap_index:
+            evidence = HostAdaptiveHopEvidenceV3.unpack(wire.evidence)
+            wire = dc.replace(
+                wire,
+                evidence=dc.replace(
+                    evidence,
+                    geometry=dc.replace(
+                        evidence.geometry,
+                        buffer_sequence=evidence.geometry.buffer_sequence - 1,
+                    ),
+                ).pack(),
+            )
+        seen.extend(stream.feed(wire))
+    status = capture.status(sequence=last_original, cancelled=True)
+    receipt, final = stream.finish(
+        HostAdaptiveHopStatusV3(
+            dc.replace(status.geometry, last_block_sequence=last_original - 1)
+        )
+    )
+    seen.extend(final)
+    assert receipt.sparse is not None
+    assert receipt.sparse.missing_sample_count == block
+    assert receipt.sparse.retained_visit_indices == tuple(
+        item.visit.event.dwell_index for item in seen
+    )
+    assert len(receipt.visits) == len(seen) < len(receipt.events)
+    assert receipt.unclassified_sample_count >= block

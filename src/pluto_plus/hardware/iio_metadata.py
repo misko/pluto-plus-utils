@@ -47,7 +47,7 @@ from pluto_plus.tandem import (
 
 ADC_SAMPLE_COUNTER_LOW_REG = 0x800000B8
 DEFAULT_METADATA_CAPACITY = 64 * 1024
-DIRECT_ASYNC_FRAME_TARGET_MAX = 4_096
+DIRECT_ASYNC_FRAME_TARGET_MAX = 8_192
 METADATA_BATCH_FRAMES_MAX = 64
 # A 262,144-sample dual-RX refill spans about 105 ms at 2.5 MS/s. Five
 # seconds leaves more than 47 refill intervals for transport jitter. Larger

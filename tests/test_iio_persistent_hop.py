@@ -210,6 +210,7 @@ class _FakeRadio:
         self.capture = _FakeCapture()
         self.open_request: bytes | None = None
         self.open_shape: tuple[int, int] | None = None
+        self.open_kwargs: dict[str, Any] = {}
 
     def open(self) -> None:
         self.opened = True
@@ -270,10 +271,11 @@ class _FakeRadio:
         *,
         kernel_buffers: int,
         request: bytes,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> _FakeCapture:
         self.open_request = request
         self.open_shape = (sample_count, kernel_buffers)
+        self.open_kwargs = kwargs
         return self.capture
 
     def read_kernel_buffers_count(self) -> int:
@@ -390,6 +392,30 @@ def test_backend_prearm_compiles_profiles_and_composes_exact_open_request(receiv
     assert radio.open_shape == (SAMPLES, 2)
     assert radio.open_request == request
     assert len(request) == 104 + 288
+
+
+def test_backend_forwards_explicit_direct_async_preserve_policy() -> None:
+    radio = _FakeRadio()
+    backend = IioPersistentHopBackend(
+        URI,
+        expected_serial=SERIAL,
+        iio_module=SimpleNamespace(),
+        radio_factory=lambda _uri, _serial: radio,
+    )
+    backend.open()
+    prepared = backend.prepare_plan(_plan())
+    request = prepared.request(session_id=SESSION).append_to_tandem_request(
+        TandemSessionRequestV1(mode=TandemMode.HOLD), SAMPLES, retention_frames=3
+    )
+    backend.start(
+        request,
+        samples_per_block=SAMPLES,
+        kernel_buffers=2,
+        direct_async_frames=4096,
+        drop_backlog_on_overrun=False,
+    )
+    assert radio.open_kwargs["direct_async_frames"] == 4096
+    assert radio.open_kwargs["drop_backlog_on_overrun"] is False
     decoded = PersistentHopRequestV1.unpack(request[-288:])
     assert decoded.profiles == prepared.profiles
     assert tuple(profile.profile_crc32 for profile in prepared.profiles) == tuple(

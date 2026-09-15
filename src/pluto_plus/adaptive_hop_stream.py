@@ -121,6 +121,24 @@ class _AdaptiveHopStreamReceipt(Generic[_R, _S]):
     valid_duty_ppm: int
     duty_target_met: bool
     source_span_attested: bool
+    sparse: SparseAdaptiveHopStreamAccountingV1 | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SparseAdaptiveHopStreamAccountingV1:
+    """Explicit source gaps and the actual visits whose IQ was retained."""
+
+    retained_visit_indices: tuple[int, ...]
+    missing_sample_count: int
+
+    def __post_init__(self) -> None:
+        if (
+            any(type(index) is not int or index < 0 for index in self.retained_visit_indices)
+            or tuple(sorted(set(self.retained_visit_indices))) != self.retained_visit_indices
+            or type(self.missing_sample_count) is not int
+            or self.missing_sample_count < 0
+        ):
+            raise ValueError("invalid sparse adaptive stream accounting")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -153,6 +171,7 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         samples_per_block: int,
         minimum_valid_duty_ppm: int = 900_000,
         maximum_event_lag_blocks: int = 2,
+        allow_counter_gaps: bool = False,
     ) -> None:
         if type(request) is not request_type:
             raise PersistentHopClientError("adaptive stream request major mismatch")
@@ -175,6 +194,7 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         self.request = request
         self.samples_per_block = samples_per_block
         self.minimum_valid_duty_ppm = minimum_valid_duty_ppm
+        self.allow_counter_gaps = allow_counter_gaps
         # One dwell, the explicitly bounded delivery lag, and a boundary refill.
         self.maximum_retained_samples = (
             request.geometry.dwell_samples + (maximum_event_lag_blocks + 1) * samples_per_block
@@ -183,6 +203,8 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         self._events: list[PersistentHopEventV1] = []
         self._choices: list[AdaptiveHopChoiceV2] = []
         self._visits: list[AdaptiveHopVisitV2] = []
+        self._retained_visits: list[AdaptiveHopVisitV2] = []
+        self._gaps: list[tuple[int, int]] = []
         self._emitted = 0
         self._previous: PersistentHopEvidenceV1 | None = None
         self._first_block_counter: int | None = None
@@ -216,11 +238,18 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
             raise PersistentHopClientError("adaptive IQ arrived after terminal evidence")
         if base.buffer_sequence != (previous.buffer_sequence + 1 if previous else 0):
             raise PersistentHopClientError("adaptive block sequence is not contiguous")
+        if previous is not None and base.block_first_counter < previous.block_end_counter_exclusive:
+            raise PersistentHopClientError("adaptive block counters regress")
         if (
             previous is not None
             and base.block_first_counter != previous.block_end_counter_exclusive
+            and not self.allow_counter_gaps
         ):
             raise PersistentHopClientError("adaptive block counters are not contiguous")
+        if previous is not None and base.block_first_counter > previous.block_end_counter_exclusive:
+            self._gaps.append(
+                (previous.block_end_counter_exclusive, base.block_first_counter)
+            )
         count = base.block_end_counter_exclusive - base.block_first_counter
         if count > self.samples_per_block or len(wire.iq_payload) != count * self._bytes_per_sample:
             raise PersistentHopClientError("adaptive IQ length disagrees with block bounds")
@@ -331,11 +360,21 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
                 if end > visit.valid_start_counter and start < visit.valid_end_counter_exclusive
             )
             if sum(piece.shape[1] for piece in pieces) != visit.valid_sample_count:
-                raise PersistentHopClientError(
-                    "adaptive IQ does not cover the complete valid dwell"
+                intersects_gap = any(
+                    gap_end > visit.valid_start_counter
+                    and gap_start < visit.valid_end_counter_exclusive
+                    for gap_start, gap_end in self._gaps
                 )
+                if not self.allow_counter_gaps or not intersects_gap:
+                    raise PersistentHopClientError(
+                        "adaptive IQ does not cover the complete valid dwell"
+                    )
+                self._emitted += 1
+                self._trim(visit.valid_end_counter_exclusive)
+                continue
             samples = pieces[0].copy() if len(pieces) == 1 else np.concatenate(pieces, axis=1)
             output.append(self._sampled_visit(visit, samples))
+            self._retained_visits.append(visit)
             self._emitted += 1
             self._trim(visit.valid_end_counter_exclusive)
         return tuple(output)
@@ -436,7 +475,7 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         output = self._emit_ready()
         if self._emitted != len(self._visits):
             raise PersistentHopClientError("adaptive terminal has undelivered complete visit IQ")
-        valid = sum(visit.valid_sample_count for visit in self._visits)
+        valid = sum(visit.valid_sample_count for visit in self._retained_visits)
         invalid = sum(
             max(
                 0,
@@ -447,7 +486,9 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         )
         unclassified = denominator - valid - invalid
         if unclassified < 0 or (
-            status.state == PersistentHopSessionState.COMPLETED and unclassified
+            status.state == PersistentHopSessionState.COMPLETED
+            and unclassified
+            and not self.allow_counter_gaps
         ):
             raise PersistentHopClientError("adaptive spans do not partition terminal capture")
         duty = valid * 1_000_000 // denominator if denominator else 0
@@ -456,11 +497,12 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
                 target_index=profile.target_index,
                 target=profile.target,
                 visit_count=sum(
-                    v.profile.target_index == profile.target_index for v in self._visits
+                    v.profile.target_index == profile.target_index
+                    for v in self._retained_visits
                 ),
                 valid_sample_count=sum(
                     v.valid_sample_count
-                    for v in self._visits
+                    for v in self._retained_visits
                     if v.profile.target_index == profile.target_index
                 ),
             )
@@ -470,7 +512,7 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
             self.request,
             wrapped,
             self._generation,
-            tuple(self._visits),
+            tuple(self._retained_visits),
             tuple(self._events),
             tuple(self._choices),
             coverage,
@@ -488,6 +530,14 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
             duty,
             duty >= self.minimum_valid_duty_ppm,
             source_span_attested,
+            sparse=(
+                SparseAdaptiveHopStreamAccountingV1(
+                    tuple(visit.event.dwell_index for visit in self._retained_visits),
+                    sum(end - start for start, end in self._gaps),
+                )
+                if self.allow_counter_gaps
+                else None
+            ),
         )
         self._receipt = receipt
         self._segments.clear()

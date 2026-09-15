@@ -209,6 +209,8 @@ class IioPersistentHopBackend(PersistentHopBackend):
         *,
         samples_per_block: int,
         kernel_buffers: int,
+        direct_async_frames: int = 0,
+        drop_backlog_on_overrun: bool = True,
     ) -> None:
         if self._capture is not None:
             raise RuntimeError("persistent-hop IIO capture is already open")
@@ -265,6 +267,8 @@ class IioPersistentHopBackend(PersistentHopBackend):
                 module, buffer, capacity
             ),
             metadata_canceller=lambda buffer: _cancel_metadata_session(module, buffer),
+            direct_async_frames=direct_async_frames,
+            drop_backlog_on_overrun=drop_backlog_on_overrun,
             **extension_options,
         )
         readback = self._require_radio().read_kernel_buffers_count()
