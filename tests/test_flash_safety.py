@@ -383,14 +383,15 @@ def test_flash_reader_without_base64(tmp_path, problem):
 
 
 def test_reviewed_issue99_writer_preserves_conservative_limit():
-    from pluto_plus.flash_writer import ISSUE99_TOOLS_SHA256, ISSUE99_UPDATER_SHA256
+    from pluto_plus.flash_writer import ISSUE99_TOOLS_SHA256S, ISSUE99_UPDATER_SHA256
 
-    observed = replace(
-        observation(), updater_sha256=ISSUE99_UPDATER_SHA256, tools_sha256=ISSUE99_TOOLS_SHA256
-    )
-    assert validate_flash(observed, fit_bytes()).address_limit == 0x1000000
-    with pytest.raises(FlashSafetyError, match="flash_range_unqualified"):
-        validate_flash(observed, fit_bytes(0xE00001))
+    for tools_sha256 in ISSUE99_TOOLS_SHA256S:
+        observed = replace(
+            observation(), updater_sha256=ISSUE99_UPDATER_SHA256, tools_sha256=tools_sha256
+        )
+        assert validate_flash(observed, fit_bytes()).address_limit == 0x1000000
+        with pytest.raises(FlashSafetyError, match="flash_range_unqualified"):
+            validate_flash(observed, fit_bytes(0xE00001))
     with pytest.raises(FlashSafetyError, match="flash_writer_unknown"):
         validate_flash(replace(observed, tools_sha256="a" * 64), fit_bytes())
 
@@ -398,6 +399,8 @@ def test_reviewed_issue99_writer_preserves_conservative_limit():
 def test_each_writer_dependency_is_bound_to_the_reviewed_digest():
     from pluto_plus.flash_writer import (
         ISSUE99_FILES,
+        ISSUE99_RELEASE_FILES,
+        ISSUE99_RELEASE_TOOLS_SHA256,
         ISSUE99_TOOLS_SHA256,
         ISSUE99_UPDATER_SHA256,
     )
@@ -408,6 +411,7 @@ def test_each_writer_dependency_is_bound_to_the_reviewed_digest():
         ).hexdigest()
 
     assert aggregate(ISSUE99_FILES.items()) == ISSUE99_TOOLS_SHA256
+    assert aggregate(ISSUE99_RELEASE_FILES.items()) == ISSUE99_RELEASE_TOOLS_SHA256
     observed = replace(observation(), updater_sha256=ISSUE99_UPDATER_SHA256)
     for path in ISSUE99_FILES:
         for changed in (dict(ISSUE99_FILES),):
