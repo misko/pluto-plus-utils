@@ -1406,6 +1406,17 @@ class IioRawSidecarCaptureSession:
             raise NotImplementedError("installed pylibiio lacks owned-buffer feedback")
         submit(payload)
 
+    def rearm_direct_async(self) -> None:
+        """Queue the next one-frame segment after feedback is acknowledged."""
+        if self._buffer is None:
+            raise RuntimeError("raw sidecar metadata capture is not open")
+        if self._direct_async_frames != 1:
+            raise RuntimeError("rolling direct async requires one-frame segments")
+        rearm = getattr(self._buffer, "rearm_direct_async", None)
+        if not callable(rearm):
+            raise NotImplementedError("installed pylibiio lacks direct async rearm")
+        rearm(1)
+
     def drain_metadata(self, capacity: int = DEFAULT_METADATA_CAPACITY) -> bytes:
         """Metadata only: never refill or replace the last received IQ block."""
         if type(capacity) is not int or not 1 <= capacity <= 65536:

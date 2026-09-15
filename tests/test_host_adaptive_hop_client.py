@@ -28,6 +28,7 @@ class ReplayBackend:
         self.cancelled = False
         self.closed = 0
         self.feedback = []
+        self.rearmed = 0
         self.error = None
 
     def blocks(self):
@@ -54,14 +55,26 @@ class ReplayBackend:
             raise self.error
         self.feedback.append(HostFeedbackV1.unpack(payload))
 
+    def rearm_direct_async(self):
+        self.rearmed += 1
 
-def session(rx=0):
+
+def session(rx=0, *, rolling_direct_async=False):
     capture, _, stream = setup(rx)
     backend = ReplayBackend(capture, rx)
     owner = HostAdaptiveHopClient(URI, expected_serial=SERIAL, backend_factory=lambda _: backend)
     owner._active = True
     selected = dc.replace(plan(rx), samples_per_block=capture.block)
-    return HostAdaptiveHopSession(owner, backend, selected, stream), backend
+    return (
+        HostAdaptiveHopSession(
+            owner,
+            backend,
+            selected,
+            stream,
+            rolling_direct_async=rolling_direct_async,
+        ),
+        backend,
+    )
 
 
 def result(session, sampled):
@@ -118,6 +131,17 @@ def test_pending_host_result_drains_before_restoration_and_remains_unapplied():
             s.submit_feedback(feedback)
     assert callbacks == [False] and not pending
     assert backend.closed == 1 and len(backend.feedback) == 32
+
+
+def test_rolling_direct_segment_is_rearmed_only_after_accepted_feedback():
+    s, backend = session(rolling_direct_async=True)
+    iterator = s.visits()
+    sampled = next(iterator)
+    assert backend.rearmed == 0
+    assert s.submit_feedback(result(s, sampled))
+    assert backend.rearmed == 1
+    s.close()
+    iterator.close()
 
 
 def test_terminal_drain_failure_still_releases_backend():

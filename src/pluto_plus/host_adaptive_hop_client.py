@@ -45,6 +45,8 @@ from .tandem import TandemSessionRequestV1
 class HostAdaptiveHopBackend(PersistentHopBackend, PersistentHopPlanPreparer, Protocol):
     def submit_metadata_feedback(self, payload: bytes) -> None: ...
 
+    def rearm_direct_async(self) -> None: ...
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class HostAdaptiveHopCaptureReceiptV3:
@@ -88,6 +90,10 @@ class HostAdaptiveHopClient:
         decision.pack()
         if self._active:
             raise PersistentHopClientError("host adaptive client already owns a session")
+        if direct_async_frames not in (0, 1):
+            raise PersistentHopClientError(
+                "host adaptive direct async requires one feedback-interleaved frame"
+            )
         backend = self._backend_factory(self.uri)
         if backend.uri != self.uri:
             raise PersistentHopClientError("host adaptive backend changed the exact LAN target")
@@ -147,17 +153,20 @@ class HostAdaptiveHopClient:
                 kernel_buffers=plan.kernel_buffers,
                 **direct_options,
             )
-            status = HostAdaptiveHopStatusV3.unpack(backend.read_status()).geometry
-            if (
-                status.session_id != session_id
-                or status.planned_dwells != request.geometry.dwell_count
-                or status.state
-                not in {PersistentHopSessionState.ARMED, PersistentHopSessionState.RUNNING}
-            ):
-                raise PersistentHopClientError(
-                    "host adaptive provider did not arm requested session"
-                )
-            session = HostAdaptiveHopSession(self, backend, plan, stream)
+            if not direct_async_frames:
+                status = HostAdaptiveHopStatusV3.unpack(backend.read_status()).geometry
+                if (
+                    status.session_id != session_id
+                    or status.planned_dwells != request.geometry.dwell_count
+                    or status.state
+                    not in {PersistentHopSessionState.ARMED, PersistentHopSessionState.RUNNING}
+                ):
+                    raise PersistentHopClientError(
+                        "host adaptive provider did not arm requested session"
+                    )
+            session = HostAdaptiveHopSession(
+                self, backend, plan, stream, rolling_direct_async=bool(direct_async_frames)
+            )
             _ = session.start_clock_bracket
         except BaseException as error:
             try:
@@ -178,6 +187,8 @@ class HostAdaptiveHopSession:
         backend: HostAdaptiveHopBackend,
         plan: SingleRxPersistentHopPlanV2 | SingleRxMultiratePersistentHopPlanV3,
         stream: HostAdaptiveHopStreamV3,
+        *,
+        rolling_direct_async: bool = False,
     ) -> None:
         self._owner, self._backend, self._stream = owner, backend, stream
         self.plan, self.request = plan, stream.request
@@ -187,6 +198,7 @@ class HostAdaptiveHopSession:
         self._receipt: HostAdaptiveHopCaptureReceiptV3 | None = None
         self._ready: deque[HostAdaptiveHopSampledVisitV3] = deque()
         self._awaiting_feedback: deque[AdaptiveHopVisitV2] = deque()
+        self._rolling_direct_async = rolling_direct_async
 
     def _require_owner(self) -> None:
         if threading.get_ident() != self._thread:
@@ -240,6 +252,8 @@ class HostAdaptiveHopSession:
         if accepted:
             try:
                 self._backend.submit_metadata_feedback(payload)
+                if self._rolling_direct_async:
+                    self._backend.rearm_direct_async()
             except OSError as error:
                 if error.errno != errno.ESHUTDOWN:
                     raise

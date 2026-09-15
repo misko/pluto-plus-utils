@@ -338,6 +338,12 @@ class IioPersistentHopBackend(PersistentHopBackend):
     def drain_metadata(self, capacity: int) -> bytes:
         return self._require_capture().drain_metadata(capacity)
 
+    def submit_metadata_feedback(self, payload: bytes) -> None:
+        self._require_capture().submit_metadata_feedback(payload)
+
+    def rearm_direct_async(self) -> None:
+        self._require_capture().rearm_direct_async()
+
     def close(self) -> PersistentHopHostLifecycleReceiptV1 | None:
         errors: list[BaseException] = []
         capture, self._capture = self._capture, None

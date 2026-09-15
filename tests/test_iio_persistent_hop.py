@@ -608,6 +608,7 @@ class _FakeMetadataBuffer:
         self.closed = False
         self.in_band_cancelled = False
         self.generic_cancelled = False
+        self.rearmed: list[int] = []
 
     def refill(self) -> None:
         self.refilled = True
@@ -624,6 +625,9 @@ class _FakeMetadataBuffer:
 
     def cancel(self) -> None:
         self.generic_cancelled = True
+
+    def rearm_direct_async(self, frames: int) -> None:
+        self.rearmed.append(frames)
 
     def close(self) -> None:
         self.closed = True
@@ -706,7 +710,7 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         metadata_canceller=lambda item: _cancel_metadata_session(SimpleNamespace(), item),
         status_capacity=160,
         metadata_unwrapper=(lambda raw: raw[len(b"extension") :]) if extended else None,
-        direct_async_frames=8192,
+        direct_async_frames=1,
         drop_backlog_on_overrun=False,
     )
     session.open()
@@ -722,7 +726,7 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
             (sdr._rxadc, SAMPLES, request, 64 * 1024),
             {
                 "batch_frames": 1,
-                "direct_async_frames": 8192,
+                "direct_async_frames": 1,
                 "drop_backlog_on_overrun": False,
             },
         )
@@ -736,6 +740,8 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert not buffer.refilled and buffer.iq == block.iq_payload
     session.submit_metadata_feedback(b"source-bound feedback")
     assert feedback_packets == [b"source-bound feedback"]
+    session.rearm_direct_async()
+    assert buffer.rearmed == [1]
     assert not buffer.refilled and buffer.iq == block.iq_payload
     for bad in (b"", bytes(257), "not bytes"):
         with pytest.raises(ValueError, match="feedback"):

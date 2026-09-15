@@ -52,7 +52,7 @@ def setup(caps=None):
     return radio, backend
 
 
-def start(backend, rx=0, *, requested_plan=None):
+def start(backend, rx=0, *, requested_plan=None, direct_async_frames=0):
     return HostAdaptiveHopClient(
         URI, expected_serial=SERIAL, backend_factory=lambda _: backend
     ).start(
@@ -61,6 +61,7 @@ def start(backend, rx=0, *, requested_plan=None):
         session_id=17,
         decision=HostDecisionConfigurationV1(rx, bytes(range(32))),
         tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+        direct_async_frames=direct_async_frames,
     )
 
 
@@ -147,3 +148,18 @@ def test_initial_legacy_status_is_rejected_and_hardware_restored():
     with pytest.raises(ValueError, match="version mismatch"):
         start(backend)
     assert radio.closed and radio.capture.closed and radio.restored == radio.original
+
+
+def test_feedback_interleaved_direct_open_defers_status_until_first_frame():
+    radio, backend = setup()
+    radio.capture.rearmed = 0
+    radio.capture.rearm_direct_async = lambda: setattr(
+        radio.capture, "rearmed", radio.capture.rearmed + 1
+    )
+    _session = start(backend, direct_async_frames=1)
+    assert radio.open_kwargs["direct_async_frames"] == 1
+    assert radio.open_kwargs["drop_backlog_on_overrun"] is False
+    assert len(radio.capture.statuses) == 1
+    backend.rearm_direct_async()
+    assert radio.capture.rearmed == 1
+    backend.close()
