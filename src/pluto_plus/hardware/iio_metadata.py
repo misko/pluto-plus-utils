@@ -1323,7 +1323,10 @@ class IioRawSidecarCaptureSession:
         try:
             buffer.refill()
         except OSError as error:
-            if error.errno != errno.ENODATA or not self._direct_async_rearm_pending:
+            if (
+                error.errno not in {errno.ENODATA, errno.EBUSY}
+                or not self._direct_async_rearm_pending
+            ):
                 raise
             buffer.rearm_direct_async(self._direct_async_frames)
             self._direct_async_rearm_pending = False

@@ -758,7 +758,8 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         nonlocal refill_attempts
         refill_attempts += 1
         if refill_attempts == 1:
-            raise OSError(errno.ENODATA, "segment is exhausted")
+            boundary_errno = errno.EBUSY if extended else errno.ENODATA
+            raise OSError(boundary_errno, "segment is exhausted")
         buffer.refilled = True
 
     buffer.rearm_direct_async = boundary_rearm
