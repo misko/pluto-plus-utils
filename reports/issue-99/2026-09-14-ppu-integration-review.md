@@ -120,3 +120,17 @@ Cold-boot acceptance is waiting for operator power removal with UART capture
 armed. Independent SD verification of the new persistent image, a single crossing
 MTD request, installed bootloader extended paths and an actual crossing FIT remain
 qualification work. Details are in firmware PR #100's deployment report.
+
+## Candidate cold-return acceptance, 2026-09-15
+
+The operator confirmed the requested power-off/SD-removed/QSPI boot procedure.
+The original UART capture window had expired; attestation resumed from the
+running console. The bound target reported power-on reset `0x00400000`, QSPI
+selection `0x1` and a changed boot ID. Candidate FIT, complete writer footprint,
+protected boot/NVM, active environment, IIOD and network IIO discovery passed.
+The complete Linux flash hash matched the expected candidate image exactly.
+
+The conservative candidate's cold-return milestone is complete. The private
+receipt is in `~/pluto-qualification-99-radio14/deployment/cold-return.json`;
+firmware PR #100 records its digest and the limits of this evidence. No new
+independent SD capture or extended-range production grant is claimed.
