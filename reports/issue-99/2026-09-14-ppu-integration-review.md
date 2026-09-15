@@ -100,3 +100,23 @@ Validation: 681 related PPU tests passed before the bounded-search change;
 147 SSH/setup/bootstrap tests passed afterward, including the large-output PTY
 regression. Ruff and type checks passed. The live protected-region and exact
 rollback FIT backup then completed and matched the retained recovered baseline.
+
+## Installed and exercised on .14
+
+The immutable host release `issue99-a049f54` passed 682 installed-package tests
+and comparison of all 122 package files. Local CLI launchers select that release;
+previous targets remain recorded and existing daemon processes were not restarted.
+Both Python 3.11/3.12/3.13 offline CI and browser CI passed on `a049f54`.
+
+The dedicated `.14` radio passed conservative legacy-writer bootstrap, normal
+candidate warm boot, a second update using the new writer, verified GLRT rollback,
+and final candidate reinstall using the installed PPU package. Protected boot/NVM
+and active environment settings were checked at each return. Receive-only capture
+returned 1,024 samples and restored scan settings. Both PPU and the device refused
+a valid FIT one byte beyond the permitted range, with identical full flash hashes
+before and after. No extended production grant was added.
+
+Cold-boot acceptance is waiting for operator power removal with UART capture
+armed. Independent SD verification of the new persistent image, a single crossing
+MTD request, installed bootloader extended paths and an actual crossing FIT remain
+qualification work. Details are in firmware PR #100's deployment report.
