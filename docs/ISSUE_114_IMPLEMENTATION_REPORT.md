@@ -5,31 +5,42 @@ restricted to the motivating radio, retained original flash digest, exact SD
 bootstrap and rollback FIT. General hardware qualification remains pending.
 Earlier release reports below describe superseded empty-registry installations.
 
-Live validation on the bound FTDI UART established the flash UID, Z7010/512 MiB
-identity, native four-byte read placement, bank-zero checks, executing U-Boot code
-interval and SD asset hashes. A fresh complete 32 MiB capture matched the retained
-original, and writing/reloading the SD backup matched the same digest. The
-current `~/pluto-recovery-14` session is `plan_ready`: 73 changed sectors and an
-expected full-image SHA-256 of
-`70ab950899687290560e3bfe86044bd26fa462a5abc37f4277c1687648889afa`.
-The plan matches the independently prepared incident repair image.
+## Completed incident recovery, 2026-09-15
 
-The RAM-only SHA-256 helper is reproducibly compiled and passed native vectors,
-ARM emulation and live vector/full-flash checks. Its first development attempt
-faulted and reset the CPU; disabling caches before upload and verifying every
-uploaded byte corrected that fault. No persistent flash writes were performed.
+The private `~/pluto-recovery-14` session is **recovered**. Its verified journal
+contains 319 events, including RAM acceptance, 73 verified sector repairs,
+complete physical flash verification and QSPI cold-return acceptance. The
+recovered radio runs `glrt-scheduled-eth-r60000000-v1` with the
+`plutoplus-glrt-single-rx` layout.
 
-The runtime recipe bypasses normal init and environment boot helpers during RAM
-trial, verifies pinned kernel/rootfs files, boot registers, preserved partition
-hashes, Ethernet/IIOD context and RF inactivity. It then requires return to SD and
-an unchanged full-flash comparison. Cold acceptance separately records physical
-operator actions and checks QSPI source plus power-on reset. These live RAM,
-write/readback and cold-boot stages remain pending the SD card transfer and actual
-execution. Simulated tests are not reported as their hardware acceptance.
+The final acceptance records QSPI boot selection `0x1`, power-on reset, operator
+confirmation of power removal and SD removal, the actual bounded FIT readback,
+preserved boot/environment/settings, Ethernet/IIOD checks and RF inactivity.
+Commit `0d0c7a9` added the post-cold-boot FIT readback; `fa10c7d` corrected the
+QSPI selection value and supported resuming at an already-running login prompt.
+The review through `fa10c7d` passed 489 recovery/flash-safety/DFU tests and Ruff.
 
-See [the operator guide](SD_RECOVERY.md) for the exact card transfer and command.
+Retained evidence identities:
 
-## Current verification and local release
+| Evidence | SHA-256 |
+|---|---|
+| Original complete flash | `254b5f30d843b65a672332da8d88fce1a98a919bc01ae56f5e5863d3807f5386` |
+| Verified repaired complete flash | `70ab950899687290560e3bfe86044bd26fa462a5abc37f4277c1687648889afa` |
+| Cold-return FIT | `56391f5da4569189bdcbf4e80c2d76553bda8d271d23aa529a1d71728a90a84a` |
+| Final repair plan | `aa78a3dfb1c92ff5bf737f2bd9719be52d699d17badbe807dd81fa1fddc0fb5b` |
+
+The source blobs and final transcript were rechecked against their content hashes
+on 2026-09-15. Private flash dumps, environment contents and UART logs remain
+outside the repository. The installed local CLI selects release
+`issue-114-live-45b8e8c24bc3`.
+
+This completes the motivating radio's incident recovery. It does not qualify
+other radios, the firmware #99 candidate, or Linux writes above physical 16 MiB.
+The recovered receipt explicitly records `linux_extended_writes_qualified=false`.
+See [the qualification handoff](ISSUE_113_HARDWARE_QUALIFICATION.md) for the next
+separate milestone.
+
+## Earlier live-candidate verification and local release
 
 - Full Python 3.11 offline suite: **3,302 passed, 1 skipped, 10 deselected**.
 - Recovery/flash-safety/DFU tests: **476 passed** on Python 3.12 and 3.13 and
@@ -46,7 +57,7 @@ Gauss release: `issue-114-live-9f618714c5cf` under
 `~/.local/share/pluto-plus-utils/releases/`.
 Wheel SHA-256:
 `9f618714c5cf904865cc6521e48ce777dfcf7b77a6011a8409a12cc3686bedd5`.
-The user-local `pluto` and `plutod` launchers select its installed runtime.
+At that stage, the user-local `pluto` and `plutod` launchers selected its runtime.
 The release retains package digests, test logs, smoke results and prior launcher
 targets in its deployment receipt. Existing daemon processes were not restarted.
 The repository virtual environment also imports the corrected editable source.

@@ -23,6 +23,8 @@ from contextlib import contextmanager
 from importlib.resources import files
 from pathlib import Path
 
+from pluto_plus.flash_safety import LEGACY_ADDRESS_LIMIT
+
 from .contracts import (
     Blob,
     Observation,
@@ -484,6 +486,23 @@ class PlutoSdBackend(SdUbootBackend):
             "boot_timeout", "expected ordered SD boot markers were not observed; inspect UART log"
         )
 
+    def _verify_cold_fit(self) -> str:
+        """Verify the persisted FIT without reading an unqualified upper bank."""
+        region = self.profile.geometry.region("fit")
+        fit = self.profile.rollback
+        if not region.start < region.start + fit.size <= min(region.end, LEGACY_ADDRESS_LIMIT):
+            raise RecoveryError("flash_range_unqualified", "cold-boot FIT exceeds safe read range")
+        self.console.command(
+            f'test "$(cat /sys/class/mtd/mtd3/offset)" = {region.start} && '
+            f'test "$(cat /sys/class/mtd/mtd3/size)" = {region.size} && '
+            'test "$(cat /sys/class/mtd/mtd3/name)" = qspi-linux'
+        )
+        output = self.console.command(f"head -c {fit.size} /dev/mtd3 | sha256sum")
+        match = re.fullmatch(rb"([0-9a-f]{64})  -", output.strip())
+        if match is None or match[1].decode() != fit.sha256:
+            raise RecoveryError("return_unverified", "cold-boot firmware FIT readback differs")
+        return match[1].decode()
+
     def _runtime(self, source: str, *, cold: bool = False) -> ReturnEvidence:
         if self.target is None:
             raise RecoveryError("target_unbound", "missing prior target observation")
@@ -506,7 +525,7 @@ class PlutoSdBackend(SdUbootBackend):
         if len(regs) != 2:
             raise RecoveryError("return_unverified", "boot registers unavailable")
         reset, mode = (int(v, 16) for v in regs)
-        if (cold and (mode & 15 != 2 or reset & 0x7F0000 != 0x400000)) or (
+        if (cold and (mode & 15 != 1 or reset & 0x7F0000 != 0x400000)) or (
             not cold and mode & 15 != 5
         ):
             raise RecoveryError("cold_boot_unverified", "actual boot selection/reset differs")
@@ -550,12 +569,13 @@ class PlutoSdBackend(SdUbootBackend):
             want = digest(expected[region.start : region.end]).encode()
             if not re.search(rb"(?m)^" + want + rb"\s+", out):
                 raise RecoveryError("return_unverified", "boot or preserved target settings differ")
+        fit_sha256 = self._verify_cold_fit() if cold else self.profile.rollback.sha256
         self._log(b"network_context_sha256=" + digest(network_context()).encode() + b"\n")
         transcript = self.store.put(bytes(self.capture))
         self.capture.clear()
         return ReturnEvidence(
             target=self.target,
-            fit_sha256=self.profile.rollback.sha256,
+            fit_sha256=fit_sha256,
             firmware=self.profile.rollback.expected_firmware,
             layout=self.profile.rollback.expected_layout,
             network_ok=True,
@@ -637,18 +657,24 @@ class PlutoSdBackend(SdUbootBackend):
         latest = self.store.latest("plan_ready")
         plan = Plan.model_validate_json(self.store.get(Blob.model_validate(latest.data["plan"])))
         self.target = plan.observation.target
-        output = self._wait((b"login:", b"/ # ", b"~ # "), timeout=180)
+        # A resumed guide may attach after Linux has already printed its login
+        # prompt. Request a fresh prompt so attestation can adopt that running
+        # cold boot without requiring another precisely timed power cycle.
+        if self.wire is not None:
+            self.wire.write(b"\n")
+        shell_prompts = (b"/ # ", b"~ # ", b"\n# ")
+        output = self._wait((b"login:", *shell_prompts), timeout=180)
         if b"login:" in output:
             if self.wire is None:
                 raise RecoveryError("transport_closed", "UART lease required")
             self.wire.write(b"root\n")
-            output = self._wait((b"Password:", b"/ # ", b"~ # "))
+            output = self._wait((b"Password:", *shell_prompts))
             if b"Password:" in output:
                 import typer
 
                 password = typer.prompt("Radio root password", hide_input=True)
                 self.wire.write(password.encode() + b"\n")
-                self._wait((b"/ # ", b"~ # "))
+                self._wait(shell_prompts)
         return self._runtime("qspi", cold=True)
 
     def confirm_operator_cold_boot(self) -> None:
