@@ -9,7 +9,7 @@ import zlib
 from dataclasses import asdict, dataclass
 
 from pluto_plus.flash_ranges import Interval, validate_write_intervals
-from pluto_plus.flash_writer import ISSUE99_TOOLS_SHA256, ISSUE99_UPDATER_SHA256
+from pluto_plus.flash_writer import ISSUE99_TOOLS_SHA256S, ISSUE99_UPDATER_SHA256
 
 POLICY_VERSION = "ppu-physical-flash-v1"
 LEGACY_ADDRESS_LIMIT = 0x1000000
@@ -137,7 +137,7 @@ def validate_flash(
         if not _DIGEST.fullmatch(digest):
             raise FlashSafetyError("flash_observation_invalid", "missing build/content digest")
     if observation.updater_sha256 == ISSUE99_UPDATER_SHA256:
-        if observation.tools_sha256 != ISSUE99_TOOLS_SHA256:
+        if observation.tools_sha256 not in ISSUE99_TOOLS_SHA256S:
             raise FlashSafetyError("flash_writer_unknown", "updater dependencies are not reviewed")
     elif observation.updater_sha256 != LEGACY_UPDATER_SHA256:
         raise FlashSafetyError("flash_writer_unknown", "updater footprint is not reviewed")
