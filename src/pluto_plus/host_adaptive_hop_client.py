@@ -90,9 +90,9 @@ class HostAdaptiveHopClient:
         decision.pack()
         if self._active:
             raise PersistentHopClientError("host adaptive client already owns a session")
-        if direct_async_frames not in (0, 1):
+        if not 0 <= direct_async_frames <= 8192:
             raise PersistentHopClientError(
-                "host adaptive direct async requires one feedback-interleaved frame"
+                "host adaptive direct async segment is outside the transport limit"
             )
         backend = self._backend_factory(self.uri)
         if backend.uri != self.uri:
