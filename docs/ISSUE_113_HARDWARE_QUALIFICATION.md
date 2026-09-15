@@ -113,3 +113,32 @@ No flash writes were issued during this milestone. Next: return to SD with full
 power removal, independently verify unchanged flash, then construct the exact
 scratch-sector write/restore experiment. All extended production grants remain
 disabled.
+
+## Two-sector Linux erase/program milestone
+
+After full power removal and SD return, the independent complete flash hash
+remained equal to the recovered baseline. The exact candidate was RAM-booted
+again. The controlled test staged and verified both 64 KiB patterns and both
+original restoration payloads before the first erase.
+
+Physical sectors `0x00FF0000` and `0x01000000` were erased and programmed
+separately through the repaired kernel's raw MTD interface. Each erase and
+program was followed by a complete flash comparison against the exact expected
+intermediate image. Both sectors passed; no bytes outside the two planned
+sectors changed according to this Linux readback. These sectors lie beyond the
+installed GLRT FIT. This is a dedicated bench operation, not a production
+qualification or a change to PPU's update limit.
+
+The expected patterned image SHA-256 is
+`0b95dd4d195a501cf33bc8aaf9633e025fe8711c9d8683011da2ac27c123ef4c`.
+The private `scratch-plan.json`, original sector files, expected full image and
+fsynced intent/verification journal retain the exact operation and restoration
+evidence. The patterns remain installed pending independent SD comparison;
+restoration is not yet complete.
+
+A pre-write UID check initially timed out because a kernel informational message
+split the console protocol's BEGIN marker. The retained transcript proves the
+read completed; no erase/program intent existed at that point. Suppressing
+informational UART printk messages with `dmesg -n 1` for the RAM bench session
+allowed re-attestation to complete. Kernel messages remain available in dmesg.
+No uncertain flash operation was retried.
