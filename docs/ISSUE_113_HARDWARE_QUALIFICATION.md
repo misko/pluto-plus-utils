@@ -88,3 +88,28 @@ powering on in SD mode, then independently capture the fresh recovered flash
 baseline. No candidate boot, scratch write, bootloader installation or extended
 qualification has yet been performed. The old Linux writer must not be used for
 unbounded full-flash reads.
+
+## First live candidate RAM/read milestone, 2026-09-15
+
+The exact SD bootstrap and target passed live re-attestation. A fresh complete
+32 MiB physical capture, with independent native-address boundary checks, matched
+the repaired baseline `70ab950899687290560e3bfe86044bd26fa462a5abc37f4277c1687648889afa`.
+The host backup and its SD export/reload round trip passed. The completed incident
+recovery session remains unchanged; new evidence is in the qualification directory.
+
+The candidate passed exact SD-to-RAM hashing and booted `config@9` using
+`rdinit=/bin/sh`. Normal init, automatic updaters, JFFS mounting and watchdog startup
+were bypassed. Its kernel and updater artifact hashes matched; IIO buffers were
+disabled and TX sources were disabled before flash-read verification.
+
+The live NOR is on `spi2.0` rather than the initially assumed `spi0.0`; its UID
+attribute is binary and was inspected as hexadecimal. After correcting those
+probe assumptions, identity matched the bound Winbond device and the addressing
+attribute reported `verified-ear-v1`. The candidate's complete 32 MiB Linux
+readback and protected-region hashes matched the independently captured baseline.
+
+This qualifies neither erase/program behavior nor persistent candidate boot.
+No flash writes were issued during this milestone. Next: return to SD with full
+power removal, independently verify unchanged flash, then construct the exact
+scratch-sector write/restore experiment. All extended production grants remain
+disabled.
