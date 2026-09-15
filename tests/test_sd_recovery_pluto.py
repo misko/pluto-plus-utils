@@ -6,6 +6,7 @@ import queue
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from recovery_fakes import fixture
@@ -302,6 +303,43 @@ def test_cold_boot_needs_separate_operator_record(tmp_path, monkeypatch):
     with values[0].lock():
         backend.confirm_operator_cold_boot()
     assert values[0].latest("operator_cold_boot").data == {"power_off": True, "sd_removed": True}
+
+
+def test_cold_boot_prompts_an_already_running_console(tmp_path, monkeypatch):
+    _, backend, _, _ = backend_fixture(tmp_path, monkeypatch)
+    backend.operator_cold_actions = True
+    monkeypatch.setattr(
+        backend.store,
+        "latest",
+        lambda kind: SimpleNamespace(data={"plan": {"sha256": "0" * 64, "size": 2}}),
+    )
+    monkeypatch.setattr(backend.store, "get", lambda blob: b"{}")
+    monkeypatch.setattr(
+        pluto_sd.Plan,
+        "model_validate_json",
+        classmethod(
+            lambda cls, value: SimpleNamespace(
+                observation=SimpleNamespace(target=SimpleNamespace())
+            )
+        ),
+    )
+
+    class Wire:
+        writes = []
+
+        def write(self, data):
+            self.writes.append(data)
+
+    wire = Wire()
+    backend.wire = wire
+    replies = iter((b"login:", b"Password:", b"\n# "))
+    monkeypatch.setattr(backend, "_wait", lambda *args, **kwargs: next(replies))
+    monkeypatch.setattr("typer.prompt", lambda *args, **kwargs: "analog")
+    expected = object()
+    monkeypatch.setattr(backend, "_runtime", lambda *args, **kwargs: expected)
+
+    assert backend._cold_boot() is expected
+    assert wire.writes == [b"\n", b"root\n", b"analog\n"]
 
 
 def test_native_sha256_helper_matches_standard_vectors(tmp_path):
@@ -602,7 +640,7 @@ def test_cold_acceptance_reads_actual_fit_before_recording_recovered(tmp_path, m
             claim = next(v for k, v in pins.items() if k.endswith("/" + name))
             return claim["sha256"].encode() + b"  /" + name.encode()
         if text.startswith("devmem "):
-            return b"0x00400000\n0x00000002"
+            return b"0x00400000\n0x00000001"
         if text == "cat /sys/bus/iio/devices/iio:device*/name":
             return b"ad9361-phy\ncf-ad9361-lpc"
         if text == "cat /proc/mtd":
