@@ -17,9 +17,10 @@ from .direct_radio.samples import ci16_single_rx
 from .host_adaptive_hop import (
     HostAdaptiveHopEvidenceV3,
     HostAdaptiveHopRequestV3,
+    HostAdaptiveHopRequestV4,
     HostAdaptiveHopStatusV3,
 )
-from .persistent_hop import PersistentHopEvidenceV1
+from .persistent_hop import PersistentHopClientError, PersistentHopEvidenceV1
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -65,15 +66,17 @@ class HostAdaptiveHopStreamV3(
 
     def __init__(
         self,
-        request: HostAdaptiveHopRequestV3,
+        request: HostAdaptiveHopRequestV3 | HostAdaptiveHopRequestV4,
         *,
         samples_per_block: int,
         minimum_valid_duty_ppm: int = 950_000,
         maximum_event_lag_blocks: int = 2,
     ) -> None:
+        if type(request) not in (HostAdaptiveHopRequestV3, HostAdaptiveHopRequestV4):
+            raise PersistentHopClientError("adaptive stream request major mismatch")
         super().__init__(
             request,
-            request_type=HostAdaptiveHopRequestV3,
+            request_type=type(request),
             status_type=HostAdaptiveHopStatusV3,
             decode_evidence=_decode_v3,
             decode_samples=ci16_single_rx,

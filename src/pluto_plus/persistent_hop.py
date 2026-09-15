@@ -1026,6 +1026,17 @@ class SingleRxPersistentHopPlanV2(PersistentHopPlanV1):
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class SingleRxMultiratePersistentHopPlanV3(SingleRxPersistentHopPlanV2):
+    """RX0-only 15/20 MS/s geometry for host adaptive wire major 4."""
+
+    def _validate_receiver_rate(self) -> None:
+        if self.sample_rate_hz not in (15_000_000, 20_000_000):
+            raise ValueError("multirate persistent hopping requires 15 or 20 MS/s")
+        if self.receiver_id != 0:
+            raise ValueError("multirate persistent hopping requires physical RX0")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class SingleRxPersistentHopSampledVisitV2(PersistentHopSampledVisitV1):
     def __post_init__(self) -> None:
         if (

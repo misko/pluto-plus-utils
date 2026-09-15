@@ -8,7 +8,9 @@ from pluto_plus.host_adaptive_hop import (
     HOST_ADAPTIVE_REQUEST_BYTES,
     HostAdaptiveHopEvidenceV3,
     HostAdaptiveHopRequestV3,
+    HostAdaptiveHopRequestV4,
     HostFeedbackV1,
+    HostFeedbackV2,
     require_host_adaptive_capabilities,
 )
 from pluto_plus.host_adaptive_hop_client import HostAdaptiveHopClient
@@ -23,13 +25,20 @@ from pluto_plus.persistent_hop import (
 class IioHostAdaptiveHopBackend(IioPersistentHopBackend):
     """One buffer owns IQ, status and feedback; the radio detector stays disabled."""
 
-    _host_request: HostAdaptiveHopRequestV3 | None = None
+    _host_request: HostAdaptiveHopRequestV3 | HostAdaptiveHopRequestV4 | None = None
 
     def _request_geometry(self, request: bytes) -> PersistentHopRequestV1:
         if len(request) != 104 + HOST_ADAPTIVE_REQUEST_BYTES:
             raise PersistentHopClientError("host adaptive OPEN request has the wrong size")
-        decoded = HostAdaptiveHopRequestV3.unpack(request[104:])
-        require_host_adaptive_capabilities(self.context_attributes(), decoded.policy)
+        decoder = (
+            HostAdaptiveHopRequestV4
+            if int.from_bytes(request[108:110], "little") == 4
+            else HostAdaptiveHopRequestV3
+        )
+        decoded = decoder.unpack(request[104:])
+        require_host_adaptive_capabilities(
+            self.context_attributes(), decoded.policy, decoded.decision
+        )
         plan = self._prepared_plan
         if (
             not isinstance(plan, SingleRxPersistentHopPlanV2)
@@ -48,7 +57,8 @@ class IioHostAdaptiveHopBackend(IioPersistentHopBackend):
         return decoded.geometry
 
     def submit_metadata_feedback(self, payload: bytes) -> None:
-        HostFeedbackV1.unpack(payload)
+        model = HostFeedbackV2 if payload[:4] == b"HFB2" else HostFeedbackV1
+        model.unpack(payload)
         self._require_capture().submit_metadata_feedback(payload)
 
 

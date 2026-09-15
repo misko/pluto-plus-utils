@@ -77,19 +77,26 @@ class HostDecisionConfigurationV1:
 
 
 def require_host_adaptive_capabilities(
-    attributes: Mapping[str, str], policy: AdaptiveHopPolicyV2
+    attributes: Mapping[str, str],
+    policy: AdaptiveHopPolicyV2,
+    decision: HostDecisionConfigurationV1 | None = None,
 ) -> None:
     policy.require_pinned_policy()
     required = {
-        "iio,buffer-host-adaptive-hop-request": "3",
         "iio,buffer-host-adaptive-hop-event": "3",
         "iio,buffer-host-adaptive-hop-status": "3",
-        "iio,buffer-host-adaptive-hop-feedback": "1",
         "iio,buffer-metadata-feedback": "1",
         "iio,buffer-adaptive-hop-modes": "shadow,adaptive",
         "iio,buffer-adaptive-hop-policy": ADAPTIVE_HOP_POLICY_ID,
     }
-    if any(attributes.get(key) != value for key, value in required.items()):
+    multirate = isinstance(decision, HostDecisionConfigurationV2)
+    request_versions = attributes.get("iio,buffer-host-adaptive-hop-request")
+    feedback_versions = attributes.get("iio,buffer-host-adaptive-hop-feedback")
+    if (
+        any(attributes.get(key) != value for key, value in required.items())
+        or request_versions not in (("3,4",) if multirate else ("3", "3,4"))
+        or feedback_versions not in (("1,2",) if multirate else ("1", "1,2"))
+    ):
         raise PersistentHopClientError("host-adaptive peer capabilities/policy are incompatible")
 
 
@@ -145,6 +152,84 @@ class HostAdaptiveHopRequestV3:
             tandem_request, samples_per_block, retention_frames=retention_frames
         )
         return packet[:-288] + self.pack()
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class HostDecisionConfigurationV2(HostDecisionConfigurationV1):
+    source_rate_hz: int
+
+    def pack(self) -> bytes:
+        _uint(self.receiver_id, 32)
+        _digest(self.configuration_sha256)
+        geometry = {
+            15_000_000: (6, 100, 34),
+            20_000_000: (8, 128, 32),
+        }
+        if self.receiver_id != 0 or self.source_rate_hz not in geometry:
+            raise PersistentHopProtocolError("multirate host decision requires RX0 at 15/20 MS/s")
+        factor, delay, supported_start = geometry[self.source_rate_hz]
+        return _CONFIGURATION.pack(
+            2,
+            0,
+            2_500_000,
+            factor,
+            0,
+            delay,
+            supported_start,
+            300_000,
+            self.configuration_sha256,
+        )
+
+    @classmethod
+    def unpack(cls, payload: bytes) -> HostDecisionConfigurationV2:
+        if len(payload) != _CONFIGURATION.size:
+            raise PersistentHopProtocolError("host decision configuration size mismatch")
+        values = _CONFIGURATION.unpack(payload)
+        source_rate = {6: 15_000_000, 8: 20_000_000}.get(values[3], 0)
+        result = cls(values[1], values[8], source_rate)
+        if result.pack() != payload:
+            raise PersistentHopProtocolError("unqualified multirate host decimation geometry")
+        return result
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class HostAdaptiveHopRequestV4(HostAdaptiveHopRequestV3):
+    decision: HostDecisionConfigurationV2
+
+    def pack(self) -> bytes:
+        packet = bytearray(self.geometry.pack())
+        self.policy.require_pinned_policy()
+        if (
+            self.geometry.sample_rate_hz != self.decision.source_rate_hz
+            or self.geometry.rf_bandwidth_hz != self.decision.source_rate_hz
+            or self.geometry.dwell_samples != self.decision.source_rate_hz * 120 // 1000
+            or not self.policy.warmup_visits * 8 <= self.geometry.dwell_count <= 2500
+        ):
+            raise PersistentHopProtocolError("host adaptive capture changed multirate geometry")
+        struct.pack_into("<HHI", packet, 4, 4, HOST_ADAPTIVE_REQUEST_BYTES, 0xFF)
+        struct.pack_into("<H", packet, 76, 144)
+        return bytes(packet) + self.policy.pack() + self.decision.pack()
+
+    @classmethod
+    def unpack(cls, payload: bytes | bytearray | memoryview) -> HostAdaptiveHopRequestV4:
+        raw = bytes(payload)
+        if (
+            len(raw) != HOST_ADAPTIVE_REQUEST_BYTES
+            or raw[:4] != b"HOPR"
+            or struct.unpack_from("<HHI", raw, 4) != (4, HOST_ADAPTIVE_REQUEST_BYTES, 0xFF)
+            or struct.unpack_from("<H", raw, 76)[0] != 144
+        ):
+            raise PersistentHopProtocolError("multirate host adaptive request header mismatch")
+        geometry = bytearray(raw[:288])
+        struct.pack_into("<HHI", geometry, 4, 1, 288, 0x1F)
+        struct.pack_into("<H", geometry, 76, 80)
+        result = cls(
+            PersistentHopRequestV1.unpack(geometry),
+            AdaptiveHopPolicyV2.unpack(raw[288:352]),
+            HostDecisionConfigurationV2.unpack(raw[352:]),
+        )
+        result.pack()
+        return result
 
 
 def _major3_numeric_packet(payload: bytes, magic: bytes, feature_offset: int) -> bytes:
@@ -305,6 +390,95 @@ class HostFeedbackV1:
                 values[16],
                 values[17],
                 values[24],
+            )
+        except ValueError as error:
+            raise PersistentHopProtocolError("unknown host feedback outcome") from error
+        if result.pack() != raw:
+            raise PersistentHopProtocolError("host feedback geometry/reserved bytes mismatch")
+        return result
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class HostFeedbackV2(HostFeedbackV1):
+    source_rate_hz: int
+
+    def pack(self) -> bytes:
+        geometry = {
+            15_000_000: (6, 100, 34),
+            20_000_000: (8, 128, 32),
+        }
+        factor, delay, supported_start = geometry.get(self.source_rate_hz, (0, 0, 0))
+        counters = (
+            self.session_id,
+            self.generation,
+            self.stream_id,
+            self.visit,
+            self.event_sequence,
+            self.valid_start,
+            self.valid_end,
+        )
+        values = (
+            self.receiver_id,
+            self.target_index,
+            self.outcome,
+            self.healthy,
+            self.screen_mask,
+            self.confirmation_mask,
+        )
+        for value in counters:
+            _uint(value, 64)
+        for value in values:
+            _uint(value, 32)
+        _digest(self.configuration_sha256)
+        if (
+            not factor
+            or not all(counters[:3])
+            or self.visit >= 2500
+            or self.event_sequence != self.visit
+            or self.valid_end - self.valid_start != self.source_rate_hz * 120 // 1000
+            or self.receiver_id != 0
+            or self.target_index >= 8
+            or self.outcome not in (0, 1, 2)
+            or self.healthy not in (0, 1)
+            or self.screen_mask > 63
+            or self.confirmation_mask > 63
+            or self.confirmation_mask & (self.confirmation_mask - 1)
+            or (self.healthy and self.screen_mask != 63)
+            or (not self.healthy and self.outcome != HostDecisionOutcome.UNKNOWN)
+            or (self.outcome == HostDecisionOutcome.DETECTED and not self.confirmation_mask)
+        ):
+            raise PersistentHopProtocolError("multirate feedback lacks complete bound evidence")
+        return _FEEDBACK.pack(
+            b"HFB2",
+            2,
+            HOST_FEEDBACK_BYTES,
+            *counters,
+            self.source_rate_hz,
+            2_500_000,
+            *values,
+            supported_start,
+            300_000,
+            factor,
+            0,
+            delay,
+            0,
+            self.configuration_sha256,
+            0,
+        )
+
+    @classmethod
+    def unpack(cls, payload: bytes | bytearray | memoryview) -> HostFeedbackV2:
+        raw = bytes(payload)
+        if len(raw) != HOST_FEEDBACK_BYTES:
+            raise PersistentHopProtocolError("host feedback size mismatch")
+        values = _FEEDBACK.unpack(raw)
+        if values[:3] != (b"HFB2", 2, HOST_FEEDBACK_BYTES):
+            raise PersistentHopProtocolError("host feedback version mismatch")
+        try:
+            result = cls(
+                values[3], values[4], values[5], values[6], values[7], values[8], values[9],
+                values[12], values[13], HostDecisionOutcome(values[14]), values[15], values[16],
+                values[17], values[24], values[10],
             )
         except ValueError as error:
             raise PersistentHopProtocolError("unknown host feedback outcome") from error

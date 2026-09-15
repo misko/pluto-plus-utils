@@ -15,10 +15,13 @@ from pluto_plus.adaptive_hop import (
 from pluto_plus.host_adaptive_hop import (
     HostAdaptiveHopEvidenceV3,
     HostAdaptiveHopRequestV3,
+    HostAdaptiveHopRequestV4,
     HostAdaptiveHopStatusV3,
     HostDecisionConfigurationV1,
+    HostDecisionConfigurationV2,
     HostDecisionOutcome,
     HostFeedbackV1,
+    HostFeedbackV2,
     require_host_adaptive_capabilities,
 )
 from pluto_plus.persistent_hop import PersistentHopClientError, PersistentHopProtocolError
@@ -51,6 +54,35 @@ def feedback(rx=0, start=2**53 + 2**32 - 1000):
     )
 
 
+def multirate_request(rate):
+    base = request(rate)
+    return HostAdaptiveHopRequestV4(
+        base.geometry,
+        base.policy,
+        HostDecisionConfigurationV2(0, bytes(range(32)), rate),
+    )
+
+
+def multirate_feedback(rate, start=2**53 + 2**32 - 1000):
+    return HostFeedbackV2(
+        session_id=71,
+        generation=9,
+        stream_id=23,
+        visit=18,
+        event_sequence=18,
+        valid_start=start,
+        valid_end=start + rate * 120 // 1000,
+        receiver_id=0,
+        target_index=7,
+        outcome=HostDecisionOutcome.DETECTED,
+        healthy=1,
+        screen_mask=63,
+        confirmation_mask=32,
+        configuration_sha256=bytes(range(32)),
+        source_rate_hz=rate,
+    )
+
+
 @pytest.mark.parametrize("rx", [0, 1])
 def test_native_rate_request_and_filter_binding_round_trip(rx):
     r = host_request(rx)
@@ -68,6 +100,28 @@ def test_native_rate_request_and_filter_binding_round_trip(rx):
     combined = r.append_to_tandem_request(tandem, 262144, retention_frames=33)
     assert combined[:104] == tandem.pack(262144, retention_frames=33)
     assert combined[104:] == packet
+
+
+@pytest.mark.parametrize(
+    "rate,factor,delay,start", [(15_000_000, 6, 100, 34), (20_000_000, 8, 128, 32)]
+)
+def test_multirate_request_and_feedback_round_trip(rate, factor, delay, start):
+    request_v4 = multirate_request(rate)
+    packet = request_v4.pack()
+    assert struct.unpack_from("<HHI", packet, 4) == (4, 416, 0xFF)
+    assert struct.unpack_from("<8I", packet, 352) == (
+        2, 0, 2_500_000, factor, 0, delay, start, 300_000
+    )
+    assert HostAdaptiveHopRequestV4.unpack(packet) == request_v4
+    with pytest.raises(PersistentHopProtocolError):
+        HostAdaptiveHopRequestV3.unpack(packet)
+
+    feedback_v2 = multirate_feedback(rate)
+    raw = feedback_v2.pack()
+    assert raw[:8] == b"HFB2\x02\x00\xa0\x00"
+    assert HostFeedbackV2.unpack(raw) == feedback_v2
+    with pytest.raises(PersistentHopProtocolError):
+        HostFeedbackV1.unpack(raw)
 
 
 def test_event_and_terminal_wrappers_keep_explicit_major_three():

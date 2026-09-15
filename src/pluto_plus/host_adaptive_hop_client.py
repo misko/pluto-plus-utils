@@ -14,8 +14,10 @@ from .adaptive_hop import AdaptiveHopPolicyV2
 from .adaptive_hop_stream import AdaptiveHopVisitV2
 from .host_adaptive_hop import (
     HostAdaptiveHopRequestV3,
+    HostAdaptiveHopRequestV4,
     HostAdaptiveHopStatusV3,
     HostDecisionConfigurationV1,
+    HostDecisionConfigurationV2,
     HostFeedbackV1,
     require_host_adaptive_capabilities,
 )
@@ -32,6 +34,7 @@ from .persistent_hop import (
     PersistentHopPlanPreparer,
     PersistentHopSessionState,
     PersistentHopStartClockBracketV1,
+    SingleRxMultiratePersistentHopPlanV3,
     SingleRxPersistentHopPlanV2,
     require_allowed_serial,
     require_physical_lan_uri,
@@ -69,7 +72,7 @@ class HostAdaptiveHopClient:
 
     def start(
         self,
-        plan: SingleRxPersistentHopPlanV2,
+        plan: SingleRxPersistentHopPlanV2 | SingleRxMultiratePersistentHopPlanV3,
         *,
         policy: AdaptiveHopPolicyV2,
         decision: HostDecisionConfigurationV1,
@@ -96,7 +99,7 @@ class HostAdaptiveHopClient:
                 or any(attrs.get(name) != "1" for name in PERSISTENT_HOP_CAPABILITIES)
             ):
                 raise PersistentHopClientError("host adaptive serial/lifecycle identity mismatch")
-            require_host_adaptive_capabilities(attrs, policy)
+            require_host_adaptive_capabilities(attrs, policy, decision)
             if getattr(backend, "metadata_extension", None) is not None:
                 raise PersistentHopClientError("host adaptive capture cannot also run radio GLRT")
             prepared = backend.prepare_plan(plan)
@@ -110,9 +113,15 @@ class HostAdaptiveHopClient:
             ):
                 raise PersistentHopClientError("host adaptive preparation changed capture geometry")
             plan = prepared
-            request = HostAdaptiveHopRequestV3(
-                plan.request(session_id=session_id), policy, decision
-            )
+            request: HostAdaptiveHopRequestV3 | HostAdaptiveHopRequestV4
+            if isinstance(decision, HostDecisionConfigurationV2):
+                request = HostAdaptiveHopRequestV4(
+                    plan.request(session_id=session_id), policy, decision
+                )
+            else:
+                request = HostAdaptiveHopRequestV3(
+                    plan.request(session_id=session_id), policy, decision
+                )
             # Fastlock CRCs are hardware evidence populated by prepare_plan.
             # Validate the complete wire request only after that preparation.
             request.pack()
@@ -157,7 +166,7 @@ class HostAdaptiveHopSession:
         self,
         owner: HostAdaptiveHopClient,
         backend: HostAdaptiveHopBackend,
-        plan: SingleRxPersistentHopPlanV2,
+        plan: SingleRxPersistentHopPlanV2 | SingleRxMultiratePersistentHopPlanV3,
         stream: HostAdaptiveHopStreamV3,
     ) -> None:
         self._owner, self._backend, self._stream = owner, backend, stream
