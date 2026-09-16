@@ -51,3 +51,38 @@ def test_counter_release_is_known_without_version_prefix_inference():
     profile = select_diagnostic_profile(policy.device_firmware)
     assert profile is not None and profile.metadata_abis == (3,)
     assert select_diagnostic_profile(policy.device_firmware + "-unreviewed") is None
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "asset_sha256", "fit_sha256", "fit_size"),
+    [
+        (
+            "feature-103-rc1-ram",
+            "559bc93c75e914cb8662d5ad3a1374504617fb6374e92fce741c94ee3469cbf5",
+            "cb0f5b747e9da1d6278f0b8cad9b6974aa2dec0c65ccc92d5dc813ddc06ababe",
+            13_188_223,
+        ),
+        (
+            "feature-103-rc2-ram",
+            "fbc591ecbbeac83f8b24fc169fd675a834aa5e00aa5b779e79c7c097d9c61c81",
+            "6cf16e9884fc46a362f3fcc9b61ea752c4cac89e69a8b12b3da2dbbe9b602c0e",
+            13_188_215,
+        ),
+    ],
+)
+def test_feature_103_candidate_is_exactly_ram_only(
+    profile_id, asset_sha256, fit_sha256, fit_size
+):
+    profile = flash.STANDALONE_FLASH_PROFILES[profile_id]
+
+    assert profile.persistent_allowed is False
+    assert profile.policy.hardware_qualified is False
+    assert profile.policy.asset_sha256 == asset_sha256
+    assert profile.policy.fit_body_sha256 == fit_sha256
+    assert profile.policy.fit_body_size == fit_size
+    assert ("iio,adaptive-scan", "1") in profile.required_iio_capabilities
+    assert not any(
+        candidate.policy.asset_sha256 == profile.policy.asset_sha256
+        and candidate.persistent_allowed
+        for candidate in flash.STANDALONE_FLASH_PROFILES.values()
+    )

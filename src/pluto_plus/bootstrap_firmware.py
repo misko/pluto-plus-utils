@@ -54,6 +54,8 @@ from pluto_plus.doctor import (
     DDR_RING_V1_RC2_RAM_POLICY,
     DDR_RING_V1_RELEASE_PERSISTENT_POLICY,
     DDR_RING_V1_RELEASE_RAM_POLICY,
+    FEATURE_103_RC1_RAM_POLICY,
+    FEATURE_103_RC2_RAM_POLICY,
     IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY,
     IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_RAM_POLICY,
     IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_RAM_POLICY,
@@ -972,6 +974,20 @@ for _counter_policy, _counter_layout, _counter_persistent in (
                 "1" if _counter_layout == SINGLE_RX_TX_CAPABLE_LAYOUT else "0",
             ),
         ),
+    )
+
+
+# Feature request #103 remains RAM-only until its bounded hardware campaigns
+# pass. Reuse the qualified counter runtime contract and require its new
+# adaptive-scan discovery capability.
+_feature_103_base = STANDALONE_FLASH_PROFILES[COUNTER_RX_V1_RELEASE_RAM_POLICY.profile_id]
+for _feature_103_policy in (FEATURE_103_RC1_RAM_POLICY, FEATURE_103_RC2_RAM_POLICY):
+    STANDALONE_FLASH_PROFILES[_feature_103_policy.profile_id] = replace(
+        _feature_103_base,
+        policy=_feature_103_policy,
+        persistent_allowed=False,
+        required_iio_capabilities=_feature_103_base.required_iio_capabilities
+        + (("iio,adaptive-scan", "1"),),
     )
 
 

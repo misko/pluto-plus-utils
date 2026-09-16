@@ -817,6 +817,35 @@ COUNTER_RX_V1_1R1T_PERSISTENT_POLICY = COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY.m
     update={"profile_id": "counter-rx-v1-1r1t-release-persistent-promotion"}
 )
 
+# Local, RAM-only feature-request #103 qualification candidate. The unchanged
+# device_firmware value is intentional: RAM return is bound to the replacement
+# kernel and iiOD/libiio overlay by the exact DFU/FIT hashes below. There is
+# deliberately no persistent companion profile.
+FEATURE_103_RC1_RAM_POLICY = COUNTER_RX_V1_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc1-ram",
+        "release_tag": "feature-103-rc1-local-ram",
+        "asset_name": "feature103-ram-v1.dfu",
+        "asset_sha256": "559bc93c75e914cb8662d5ad3a1374504617fb6374e92fce741c94ee3469cbf5",
+        "release_url": "https://github.com/misko/plutosdr-fw/issues/103",
+        "source_commit": "bb171e96d7f3065350497f602a9bdf6a96611c7a",
+        "fit_body_sha256": "cb0f5b747e9da1d6278f0b8cad9b6974aa2dec0c65ccc92d5dc813ddc06ababe",
+        "fit_body_size": 13_188_223,
+        "hardware_qualified": False,
+        "published_at": datetime(2026, 9, 16, tzinfo=UTC),
+    }
+)
+FEATURE_103_RC2_RAM_POLICY = FEATURE_103_RC1_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc2-ram",
+        "release_tag": "feature-103-rc2-local-ram",
+        "asset_name": "feature103-ram-v2.dfu",
+        "asset_sha256": "fbc591ecbbeac83f8b24fc169fd675a834aa5e00aa5b779e79c7c097d9c61c81",
+        "fit_body_sha256": "6cf16e9884fc46a362f3fcc9b61ea752c4cac89e69a8b12b3da2dbbe9b602c0e",
+        "fit_body_size": 13_188_215,
+    }
+)
+
 # Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
 # ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a
 # local, recoverable-radio persistent canary only: ``hardware_qualified=False``
