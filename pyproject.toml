@@ -44,6 +44,7 @@ pluto = "pluto_plus.cli:app"
 plutod = "pluto_plus.cli:serve_entrypoint"
 pluto-install-metadata-runtime = "pluto_plus.metadata_runtime_install:main"
 pluto-feature103-qualify = "pluto_plus.feature103_qualification:main"
+pluto-feature103-verify = "pluto_plus.feature103_verify:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pluto_plus"]
