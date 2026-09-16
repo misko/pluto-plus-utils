@@ -47,8 +47,10 @@ def build_adaptive_scan_setup(
 ) -> ScanSetup:
     """Build the canonical bounded campaign setup before profile compilation."""
 
-    if not 1 <= len(frequencies_hz) <= 8 or len(baseline_weights) != len(frequencies_hz):
-        raise ValueError("campaign requires one to eight frequency/weight pairs")
+    # The AD9361 driver uses fastlock profile 0 as its inactive sentinel.
+    # Hardware-backed sessions therefore use the seven recallable slots 1..7.
+    if not 1 <= len(frequencies_hz) <= 7 or len(baseline_weights) != len(frequencies_hz):
+        raise ValueError("campaign requires one to seven frequency/weight pairs")
     setup = ScanSetup(
         session=session,
         generation=generation,
@@ -70,7 +72,7 @@ def build_adaptive_scan_setup(
         targets=tuple(
             ScanTarget(
                 channel=index,
-                profile=index,
+                profile=index + 1,
                 frequency_hz=frequency,
                 baseline_weight=baseline_weights[index],
                 profile_crc32=0,

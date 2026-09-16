@@ -1084,6 +1084,16 @@ class IioRadioDevice:
             )
         return values
 
+    def load_rx_fastlock_profile(self, profile: int, values: tuple[int, ...]) -> None:
+        """Reload one previously attested 16-byte RX Fast Lock profile."""
+
+        _validate_fastlock_profile(profile)
+        if len(values) != 16 or any(value < 0 or value > 255 for value in values):
+            raise ValueError("RX Fast Lock profile must contain sixteen bytes")
+        device = self._require_bufferless_device()
+        payload = f"{profile} {values[0]}," + ",".join(str(value) for value in values[1:])
+        _rx_fastlock_channel(device).attrs["fastlock_load"].value = payload
+
     def recall_rx_fastlock_profile(self, profile: int) -> None:
         """Issue one RX Fast Lock recall write without arming an RX buffer."""
 

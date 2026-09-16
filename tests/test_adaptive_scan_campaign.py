@@ -121,7 +121,14 @@ class Client:
 
 def _install_lifecycle(monkeypatch, setup: ScanSetup, events: list[str]) -> None:
     preparation = AdaptiveScanRadioPreparation(
-        "ip:192.168.1.18", "SERIAL_A", SETTINGS, SETTINGS, setup, ((1,) * 16,)
+        uri="ip:192.168.1.18",
+        serial="SERIAL_A",
+        original=SETTINGS,
+        configured=SETTINGS,
+        original_kernel_buffers=4,
+        configured_kernel_buffers=16,
+        setup=setup,
+        profile_words=((1,) * 16,),
     )
 
     def prepare(*_args, **_kwargs):
@@ -190,7 +197,7 @@ def test_campaign_setup_builder_is_fixed_rate_and_profile_bounded(rate) -> None:
     )
     assert setup.source_rate_hz == rate
     assert setup.analog_bandwidth_hz == 8_000_000
-    assert [target.profile for target in setup.targets] == [0, 1]
+    assert [target.profile for target in setup.targets] == [1, 2]
     assert all(target.profile_crc32 == 0 for target in setup.targets)
 
 
@@ -207,4 +214,20 @@ def test_campaign_setup_builder_rejects_sixty_mss() -> None:
             frequencies_hz=(959_687_500, 1_190_312_500),
             baseline_weights=(1, 1),
             analysis_digest=TargetMaskDetectorConfig((1,)).analysis_digest,
+        )
+
+
+def test_setup_rejects_eighth_frequency_because_profile_zero_is_inactive() -> None:
+    with pytest.raises(ValueError, match="one to seven"):
+        campaign.build_adaptive_scan_setup(
+            session=1,
+            generation=2,
+            seed=3,
+            source_rate_hz=10_000_000,
+            analog_bandwidth_hz=8_000_000,
+            duration_ms=30_000,
+            dwell_ms=240,
+            frequencies_hz=tuple(900_000_000 + index * 10_000_000 for index in range(8)),
+            baseline_weights=(1,) * 8,
+            analysis_digest=b"x" * 32,
         )

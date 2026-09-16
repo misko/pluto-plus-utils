@@ -57,28 +57,34 @@ def test_counter_release_is_known_without_version_prefix_inference():
     ("profile_id", "asset_sha256", "fit_sha256", "fit_size"),
     [
         (
-            "feature-103-rc1-ram",
-            "559bc93c75e914cb8662d5ad3a1374504617fb6374e92fce741c94ee3469cbf5",
-            "cb0f5b747e9da1d6278f0b8cad9b6974aa2dec0c65ccc92d5dc813ddc06ababe",
-            13_188_223,
+            "feature-103-rc10-parent-ram",
+            "435a26369018e86ee66262b79c32895dbaaacef510a1efb71c566d6409555344",
+            "a53efc46f3c65d1a15e5063374551d2daa3cb9d0df51257de53b6af80be39493",
+            12_829_435,
         ),
         (
-            "feature-103-rc2-ram",
-            "fbc591ecbbeac83f8b24fc169fd675a834aa5e00aa5b779e79c7c097d9c61c81",
-            "6cf16e9884fc46a362f3fcc9b61ea752c4cac89e69a8b12b3da2dbbe9b602c0e",
-            13_188_215,
+            "feature-103-rc10-repack-ram",
+            "42353c6d25d0dfa1692e2ef05c43736ebf7c2342b93bc1316a48a8d05bf6b769",
+            "aed5b10e692bc683e04ef9c5d9cde0442f6bd5af4250cbdd7e52969eb5b54e42",
+            12_828_795,
         ),
         (
-            "feature-103-rc3-ram",
-            "7e5a551f5cfe9fd3d913527c5d4f3bcfb0b5d544301d5e96ab1ca0bbf2701fae",
-            "565549cb08a2fe6245bddf863ccc6cfe3516e57a0dba0e2fe77322ca9039e3b2",
-            13_184_047,
+            "feature-103-rc10-kernel-ram",
+            "407bcf54c77a2237bde68b0b184674c6376ea8b29cc503ce1a5647dd1edfc50a",
+            "79caea519d6f67f0b5521f45641c61956b20b86f9d003490a815f14cabd44518",
+            12_831_827,
         ),
         (
-            "feature-103-rc4-ram",
-            "f03f4b25da2e97fe67946aa4250df7ba6e7d04f844a8c8c3d232e2cd62d204be",
-            "52f8216403f38e595a5ec8bd8d3509d01a480c5ebc055be5fdd3d836692c2a94",
-            13_188_343,
+            "feature-103-rc10-rx0-ram",
+            "3b7ee6b229c64227d569a15744aedf7a50b549f36f328f4707c69df6a02e8477",
+            "7ec535917eabffbd4b5689eda053e258d042e1c76325d31a0850c89ec2dc067d",
+            12_832_079,
+        ),
+        (
+            "feature-103-rc10-full-ram",
+            "cdd25fcb2fa422d515500f0f144bae0c1d543405e1a0bdbd687b6a939950074a",
+            "95760da77b70cefaf1ee9bb0d43c2d012846893f8edee8f50645c39c3c4daf5f",
+            13_185_287,
         ),
     ],
 )
@@ -92,15 +98,17 @@ def test_feature_103_candidate_is_exactly_ram_only(
     assert profile.policy.asset_sha256 == asset_sha256
     assert profile.policy.fit_body_sha256 == fit_sha256
     assert profile.policy.fit_body_size == fit_size
-    assert ("iio,adaptive-scan", "1") in profile.required_iio_capabilities
-    assert not any(
-        candidate.policy.asset_sha256 == profile.policy.asset_sha256
-        and candidate.persistent_allowed
-        for candidate in flash.STANDALONE_FLASH_PROFILES.values()
-    )
+    if profile_id not in {"feature-103-rc10-parent-ram", "feature-103-rc10-repack-ram"}:
+        assert ("iio,adaptive-scan", "1") in profile.required_iio_capabilities
+    if profile_id != "feature-103-rc10-parent-ram":
+        assert not any(
+            candidate.policy.asset_sha256 == profile.policy.asset_sha256
+            and candidate.persistent_allowed
+            for candidate in flash.STANDALONE_FLASH_PROFILES.values()
+        )
 
 
-@pytest.mark.parametrize("profile_id", ["feature-103-rc3-ram", "feature-103-rc4-ram"])
+@pytest.mark.parametrize("profile_id", ["feature-103-rc10-rx0-ram", "feature-103-rc10-full-ram"])
 def test_feature_103_rx0_candidates_attest_physical_rx0_topology(profile_id: str) -> None:
     profile = flash.STANDALONE_FLASH_PROFILES[profile_id]
     capabilities = dict(profile.required_iio_capabilities)
@@ -108,3 +116,8 @@ def test_feature_103_rx0_candidates_attest_physical_rx0_topology(profile_id: str
     assert profile.source_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
     assert profile.return_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
     assert capabilities["iio,buffer-counter-metadata-topology-supported"] == "1"
+
+
+def test_feature_103_rc1_through_rc9_are_quarantined() -> None:
+    for revision in range(1, 10):
+        assert f"feature-103-rc{revision}-ram" not in flash.STANDALONE_FLASH_PROFILES

@@ -867,6 +867,301 @@ FEATURE_103_RC4_RAM_POLICY = FEATURE_103_RC3_RAM_POLICY.model_copy(
     }
 )
 
+# RC1--RC4 are retained above solely as historical receipt identities. RC5 is
+# rebuilt from the exact qualified v0.50 DFU and split into four RAM-only
+# bisection stages. No stage has a persistent companion.
+FEATURE_103_RC5_PARENT_RAM_POLICY = COUNTER_RX_V1_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc5-parent-ram",
+        "release_tag": "feature-103-rc5-parent-repack-local-ram",
+        "asset_name": "feature103-rc5-parent.dfu",
+        "asset_sha256": "2ee357b6f81c0842b94d522affd08fe2e10e644ad89dcd6d0257fc9bca968621",
+        "release_url": "https://github.com/misko/plutosdr-fw/issues/103",
+        "source_commit": "d7a70683c4cac88e5815bd97635b403ec4a9b89f",
+        "fit_body_sha256": "ee205702ad3ccef2b3deff802d5cfa5efe1973fde86f1d33a897cde410408946",
+        "fit_body_size": 12_782_159,
+        "hardware_qualified": False,
+        "published_at": datetime(2026, 9, 16, tzinfo=UTC),
+    }
+)
+FEATURE_103_RC5_KERNEL_RAM_POLICY = FEATURE_103_RC5_PARENT_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc5-kernel-ram",
+        "release_tag": "feature-103-rc5-kernel-local-ram",
+        "asset_name": "feature103-rc5-kernel.dfu",
+        "asset_sha256": "3f0fddfdf7b2fd6e4b86dc039ce1286750721589a893601e7691ca150bf14b7d",
+        "source_commit": "21b0090b491a08256552913004c0453ee4d4c418",
+        "fit_body_sha256": "e30eca8e57cf0dabef1206afb807ed419a9628558e79353d4ff3ef95f381e155",
+        "fit_body_size": 12_785_511,
+    }
+)
+FEATURE_103_RC5_RX0_RAM_POLICY = FEATURE_103_RC5_KERNEL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc5-rx0-ram",
+        "release_tag": "feature-103-rc5-rx0-local-ram",
+        "asset_name": "feature103-rc5-rx0.dfu",
+        "asset_sha256": "25dd5f78a53f11663610f1b69644da43ac69fd197ea4bb4161c4227915da1e22",
+        "fit_body_sha256": "7e3ad915590ac754c992b669a113c4381df66a1cdd413a22ca2534756077e2da",
+        "fit_body_size": 12_785_571,
+    }
+)
+FEATURE_103_RC5_FULL_RAM_POLICY = FEATURE_103_RC5_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc5-full-ram",
+        "release_tag": "feature-103-rc5-full-local-ram",
+        "device_firmware": "v0.50-plutoplus-feature103-rc5",
+        "asset_name": "feature103-rc5-full.dfu",
+        "asset_sha256": "52a1dd68a9136f5a29259d24de2206d80b325c4e0a6011cec2bbf241f88bf784",
+        "source_commit": "23e4edf099e4b2b34e2fc0bd08ea2e5d08eabe4d",
+        "fit_body_sha256": "4d42137ffacdfe7f88085f93a6f61fdf89110f98ab3cf07c14fbd3873116d07e",
+        "fit_body_size": 13_138_751,
+    }
+)
+
+# RC5 is retained solely as a failed-container receipt identity. RC6 first
+# proves the byte-exact qualified parent, then a canonical full-layout repack,
+# before introducing the feature kernel, RX0 DTB, and userspace independently.
+FEATURE_103_RC6_PARENT_RAM_POLICY = COUNTER_RX_V1_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc6-parent-ram",
+        "release_tag": "feature-103-rc6-byte-exact-parent-local-ram",
+        "asset_name": "feature103-rc6-parent.dfu",
+        "release_url": "https://github.com/misko/plutosdr-fw/issues/103",
+        "hardware_qualified": False,
+        "published_at": datetime(2026, 9, 16, tzinfo=UTC),
+    }
+)
+FEATURE_103_RC6_REPACK_RAM_POLICY = FEATURE_103_RC6_PARENT_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc6-repack-ram",
+        "release_tag": "feature-103-rc6-canonical-repack-local-ram",
+        "asset_name": "feature103-rc6-repack.dfu",
+        "asset_sha256": "42353c6d25d0dfa1692e2ef05c43736ebf7c2342b93bc1316a48a8d05bf6b769",
+        "fit_body_sha256": "aed5b10e692bc683e04ef9c5d9cde0442f6bd5af4250cbdd7e52969eb5b54e42",
+        "fit_body_size": 12_828_795,
+    }
+)
+FEATURE_103_RC6_KERNEL_RAM_POLICY = FEATURE_103_RC6_REPACK_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc6-kernel-ram",
+        "release_tag": "feature-103-rc6-kernel-local-ram",
+        "asset_name": "feature103-rc6-kernel.dfu",
+        "asset_sha256": "9c154b4f1400449eaf8db0c42f5b37eb23e0786816c86063c6dafe1b929543df",
+        "source_commit": "21b0090b491a08256552913004c0453ee4d4c418",
+        "fit_body_sha256": "c285623e9f12fcf4569e3fe8e14b7d1c47c875823f64eb66915dfe8a128e5340",
+        "fit_body_size": 12_832_147,
+    }
+)
+FEATURE_103_RC6_RX0_RAM_POLICY = FEATURE_103_RC6_KERNEL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc6-rx0-ram",
+        "release_tag": "feature-103-rc6-rx0-local-ram",
+        "asset_name": "feature103-rc6-rx0.dfu",
+        "asset_sha256": "cc1d947f2f3088ea063329470fc0758c2e85c0155350df29f4441abb0a2625d3",
+        "fit_body_sha256": "4e2a2ff7df4944507f9e0696d23c922ea1fc87d8677b847bca25cd4ae5b986f1",
+        "fit_body_size": 12_832_223,
+    }
+)
+FEATURE_103_RC6_FULL_RAM_POLICY = FEATURE_103_RC6_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc6-full-ram",
+        "release_tag": "feature-103-rc6-full-local-ram",
+        "device_firmware": "v0.50-plutoplus-feature103-rc6",
+        "asset_name": "feature103-rc6-full.dfu",
+        "asset_sha256": "b7730848bd2db8575ce07bcc78bfe160254549269e933d68a5cfceb8bf5795b6",
+        "source_commit": "23e4edf099e4b2b34e2fc0bd08ea2e5d08eabe4d",
+        "fit_body_sha256": "f5283f93fdc9291b8edcba73a373a8e4fc43ec5f27218db012be897897360798",
+        "fit_body_size": 13_185_399,
+    }
+)
+
+# RC7 keeps RC6's validated parent/container/kernel stages but applies the
+# reviewed RX0 transform to every canonical FIT DT slot. The two authorized
+# radios select different configs (config@9/fdt@3 and config@0/fdt@1).
+FEATURE_103_RC7_PARENT_RAM_POLICY = FEATURE_103_RC6_PARENT_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc7-parent-ram",
+        "release_tag": "feature-103-rc7-byte-exact-parent-local-ram",
+        "asset_name": "feature103-rc7-parent.dfu",
+    }
+)
+FEATURE_103_RC7_REPACK_RAM_POLICY = FEATURE_103_RC6_REPACK_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc7-repack-ram",
+        "release_tag": "feature-103-rc7-canonical-repack-local-ram",
+        "asset_name": "feature103-rc7-repack.dfu",
+    }
+)
+FEATURE_103_RC7_KERNEL_RAM_POLICY = FEATURE_103_RC6_KERNEL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc7-kernel-ram",
+        "release_tag": "feature-103-rc7-kernel-local-ram",
+        "asset_name": "feature103-rc7-kernel.dfu",
+    }
+)
+FEATURE_103_RC7_RX0_RAM_POLICY = FEATURE_103_RC7_KERNEL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc7-rx0-ram",
+        "release_tag": "feature-103-rc7-all-fit-slots-rx0-local-ram",
+        "asset_name": "feature103-rc7-rx0.dfu",
+        "asset_sha256": "2f25a4675c9129af35b1c544ff2a59fc9e1d82accf74322d6a36ccfd7bbbc474",
+        "fit_body_sha256": "e3a45e3788f82af447beda50926ffcd240abc097f768630f0c3d73a4f5450a86",
+        "fit_body_size": 12_832_399,
+    }
+)
+FEATURE_103_RC7_FULL_RAM_POLICY = FEATURE_103_RC7_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc7-full-ram",
+        "release_tag": "feature-103-rc7-full-local-ram",
+        "device_firmware": "v0.50-plutoplus-feature103-rc7",
+        "asset_name": "feature103-rc7-full.dfu",
+        "asset_sha256": "6c4667ab2c64639709252eaa992ab7c72e15c8905c3ef310287ac4f844f46f72",
+        "source_commit": "23e4edf099e4b2b34e2fc0bd08ea2e5d08eabe4d",
+        "fit_body_sha256": "17e6d44209e6d735622fd09e9b6e9243e3cdcdf18837d2c016a9e9580dfc5b15",
+        "fit_body_size": 13_185_575,
+    }
+)
+
+# RC8 replaces only the feature kernel (and therefore the RX0/full stages).
+# Fast Lock validation now reads the live RFPLL registers instead of the clock
+# framework's stale cached rate. Parent and canonical-repack bytes are exact
+# matches for the already returned RC7 stages.
+FEATURE_103_RC8_PARENT_RAM_POLICY = FEATURE_103_RC7_PARENT_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc8-parent-ram",
+        "release_tag": "feature-103-rc8-byte-exact-parent-local-ram",
+        "asset_name": "feature103-rc8-parent.dfu",
+    }
+)
+FEATURE_103_RC8_REPACK_RAM_POLICY = FEATURE_103_RC7_REPACK_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc8-repack-ram",
+        "release_tag": "feature-103-rc8-canonical-repack-local-ram",
+        "asset_name": "feature103-rc8-repack.dfu",
+    }
+)
+FEATURE_103_RC8_KERNEL_RAM_POLICY = FEATURE_103_RC8_REPACK_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc8-kernel-ram",
+        "release_tag": "feature-103-rc8-live-rfpll-kernel-local-ram",
+        "asset_name": "feature103-rc8-kernel.dfu",
+        "asset_sha256": "407bcf54c77a2237bde68b0b184674c6376ea8b29cc503ce1a5647dd1edfc50a",
+        "source_commit": "104af780d1668dfc239804fba62215930d85af2b",
+        "fit_body_sha256": "79caea519d6f67f0b5521f45641c61956b20b86f9d003490a815f14cabd44518",
+        "fit_body_size": 12_831_827,
+    }
+)
+FEATURE_103_RC8_RX0_RAM_POLICY = FEATURE_103_RC8_KERNEL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc8-rx0-ram",
+        "release_tag": "feature-103-rc8-all-fit-slots-rx0-local-ram",
+        "asset_name": "feature103-rc8-rx0.dfu",
+        "asset_sha256": "3b7ee6b229c64227d569a15744aedf7a50b549f36f328f4707c69df6a02e8477",
+        "fit_body_sha256": "7ec535917eabffbd4b5689eda053e258d042e1c76325d31a0850c89ec2dc067d",
+        "fit_body_size": 12_832_079,
+    }
+)
+FEATURE_103_RC8_FULL_RAM_POLICY = FEATURE_103_RC8_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc8-full-ram",
+        "release_tag": "feature-103-rc8-full-local-ram",
+        "device_firmware": "v0.50-plutoplus-feature103-rc8",
+        "asset_name": "feature103-rc8-full.dfu",
+        "asset_sha256": "ef0fbc908090284f12edd09ca5be2f7985b2c2e4ac132e1e28f7319d464fcad1",
+        "source_commit": "23e4edf099e4b2b34e2fc0bd08ea2e5d08eabe4d",
+        "fit_body_sha256": "64866fa565662e747397dfe3b090b943ea2b29adc3211e7542f57d3f8bc5d8eb",
+        "fit_body_size": 13_185_251,
+    }
+)
+
+# RC9 keeps RC8's parent, kernel, and all-slot RX0 topology bytes. Its full
+# userspace fixes an adaptive-scan queue boundary that was already terminal
+# from an observed DMA gap being treated as a second, fatal close.
+FEATURE_103_RC9_PARENT_RAM_POLICY = FEATURE_103_RC8_PARENT_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc9-parent-ram",
+        "release_tag": "feature-103-rc9-byte-exact-parent-local-ram",
+        "asset_name": "feature103-rc9-parent.dfu",
+    }
+)
+FEATURE_103_RC9_REPACK_RAM_POLICY = FEATURE_103_RC8_REPACK_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc9-repack-ram",
+        "release_tag": "feature-103-rc9-canonical-repack-local-ram",
+        "asset_name": "feature103-rc9-repack.dfu",
+    }
+)
+FEATURE_103_RC9_KERNEL_RAM_POLICY = FEATURE_103_RC8_KERNEL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc9-kernel-ram",
+        "release_tag": "feature-103-rc9-live-rfpll-kernel-local-ram",
+        "asset_name": "feature103-rc9-kernel.dfu",
+    }
+)
+FEATURE_103_RC9_RX0_RAM_POLICY = FEATURE_103_RC8_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc9-rx0-ram",
+        "release_tag": "feature-103-rc9-all-fit-slots-rx0-local-ram",
+        "asset_name": "feature103-rc9-rx0.dfu",
+    }
+)
+FEATURE_103_RC9_FULL_RAM_POLICY = FEATURE_103_RC9_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc9-full-ram",
+        "release_tag": "feature-103-rc9-full-local-ram",
+        "device_firmware": "v0.50-plutoplus-feature103-rc9",
+        "asset_name": "feature103-rc9-full.dfu",
+        "asset_sha256": "fa91f157934d0f15cb6b483f9b12e585ba485f0af311616b4474f04778519b49",
+        "source_commit": "7918bb9b77a99a9630e5625c47f59bc0c5f7c5a5",
+        "fit_body_sha256": "61adcf9a35a9923e506849aeb8cc3647dcc7ce05b8e915d29a6f009d3986d485",
+        "fit_body_size": 13_185_303,
+    }
+)
+
+# RC10 keeps every RC9 boot component except userspace. Feedback now consumes
+# the session's mutex-protected coherent source-time watermark instead of
+# issuing a competing counter ioctl from the control connection.
+FEATURE_103_RC10_PARENT_RAM_POLICY = FEATURE_103_RC9_PARENT_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc10-parent-ram",
+        "release_tag": "feature-103-rc10-byte-exact-parent-local-ram",
+        "asset_name": "feature103-rc10-parent.dfu",
+    }
+)
+FEATURE_103_RC10_REPACK_RAM_POLICY = FEATURE_103_RC9_REPACK_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc10-repack-ram",
+        "release_tag": "feature-103-rc10-canonical-repack-local-ram",
+        "asset_name": "feature103-rc10-repack.dfu",
+    }
+)
+FEATURE_103_RC10_KERNEL_RAM_POLICY = FEATURE_103_RC9_KERNEL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc10-kernel-ram",
+        "release_tag": "feature-103-rc10-live-rfpll-kernel-local-ram",
+        "asset_name": "feature103-rc10-kernel.dfu",
+    }
+)
+FEATURE_103_RC10_RX0_RAM_POLICY = FEATURE_103_RC9_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc10-rx0-ram",
+        "release_tag": "feature-103-rc10-all-fit-slots-rx0-local-ram",
+        "asset_name": "feature103-rc10-rx0.dfu",
+    }
+)
+FEATURE_103_RC10_FULL_RAM_POLICY = FEATURE_103_RC10_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc10-full-ram",
+        "release_tag": "feature-103-rc10-full-local-ram",
+        "device_firmware": "v0.50-plutoplus-feature103-rc10",
+        "asset_name": "feature103-rc10-full.dfu",
+        "asset_sha256": "cdd25fcb2fa422d515500f0f144bae0c1d543405e1a0bdbd687b6a939950074a",
+        "source_commit": "ee2f40d2616581719f9dd5726d0d6ff8334f3a9c",
+        "fit_body_sha256": "95760da77b70cefaf1ee9bb0d43c2d012846893f8edee8f50645c39c3c4daf5f",
+        "fit_body_size": 13_185_287,
+    }
+)
+
 # Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
 # ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a
 # local, recoverable-radio persistent canary only: ``hardware_qualified=False``

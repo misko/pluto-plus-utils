@@ -10,8 +10,8 @@ import pytest
 
 from pluto_plus.adaptive_scan_evidence import (
     AUTHORIZED_FEATURE_103_SERIALS,
-    FEATURE_103_RC4_DFU_SHA256,
-    FEATURE_103_RC4_FIT_SHA256,
+    FEATURE_103_RC10_DFU_SHA256,
+    FEATURE_103_RC10_FIT_SHA256,
     SCHEMA,
     AdaptiveScanEvidenceError,
     attest_feature103_fleet_ram_boot_receipts,
@@ -82,10 +82,10 @@ def _write_boot_receipt(
                 "returned_serial": serial,
                 "plan": {
                     "serial": serial,
-                    "profile_id": "feature-103-rc4-ram",
-                    "image_sha256": FEATURE_103_RC4_DFU_SHA256,
-                    "fit_sha256": FEATURE_103_RC4_FIT_SHA256,
-                    "fit_size": 13_188_343,
+                    "profile_id": "feature-103-rc10-full-ram",
+                    "image_sha256": FEATURE_103_RC10_DFU_SHA256,
+                    "fit_sha256": FEATURE_103_RC10_FIT_SHA256,
+                    "fit_size": 13_185_287,
                     "usb_sysfs_path": usb_path,
                 },
             }
@@ -94,7 +94,7 @@ def _write_boot_receipt(
     path.chmod(0o600)
 
 
-def test_exact_rc4_rx0_ram_receipt_is_required(tmp_path: Path) -> None:
+def test_exact_rc10_full_ram_receipt_is_required(tmp_path: Path) -> None:
     receipt_id = "1" * 32
     path = tmp_path / f"{receipt_id}.json"
     serial = AUTHORIZED_FEATURE_103_SERIALS[0]
@@ -107,12 +107,12 @@ def test_exact_rc4_rx0_ram_receipt_is_required(tmp_path: Path) -> None:
 
     identity = attest_feature103_ram_boot_receipt(path, expected_serial=serial)
     assert identity.receipt_id == receipt_id
-    assert identity.dfu_sha256 == FEATURE_103_RC4_DFU_SHA256
+    assert identity.dfu_sha256 == FEATURE_103_RC10_DFU_SHA256
 
     payload = json.loads(path.read_bytes())
     payload["plan"]["profile_id"] = "feature-103-rc1-ram"
     path.write_text(json.dumps(payload))
-    with pytest.raises(AdaptiveScanEvidenceError, match="exact RC4 RX0"):
+    with pytest.raises(AdaptiveScanEvidenceError, match="exact RC10-full"):
         attest_feature103_ram_boot_receipt(path, expected_serial=serial)
 
 

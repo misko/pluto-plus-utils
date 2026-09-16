@@ -54,10 +54,11 @@ from pluto_plus.doctor import (
     DDR_RING_V1_RC2_RAM_POLICY,
     DDR_RING_V1_RELEASE_PERSISTENT_POLICY,
     DDR_RING_V1_RELEASE_RAM_POLICY,
-    FEATURE_103_RC1_RAM_POLICY,
-    FEATURE_103_RC2_RAM_POLICY,
-    FEATURE_103_RC3_RAM_POLICY,
-    FEATURE_103_RC4_RAM_POLICY,
+    FEATURE_103_RC10_FULL_RAM_POLICY,
+    FEATURE_103_RC10_KERNEL_RAM_POLICY,
+    FEATURE_103_RC10_PARENT_RAM_POLICY,
+    FEATURE_103_RC10_REPACK_RAM_POLICY,
+    FEATURE_103_RC10_RX0_RAM_POLICY,
     IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY,
     IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_RAM_POLICY,
     IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_RAM_POLICY,
@@ -979,14 +980,14 @@ for _counter_policy, _counter_layout, _counter_persistent in (
     )
 
 
-# Feature request #103 remains RAM-only until its bounded hardware campaigns
-# pass. Reuse the qualified counter runtime contract and require its new
-# adaptive-scan discovery capability.
-for _feature_103_policy, _feature_103_counter_policy in (
-    (FEATURE_103_RC1_RAM_POLICY, COUNTER_RX_V1_RELEASE_RAM_POLICY),
-    (FEATURE_103_RC2_RAM_POLICY, COUNTER_RX_V1_RELEASE_RAM_POLICY),
-    (FEATURE_103_RC3_RAM_POLICY, COUNTER_RX_V1_1R1T_RAM_POLICY),
-    (FEATURE_103_RC4_RAM_POLICY, COUNTER_RX_V1_1R1T_RAM_POLICY),
+# RC1--RC9 are deliberately absent from the executable profile registry after
+# the provenance/container/topology and cached-RFPLL validation RCAs.
+for _feature_103_policy, _feature_103_counter_policy, _adaptive in (
+    (FEATURE_103_RC10_PARENT_RAM_POLICY, COUNTER_RX_V1_RELEASE_RAM_POLICY, False),
+    (FEATURE_103_RC10_REPACK_RAM_POLICY, COUNTER_RX_V1_RELEASE_RAM_POLICY, False),
+    (FEATURE_103_RC10_KERNEL_RAM_POLICY, COUNTER_RX_V1_RELEASE_RAM_POLICY, True),
+    (FEATURE_103_RC10_RX0_RAM_POLICY, COUNTER_RX_V1_1R1T_RAM_POLICY, True),
+    (FEATURE_103_RC10_FULL_RAM_POLICY, COUNTER_RX_V1_1R1T_RAM_POLICY, True),
 ):
     _feature_103_base = STANDALONE_FLASH_PROFILES[_feature_103_counter_policy.profile_id]
     STANDALONE_FLASH_PROFILES[_feature_103_policy.profile_id] = replace(
@@ -994,7 +995,7 @@ for _feature_103_policy, _feature_103_counter_policy in (
         policy=_feature_103_policy,
         persistent_allowed=False,
         required_iio_capabilities=_feature_103_base.required_iio_capabilities
-        + (("iio,adaptive-scan", "1"),),
+        + ((("iio,adaptive-scan", "1"),) if _adaptive else ()),
     )
 
 

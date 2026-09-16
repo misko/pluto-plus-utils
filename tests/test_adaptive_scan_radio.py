@@ -4,6 +4,7 @@ import zlib
 
 import pytest
 
+from pluto_plus import adaptive_scan_radio
 from pluto_plus.adaptive_scan import ScanSetup, ScanTarget
 from pluto_plus.adaptive_scan_radio import (
     prepare_adaptive_scan_radio,
@@ -12,6 +13,7 @@ from pluto_plus.adaptive_scan_radio import (
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.iio import IioReceiverSettingsReadback
 from pluto_plus.models import GainMode, RadioIdentity, Transport
+from pluto_plus.setup_profiles import AD9361_1R1T_TARGET_PROFILE
 
 ORIGINAL = IioReceiverSettingsReadback(
     915_000_000.0,
@@ -63,8 +65,11 @@ class Radio:
         self.restored = False
         self.settings = ORIGINAL
         self.frequency = round(ORIGINAL.center_frequency_hz)
+        self.cached_frequency = self.frequency
         self.active = None
         self.profiles = {}
+        self.profile_frequencies = {}
+        self.kernel_buffers = 4
 
     def open(self) -> None:
         self.opened = True
@@ -81,6 +86,7 @@ class Radio:
     def restore_receiver_settings_readback(self, snapshot):
         self.settings = snapshot
         self.frequency = round(snapshot.center_frequency_hz)
+        self.cached_frequency = self.frequency
         self.active = None
         self.restored = True
         return snapshot
@@ -98,9 +104,21 @@ class Radio:
         )
         return self.settings
 
+    def read_kernel_buffers_count(self):
+        return self.kernel_buffers
+
+    def configure_kernel_buffers(self, count):
+        self.kernel_buffers = count
+        return count
+
     def write_center_frequency_bufferless(self, center_frequency_hz):
-        self.frequency = round(center_frequency_hz)
-        self.active = None
+        requested = round(center_frequency_hz)
+        # Model clk_set_rate() suppressing a write at the cached ordinary
+        # rate even when Fast Lock has changed the live synthesizer.
+        if requested != self.cached_frequency:
+            self.frequency = requested
+            self.cached_frequency = requested
+            self.active = None
 
     def read_center_frequency(self):
         return float(self.frequency)
@@ -108,13 +126,21 @@ class Radio:
     def store_rx_fastlock_profile(self, profile):
         words = tuple((self.frequency // 1_000_000 + profile + index) & 0xFF for index in range(16))
         self.profiles[profile] = words
+        self.profile_frequencies[profile] = self.frequency
         return words
 
     def save_rx_fastlock_profile(self, profile):
         return self.profiles[profile]
 
+    def load_rx_fastlock_profile(self, profile, values):
+        self.profiles[profile] = values
+
     def recall_rx_fastlock_profile(self, profile):
         self.active = None if self.bad_recall else profile
+        if not self.bad_recall:
+            self.frequency = self.profile_frequencies[profile]
+            words = self.profiles[profile]
+            self.profiles[profile] = (*words[:-1], (words[-1] + 2) & 0xFF)
 
     def read_active_rx_fastlock_profile(self):
         return self.active
@@ -133,6 +159,8 @@ def test_prepare_binds_profiles_and_restore_is_exact() -> None:
     )
     assert radios[0].closed and not radios[0].restored
     assert preparation.configured.channels == (0,)
+    assert preparation.original_kernel_buffers == 4
+    assert preparation.configured_kernel_buffers == 16
     assert [target.profile_crc32 for target in preparation.setup.targets] == [
         zlib.crc32(bytes(words)) & 0xFFFF_FFFF for words in preparation.profile_words
     ]
@@ -140,7 +168,7 @@ def test_prepare_binds_profiles_and_restore_is_exact() -> None:
     restoration = restore_adaptive_scan_radio(preparation, radio_factory=factory)
     assert restoration.expected == restoration.observed == ORIGINAL
     assert restoration.fastlock_inactive
-    assert radios[1].closed and radios[1].restored
+    assert radios[1].closed and radios[1].restored and radios[1].kernel_buffers == 4
 
 
 def test_prepare_failure_restores_and_closes() -> None:
@@ -153,3 +181,21 @@ def test_prepare_failure_restores_and_closes() -> None:
             radio_factory=lambda _uri, _serial: radio,
         )
     assert radio.restored and radio.closed and radio.settings == ORIGINAL
+
+
+def test_production_factory_selects_exact_rx0_layout_before_open(monkeypatch) -> None:
+    class Device:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.layout = None
+
+        def configure_rx_layout(self, expectation):
+            self.layout = expectation
+
+    monkeypatch.setattr(adaptive_scan_radio, "IioRadioDevice", Device)
+    radio = adaptive_scan_radio._default_factory("ip:192.168.1.15", "SERIAL_A")
+
+    assert radio.layout == AD9361_1R1T_TARGET_PROFILE.rx_layout_expectation
+    assert radio.kwargs["expected_metadata_abi"] == 3
+    assert radio.kwargs["require_idle_tandem_owner"] is True

@@ -213,9 +213,16 @@ class AdaptiveScanSession:
         if (
             record.frequency_hz != target.frequency_hz
             or record.profile != target.profile
-            or record.profile_crc32 != target.profile_crc32
         ):
             raise AdaptiveScanTransportError("visit target metadata changed from setup")
+        # The AD9361 recall path can legitimately adapt the stored ALC byte.
+        # OPENM verifies the setup CRC before recall; every kernel recall then
+        # verifies the current CRC and returns the post-recall CRC atomically.
+        if not record.profile_crc32:
+            raise AdaptiveScanTransportError(
+                "visit Fast Lock CRC is zero "
+                f"(visit={record.visit}, target={record.target}, result={record.result.name})"
+            )
         if (
             record.source_rate_hz != self.setup.source_rate_hz
             or record.analog_bandwidth_hz != self.setup.analog_bandwidth_hz

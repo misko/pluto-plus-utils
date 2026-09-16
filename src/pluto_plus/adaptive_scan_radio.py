@@ -16,6 +16,9 @@ from .hardware.iio import (
 )
 from .models import RadioIdentity, Transport
 from .persistent_hop import require_physical_lan_uri
+from .setup_profiles import AD9361_1R1T_TARGET_PROFILE
+
+ADAPTIVE_SCAN_KERNEL_BUFFERS = 16
 
 
 class AdaptiveScanRadio(Protocol):
@@ -38,6 +41,10 @@ class AdaptiveScanRadio(Protocol):
         self, *, sample_rate_hz: int, rf_bandwidth_hz: int, manual_gain_db: float
     ) -> IioReceiverSettingsReadback: ...
 
+    def read_kernel_buffers_count(self) -> int: ...
+
+    def configure_kernel_buffers(self, count: int) -> int: ...
+
     def write_center_frequency_bufferless(self, center_frequency_hz: float) -> None: ...
 
     def read_center_frequency(self) -> float: ...
@@ -45,6 +52,8 @@ class AdaptiveScanRadio(Protocol):
     def store_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]: ...
 
     def save_rx_fastlock_profile(self, profile: int) -> tuple[int, ...]: ...
+
+    def load_rx_fastlock_profile(self, profile: int, values: tuple[int, ...]) -> None: ...
 
     def recall_rx_fastlock_profile(self, profile: int) -> None: ...
 
@@ -60,6 +69,8 @@ class AdaptiveScanRadioPreparation:
     serial: str
     original: IioReceiverSettingsReadback
     configured: IioReceiverSettingsReadback
+    original_kernel_buffers: int
+    configured_kernel_buffers: int
     setup: ScanSetup
     profile_words: tuple[tuple[int, ...], ...]
 
@@ -72,13 +83,15 @@ class AdaptiveScanRadioRestoration:
 
 
 def _default_factory(uri: str, serial: str) -> AdaptiveScanRadio:
-    return IioRadioDevice(
+    radio = IioRadioDevice(
         uri,
         serial=serial,
         radio_id=serial,
         expected_metadata_abi=3,
         require_idle_tandem_owner=True,
     )
+    radio.configure_rx_layout(AD9361_1R1T_TARGET_PROFILE.rx_layout_expectation)
+    return radio
 
 
 def _attest_identity(radio: AdaptiveScanRadio, uri: str, serial: str) -> None:
@@ -108,18 +121,23 @@ def prepare_adaptive_scan_radio(
     setup.validate()
     radio = radio_factory(selected_uri, serial)
     original: IioReceiverSettingsReadback | None = None
+    original_kernel_buffers: int | None = None
     failure: BaseException | None = None
     result: AdaptiveScanRadioPreparation | None = None
     try:
         radio.open()
         _attest_identity(radio, selected_uri, serial)
         original = radio.read_receiver_settings_readback()
+        original_kernel_buffers = radio.read_kernel_buffers_count()
         if radio.read_active_rx_fastlock_profile() is not None:
             raise RadioConfigurationError("adaptive scan preparation found active Fast Lock")
         configured = radio.configure_adaptive_scan_rx0_geometry(
             sample_rate_hz=setup.source_rate_hz,
             rf_bandwidth_hz=setup.analog_bandwidth_hz,
             manual_gain_db=manual_gain_db,
+        )
+        configured_kernel_buffers = radio.configure_kernel_buffers(
+            ADAPTIVE_SCAN_KERNEL_BUFFERS
         )
         words: list[tuple[int, ...]] = []
         for target in setup.targets:
@@ -140,14 +158,36 @@ def prepare_adaptive_scan_radio(
             or round(radio.read_center_frequency()) != setup.targets[0].frequency_hz
         ):
             raise RadioConfigurationError("adaptive scan preparation did not exit Fast Lock")
-        final_words = tuple(
-            radio.save_rx_fastlock_profile(target.profile) for target in setup.targets
-        )
-        if any(
-            radio.save_rx_fastlock_profile(target.profile) != saved
-            for target, saved in zip(setup.targets, final_words, strict=True)
-        ):
-            raise RadioConfigurationError("adaptive scan final Fast Lock readback changed")
+        final_words = tuple(words)
+        # Ordinary LO tuning for a subsequent target can overwrite the
+        # currently selected hardware profile. Reload the saved immutable
+        # bytes after all frequency compilation, then prove every slot.
+        for target, saved in zip(setup.targets, final_words, strict=True):
+            radio.load_rx_fastlock_profile(target.profile, saved)
+            if radio.save_rx_fastlock_profile(target.profile) != saved:
+                raise RadioConfigurationError("adaptive scan Fast Lock reload changed")
+        for target in setup.targets:
+            radio.recall_rx_fastlock_profile(target.profile)
+            # The ordinary IIO LO getter is backed by the clock framework's
+            # cached rate, which Fast Lock deliberately bypasses. RC8 validates
+            # the live RFPLL registers in-kernel before accepting scan setup.
+            if radio.read_active_rx_fastlock_profile() != target.profile:
+                raise RadioConfigurationError("adaptive scan reloaded profile recall failed")
+        # A recall may adapt the profile's ALC byte. Put the originally
+        # attested bytes back after the recall test so OPENM's pre-recall CRC
+        # check sees exactly the words whose CRC is carried in the setup.
+        for target, saved in zip(setup.targets, final_words, strict=True):
+            radio.load_rx_fastlock_profile(target.profile, saved)
+            if radio.save_rx_fastlock_profile(target.profile) != saved:
+                raise RadioConfigurationError("adaptive scan final Fast Lock reload changed")
+        # The clock framework can suppress an ordinary write when its cached
+        # rate already equals target 0, even though Fast Lock has since changed
+        # the live RFPLL. Force a distinct cached-rate transition first so the
+        # driver's normal set-rate path always exits Fast Lock.
+        radio.write_center_frequency_bufferless(setup.targets[-1].frequency_hz)
+        radio.write_center_frequency_bufferless(setup.targets[0].frequency_hz)
+        if radio.read_active_rx_fastlock_profile() is not None:
+            raise RadioConfigurationError("adaptive scan reload validation did not exit Fast Lock")
         targets = tuple(
             dataclasses.replace(target, profile_crc32=zlib.crc32(bytes(saved)) & 0xFFFF_FFFF)
             for target, saved in zip(setup.targets, final_words, strict=True)
@@ -161,6 +201,8 @@ def prepare_adaptive_scan_radio(
             serial=serial,
             original=original,
             configured=configured,
+            original_kernel_buffers=original_kernel_buffers,
+            configured_kernel_buffers=configured_kernel_buffers,
             setup=prepared,
             profile_words=final_words,
         )
@@ -169,6 +211,8 @@ def prepare_adaptive_scan_radio(
         if original is not None:
             try:
                 radio.restore_receiver_settings_readback(original)
+                if original_kernel_buffers is not None:
+                    radio.configure_kernel_buffers(original_kernel_buffers)
             except BaseException as cleanup:
                 error.add_note(f"adaptive scan preparation restoration failed: {cleanup!r}")
     finally:
@@ -198,8 +242,15 @@ def restore_adaptive_scan_radio(
     try:
         _attest_identity(radio, preparation.uri, preparation.serial)
         observed = radio.restore_receiver_settings_readback(preparation.original)
+        restored_kernel_buffers = radio.configure_kernel_buffers(
+            preparation.original_kernel_buffers
+        )
         inactive = radio.read_active_rx_fastlock_profile() is None
-        if not _receiver_settings_restored(preparation.original, observed) or not inactive:
+        if (
+            not _receiver_settings_restored(preparation.original, observed)
+            or restored_kernel_buffers != preparation.original_kernel_buffers
+            or not inactive
+        ):
             raise RadioConfigurationError("adaptive scan host restoration was not exact")
         return AdaptiveScanRadioRestoration(preparation.original, observed, inactive)
     finally:

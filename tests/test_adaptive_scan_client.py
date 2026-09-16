@@ -267,3 +267,28 @@ def test_ack_poll_distinguishes_not_ready_from_a_terminal_ack() -> None:
     assert client.try_take_ack("cf-ad9361-lpc") is None
     assert client.try_take_ack("cf-ad9361-lpc") == ack
     assert not_ready.closed and ready.closed
+
+
+def test_stream_accepts_kernel_attested_post_recall_crc_change() -> None:
+    request = setup()
+    iq = b"\x01\x02\x03\x04" * 4
+    visit = dataclasses.replace(
+        _complete_visit(request, iq),
+        profile_crc32=request.targets[0].profile_crc32 ^ 0x01020304,
+    )
+    wire = ScriptedSocket(
+        b"0\n160\n"
+        + visit.pack()
+        + b"16\n"
+        + iq
+        + b"128\n"
+        + _terminal(request).pack()
+        + b"0\n"
+        + b"0\n"
+    )
+    client = AdaptiveScanClient(
+        "192.0.2.1", connector=lambda _host, _port, _timeout: wire
+    )
+
+    with client.start(request) as session:
+        assert tuple(session.visits())[0].record.profile_crc32 == visit.profile_crc32
