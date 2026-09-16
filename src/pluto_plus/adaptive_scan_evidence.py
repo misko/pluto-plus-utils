@@ -20,6 +20,12 @@ from .adaptive_scan_campaign import AdaptiveScanCampaignReceipt
 from .adaptive_scan_detector import Ci16EnergyObservation
 
 SCHEMA = "pluto-plus-utils.feature-103-campaign-evidence.v1"
+FEATURE_103_RC2_DFU_SHA256 = (
+    "fbc591ecbbeac83f8b24fc169fd675a834aa5e00aa5b779e79c7c097d9c61c81"
+)
+FEATURE_103_RC2_FIT_SHA256 = (
+    "6cf16e9884fc46a362f3fcc9b61ea752c4cac89e69a8b12b3da2dbbe9b602c0e"
+)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -32,6 +38,63 @@ class AdaptiveScanEvidenceIdentity:
     path: Path
     sha256: str
     bytes: int
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Feature103RamBootIdentity:
+    receipt_id: str
+    receipt_path: Path
+    serial: str
+    usb_sysfs_path: str
+    dfu_sha256: str
+    fit_sha256: str
+
+
+def attest_feature103_ram_boot_receipt(
+    path: Path, *, expected_serial: str
+) -> Feature103RamBootIdentity:
+    """Require a private successful RC2 volatile-return receipt for this serial."""
+
+    selected = path.expanduser().absolute()
+    try:
+        stat_result = selected.lstat()
+        raw = selected.read_bytes()
+        payload = json.loads(raw)
+        plan = payload["plan"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise AdaptiveScanEvidenceError("RAM-boot receipt is unreadable or malformed") from error
+    phases = tuple(payload.get("phases", ()))
+    receipt_id = str(payload.get("receipt_id", ""))
+    if (
+        selected.is_symlink()
+        or not selected.is_file()
+        or stat_result.st_mode & 0o077
+        or not re.fullmatch(r"[0-9a-f]{32}", receipt_id)
+        or selected.stem != receipt_id
+    ):
+        raise AdaptiveScanEvidenceError("RAM-boot receipt identity or permissions are unsafe")
+    if (
+        payload.get("outcome") != "success"
+        or phases[-2:] != ("return_attested", "tx_safe_attested")
+        or payload.get("returned_serial") != expected_serial
+        or plan.get("serial") != expected_serial
+        or plan.get("profile_id") != "feature-103-rc2-ram"
+        or plan.get("image_sha256") != FEATURE_103_RC2_DFU_SHA256
+        or plan.get("fit_sha256") != FEATURE_103_RC2_FIT_SHA256
+        or plan.get("fit_size") != 13_188_215
+    ):
+        raise AdaptiveScanEvidenceError("RAM-boot receipt does not attest exact RC2 return")
+    usb_path = str(plan.get("usb_sysfs_path", ""))
+    if not usb_path.startswith("/sys/bus/usb/devices/") or ":" in Path(usb_path).name:
+        raise AdaptiveScanEvidenceError("RAM-boot receipt USB identity is invalid")
+    return Feature103RamBootIdentity(
+        receipt_id=receipt_id,
+        receipt_path=selected,
+        serial=expected_serial,
+        usb_sysfs_path=usb_path,
+        dfu_sha256=FEATURE_103_RC2_DFU_SHA256,
+        fit_sha256=FEATURE_103_RC2_FIT_SHA256,
+    )
 
 
 def _json_value(value: Any) -> Any:

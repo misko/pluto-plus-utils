@@ -9,8 +9,11 @@ from pathlib import Path
 import pytest
 
 from pluto_plus.adaptive_scan_evidence import (
+    FEATURE_103_RC2_DFU_SHA256,
+    FEATURE_103_RC2_FIT_SHA256,
     SCHEMA,
     AdaptiveScanEvidenceError,
+    attest_feature103_ram_boot_receipt,
     write_adaptive_scan_evidence,
 )
 
@@ -63,3 +66,37 @@ def test_evidence_rejects_unpinned_candidate(tmp_path: Path) -> None:
             candidate_dfu_sha256="A" * 64,
             candidate_fit_sha256="b" * 64,
         )
+
+
+def test_exact_rc2_ram_receipt_is_required(tmp_path: Path) -> None:
+    receipt_id = "1" * 32
+    path = tmp_path / f"{receipt_id}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "receipt_id": receipt_id,
+                "outcome": "success",
+                "phases": ["return_attested", "tx_safe_attested"],
+                "returned_serial": "SERIAL_A",
+                "plan": {
+                    "serial": "SERIAL_A",
+                    "profile_id": "feature-103-rc2-ram",
+                    "image_sha256": FEATURE_103_RC2_DFU_SHA256,
+                    "fit_sha256": FEATURE_103_RC2_FIT_SHA256,
+                    "fit_size": 13_188_215,
+                    "usb_sysfs_path": "/sys/bus/usb/devices/3-11",
+                },
+            }
+        )
+    )
+    path.chmod(0o600)
+
+    identity = attest_feature103_ram_boot_receipt(path, expected_serial="SERIAL_A")
+    assert identity.receipt_id == receipt_id
+    assert identity.dfu_sha256 == FEATURE_103_RC2_DFU_SHA256
+
+    payload = json.loads(path.read_bytes())
+    payload["plan"]["profile_id"] = "feature-103-rc1-ram"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(AdaptiveScanEvidenceError, match="exact RC2"):
+        attest_feature103_ram_boot_receipt(path, expected_serial="SERIAL_A")
