@@ -96,16 +96,21 @@ def test_each_selected_radio_tx2_reaches_both_splitter_receivers() -> None:
     for serial, attenuation_db, tx_gain_db in targets:
         sdr = adi.ad9361(uri=_usb_uri(serial))
         snapshot: dict[str, Any] | None = None
+        paired_tx = False
         try:
             assert sdr._ctx.attrs.get("hw_serial") == serial
             # A 2R2T image is mandatory: chan1 is physical TX2, and both tee
             # outputs must be visible simultaneously as RX0/RX1.
-            for attribute in (
-                "tx_hardwaregain_chan1",
-                "rx_hardwaregain_chan1",
-                "gain_control_mode_chan1",
+            phy_tx2 = sdr._ctrl.find_channel("voltage1", True)
+            phy_rx2 = sdr._ctrl.find_channel("voltage1", False)
+            if (
+                phy_tx2 is None
+                or "hardwaregain" not in phy_tx2.attrs
+                or phy_rx2 is None
+                or not {"hardwaregain", "gain_control_mode"} <= set(phy_rx2.attrs)
             ):
-                assert hasattr(sdr, attribute), f"{serial} lacks 2R2T attribute {attribute}"
+                pytest.fail(f"{serial} does not expose the required 2R2T PHY controls")
+            paired_tx = True
             assert float(sdr.tx_hardwaregain_chan0) <= -80.0
             assert float(sdr.tx_hardwaregain_chan1) <= -80.0
             snapshot = _snapshot(sdr)
@@ -124,12 +129,13 @@ def test_each_selected_radio_tx2_reaches_both_splitter_receivers() -> None:
             sdr.tx_lo = frequency_hz
             assert int(sdr.rx_lo) == frequency_hz and int(sdr.tx_lo) == frequency_hz
 
-            # Program DDS channel 1 while fully muted, then expose only TX2 at
-            # the explicitly bounded gain. TX1 remains at -80 dB throughout.
             sdr._ctrl.attrs["calib_mode"].value = "tx_quad"
-            sdr.dds_single_tone(TONE_HZ, 0.25, channel=1)
             assert float(sdr.tx_hardwaregain_chan0) <= -80.0
             sdr.tx_hardwaregain_chan1 = tx_gain_db
+            # Match the proven tandem qualification sequence: calibrate while
+            # muted, apply the bounded TX2 attenuation with DDS still off, then
+            # enable the waveform. TX1 remains at -80 dB throughout.
+            sdr.dds_single_tone(TONE_HZ, 0.25, channel=1)
             time.sleep(0.25)
             signal = np.asarray(sdr.rx())[:, 1024:]
             result = analyze_tx2_splitter(
@@ -143,7 +149,8 @@ def test_each_selected_radio_tx2_reaches_both_splitter_receivers() -> None:
             try:
                 _mute_transmit(sdr)
                 assert float(sdr.tx_hardwaregain_chan0) <= -80.0
-                assert float(sdr.tx_hardwaregain_chan1) <= -80.0
+                if paired_tx:
+                    assert float(sdr.tx_hardwaregain_chan1) <= -80.0
             finally:
                 if snapshot is not None:
                     _restore(sdr, snapshot)
