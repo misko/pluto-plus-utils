@@ -257,7 +257,10 @@ class BundledIiodTransport:
         read = getattr(self._transport, "read_log_tail", None)
         if not callable(read):
             raise UserspaceIiodLifecycleError("transport lacks bounded daemon diagnostics")
-        return read(paths, process)
+        result = read(paths, process)
+        if not isinstance(result, bytes):
+            raise UserspaceIiodLifecycleError("transport returned invalid daemon diagnostics")
+        return result
 
     def terminate(
         self, paths: RemoteIiodPaths, process: UserspaceIiodProcessIdentity, *, timeout_s: float
