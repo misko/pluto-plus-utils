@@ -138,7 +138,7 @@ def _install_lifecycle(monkeypatch, setup: ScanSetup, events: list[str]) -> None
     def restore(value, **_kwargs):
         assert value is preparation
         events.append("restore")
-        return AdaptiveScanRadioRestoration(SETTINGS, SETTINGS, True)
+        return AdaptiveScanRadioRestoration(SETTINGS, SETTINGS, 4, 4, True)
 
     monkeypatch.setattr(campaign, "prepare_adaptive_scan_radio", prepare)
     monkeypatch.setattr(campaign, "restore_adaptive_scan_radio", restore)

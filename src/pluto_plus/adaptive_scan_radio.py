@@ -79,6 +79,8 @@ class AdaptiveScanRadioPreparation:
 class AdaptiveScanRadioRestoration:
     expected: IioReceiverSettingsReadback
     observed: IioReceiverSettingsReadback
+    expected_kernel_buffers: int
+    observed_kernel_buffers: int
     fastlock_inactive: bool
 
 
@@ -252,6 +254,12 @@ def restore_adaptive_scan_radio(
             or not inactive
         ):
             raise RadioConfigurationError("adaptive scan host restoration was not exact")
-        return AdaptiveScanRadioRestoration(preparation.original, observed, inactive)
+        return AdaptiveScanRadioRestoration(
+            expected=preparation.original,
+            observed=observed,
+            expected_kernel_buffers=preparation.original_kernel_buffers,
+            observed_kernel_buffers=restored_kernel_buffers,
+            fastlock_inactive=inactive,
+        )
     finally:
         radio.close()

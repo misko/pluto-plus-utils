@@ -167,6 +167,7 @@ def test_prepare_binds_profiles_and_restore_is_exact() -> None:
 
     restoration = restore_adaptive_scan_radio(preparation, radio_factory=factory)
     assert restoration.expected == restoration.observed == ORIGINAL
+    assert restoration.expected_kernel_buffers == restoration.observed_kernel_buffers == 4
     assert restoration.fastlock_inactive
     assert radios[1].closed and radios[1].restored and radios[1].kernel_buffers == 4
 
