@@ -157,7 +157,10 @@ def test_counter_runtime_rejects_incompatible_selections(arguments):
     script = Path(__file__).parents[1] / "scripts/install_native_libiio.sh"
     result = subprocess.run((str(script), *arguments), capture_output=True, text=True, timeout=10)
     assert result.returncode == 2
-    assert "--counter-rx requires --metadata-abi 3 and excludes other runtime selectors" in result.stderr
+    assert (
+        "--counter-rx requires --metadata-abi 3 and excludes other runtime selectors"
+        in result.stderr
+    )
 
 
 @pytest.mark.parametrize(
