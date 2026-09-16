@@ -1301,6 +1301,22 @@ FEATURE_103_RC13_FULL_RAM_POLICY = FEATURE_103_RC12_FULL_RAM_POLICY.model_copy(
     }
 )
 
+# RC14 retains RC13's all-slot RX0/TX2 topology and incorporates the current
+# libiio master, including the negotiated peer limit and synchronous USB pipe
+# teardown. It is a new RAM-only identity and inherits no RC12/RC13 evidence.
+FEATURE_103_RC14_FULL_RAM_POLICY = FEATURE_103_RC13_FULL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc14-full-ram",
+        "release_tag": "feature-103-rc14-main-sync-local-ram",
+        "device_firmware": "v0.50-plutoplus-feature103-rc14",
+        "asset_name": "feature103-rc14-full.dfu",
+        "asset_sha256": "99ae82e5e6a5eb4f02394463112e9d41fd90ff8343cbfbf95a4ec15e97853db1",
+        "source_commit": "d249dd280dda480f524f37adc9157a24dae2b6d1",
+        "fit_body_sha256": "26db9c700ad5b2cf01a3a9fc841f847bc0d06f7a1660cbbd3f181dcc4bdf048e",
+        "fit_body_size": 13_200_115,
+    }
+)
+
 # Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
 # ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a
 # local, recoverable-radio persistent canary only: ``hardware_qualified=False``

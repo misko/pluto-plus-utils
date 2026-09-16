@@ -92,6 +92,12 @@ def test_counter_release_is_known_without_version_prefix_inference():
             "a836a026f9e49572805c402ce24886b88beb23dbf12bbad5e7a1cb921f253c25",
             13_187_271,
         ),
+        (
+            "feature-103-rc14-full-ram",
+            "99ae82e5e6a5eb4f02394463112e9d41fd90ff8343cbfbf95a4ec15e97853db1",
+            "26db9c700ad5b2cf01a3a9fc841f847bc0d06f7a1660cbbd3f181dcc4bdf048e",
+            13_200_115,
+        ),
     ],
 )
 def test_feature_103_candidate_is_exactly_ram_only(
@@ -120,6 +126,7 @@ def test_feature_103_candidate_is_exactly_ram_only(
         "feature-103-rc12-rx0-ram",
         "feature-103-rc12-full-ram",
         "feature-103-rc13-full-ram",
+        "feature-103-rc14-full-ram",
     ],
 )
 def test_feature_103_rx0_candidates_attest_physical_rx0_topology(profile_id: str) -> None:
