@@ -344,6 +344,9 @@ class IioPersistentHopBackend(PersistentHopBackend):
     def rearm_direct_async(self) -> None:
         self._require_capture().rearm_direct_async()
 
+    def finish_direct_async_segment(self) -> None:
+        self._require_capture().finish_direct_async_segment()
+
     def close(self) -> PersistentHopHostLifecycleReceiptV1 | None:
         errors: list[BaseException] = []
         capture, self._capture = self._capture, None

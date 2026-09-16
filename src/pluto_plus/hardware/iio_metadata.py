@@ -1449,6 +1449,28 @@ class IioRawSidecarCaptureSession:
         # within one segment intentionally coalesce into one next segment.
         self._direct_async_rearm_pending = True
 
+    def finish_direct_async_segment(self) -> None:
+        """Consume the finite batch boundary after terminal IQ was received.
+
+        A provider may reach its terminal state before every response slot in
+        the current direct-async command is used.  One final refill lets
+        libiio consume the command's terminal errno and cache the terminal
+        status.  It must never rearm acquisition or silently discard IQ.
+        """
+        if self._buffer is None:
+            raise RuntimeError("raw sidecar metadata capture is not open")
+        if not self._direct_async_frames:
+            return
+        try:
+            self._buffer.refill()
+        except OSError as error:
+            if error.errno not in {errno.ENODATA, errno.EBUSY}:
+                raise
+        else:
+            raise RuntimeError("terminal direct-async boundary returned unexpected IQ")
+        self._direct_async_rearm_pending = False
+        self._direct_async_feedback_pending.clear()
+
     def drain_metadata(self, capacity: int = DEFAULT_METADATA_CAPACITY) -> bytes:
         """Metadata only: never refill or replace the last received IQ block."""
         if type(capacity) is not int or not 1 <= capacity <= 65536:

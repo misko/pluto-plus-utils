@@ -29,6 +29,7 @@ class ReplayBackend:
         self.closed = 0
         self.feedback = []
         self.rearmed = 0
+        self.finished_direct_segments = 0
         self.error = None
 
     def blocks(self):
@@ -57,6 +58,9 @@ class ReplayBackend:
 
     def rearm_direct_async(self):
         self.rearmed += 1
+
+    def finish_direct_async_segment(self):
+        self.finished_direct_segments += 1
 
 
 def session(rx=0, *, rolling_direct_async=False):
@@ -141,6 +145,7 @@ def test_rolling_direct_segment_is_rearmed_only_after_accepted_feedback():
     assert s.submit_feedback(result(s, sampled))
     assert backend.rearmed == 1
     s.close()
+    assert backend.finished_direct_segments == 1
     iterator.close()
 
 

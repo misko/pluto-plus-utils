@@ -789,6 +789,19 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
         with pytest.raises(ValueError, match="feedback"):
             session.submit_metadata_feedback(bad)
     assert session.read_status() == _status(PersistentHopSessionState.RUNNING)
+    terminal_refills = 0
+
+    def terminal_refill() -> None:
+        nonlocal terminal_refills
+        terminal_refills += 1
+        raise OSError(errno.ENODATA, "terminal finite segment is exhausted")
+
+    buffer.refill = terminal_refill
+    session.finish_direct_async_segment()
+    assert terminal_refills == 1
+    assert buffer.rearmed == [1, 1]
+    buffer.refill = boundary_refill
+    refill_attempts = 3
     parsed_base.enabled_scan_mask ^= 0x0F
     with pytest.raises(RuntimeError, match="geometry disagrees"):
         session.read_block()

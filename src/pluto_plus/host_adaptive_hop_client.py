@@ -47,6 +47,8 @@ class HostAdaptiveHopBackend(PersistentHopBackend, PersistentHopPlanPreparer, Pr
 
     def rearm_direct_async(self) -> None: ...
 
+    def finish_direct_async_segment(self) -> None: ...
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class HostAdaptiveHopCaptureReceiptV3:
@@ -309,6 +311,8 @@ class HostAdaptiveHopSession:
 
     def _finish(self, *, before_release: Callable[[], None] | None = None) -> None:
         deadline = time.monotonic() + 10
+        if self._rolling_direct_async:
+            self._backend.finish_direct_async_segment()
         while True:
             status = HostAdaptiveHopStatusV3.unpack(self._backend.read_status())
             if status.geometry.state not in {
