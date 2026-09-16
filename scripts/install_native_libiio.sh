@@ -14,6 +14,7 @@ source_ref=""
 source_commit=""
 scanner_glrt=0
 counter_rx=0
+direct_peer_limit=0
 source_repository="https://github.com/misko/libiio.git"
 local_source_repository=""
 
@@ -21,7 +22,8 @@ usage() {
     cat <<EOF
 Usage: scripts/install_native_libiio.sh --uv-bin ABSOLUTE_PATH
        [--python PATH] [--prefix PATH] [--jobs N] [--metadata-abi 1|2|3|4]
-       [--scanner-glrt | --counter-rx] [--source-repository ABSOLUTE_LOCAL_PATH]
+       [--scanner-glrt | --counter-rx | --direct-peer-limit]
+       [--source-repository ABSOLUTE_LOCAL_PATH]
 
 Builds the exact host libiio matched to the selected firmware metadata ABI with
 USB support. The default ABI is 1 for the currently deployed production radios.
@@ -36,6 +38,10 @@ and requires --metadata-abi 3. Existing defaults are unchanged. Before its commi
 is published, --source-repository may select a local Git repository containing
 that exact commit. Only committed objects are fetched into a fresh checkout;
 working-tree edits are never built and no caller-supplied source pin is accepted.
+
+--direct-peer-limit selects the matched v0.51 runtime. It accepts Python targets
+through 8,192 frames, rejects oversized requests against the peer-advertised
+limit before writing a command, and falls back to 4,096 for legacy iiOD peers.
 EOF
 }
 
@@ -48,6 +54,7 @@ while (($#)); do
     --metadata-abi) metadata_abi="${2:?missing value for --metadata-abi}"; shift 2 ;;
     --scanner-glrt) scanner_glrt=1; shift ;;
     --counter-rx) counter_rx=1; shift ;;
+    --direct-peer-limit) direct_peer_limit=1; shift ;;
     --source-repository) local_source_repository="${2:?missing value for --source-repository}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; printf 'ERROR: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -78,8 +85,8 @@ case "$metadata_abi" in
 esac
 
 if ((counter_rx)); then
-    [[ "$metadata_abi" == 3 && "$scanner_glrt" == 0 ]] || {
-        printf 'ERROR: --counter-rx requires --metadata-abi 3 and excludes --scanner-glrt\n' >&2
+    [[ "$metadata_abi" == 3 && "$scanner_glrt" == 0 && "$direct_peer_limit" == 0 ]] || {
+        printf 'ERROR: --counter-rx requires --metadata-abi 3 and excludes other runtime selectors\n' >&2
         exit 2
     }
     source_ref="counter-rx-v1-source/libiio-v1"
@@ -87,12 +94,20 @@ if ((counter_rx)); then
 fi
 
 if ((scanner_glrt)); then
-    [[ "$metadata_abi" == 3 ]] || {
-        printf 'ERROR: --scanner-glrt requires --metadata-abi 3\n' >&2
+    [[ "$metadata_abi" == 3 && "$direct_peer_limit" == 0 ]] || {
+        printf 'ERROR: --scanner-glrt requires --metadata-abi 3 and excludes other runtime selectors\n' >&2
         exit 2
     }
     source_commit="948d6a246bb937fe3a62ed15233d9f592ab71d6a"
     source_ref="$source_commit"
+fi
+if ((direct_peer_limit)); then
+    [[ "$metadata_abi" == 3 && "$scanner_glrt" == 0 && "$counter_rx" == 0 ]] || {
+        printf 'ERROR: --direct-peer-limit requires --metadata-abi 3 and excludes other runtime selectors\n' >&2
+        exit 2
+    }
+    source_ref="iq-direct-async-v5-source/libiio-v2"
+    source_commit="77f0b04dfc9059a6ac1197dce3c323b8d6272a6f"
 fi
 if [[ -n "$local_source_repository" ]]; then
     [[ "$local_source_repository" == /* && -d "$local_source_repository" ]] || {
