@@ -68,6 +68,12 @@ def test_counter_release_is_known_without_version_prefix_inference():
             "6cf16e9884fc46a362f3fcc9b61ea752c4cac89e69a8b12b3da2dbbe9b602c0e",
             13_188_215,
         ),
+        (
+            "feature-103-rc3-ram",
+            "7e5a551f5cfe9fd3d913527c5d4f3bcfb0b5d544301d5e96ab1ca0bbf2701fae",
+            "565549cb08a2fe6245bddf863ccc6cfe3516e57a0dba0e2fe77322ca9039e3b2",
+            13_184_047,
+        ),
     ],
 )
 def test_feature_103_candidate_is_exactly_ram_only(
@@ -86,3 +92,12 @@ def test_feature_103_candidate_is_exactly_ram_only(
         and candidate.persistent_allowed
         for candidate in flash.STANDALONE_FLASH_PROFILES.values()
     )
+
+
+def test_feature_103_rc3_attests_physical_rx0_topology() -> None:
+    profile = flash.STANDALONE_FLASH_PROFILES["feature-103-rc3-ram"]
+    capabilities = dict(profile.required_iio_capabilities)
+
+    assert profile.source_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
+    assert profile.return_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
+    assert capabilities["iio,buffer-counter-metadata-topology-supported"] == "1"

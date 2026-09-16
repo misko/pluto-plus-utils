@@ -845,6 +845,17 @@ FEATURE_103_RC2_RAM_POLICY = FEATURE_103_RC1_RAM_POLICY.model_copy(
         "fit_body_size": 13_188_215,
     }
 )
+FEATURE_103_RC3_RAM_POLICY = FEATURE_103_RC2_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc3-ram",
+        "release_tag": "feature-103-rc3-rx0-local-ram",
+        "asset_name": "feature103-ram-v3.dfu",
+        "asset_sha256": "7e5a551f5cfe9fd3d913527c5d4f3bcfb0b5d544301d5e96ab1ca0bbf2701fae",
+        "source_commit": "21b0090b491a08256552913004c0453ee4d4c418",
+        "fit_body_sha256": "565549cb08a2fe6245bddf863ccc6cfe3516e57a0dba0e2fe77322ca9039e3b2",
+        "fit_body_size": 13_184_047,
+    }
+)
 
 # Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
 # ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a

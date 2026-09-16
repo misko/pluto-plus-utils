@@ -56,6 +56,7 @@ from pluto_plus.doctor import (
     DDR_RING_V1_RELEASE_RAM_POLICY,
     FEATURE_103_RC1_RAM_POLICY,
     FEATURE_103_RC2_RAM_POLICY,
+    FEATURE_103_RC3_RAM_POLICY,
     IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY,
     IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_RAM_POLICY,
     IIO_THROUGHPUT_COVERAGE_WINDOW_V6_RC1_RAM_POLICY,
@@ -980,8 +981,12 @@ for _counter_policy, _counter_layout, _counter_persistent in (
 # Feature request #103 remains RAM-only until its bounded hardware campaigns
 # pass. Reuse the qualified counter runtime contract and require its new
 # adaptive-scan discovery capability.
-_feature_103_base = STANDALONE_FLASH_PROFILES[COUNTER_RX_V1_RELEASE_RAM_POLICY.profile_id]
-for _feature_103_policy in (FEATURE_103_RC1_RAM_POLICY, FEATURE_103_RC2_RAM_POLICY):
+for _feature_103_policy, _feature_103_counter_policy in (
+    (FEATURE_103_RC1_RAM_POLICY, COUNTER_RX_V1_RELEASE_RAM_POLICY),
+    (FEATURE_103_RC2_RAM_POLICY, COUNTER_RX_V1_RELEASE_RAM_POLICY),
+    (FEATURE_103_RC3_RAM_POLICY, COUNTER_RX_V1_1R1T_RAM_POLICY),
+):
+    _feature_103_base = STANDALONE_FLASH_PROFILES[_feature_103_counter_policy.profile_id]
     STANDALONE_FLASH_PROFILES[_feature_103_policy.profile_id] = replace(
         _feature_103_base,
         policy=_feature_103_policy,
