@@ -54,7 +54,8 @@ fi
 # No unbounded upper-bank reads. Protected partitions are read here only after
 # their observed physical ranges have been checked. Offsets come from MTD sysfs,
 # not cumulative /proc/mtd sizes. The fixed updater's config is also constrained.
-OBSERVE_SCRIPT = rb"""set -eu
+OBSERVE_SCRIPT = (
+    rb"""set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 emit() { printf '%s=%s\n' "$1" "$2"; }
@@ -68,7 +69,9 @@ updater=$(digest /sbin/update_frm.sh)
 emit updater_sha256 "$updater"
 config_digest=$(digest /etc/device_config)
 test "$config_digest" = 8938c87cd4949f07c33ec2f638d339a45c1c6d5bd0c4e777b64dcaf00577c3f9
-""" + tools_observation_script() + rb"""
+"""
+    + tools_observation_script()
+    + rb"""
 emit tools_sha256 "$(printf '%s\n' "$tools" | sha256sum | awk '{print $1}')"
 env_config=$(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' /etc/fw_env.config | awk '{$1=$1;print}')
 test "$env_config" = '/dev/mtd1 0x0000 0x20000 0x20000'
@@ -114,6 +117,7 @@ for index in 1 2; do
   emit "protected$index" "$(digest /dev/mtd$index)"
 done
 """
+)
 
 
 class FlashSshTransport(Protocol):
@@ -243,7 +247,15 @@ class FlashSession:
         self.before = self._protected()
         # Reviewed U-Boot import stops at the double NUL; CRC covers all bytes.
         # fw_setenv may retain old bytes in the inactive tail. Back up all of it.
-        decode_environment(self.before[1], opaque_padding=True)
+        # A known factory environment contains an adjacent empty ``preboot``
+        # immediately before its canonical value. Permit only that exact legacy
+        # input; post-write verification remains strict and therefore proves the
+        # updater normalized it without changing its logical value.
+        decode_environment(
+            self.before[1],
+            opaque_padding=True,
+            allow_legacy_duplicate_preboot=True,
+        )
         if hashlib.sha256(self.before[0]).hexdigest() != fresh.observation.boot_sha256:
             raise FlashSafetyError("flash_observation_changed", "boot changed during backup")
         for index, data in self.before.items():

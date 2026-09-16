@@ -791,6 +791,40 @@ IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V4_RELEASE_RAM_PO
     }
 )
 
+# Exact v0.51 bytes from trusted build run 35125485409. The matched host and
+# device libiio negotiate an 8,192-frame ceiling, retain the 4,096-frame legacy
+# fallback, enable direct async over USB, and make USB pipe closure a teardown
+# barrier before the next device operation can begin.
+IQ_DIRECT_ASYNC_V5_CANDIDATE_RAM_POLICY = FirmwarePolicy(
+    profile_id="iq-direct-async-v5-candidate-ram",
+    release_tag="iq-direct-async-v5-candidate-b72773dd191a",
+    device_firmware="v0.51-plutoplus-spf-iq-direct-async-v5",
+    asset_name="plutoplus-spf-iq-direct-async-v5-b72773dd191a-pluto.dfu",
+    asset_sha256="feea70f42b104698dc2ca1b0abcc8e836bf86f25ba21c24bd92741f5cb6f5ace",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/35125485409",
+    source_commit="b72773dd191a3df1d717886ac100d0dcbf3403e2",
+    fit_body_sha256="d86df7226fd10fdebb7cc1166c264077e39698fcf3e33e57705e8eca7913bc38",
+    fit_body_size=12_829_587,
+    hardware_qualified=False,
+    published_at=datetime(2026, 9, 16, 17, 21, 22, tzinfo=UTC),
+)
+IQ_DIRECT_ASYNC_V5_RELEASE_RAM_POLICY = IQ_DIRECT_ASYNC_V5_CANDIDATE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "iq-direct-async-v5-release-ram",
+        "release_tag": "v0.51-plutoplus-spf-iq-direct-async-v5",
+        "release_url": (
+            "https://github.com/misko/plutosdr-fw/releases/tag/"
+            "v0.51-plutoplus-spf-iq-direct-async-v5"
+        ),
+    }
+)
+IQ_DIRECT_ASYNC_V5_RELEASE_PERSISTENT_POLICY = IQ_DIRECT_ASYNC_V5_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "iq-direct-async-v5-release-persistent-promotion",
+        "hardware_qualified": True,
+    }
+)
+
 
 # Trusted run 34722030151; exact DFU/FIT passed RAM and persistent
 # 1R1T/2R2T qualification on serial 1040007c4a94000211000b009186843ef2.
@@ -1064,7 +1098,7 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 # repair. USB and enrolled-network upgrades select the newest release that has
 # completed the persistent hardware gate; setup keeps the immutable U-Boot
 # tuple but accepts only an exact QSPI image in the allowlist below.
-PERSISTENT_UPGRADE_POLICY = COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY
+PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_V5_RELEASE_PERSISTENT_POLICY
 
 # Canonical U-Boot repair may run only while one of these exact, reviewed,
 # hardware-qualified QSPI images is active. The tuple itself remains fixed;
@@ -1078,6 +1112,7 @@ SETUP_REPAIR_POLICIES = (
     IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY,
+    COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY,
     PERSISTENT_UPGRADE_POLICY,
 )
 
@@ -1094,6 +1129,8 @@ SETUP_INSPECTION_POLICIES = (
     IQ_DIRECT_ASYNC_V3_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V4_CANDIDATE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY,
+    IQ_DIRECT_ASYNC_V5_CANDIDATE_RAM_POLICY,
+    IQ_DIRECT_ASYNC_V5_RELEASE_RAM_POLICY,
 )
 
 

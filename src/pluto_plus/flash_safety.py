@@ -273,7 +273,18 @@ def reject_uncontrolled_persistence() -> None:
     )
 
 
-def decode_environment(raw: bytes, *, opaque_padding: bool = False) -> dict[bytes, bytes]:
+LEGACY_DUPLICATE_PREBOOT = (
+    b"if test $modeboot = sdboot && env run sd_uEnvtxt_existence_test; then "
+    b"if env run loadbootenv; then env run importbootenv; fi; fi; "
+)
+
+
+def decode_environment(
+    raw: bytes,
+    *,
+    opaque_padding: bool = False,
+    allow_legacy_duplicate_preboot: bool = False,
+) -> dict[bytes, bytes]:
     """Decode the reviewed single-copy, little-endian U-Boot environment."""
     if len(raw) != 0x20000 or int.from_bytes(raw[:4], "little") != zlib.crc32(raw[4:]):
         raise FlashSafetyError("protected_region_changed", "invalid environment size/CRC")
@@ -283,11 +294,26 @@ def decode_environment(raw: bytes, *, opaque_padding: bool = False) -> dict[byte
         not opaque_padding and any(byte not in (0, 255) for byte in data[terminator + 2 :])
     ):
         raise FlashSafetyError("protected_region_changed", "invalid environment encoding/padding")
+    entries = data[:terminator].split(b"\0")
     values: dict[bytes, bytes] = {}
-    for entry in data[:terminator].split(b"\0"):
+    for position, entry in enumerate(entries):
         key, separator, value = entry.partition(b"=")
-        if not separator or not key or key in values:
+        if not separator or not key:
             raise FlashSafetyError("protected_region_changed", "invalid/duplicate environment key")
+        if key in values:
+            legacy_preboot = (
+                allow_legacy_duplicate_preboot
+                and key == b"preboot"
+                and values[key] == b""
+                and value == LEGACY_DUPLICATE_PREBOOT
+                and position > 0
+                and entries[position - 1] == b"preboot="
+                and sum(item.startswith(b"preboot=") for item in entries) == 2
+            )
+            if not legacy_preboot:
+                raise FlashSafetyError(
+                    "protected_region_changed", "invalid/duplicate environment key"
+                )
         values[key] = value
     return values
 
@@ -306,7 +332,11 @@ def verify_protected(
     for index in (0, 2):
         if not before[index] or after[index] != before[index]:
             raise FlashSafetyError("protected_region_changed", f"mtd{index} changed; do not reboot")
-    expected = decode_environment(before[1], opaque_padding=opaque_padding)
+    expected = decode_environment(
+        before[1],
+        opaque_padding=opaque_padding,
+        allow_legacy_duplicate_preboot=True,
+    )
     expected[b"fit_size"] = f"{fit_size:X}".encode()
     if decode_environment(after[1], opaque_padding=opaque_padding) != expected:
         raise FlashSafetyError("protected_region_changed", "unexpected U-Boot environment changes")
