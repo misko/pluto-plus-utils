@@ -20,6 +20,7 @@ SETUP_FLAGS: Final = 1
 VISIT_FLAGS: Final = 1
 VISIT_DEADLINE_FORCED: Final = 2
 VISIT_FLAG_MASK: Final = VISIT_FLAGS | VISIT_DEADLINE_FORCED
+TERMINAL_FLAGS: Final = 1
 FORMAT_CI16: Final = 1
 CAPS_BYTES: Final = 96
 SETUP_BYTES: Final = 352
@@ -608,7 +609,7 @@ class ScanTerminal:
     state: TerminalState
     reason: int
     error: int
-    flags: int = 0
+    flags: int = TERMINAL_FLAGS
 
     def pack(self) -> bytes:
         if (
@@ -619,6 +620,7 @@ class ScanTerminal:
             or (self.state is TerminalState.COMPLETED and self.error)
             or (self.state is TerminalState.COMPLETED and self.restore_before < self.final_counter)
             or (self.state is TerminalState.FAILED and self.error >= 0)
+            or self.flags != TERMINAL_FLAGS
             or not -(1 << 31) <= self.error < (1 << 31)
         ):
             raise AdaptiveScanProtocolError("terminal record is inconsistent")
