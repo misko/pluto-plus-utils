@@ -140,6 +140,11 @@ class Session:
         self.acks.append(ack)
         return ack
 
+    def try_take_ack(self):
+        if len(getattr(self, "acks", [])) >= len(self.sent):
+            return None
+        return self.take_ack()
+
 
 def _detector(visit: AdaptiveScanVisit) -> ScanOutcome:
     return ScanOutcome.ACTIVE if visit.record.target == 1 else ScanOutcome.QUIET
@@ -193,6 +198,69 @@ def test_adaptive_retries_narrow_post_delivery_completion_race() -> None:
         FeedbackResult.ACCEPTED,
         FeedbackResult.ACCEPTED,
     ]
+
+
+def test_long_adaptive_run_drains_bounded_ack_mailbox_during_stream() -> None:
+    class LongSession(Session):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setup = replace(self.setup, duration_ms=3_000)
+            template = _visits(self.setup)[0]
+            samples = self.setup.source_rate_hz * self.setup.dwell_ms // 1_000
+            iq = template.iq
+            cursor = 1_000
+            self.items = []
+            for index in range(100):
+                start = cursor + self.setup.source_rate_hz // 1_000
+                end = start + samples
+                record = replace(
+                    template.record,
+                    visit=index,
+                    selection_counter=cursor,
+                    transition_before=cursor,
+                    transition_after=start,
+                    valid_start=start,
+                    valid_end=end,
+                    iq_bytes=len(iq),
+                )
+                self.items.append(AdaptiveScanVisit(record, iq))
+                cursor = end
+
+        def visits(self):
+            yield from self.items
+            final = self.items[-1].record.valid_end
+            self.terminal = ScanTerminal(
+                session=self.setup.session,
+                generation=self.setup.generation,
+                final_counter=final,
+                restore_before=final,
+                restore_after=final + 1,
+                planned=len(self.items),
+                delivered=len(self.items),
+                skipped=0,
+                invalid=0,
+                cancelled=0,
+                iq_bytes=sum(len(item.iq) for item in self.items),
+                state=TerminalState.COMPLETED,
+                reason=1,
+                error=0,
+            )
+
+        def submit_feedback(self, feedback):
+            if len(self.sent) - len(getattr(self, "acks", [])) >= 64:
+                return FeedbackResult.MAILBOX_FULL
+            return super().submit_feedback(feedback)
+
+    session = LongSession()
+    report = run_scanner_session(
+        session,
+        lambda _visit: ScanOutcome.ACTIVE,
+        mode=AdaptiveScanMode.ADAPTIVE,
+    )
+
+    assert len(session.sent) == 100
+    assert len(report.acknowledgements) == 100
+    assert all(item.receipt is FeedbackResult.ACCEPTED for item in report.observations)
 
 
 def test_weighting_evidence_uses_firmware_application_boundary() -> None:

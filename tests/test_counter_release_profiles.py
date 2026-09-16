@@ -74,6 +74,12 @@ def test_counter_release_is_known_without_version_prefix_inference():
             "565549cb08a2fe6245bddf863ccc6cfe3516e57a0dba0e2fe77322ca9039e3b2",
             13_184_047,
         ),
+        (
+            "feature-103-rc4-ram",
+            "f03f4b25da2e97fe67946aa4250df7ba6e7d04f844a8c8c3d232e2cd62d204be",
+            "52f8216403f38e595a5ec8bd8d3509d01a480c5ebc055be5fdd3d836692c2a94",
+            13_188_343,
+        ),
     ],
 )
 def test_feature_103_candidate_is_exactly_ram_only(
@@ -94,8 +100,9 @@ def test_feature_103_candidate_is_exactly_ram_only(
     )
 
 
-def test_feature_103_rc3_attests_physical_rx0_topology() -> None:
-    profile = flash.STANDALONE_FLASH_PROFILES["feature-103-rc3-ram"]
+@pytest.mark.parametrize("profile_id", ["feature-103-rc3-ram", "feature-103-rc4-ram"])
+def test_feature_103_rx0_candidates_attest_physical_rx0_topology(profile_id: str) -> None:
+    profile = flash.STANDALONE_FLASH_PROFILES[profile_id]
     capabilities = dict(profile.required_iio_capabilities)
 
     assert profile.source_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT

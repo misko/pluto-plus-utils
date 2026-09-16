@@ -20,11 +20,11 @@ from .adaptive_scan_campaign import AdaptiveScanCampaignReceipt
 from .adaptive_scan_detector import Ci16EnergyObservation
 
 SCHEMA = "pluto-plus-utils.feature-103-campaign-evidence.v1"
-FEATURE_103_RC3_DFU_SHA256 = (
-    "7e5a551f5cfe9fd3d913527c5d4f3bcfb0b5d544301d5e96ab1ca0bbf2701fae"
+FEATURE_103_RC4_DFU_SHA256 = (
+    "f03f4b25da2e97fe67946aa4250df7ba6e7d04f844a8c8c3d232e2cd62d204be"
 )
-FEATURE_103_RC3_FIT_SHA256 = (
-    "565549cb08a2fe6245bddf863ccc6cfe3516e57a0dba0e2fe77322ca9039e3b2"
+FEATURE_103_RC4_FIT_SHA256 = (
+    "52f8216403f38e595a5ec8bd8d3509d01a480c5ebc055be5fdd3d836692c2a94"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -53,7 +53,7 @@ class Feature103RamBootIdentity:
 def attest_feature103_ram_boot_receipt(
     path: Path, *, expected_serial: str
 ) -> Feature103RamBootIdentity:
-    """Require a private successful RC3 RX0 volatile-return receipt for this serial."""
+    """Require a private successful RC4 RX0 volatile-return receipt for this serial."""
 
     selected = path.expanduser().absolute()
     try:
@@ -78,12 +78,12 @@ def attest_feature103_ram_boot_receipt(
         or phases[-2:] != ("return_attested", "tx_safe_attested")
         or payload.get("returned_serial") != expected_serial
         or plan.get("serial") != expected_serial
-        or plan.get("profile_id") != "feature-103-rc3-ram"
-        or plan.get("image_sha256") != FEATURE_103_RC3_DFU_SHA256
-        or plan.get("fit_sha256") != FEATURE_103_RC3_FIT_SHA256
-        or plan.get("fit_size") != 13_184_047
+        or plan.get("profile_id") != "feature-103-rc4-ram"
+        or plan.get("image_sha256") != FEATURE_103_RC4_DFU_SHA256
+        or plan.get("fit_sha256") != FEATURE_103_RC4_FIT_SHA256
+        or plan.get("fit_size") != 13_188_343
     ):
-        raise AdaptiveScanEvidenceError("RAM-boot receipt does not attest exact RC3 RX0 return")
+        raise AdaptiveScanEvidenceError("RAM-boot receipt does not attest exact RC4 RX0 return")
     usb_path = str(plan.get("usb_sysfs_path", ""))
     if not usb_path.startswith("/sys/bus/usb/devices/") or ":" in Path(usb_path).name:
         raise AdaptiveScanEvidenceError("RAM-boot receipt USB identity is invalid")
@@ -92,8 +92,8 @@ def attest_feature103_ram_boot_receipt(
         receipt_path=selected,
         serial=expected_serial,
         usb_sysfs_path=usb_path,
-        dfu_sha256=FEATURE_103_RC3_DFU_SHA256,
-        fit_sha256=FEATURE_103_RC3_FIT_SHA256,
+        dfu_sha256=FEATURE_103_RC4_DFU_SHA256,
+        fit_sha256=FEATURE_103_RC4_FIT_SHA256,
     )
 
 

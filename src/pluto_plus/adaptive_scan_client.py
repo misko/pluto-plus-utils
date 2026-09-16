@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import socket
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -156,16 +157,27 @@ class AdaptiveScanClient:
         finally:
             connection.close()
 
-    def take_ack(self, device: str) -> ScanAck:
+    def try_take_ack(self, device: str) -> ScanAck | None:
+        """Return one ready application ACK without waiting for a future boundary."""
+
         connection = self._connection()
         try:
             connection.sendall(f"SCANACK {device} {ACK_BYTES}\n".encode())
-            size = _require_success(_integer(connection), "SCANACK")
+            size = _integer(connection)
+            if size == -errno.EAGAIN:
+                return None
+            size = _require_success(size, "SCANACK")
             if size != ACK_BYTES:
                 raise AdaptiveScanTransportError("SCANACK returned the wrong record size")
             return ScanAck.unpack(_exact(connection, size))
         finally:
             connection.close()
+
+    def take_ack(self, device: str) -> ScanAck:
+        ack = self.try_take_ack(device)
+        if ack is None:
+            raise AdaptiveScanTransportError("SCANACK has no ready acknowledgement")
+        return ack
 
 
 class AdaptiveScanSession:
@@ -282,6 +294,9 @@ class AdaptiveScanSession:
 
     def take_ack(self) -> ScanAck:
         return self._owner.take_ack(self.device)
+
+    def try_take_ack(self) -> ScanAck | None:
+        return self._owner.try_take_ack(self.device)
 
     def close(self) -> None:
         if self._closed:

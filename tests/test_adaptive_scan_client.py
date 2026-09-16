@@ -6,6 +6,8 @@ from collections import deque
 import pytest
 
 from pluto_plus.adaptive_scan import (
+    FeedbackResult,
+    ScanAck,
     ScanCapabilities,
     ScanSetup,
     ScanTarget,
@@ -241,3 +243,27 @@ def test_stream_rejects_terminal_accounting_mismatch() -> None:
     ):
         list(session.visits())
     assert wire.closed
+
+
+def test_ack_poll_distinguishes_not_ready_from_a_terminal_ack() -> None:
+    ack = ScanAck(
+        sequence=1,
+        source_visit=2,
+        first_visit=3,
+        received_counter=100,
+        application_counter=101,
+        target=0,
+        result=FeedbackResult.APPLIED,
+        old_boost=65_536,
+        new_boost=196_608,
+    )
+    not_ready = ScriptedSocket(b"-11\n")
+    ready = ScriptedSocket(b"96\n" + ack.pack())
+    sockets = deque((not_ready, ready))
+    client = AdaptiveScanClient(
+        "192.0.2.1", connector=lambda _host, _port, _timeout: sockets.popleft()
+    )
+
+    assert client.try_take_ack("cf-ad9361-lpc") is None
+    assert client.try_take_ack("cf-ad9361-lpc") == ack
+    assert not_ready.closed and ready.closed

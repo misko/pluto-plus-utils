@@ -31,6 +31,7 @@ class AdaptiveScanMode(enum.StrEnum):
 
 
 Detector = Callable[[AdaptiveScanVisit], ScanOutcome]
+ACK_DRAIN_WATERMARK = 32
 
 
 class ScannerSession(Protocol):
@@ -42,6 +43,8 @@ class ScannerSession(Protocol):
     def submit_feedback(self, feedback: ScanFeedback) -> FeedbackResult: ...
 
     def take_ack(self) -> ScanAck: ...
+
+    def try_take_ack(self) -> ScanAck | None: ...
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -132,10 +135,22 @@ def run_scanner_session(
         raise ValueError("feedback period or retry policy is invalid")
     accumulator = AdaptiveScanAccumulator(session.setup)
     observations: list[ScannerObservation] = []
+    acknowledgements: list[ScanAck] = []
+    accepted_count = 0
+
+    def drain_ready_acknowledgements() -> None:
+        while len(acknowledgements) < accepted_count:
+            ack = session.try_take_ack()
+            if ack is None:
+                return
+            acknowledgements.append(ack)
+
     sequence = 0
     complete_visits = 0
     for visit in session.visits():
         accumulator.add(visit)
+        if accepted_count - len(acknowledgements) >= ACK_DRAIN_WATERMARK:
+            drain_ready_acknowledgements()
         if not visit.iq:
             continue
         complete_visits += 1
@@ -164,6 +179,10 @@ def run_scanner_session(
                     sleeper(retry_delay_s)
                     receipt = session.submit_feedback(feedback)
                     attempts += 1
+                if receipt is FeedbackResult.ACCEPTED:
+                    accepted_count += 1
+                    if accepted_count - len(acknowledgements) >= ACK_DRAIN_WATERMARK:
+                        drain_ready_acknowledgements()
         observations.append(
             ScannerObservation(
                 visit=visit.record.visit,
@@ -180,7 +199,8 @@ def run_scanner_session(
         for item in observations
         if item.feedback is not None and item.receipt is FeedbackResult.ACCEPTED
     )
-    acknowledgements = tuple(session.take_ack() for _item in accepted)
+    while len(acknowledgements) < len(accepted):
+        acknowledgements.append(session.take_ack())
     expected = {
         item.feedback.sequence: (item.feedback.visit, item.feedback.target)
         for item in accepted
@@ -196,7 +216,7 @@ def run_scanner_session(
         mode=mode,
         feedback_period_visits=feedback_period_visits,
         observations=tuple(observations),
-        acknowledgements=acknowledgements,
+        acknowledgements=tuple(acknowledgements),
         metrics=metrics,
         gate=primary_acceptance_gate(metrics),
     )
