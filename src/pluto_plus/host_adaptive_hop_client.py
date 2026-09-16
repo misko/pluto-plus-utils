@@ -289,6 +289,7 @@ class HostAdaptiveHopSession:
         except BaseException as error:
             if threading.get_ident() != self._thread:
                 raise
+            error.add_note(f"host adaptive stream progress: {self._stream.progress_summary()}")
             if not self._closed:
                 try:
                     self._backend.cancel()

@@ -217,3 +217,8 @@ def test_wide_stream_releases_complete_visit_before_delayed_next_event():
         )
         == 1
     )
+    summary = stream.progress_summary()
+    assert "events=1 visits=1 emitted=1" in summary
+    assert "retained_segments=" in summary
+    assert "last_event_span=" in summary
+    assert "last_block=2 last_state=RUNNING" in summary

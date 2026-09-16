@@ -69,6 +69,25 @@ class HostAdaptiveHopStreamV3(
 ):
     """One native payload row for either RX, with exact uint64 source counters."""
 
+    def progress_summary(self) -> str:
+        segments = self._segments
+        span = f"{segments[0][0]}..{segments[-1][1]}" if segments else "none"
+        event = self._events[-1] if self._events else None
+        event_span = (
+            f"{event.invalid_start_counter}..{event.invalid_end_counter_exclusive}"
+            f"..{event.invalid_end_counter_exclusive + self.request.geometry.dwell_samples}"
+            if event is not None
+            else "none"
+        )
+        previous = self._previous
+        return (
+            f"events={len(self._events)} visits={len(self._visits)} "
+            f"emitted={self._emitted} retained_segments={len(segments)} "
+            f"retained_span={span} last_event_span={event_span} last_block="
+            f"{previous.buffer_sequence if previous is not None else 'none'} "
+            f"last_state={previous.state.name if previous is not None else 'none'}"
+        )
+
     def __init__(
         self,
         request: HostAdaptiveHopRequestV3 | HostAdaptiveHopRequestV4,
