@@ -125,7 +125,9 @@ class SshRamBootTransition:
         self._transport = transport
         self._radio = FixedSshLocalRebootTransport(transport)
 
-    def enter_ram(self, plan: VolatileFirmwarePlan) -> None:
+    def preflight(self, plan: VolatileFirmwarePlan) -> None:
+        """Attest the pinned endpoint before any TX-state or reboot mutation."""
+
         before = self._radio.attest(plan.serial)
         if (
             before.firmware != plan.before_firmware
@@ -134,6 +136,8 @@ class SshRamBootTransition:
             or before.capabilities.phy_model != plan.before_phy
         ):
             raise VolatileFirmwareError("remote SSH facts changed from the USB-bound plan")
+
+    def enter_ram(self, plan: VolatileFirmwarePlan) -> None:
         self._radio.ensure_tx_safe(plan.serial)
         self._transport.run(
             "set -eu; "
@@ -332,6 +336,10 @@ def execute_ram_boot_plan(
         )
     runner = command_runner or SubprocessDfuRunner()
     runner.run(("dfu-util", "--version"), timeout_s=5)
+
+    transition_preflight = getattr(transition, "preflight", None)
+    if callable(transition_preflight):
+        transition_preflight(plan)
 
     receipt_id = uuid.uuid4().hex
     receipt_path = receipt_directory / f"{receipt_id}.json"
