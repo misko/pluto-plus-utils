@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import zlib
 from dataclasses import replace
 
 import pytest
@@ -16,6 +17,7 @@ from flash_fakes import (
 
 from pluto_plus.firmware import validate_frm
 from pluto_plus.flash_safety import (
+    LEGACY_DUPLICATE_PREBOOT,
     FlashQualification,
     FlashSafetyError,
     decode_environment,
@@ -230,6 +232,60 @@ def test_environment_crc_and_only_expected_change():
     values[b"bootcmd"] = b"changed"
     with pytest.raises(FlashSafetyError):
         verify_protected(before, before | {1: environment(values)}, 100)
+
+
+def test_exact_legacy_duplicate_preboot_is_one_way_normalized():
+    duplicate = environment(
+        {
+            b"fit_size": b"60",
+            b"preboot": b"",
+            b"sentinel": b"unchanged",
+        }
+    )
+    data = duplicate[4:]
+    payload = data[: data.find(b"\0\0")].replace(
+        b"preboot=\0sentinel=",
+        b"preboot=\0preboot=" + LEGACY_DUPLICATE_PREBOOT + b"\0sentinel=",
+    )
+    payload = (payload + b"\0\0").ljust(0x20000 - 4, b"\xff")
+    duplicate = zlib.crc32(payload).to_bytes(4, "little") + payload
+
+    with pytest.raises(FlashSafetyError, match="duplicate environment key"):
+        decode_environment(duplicate)
+    assert (
+        decode_environment(duplicate, allow_legacy_duplicate_preboot=True)[b"preboot"]
+        == LEGACY_DUPLICATE_PREBOOT
+    )
+
+    normalized = environment(
+        {
+            b"fit_size": b"64",
+            b"preboot": LEGACY_DUPLICATE_PREBOOT,
+            b"sentinel": b"unchanged",
+        }
+    )
+    verify_protected(
+        {0: b"boot", 1: duplicate, 2: b"spare"},
+        {0: b"boot", 1: normalized, 2: b"spare"},
+        100,
+    )
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [b"preboot=" + LEGACY_DUPLICATE_PREBOOT, b"preboot="],
+        [b"preboot=", b"sentinel=x", b"preboot=" + LEGACY_DUPLICATE_PREBOOT],
+        [b"preboot=", b"preboot=changed"],
+        [b"preboot=", b"preboot=" + LEGACY_DUPLICATE_PREBOOT, b"preboot=again"],
+        [b"other=", b"other=value"],
+    ],
+)
+def test_other_duplicate_environment_layouts_remain_rejected(entries):
+    payload = (b"\0".join([b"fit_size=60", *entries]) + b"\0\0").ljust(0x20000 - 4, b"\xff")
+    raw = zlib.crc32(payload).to_bytes(4, "little") + payload
+    with pytest.raises(FlashSafetyError, match="duplicate environment key"):
+        decode_environment(raw, allow_legacy_duplicate_preboot=True)
 
 
 @pytest.mark.parametrize("change", [None, "report", "stage", "owner"])

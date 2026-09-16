@@ -70,6 +70,8 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     assert "iio-gain-timeline-v8-rc1-source/libiio-v4" in text
     assert "98a5e6139459a01a5a42ca7cd3e98d807156b6b0" in text
     assert SCANNER_GLRT_RUNTIME_SOURCE_COMMIT in text
+    assert "iq-direct-async-v5-source/libiio-v5" in text
+    assert "a8c4809c2cfe77ac5bd6fe95f8ead0559fbbe6ff" in text
     assert 'remote add origin "$source_repository"' in text
     assert '[[ "$actual_commit" == "$source_commit" ]]' in text
 
@@ -155,4 +157,24 @@ def test_counter_runtime_rejects_incompatible_selections(arguments):
     script = Path(__file__).parents[1] / "scripts/install_native_libiio.sh"
     result = subprocess.run((str(script), *arguments), capture_output=True, text=True, timeout=10)
     assert result.returncode == 2
-    assert "--counter-rx requires --metadata-abi 3 and excludes --scanner-glrt" in result.stderr
+    assert (
+        "--counter-rx requires --metadata-abi 3 and excludes other runtime selectors"
+        in result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("--metadata-abi", "1", "--direct-peer-limit"),
+        ("--metadata-abi", "2", "--direct-peer-limit"),
+        ("--metadata-abi", "4", "--direct-peer-limit"),
+        ("--metadata-abi", "3", "--direct-peer-limit", "--scanner-glrt"),
+        ("--metadata-abi", "3", "--direct-peer-limit", "--counter-rx"),
+    ],
+)
+def test_direct_peer_limit_runtime_rejects_incompatible_selections(arguments):
+    script = Path(__file__).parents[1] / "scripts/install_native_libiio.sh"
+    result = subprocess.run((str(script), *arguments), capture_output=True, text=True, timeout=10)
+    assert result.returncode == 2
+    assert "excludes other runtime selectors" in result.stderr
