@@ -12,6 +12,7 @@ from pluto_plus.adaptive_scan import (
     SETUP_BYTES,
     TERMINAL_BYTES,
     VISIT_BYTES,
+    VISIT_DEADLINE_FORCED,
     AdaptiveScanProtocolError,
     FeedbackResult,
     ScanAck,
@@ -106,6 +107,7 @@ def test_source_bound_records_round_trip_and_reject_corruption() -> None:
         eligible_mask=7,
         effective_weight=65536 * 2,
         profile_crc32=request.targets[1].profile_crc32,
+        flags=1 | VISIT_DEADLINE_FORCED,
     )
     feedback = ScanFeedback(
         session=request.session,

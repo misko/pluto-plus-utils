@@ -18,6 +18,8 @@ VERSION: Final = 1
 FEATURES: Final = 0xFF
 SETUP_FLAGS: Final = 1
 VISIT_FLAGS: Final = 1
+VISIT_DEADLINE_FORCED: Final = 2
+VISIT_FLAG_MASK: Final = VISIT_FLAGS | VISIT_DEADLINE_FORCED
 FORMAT_CI16: Final = 1
 CAPS_BYTES: Final = 96
 SETUP_BYTES: Final = 352
@@ -452,7 +454,8 @@ class ScanVisit:
             or not 0 <= self.target < 8
             or not 0 <= self.profile < 8
             or self.eligible_mask & ~0xFF
-            or self.flags & ~VISIT_FLAGS
+            or not self.flags & VISIT_FLAGS
+            or self.flags & ~VISIT_FLAG_MASK
             or (self.result is VisitResult.COMPLETE) != bool(self.iq_bytes)
             or (self.result is VisitResult.COMPLETE and self.iq_bytes != samples * 4)
         ):
