@@ -20,6 +20,7 @@ from .adaptive_scan import (
     ScanSetup,
     ScanTerminal,
     ScanVisit,
+    VisitResult,
 )
 
 
@@ -182,6 +183,64 @@ class AdaptiveScanSession:
         self.terminal: ScanTerminal | None = None
         self._iterated = False
         self._closed = False
+        self._visit_count = 0
+        self._last_visit: int | None = None
+        self._last_valid_end: int | None = None
+        self._iq_bytes = 0
+        self._delivered = 0
+        self._skipped = 0
+        self._invalid = 0
+        self._cancelled = 0
+
+    def _validate_visit(self, record: ScanVisit) -> None:
+        if record.session != self.setup.session or record.generation != self.setup.generation:
+            raise AdaptiveScanTransportError("visit identity changed")
+        if record.target >= len(self.setup.targets):
+            raise AdaptiveScanTransportError("visit target is outside the setup whitelist")
+        target = self.setup.targets[record.target]
+        if (
+            record.frequency_hz != target.frequency_hz
+            or record.profile != target.profile
+            or record.profile_crc32 != target.profile_crc32
+        ):
+            raise AdaptiveScanTransportError("visit target metadata changed from setup")
+        if (
+            record.source_rate_hz != self.setup.source_rate_hz
+            or record.analog_bandwidth_hz != self.setup.analog_bandwidth_hz
+        ):
+            raise AdaptiveScanTransportError("visit rate or analog bandwidth changed")
+        expected_visit = 0 if self._last_visit is None else self._last_visit + 1
+        if record.visit != expected_visit:
+            raise AdaptiveScanTransportError("visit sequence is not contiguous")
+        if self._last_valid_end is not None and record.transition_before < self._last_valid_end:
+            raise AdaptiveScanTransportError("visit source intervals overlap or regress")
+        if record.result is VisitResult.ADMITTED:
+            raise AdaptiveScanTransportError("non-terminal admitted visit escaped the provider")
+        self._last_visit = record.visit
+        self._last_valid_end = record.valid_end
+        self._visit_count += 1
+        self._iq_bytes += record.iq_bytes
+        if record.result is VisitResult.COMPLETE:
+            self._delivered += 1
+        elif record.result in {VisitResult.SKIP_CAPACITY, VisitResult.SKIP_AGE}:
+            self._skipped += 1
+        elif record.result is VisitResult.INVALID_GAP:
+            self._invalid += 1
+        elif record.result is VisitResult.CANCELLED:
+            self._cancelled += 1
+
+    def _validate_terminal(self, terminal: ScanTerminal) -> None:
+        if (
+            terminal.planned != self._visit_count
+            or terminal.delivered != self._delivered
+            or terminal.skipped != self._skipped
+            or terminal.invalid != self._invalid
+            or terminal.cancelled != self._cancelled
+            or terminal.iq_bytes != self._iq_bytes
+        ):
+            raise AdaptiveScanTransportError("terminal accounting disagrees with the stream")
+        if self._last_valid_end is not None and terminal.final_counter < self._last_valid_end:
+            raise AdaptiveScanTransportError("terminal source counter regressed")
 
     def visits(self) -> Iterator[AdaptiveScanVisit]:
         if self._iterated or self._closed:
@@ -192,6 +251,7 @@ class AdaptiveScanSession:
                 record_size = _require_success(_integer(self._connection), "READSCAN")
                 if record_size == VISIT_BYTES:
                     record = ScanVisit.unpack(_exact(self._connection, record_size))
+                    self._validate_visit(record)
                     iq_size = _require_success(_integer(self._connection), "READSCAN IQ")
                     if iq_size != record.iq_bytes:
                         raise AdaptiveScanTransportError("visit IQ length disagrees with record")
@@ -206,6 +266,7 @@ class AdaptiveScanSession:
                         or terminal.generation != self.setup.generation
                     ):
                         raise AdaptiveScanTransportError("terminal identity changed")
+                    self._validate_terminal(terminal)
                     self.terminal = terminal
                     return
                 raise AdaptiveScanTransportError("READSCAN returned an unknown record size")
