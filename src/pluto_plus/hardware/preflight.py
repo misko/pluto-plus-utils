@@ -31,7 +31,7 @@ METADATA_RUNTIME_SOURCE_COMMITS = {
 # The receipt's existing immutable source identity distinguishes this runtime;
 # neither the metadata ABI nor the persisted receipt schema changes.
 COUNTER_RX_RUNTIME_SOURCE_COMMIT = "47a75cbc5e7d24a063b8b54eb531fdba6602b85c"
-SCANNER_GLRT_RUNTIME_SOURCE_COMMIT = "b702129de0dec8556058b7174b665e00a93428e8"
+SCANNER_GLRT_RUNTIME_SOURCE_COMMIT = "6f76eea926685661c308a8a410ade30eb2a68ebb"
 SCANNER_GLRT_BUFFER_METHODS = {
     "cancel_metadata_session": ("self",),
     "metadata_status_raw": ("self", "capacity"),
