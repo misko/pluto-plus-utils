@@ -1464,7 +1464,7 @@ class IioRawSidecarCaptureSession:
         try:
             self._buffer.refill()
         except OSError as error:
-            if error.errno not in {errno.ENODATA, errno.EBUSY}:
+            if error.errno not in {errno.EINVAL, errno.ENODATA, errno.EBUSY}:
                 raise
         else:
             raise RuntimeError("terminal direct-async boundary returned unexpected IQ")

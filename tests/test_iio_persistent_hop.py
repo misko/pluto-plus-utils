@@ -794,7 +794,7 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     def terminal_refill() -> None:
         nonlocal terminal_refills
         terminal_refills += 1
-        raise OSError(errno.ENODATA, "terminal finite segment is exhausted")
+        raise OSError(errno.EINVAL, "terminal finite segment ended before every slot was used")
 
     buffer.refill = terminal_refill
     session.finish_direct_async_segment()
