@@ -17,7 +17,10 @@ from pluto_plus.host_adaptive_hop import (
     HostDecisionConfigurationV2,
 )
 from pluto_plus.host_adaptive_hop_stream import HostAdaptiveHopStreamV3
-from pluto_plus.persistent_hop import PersistentHopClientError, PersistentHopProtocolError
+from pluto_plus.persistent_hop import (
+    PersistentHopClientError,
+    PersistentHopProtocolError,
+)
 
 
 def setup(rx, mode=AdaptiveHopMode.ADAPTIVE, block=262144, delay=0):
@@ -208,3 +211,47 @@ def test_wide_stream_releases_complete_visit_before_delayed_next_event():
     assert "retained_segments=" in summary
     assert "last_event_span=" in summary
     assert "last_block=2 last_state=RUNNING" in summary
+
+
+def test_wide_complete_stream_bounds_terminal_refill_with_declared_source_gap():
+    block = 1_000_000
+    capture = Capture(20_000_000, AdaptiveHopMode.ADAPTIVE, block)
+    request = HostAdaptiveHopRequestV4(
+        capture.request.geometry,
+        capture.request.policy,
+        HostDecisionConfigurationV2(0, bytes(range(32)), 20_000_000),
+    )
+    stream = HostAdaptiveHopStreamV3(request, samples_per_block=block)
+    wires = [single_wire(wire, 0) for wire in capture.wires()]
+    final_evidence = HostAdaptiveHopEvidenceV3.unpack(wires[-1].evidence)
+    terminal_start = final_evidence.geometry.block_first_counter + block
+    terminal = dc.replace(
+        final_evidence.geometry,
+        buffer_sequence=final_evidence.geometry.buffer_sequence + 1,
+        block_first_counter=terminal_start,
+        block_end_counter_exclusive=terminal_start + block,
+        events=(),
+    )
+    terminal_wire = dc.replace(
+        wires[-1],
+        evidence=HostAdaptiveHopEvidenceV3(terminal, ()).pack(),
+        iq_payload=np.zeros((block, 2), dtype="<i2").tobytes(),
+    )
+    seen = []
+    for wire in (*wires[:-2], terminal_wire):
+        seen.extend(stream.feed(wire))
+    status = capture.status().geometry
+    status = dc.replace(
+        status,
+        last_block_sequence=terminal.buffer_sequence,
+        last_block_end_counter=terminal.block_end_counter_exclusive,
+        restore_before_counter=terminal.block_end_counter_exclusive,
+        restore_after_counter=terminal.block_end_counter_exclusive + 1,
+    )
+    receipt, final = stream.finish(HostAdaptiveHopStatusV3(status))
+    seen.extend(final)
+
+    assert receipt.sparse is not None
+    assert receipt.sparse.missing_sample_count == 2 * block
+    assert receipt.visits == tuple(item.visit for item in seen)
+    assert receipt.status.geometry.final_counter == capture.final

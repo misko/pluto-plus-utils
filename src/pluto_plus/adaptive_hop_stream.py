@@ -492,13 +492,14 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
                 + last.invalid_end_counter_exclusive
                 - last.invalid_start_counter
             )
+            missing = sum(end - start for start, end in self._gaps)
             if (
                 not geometry.capture_span_samples
                 <= denominator
-                <= geometry.capture_span_samples + overshoot
+                <= geometry.capture_span_samples + overshoot + missing
                 or not 0
                 <= status.last_block_end_counter - status.final_counter
-                <= self.samples_per_block
+                <= self.samples_per_block + missing
             ):
                 raise PersistentHopClientError("adaptive completion duration/overshoot is invalid")
             if len(self._visits) == len(self._events):
