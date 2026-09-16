@@ -16,7 +16,12 @@ from pluto_plus.adaptive_scan import (
     VisitResult,
 )
 from pluto_plus.adaptive_scan_client import AdaptiveScanVisit
-from pluto_plus.adaptive_scan_shadow import AdaptiveScanMode, run_scanner_session
+from pluto_plus.adaptive_scan_shadow import (
+    AdaptiveScanMode,
+    ScannerObservation,
+    run_scanner_session,
+    weighting_evidence,
+)
 
 
 def _setup() -> ScanSetup:
@@ -188,6 +193,31 @@ def test_adaptive_retries_narrow_post_delivery_completion_race() -> None:
         FeedbackResult.ACCEPTED,
         FeedbackResult.ACCEPTED,
     ]
+
+
+def test_weighting_evidence_uses_firmware_application_boundary() -> None:
+    session = Session()
+    report = run_scanner_session(
+        session, _detector, mode=AdaptiveScanMode.ADAPTIVE, feedback_period_visits=2
+    )
+    observations = report.observations + tuple(
+        ScannerObservation(
+            visit=visit,
+            target=1,
+            outcome=ScanOutcome.ACTIVE,
+            feedback=None,
+            receipt=None,
+        )
+        for visit in range(4, 10)
+    )
+    evidence = weighting_evidence(
+        replace(report, observations=observations),
+        target=1,
+    )
+    assert evidence.application_visit == 2
+    assert evidence.before_share == 0.5
+    assert evidence.after_share == 0.875
+    assert evidence.probability_increased
     assert all(
         feedback.analysis_digest == session.setup.analysis_digest
         and feedback.valid_start == session.items[feedback.visit].record.valid_start

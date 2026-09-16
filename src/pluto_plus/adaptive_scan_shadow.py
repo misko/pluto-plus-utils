@@ -63,6 +63,55 @@ class ScannerRunReport:
     gate: AdaptiveScanGate
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class WeightingEvidence:
+    target: int
+    application_visit: int
+    before_visits: int
+    after_visits: int
+    before_share: float
+    after_share: float
+
+    @property
+    def probability_increased(self) -> bool:
+        return self.after_share > self.before_share
+
+
+def weighting_evidence(report: ScannerRunReport, *, target: int) -> WeightingEvidence:
+    """Measure selection share around the first applied active feedback boundary."""
+
+    active_sequences = {
+        item.feedback.sequence
+        for item in report.observations
+        if item.feedback is not None
+        and item.feedback.target == target
+        and item.feedback.outcome is ScanOutcome.ACTIVE
+        and item.receipt is FeedbackResult.ACCEPTED
+    }
+    applied = next(
+        (
+            ack
+            for ack in report.acknowledgements
+            if ack.sequence in active_sequences and ack.result is FeedbackResult.APPLIED
+        ),
+        None,
+    )
+    if applied is None:
+        raise ValueError("target has no applied active feedback")
+    before = tuple(item for item in report.observations if item.visit < applied.first_visit)
+    after = tuple(item for item in report.observations if item.visit >= applied.first_visit)
+    if not before or not after:
+        raise ValueError("weighting evidence requires visits on both sides of application")
+    return WeightingEvidence(
+        target=target,
+        application_visit=applied.first_visit,
+        before_visits=len(before),
+        after_visits=len(after),
+        before_share=sum(item.target == target for item in before) / len(before),
+        after_share=sum(item.target == target for item in after) / len(after),
+    )
+
+
 def run_scanner_session(
     session: ScannerSession,
     detector: Detector,
