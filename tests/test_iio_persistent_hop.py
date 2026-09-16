@@ -752,8 +752,8 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     def boundary_refill() -> None:
         nonlocal refill_attempts
         refill_attempts += 1
-        if refill_attempts == 1:
-            boundary_errno = errno.EBUSY if extended else errno.ENODATA
+        if refill_attempts <= 2:
+            boundary_errno = errno.EBUSY if refill_attempts == 2 or extended else errno.ENODATA
             raise OSError(boundary_errno, "segment is exhausted")
         buffer.refilled = True
 
@@ -765,8 +765,8 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert buffer.rearmed == []
     boundary_block = session.read_block()
     assert boundary_block.iq_payload == block.iq_payload
-    assert refill_attempts == 2
-    assert buffer.rearmed == [1]
+    assert refill_attempts == 3
+    assert buffer.rearmed == [1, 1]
     assert feedback_packets == [b"source-bound feedback"]
     buffer.refilled = False
     assert session.drain_metadata() == b"terminal metadata"
@@ -774,7 +774,7 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert not buffer.refilled and buffer.iq == block.iq_payload
     session.rearm_direct_async()
     session.rearm_direct_async()
-    assert buffer.rearmed == [1]
+    assert buffer.rearmed == [1, 1]
     assert not buffer.refilled and buffer.iq == block.iq_payload
     for bad in (b"", bytes(257), "not bytes"):
         with pytest.raises(ValueError, match="feedback"):

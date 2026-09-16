@@ -1322,25 +1322,30 @@ class IioRawSidecarCaptureSession:
         buffer = self._buffer
         if buffer is None:
             raise RuntimeError("raw sidecar metadata capture is not open")
-        try:
-            buffer.refill()
-        except OSError as error:
-            if (
-                error.errno not in {errno.ENODATA, errno.EBUSY}
-                or not self._direct_async_rearm_pending
-            ):
-                raise
-            submit = getattr(buffer, "submit_metadata_feedback", None)
-            if self._direct_async_feedback_pending and not callable(submit):
-                raise NotImplementedError(
-                    "installed pylibiio lacks owned-buffer feedback"
-                ) from error
-            submit_feedback = cast(Callable[[bytes], None], submit)
-            while self._direct_async_feedback_pending:
-                submit_feedback(self._direct_async_feedback_pending[0])
-                self._direct_async_feedback_pending.popleft()
-            buffer.rearm_direct_async(self._direct_async_frames)
-            buffer.refill()
+        boundary_attempts = 0
+        while True:
+            try:
+                buffer.refill()
+                break
+            except OSError as error:
+                if (
+                    error.errno not in {errno.ENODATA, errno.EBUSY}
+                    or not self._direct_async_rearm_pending
+                    or boundary_attempts >= 4
+                ):
+                    raise
+                boundary_attempts += 1
+                submit = getattr(buffer, "submit_metadata_feedback", None)
+                if self._direct_async_feedback_pending and not callable(submit):
+                    raise NotImplementedError(
+                        "installed pylibiio lacks owned-buffer feedback"
+                    ) from error
+                submit_feedback = cast(Callable[[bytes], None], submit)
+                while self._direct_async_feedback_pending:
+                    submit_feedback(self._direct_async_feedback_pending[0])
+                    self._direct_async_feedback_pending.popleft()
+                buffer.rearm_direct_async(self._direct_async_frames)
+        if boundary_attempts:
             self._direct_async_rearm_pending = False
         iq_payload = bytes(buffer.read())
         raw_metadata = buffer.metadata
