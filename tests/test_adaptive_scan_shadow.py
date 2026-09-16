@@ -6,6 +6,7 @@ import pytest
 
 from pluto_plus.adaptive_scan import (
     FeedbackResult,
+    ScanAck,
     ScanOutcome,
     ScanSetup,
     ScanTarget,
@@ -111,6 +112,24 @@ class Session:
         self.sent.append(feedback)
         return FeedbackResult.ACCEPTED
 
+    def take_ack(self):
+        feedback = self.sent[len(getattr(self, "acks", []))]
+        if not hasattr(self, "acks"):
+            self.acks = []
+        ack = ScanAck(
+            sequence=feedback.sequence,
+            source_visit=feedback.visit,
+            first_visit=feedback.visit + 1,
+            received_counter=feedback.valid_end + 1,
+            application_counter=feedback.valid_end + 2,
+            target=feedback.target,
+            result=FeedbackResult.APPLIED,
+            old_boost=65_536,
+            new_boost=196_608,
+        )
+        self.acks.append(ack)
+        return ack
+
 
 def _detector(visit: AdaptiveScanVisit) -> ScanOutcome:
     return ScanOutcome.ACTIVE if visit.record.target == 1 else ScanOutcome.QUIET
@@ -147,6 +166,7 @@ def test_adaptive_transmits_periodic_source_bound_feedback() -> None:
         for item in report.observations
         if item.feedback
     )
+    assert [ack.sequence for ack in report.acknowledgements] == [1, 2]
     assert all(
         feedback.analysis_digest == session.setup.analysis_digest
         and feedback.valid_start == session.items[feedback.visit].record.valid_start

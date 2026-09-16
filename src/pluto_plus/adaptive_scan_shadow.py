@@ -7,7 +7,14 @@ import enum
 from collections.abc import Callable, Iterable
 from typing import Protocol
 
-from .adaptive_scan import FeedbackResult, ScanFeedback, ScanOutcome, ScanSetup, ScanTerminal
+from .adaptive_scan import (
+    FeedbackResult,
+    ScanAck,
+    ScanFeedback,
+    ScanOutcome,
+    ScanSetup,
+    ScanTerminal,
+)
 from .adaptive_scan_client import AdaptiveScanVisit
 from .adaptive_scan_qualification import (
     AdaptiveScanAccumulator,
@@ -33,6 +40,8 @@ class ScannerSession(Protocol):
 
     def submit_feedback(self, feedback: ScanFeedback) -> FeedbackResult: ...
 
+    def take_ack(self) -> ScanAck: ...
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class ScannerObservation:
@@ -48,6 +57,7 @@ class ScannerRunReport:
     mode: AdaptiveScanMode
     feedback_period_visits: int
     observations: tuple[ScannerObservation, ...]
+    acknowledgements: tuple[ScanAck, ...]
     metrics: AdaptiveScanMetrics
     gate: AdaptiveScanGate
 
@@ -103,11 +113,28 @@ def run_scanner_session(
         )
     if session.terminal is None:
         raise RuntimeError("scanner stream ended without a terminal record")
+    accepted = tuple(
+        item
+        for item in observations
+        if item.feedback is not None and item.receipt is FeedbackResult.ACCEPTED
+    )
+    acknowledgements = tuple(session.take_ack() for _item in accepted)
+    expected = {
+        item.feedback.sequence: (item.feedback.visit, item.feedback.target)
+        for item in accepted
+        if item.feedback is not None
+    }
+    observed = {
+        ack.sequence: (ack.source_visit, ack.target) for ack in acknowledgements
+    }
+    if len(observed) != len(acknowledgements) or observed != expected:
+        raise RuntimeError("feedback acknowledgements do not match accepted observations")
     metrics = accumulator.finish(session.terminal)
     return ScannerRunReport(
         mode=mode,
         feedback_period_visits=feedback_period_visits,
         observations=tuple(observations),
+        acknowledgements=acknowledgements,
         metrics=metrics,
         gate=primary_acceptance_gate(metrics),
     )
