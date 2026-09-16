@@ -30,7 +30,7 @@ METADATA_RUNTIME_SOURCE_COMMITS = {
 # An explicit installer opt-in, not a replacement for the established defaults.
 # The receipt's existing immutable source identity distinguishes this runtime;
 # neither the metadata ABI nor the persisted receipt schema changes.
-SCANNER_GLRT_RUNTIME_SOURCE_COMMIT = "18b721c663c848a06a83a6ccd1f04244ba109a46"
+SCANNER_GLRT_RUNTIME_SOURCE_COMMIT = "b702129886439c83142e8fd4db61d73a50cb3063"
 SCANNER_GLRT_BUFFER_METHODS = {
     "cancel_metadata_session": ("self",),
     "metadata_status_raw": ("self", "capacity"),
