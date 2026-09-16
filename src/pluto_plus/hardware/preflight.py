@@ -32,7 +32,7 @@ METADATA_RUNTIME_SOURCE_COMMITS = {
 # neither the metadata ABI nor the persisted receipt schema changes.
 COUNTER_RX_RUNTIME_SOURCE_COMMIT = "47a75cbc5e7d24a063b8b54eb531fdba6602b85c"
 SCANNER_GLRT_RUNTIME_SOURCE_COMMIT = "948d6a246bb937fe3a62ed15233d9f592ab71d6a"
-DIRECT_PEER_LIMIT_RUNTIME_SOURCE_COMMIT = "77f0b04dfc9059a6ac1197dce3c323b8d6272a6f"
+DIRECT_PEER_LIMIT_RUNTIME_SOURCE_COMMIT = "0de80c0ed05fed86da58ff5afadfdda83dadd0e1"
 SCANNER_GLRT_BUFFER_METHODS = {
     "cancel_metadata_session": ("self",),
     "metadata_status_raw": ("self", "capacity"),
