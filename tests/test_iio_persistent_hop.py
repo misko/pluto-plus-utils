@@ -744,14 +744,9 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert block.sidecar == _sidecar()
     assert block.iq_payload == bytes(SAMPLES * 4 * len(receiver_ids))
     assert block.extension_metadata == (b"extension" + bytes(metadata) if extended else None)
-    rearm_attempts = 0
     refill_attempts = 0
 
     def boundary_rearm(frames: int) -> None:
-        nonlocal rearm_attempts
-        rearm_attempts += 1
-        if rearm_attempts == 1:
-            raise OSError(errno.EBUSY, "segment is still active")
         buffer.rearmed.append(frames)
 
     def boundary_refill() -> None:
@@ -765,9 +760,10 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     buffer.rearm_direct_async = boundary_rearm
     buffer.refill = boundary_refill
     session.rearm_direct_async()
+    assert buffer.rearmed == []
     boundary_block = session.read_block()
     assert boundary_block.iq_payload == block.iq_payload
-    assert rearm_attempts == 2 and refill_attempts == 2
+    assert refill_attempts == 2
     assert buffer.rearmed == [1]
     buffer.refilled = False
     assert session.drain_metadata() == b"terminal metadata"
@@ -776,7 +772,8 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     session.submit_metadata_feedback(b"source-bound feedback")
     assert feedback_packets == [b"source-bound feedback"]
     session.rearm_direct_async()
-    assert buffer.rearmed == [1, 1]
+    session.rearm_direct_async()
+    assert buffer.rearmed == [1]
     assert not buffer.refilled and buffer.iq == block.iq_payload
     for bad in (b"", bytes(257), "not bytes"):
         with pytest.raises(ValueError, match="feedback"):

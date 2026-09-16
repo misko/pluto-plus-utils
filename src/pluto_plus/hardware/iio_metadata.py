@@ -1329,8 +1329,8 @@ class IioRawSidecarCaptureSession:
             ):
                 raise
             buffer.rearm_direct_async(self._direct_async_frames)
-            self._direct_async_rearm_pending = False
             buffer.refill()
+            self._direct_async_rearm_pending = False
         iq_payload = bytes(buffer.read())
         raw_metadata = buffer.metadata
         if raw_metadata is None:
@@ -1378,7 +1378,7 @@ class IioRawSidecarCaptureSession:
         submit(payload)
 
     def rearm_direct_async(self) -> None:
-        """Queue the next one-frame segment after feedback is acknowledged."""
+        """Authorize one next segment after the current segment is drained."""
         if self._buffer is None:
             raise RuntimeError("raw sidecar metadata capture is not open")
         if not self._direct_async_frames:
@@ -1386,16 +1386,14 @@ class IioRawSidecarCaptureSession:
         rearm = getattr(self._buffer, "rearm_direct_async", None)
         if not callable(rearm):
             raise NotImplementedError("installed pylibiio lacks direct async rearm")
-        try:
-            rearm(self._direct_async_frames)
-            self._direct_async_rearm_pending = False
-        except OSError as error:
-            if error.errno != errno.EBUSY:
-                raise
-            # Feedback may arrive before the current finite segment has been
-            # consumed.  Preserve that causal authorization and rearm exactly
-            # when the following refill reports the segment boundary.
-            self._direct_async_rearm_pending = True
+        # libiio's async enqueue returns after writing the command, before the
+        # remote iiOD has accepted it.  Enqueueing while the previous producer
+        # is finishing can therefore appear locally successful and surface a
+        # remote ENODATA on the following refill.  Preserve the causal
+        # authorization here and issue the command only after refill proves the
+        # previous finite segment is exhausted.  Multiple visit feedback items
+        # within one segment intentionally coalesce into one next segment.
+        self._direct_async_rearm_pending = True
 
     def drain_metadata(self, capacity: int = DEFAULT_METADATA_CAPACITY) -> bytes:
         """Metadata only: never refill or replace the last received IQ block."""
