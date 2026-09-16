@@ -82,10 +82,12 @@ def _visits(setup: ScanSetup) -> list[AdaptiveScanVisit]:
 
 
 class Session:
-    def __init__(self) -> None:
+    def __init__(self, *, reject_first: bool = False) -> None:
         self.setup = _setup()
         self.items = _visits(self.setup)
         self.sent = []
+        self.reject_first = reject_first
+        self.attempts = {}
         self.terminal = None
 
     def visits(self):
@@ -109,6 +111,9 @@ class Session:
         )
 
     def submit_feedback(self, feedback):
+        self.attempts[feedback.sequence] = self.attempts.get(feedback.sequence, 0) + 1
+        if self.reject_first and self.attempts[feedback.sequence] == 1:
+            return FeedbackResult.REJECTED
         self.sent.append(feedback)
         return FeedbackResult.ACCEPTED
 
@@ -167,6 +172,22 @@ def test_adaptive_transmits_periodic_source_bound_feedback() -> None:
         if item.feedback
     )
     assert [ack.sequence for ack in report.acknowledgements] == [1, 2]
+
+
+def test_adaptive_retries_narrow_post_delivery_completion_race() -> None:
+    session = Session(reject_first=True)
+    report = run_scanner_session(
+        session,
+        _detector,
+        mode=AdaptiveScanMode.ADAPTIVE,
+        feedback_period_visits=2,
+        sleeper=lambda _delay: None,
+    )
+    assert session.attempts == {1: 2, 2: 2}
+    assert [item.receipt for item in report.observations if item.feedback] == [
+        FeedbackResult.ACCEPTED,
+        FeedbackResult.ACCEPTED,
+    ]
     assert all(
         feedback.analysis_digest == session.setup.analysis_digest
         and feedback.valid_start == session.items[feedback.visit].record.valid_start

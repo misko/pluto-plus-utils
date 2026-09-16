@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import time
 from collections.abc import Callable, Iterable
 from typing import Protocol
 
@@ -68,11 +69,18 @@ def run_scanner_session(
     *,
     mode: AdaptiveScanMode,
     feedback_period_visits: int = 1,
+    rejected_race_retries: int = 5,
+    retry_delay_s: float = 0.001,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> ScannerRunReport:
     """Run one stream; shadow mode constructs but never transmits feedback."""
 
-    if feedback_period_visits <= 0:
-        raise ValueError("feedback period must be positive")
+    if (
+        feedback_period_visits <= 0
+        or rejected_race_retries < 0
+        or not 0 <= retry_delay_s <= 0.1
+    ):
+        raise ValueError("feedback period or retry policy is invalid")
     accumulator = AdaptiveScanAccumulator(session.setup)
     observations: list[ScannerObservation] = []
     sequence = 0
@@ -102,6 +110,11 @@ def run_scanner_session(
             )
             if mode is AdaptiveScanMode.ADAPTIVE:
                 receipt = session.submit_feedback(feedback)
+                attempts = 0
+                while receipt is FeedbackResult.REJECTED and attempts < rejected_race_retries:
+                    sleeper(retry_delay_s)
+                    receipt = session.submit_feedback(feedback)
+                    attempts += 1
         observations.append(
             ScannerObservation(
                 visit=visit.record.visit,
