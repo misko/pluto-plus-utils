@@ -20,6 +20,10 @@ from .adaptive_scan_campaign import AdaptiveScanCampaignReceipt
 from .adaptive_scan_detector import Ci16EnergyObservation
 
 SCHEMA = "pluto-plus-utils.feature-103-campaign-evidence.v1"
+AUTHORIZED_FEATURE_103_SERIALS = (
+    "1040007c4a94000211000b009186843ef2",
+    "104000b29905000e17000800065934759d",
+)
 FEATURE_103_RC4_DFU_SHA256 = (
     "f03f4b25da2e97fe67946aa4250df7ba6e7d04f844a8c8c3d232e2cd62d204be"
 )
@@ -54,6 +58,9 @@ def attest_feature103_ram_boot_receipt(
     path: Path, *, expected_serial: str
 ) -> Feature103RamBootIdentity:
     """Require a private successful RC4 RX0 volatile-return receipt for this serial."""
+
+    if expected_serial not in AUTHORIZED_FEATURE_103_SERIALS:
+        raise AdaptiveScanEvidenceError("serial is not authorized for feature 103 qualification")
 
     selected = path.expanduser().absolute()
     try:
@@ -95,6 +102,24 @@ def attest_feature103_ram_boot_receipt(
         dfu_sha256=FEATURE_103_RC4_DFU_SHA256,
         fit_sha256=FEATURE_103_RC4_FIT_SHA256,
     )
+
+
+def attest_feature103_fleet_ram_boot_receipts(
+    paths: Sequence[Path],
+) -> tuple[Feature103RamBootIdentity, ...]:
+    """Require one distinct successful RC4 RAM return for each authorized radio."""
+
+    if len(paths) != len(AUTHORIZED_FEATURE_103_SERIALS):
+        raise AdaptiveScanEvidenceError("fleet qualification requires exactly two boot receipts")
+    identities = tuple(
+        attest_feature103_ram_boot_receipt(path, expected_serial=serial)
+        for path, serial in zip(paths, AUTHORIZED_FEATURE_103_SERIALS, strict=True)
+    )
+    if len({item.receipt_id for item in identities}) != len(identities) or len(
+        {item.usb_sysfs_path for item in identities}
+    ) != len(identities):
+        raise AdaptiveScanEvidenceError("fleet boot receipts are not distinct")
+    return identities
 
 
 def _json_value(value: Any) -> Any:
