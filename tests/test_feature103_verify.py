@@ -9,8 +9,8 @@ import pytest
 
 from pluto_plus.adaptive_scan_evidence import (
     AUTHORIZED_FEATURE_103_SERIALS,
-    FEATURE_103_RC12_DFU_SHA256,
-    FEATURE_103_RC12_FIT_SHA256,
+    FEATURE_103_RC14_DFU_SHA256,
+    FEATURE_103_RC14_FIT_SHA256,
     SCHEMA,
     AdaptiveScanEvidenceError,
 )
@@ -32,10 +32,10 @@ def _boot_receipt(tmp_path: Path, serial: str, index: int) -> Path:
         "returned_serial": serial,
         "plan": {
             "serial": serial,
-            "profile_id": "feature-103-rc12-full-ram",
-            "image_sha256": FEATURE_103_RC12_DFU_SHA256,
-            "fit_sha256": FEATURE_103_RC12_FIT_SHA256,
-            "fit_size": 13_187_283,
+            "profile_id": "feature-103-rc14-full-ram",
+            "image_sha256": FEATURE_103_RC14_DFU_SHA256,
+            "fit_sha256": FEATURE_103_RC14_FIT_SHA256,
+            "fit_size": 13_200_115,
             "usb_sysfs_path": f"/sys/bus/usb/devices/3-{index}",
         },
     }
@@ -133,8 +133,8 @@ def _campaign(serial: str, rate: int) -> dict[str, Any]:
         "schema": SCHEMA,
         "schema_version": 1,
         "created_at": "2026-09-16T00:00:00+00:00",
-        "candidate": {"dfu_sha256": FEATURE_103_RC12_DFU_SHA256,
-                      "fit_sha256": FEATURE_103_RC12_FIT_SHA256},
+        "candidate": {"dfu_sha256": FEATURE_103_RC14_DFU_SHA256,
+                      "fit_sha256": FEATURE_103_RC14_FIT_SHA256},
         "campaign": {
             "uri": "ip:192.0.2.1",
             "serial": serial,
@@ -239,7 +239,7 @@ def test_complete_two_radio_matrix_passes_and_reconstructs_weighting(tmp_path: P
         (lambda root: root["campaign"]["run"]["observations"][2].update(target=0),
          "controlled detector"),
         (lambda root: root["candidate"].update(dfu_sha256="0" * 64),
-         "exact RC12"),
+         "exact RC14"),
     ),
 )
 def test_matrix_rejects_semantic_tampering(tmp_path: Path, mutation, message: str) -> None:
