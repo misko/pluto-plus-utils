@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 
-from .adaptive_scan import ScanOutcome, ScanSetup
+from .adaptive_scan import ScanOutcome, ScanSetup, ScanTarget
 from .adaptive_scan_client import AdaptiveScanClient, AdaptiveScanVisit
 from .adaptive_scan_radio import (
     AdaptiveScanRadioPreparation,
@@ -28,6 +28,58 @@ class AdaptiveScanCampaignReceipt:
     preparation: AdaptiveScanRadioPreparation
     run: ScannerRunReport
     restoration: AdaptiveScanRadioRestoration
+
+
+def build_adaptive_scan_setup(
+    *,
+    session: int,
+    generation: int,
+    seed: int,
+    source_rate_hz: int,
+    analog_bandwidth_hz: int,
+    duration_ms: int,
+    dwell_ms: int,
+    frequencies_hz: tuple[int, ...],
+    baseline_weights: tuple[int, ...],
+    analysis_digest: bytes,
+    transition_budget_ms: int = 10,
+    maximum_revisit_ms: int = 3_000,
+) -> ScanSetup:
+    """Build the canonical bounded campaign setup before profile compilation."""
+
+    if not 1 <= len(frequencies_hz) <= 8 or len(baseline_weights) != len(frequencies_hz):
+        raise ValueError("campaign requires one to eight frequency/weight pairs")
+    setup = ScanSetup(
+        session=session,
+        generation=generation,
+        seed=seed,
+        source_rate_hz=source_rate_hz,
+        analog_bandwidth_hz=analog_bandwidth_hz,
+        duration_ms=duration_ms,
+        dwell_ms=dwell_ms,
+        transition_budget_ms=transition_budget_ms,
+        maximum_revisit_ms=maximum_revisit_ms,
+        feedback_age_ms=1_000,
+        application_delay_ms=1_000,
+        decay_ms=5_000,
+        maximum_boost=3,
+        maximum_queue_bytes=200_000_000,
+        maximum_queue_age_ms=5_000,
+        maximum_queue_visits=50,
+        analysis_digest=analysis_digest,
+        targets=tuple(
+            ScanTarget(
+                channel=index,
+                profile=index,
+                frequency_hz=frequency,
+                baseline_weight=baseline_weights[index],
+                profile_crc32=0,
+            )
+            for index, frequency in enumerate(frequencies_hz)
+        ),
+    )
+    setup.validate()
+    return setup
 
 
 def run_adaptive_scan_campaign(

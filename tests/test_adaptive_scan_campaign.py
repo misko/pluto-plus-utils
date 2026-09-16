@@ -16,6 +16,7 @@ from pluto_plus.adaptive_scan import (
     VisitResult,
 )
 from pluto_plus.adaptive_scan_client import AdaptiveScanVisit
+from pluto_plus.adaptive_scan_detector import TargetMaskDetectorConfig
 from pluto_plus.adaptive_scan_radio import (
     AdaptiveScanRadioPreparation,
     AdaptiveScanRadioRestoration,
@@ -171,3 +172,39 @@ def test_campaign_restores_after_detector_failure(monkeypatch) -> None:
             client_factory=Client,
         )
     assert events == ["prepare", "restore"]
+
+
+@pytest.mark.parametrize("rate", [10_000_000, 15_000_000, 20_000_000, 30_000_000])
+def test_campaign_setup_builder_is_fixed_rate_and_profile_bounded(rate) -> None:
+    setup = campaign.build_adaptive_scan_setup(
+        session=1,
+        generation=2,
+        seed=3,
+        source_rate_hz=rate,
+        analog_bandwidth_hz=8_000_000,
+        duration_ms=300_000,
+        dwell_ms=240,
+        frequencies_hz=(959_687_500, 1_190_312_500),
+        baseline_weights=(1, 1),
+        analysis_digest=TargetMaskDetectorConfig((1,)).analysis_digest,
+    )
+    assert setup.source_rate_hz == rate
+    assert setup.analog_bandwidth_hz == 8_000_000
+    assert [target.profile for target in setup.targets] == [0, 1]
+    assert all(target.profile_crc32 == 0 for target in setup.targets)
+
+
+def test_campaign_setup_builder_rejects_sixty_mss() -> None:
+    with pytest.raises(ValueError, match="10/15/20/30"):
+        campaign.build_adaptive_scan_setup(
+            session=1,
+            generation=2,
+            seed=3,
+            source_rate_hz=60_000_000,
+            analog_bandwidth_hz=8_000_000,
+            duration_ms=300_000,
+            dwell_ms=240,
+            frequencies_hz=(959_687_500, 1_190_312_500),
+            baseline_weights=(1, 1),
+            analysis_digest=TargetMaskDetectorConfig((1,)).analysis_digest,
+        )
