@@ -106,8 +106,8 @@ if ((direct_peer_limit)); then
         printf 'ERROR: --direct-peer-limit requires --metadata-abi 3 and excludes other runtime selectors\n' >&2
         exit 2
     }
-    source_ref="iq-direct-async-v5-source/libiio-v4"
-    source_commit="1d75119e897a2e571ca460a72b4b31e17113c49e"
+    source_ref="iq-direct-async-v5-source/libiio-v5"
+    source_commit="a8c4809c2cfe77ac5bd6fe95f8ead0559fbbe6ff"
 fi
 if [[ -n "$local_source_repository" ]]; then
     [[ "$local_source_repository" == /* && -d "$local_source_repository" ]] || {

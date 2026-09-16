@@ -70,8 +70,8 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     assert "iio-gain-timeline-v8-rc1-source/libiio-v4" in text
     assert "98a5e6139459a01a5a42ca7cd3e98d807156b6b0" in text
     assert SCANNER_GLRT_RUNTIME_SOURCE_COMMIT in text
-    assert "iq-direct-async-v5-source/libiio-v4" in text
-    assert "1d75119e897a2e571ca460a72b4b31e17113c49e" in text
+    assert "iq-direct-async-v5-source/libiio-v5" in text
+    assert "a8c4809c2cfe77ac5bd6fe95f8ead0559fbbe6ff" in text
     assert 'remote add origin "$source_repository"' in text
     assert '[[ "$actual_commit" == "$source_commit" ]]' in text
 
