@@ -1251,6 +1251,22 @@ FEATURE_103_RC12_FULL_RAM_POLICY = FEATURE_103_RC12_RX0_RAM_POLICY.model_copy(
     }
 )
 
+# RC13 changes only the all-slot 1R1T device trees and the version receipt:
+# physical RX1 remains the scanner source while logical TX0 is mapped to the
+# fixture's wired physical TX2. RC12 remains immutable qualification evidence.
+FEATURE_103_RC13_FULL_RAM_POLICY = FEATURE_103_RC12_FULL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc13-full-ram",
+        "release_tag": "feature-103-rc13-tx2-loopback-local-ram",
+        "device_firmware": "v0.50-plutoplus-feature103-rc13",
+        "asset_name": "feature103-rc13-full.dfu",
+        "asset_sha256": "1554cc43e2af0efe494eae570140adb57a2162b3cc7aa531e6f00dd9ca9b23f2",
+        "source_commit": "61fdcc844ef8c78b7c3d2b044295565eb8d01ce4",
+        "fit_body_sha256": "a836a026f9e49572805c402ce24886b88beb23dbf12bbad5e7a1cb921f253c25",
+        "fit_body_size": 13_187_271,
+    }
+)
+
 # Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
 # ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a
 # local, recoverable-radio persistent canary only: ``hardware_qualified=False``
