@@ -43,7 +43,7 @@ def test_counter_release_preserves_exact_artifact_and_mode_gates(single, persist
 
 def test_counter_release_is_known_without_version_prefix_inference():
     policy = doctor.COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY
-    assert doctor.PERSISTENT_UPGRADE_POLICY is policy
+    assert policy in doctor.SETUP_REPAIR_POLICIES
     assert doctor.require_setup_repair_policy(policy) is policy
     assert doctor.setup_repair_policy_for_firmware(policy.device_firmware) is policy
     assert doctor.setup_inspection_policy_for_firmware(policy.device_firmware) is policy

@@ -3071,6 +3071,7 @@ def test_rx_only_persistent_canary_is_local_only_and_has_exact_1r1t_transition()
     assert profile.allowed_before_firmwares == (
         "v0.48-plutoplus-spf-iq-direct-async-v3",
         "v0.49-plutoplus-spf-iq-direct-async-v4",
+        "v0.51-plutoplus-spf-iq-direct-async-v5",
     )
     promotion = bootstrap.STANDALONE_FLASH_PROFILES[
         "starlink-pss-15m-rx-only-dnm-v7-persistent-promotion"

@@ -259,7 +259,7 @@ class BundledIiodTransport:
             raise UserspaceIiodLifecycleError("transport lacks bounded daemon diagnostics")
         result = read(paths, process)
         if not isinstance(result, bytes):
-            raise UserspaceIiodLifecycleError("transport returned malformed daemon diagnostics")
+            raise UserspaceIiodLifecycleError("transport returned invalid daemon diagnostics")
         return result
 
     def terminate(

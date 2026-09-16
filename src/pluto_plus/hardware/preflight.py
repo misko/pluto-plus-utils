@@ -32,6 +32,7 @@ METADATA_RUNTIME_SOURCE_COMMITS = {
 # neither the metadata ABI nor the persisted receipt schema changes.
 COUNTER_RX_RUNTIME_SOURCE_COMMIT = "47a75cbc5e7d24a063b8b54eb531fdba6602b85c"
 SCANNER_GLRT_RUNTIME_SOURCE_COMMIT = "948d6a246bb937fe3a62ed15233d9f592ab71d6a"
+DIRECT_PEER_LIMIT_RUNTIME_SOURCE_COMMIT = "a8c4809c2cfe77ac5bd6fe95f8ead0559fbbe6ff"
 SCANNER_GLRT_BUFFER_METHODS = {
     "cancel_metadata_session": ("self",),
     "metadata_status_raw": ("self", "capacity"),
@@ -259,7 +260,11 @@ def _validate_metadata_runtime_receipt(
     allowed_commits = {METADATA_RUNTIME_SOURCE_COMMITS[expected_abi]}
     if expected_abi == 3:
         allowed_commits.update(
-            {SCANNER_GLRT_RUNTIME_SOURCE_COMMIT, COUNTER_RX_RUNTIME_SOURCE_COMMIT}
+            {
+                SCANNER_GLRT_RUNTIME_SOURCE_COMMIT,
+                COUNTER_RX_RUNTIME_SOURCE_COMMIT,
+                DIRECT_PEER_LIMIT_RUNTIME_SOURCE_COMMIT,
+            }
         )
     if source_commit not in allowed_commits:
         raise RuntimeError("metadata runtime receipt has the wrong source commit")
