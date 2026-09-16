@@ -311,10 +311,20 @@ class HostAdaptiveHopSession:
 
     def _finish(self, *, before_release: Callable[[], None] | None = None) -> None:
         deadline = time.monotonic() + 10
-        if self._rolling_direct_async:
-            self._backend.finish_direct_async_segment()
+        terminal_boundary_finished = False
         while True:
-            status = HostAdaptiveHopStatusV3.unpack(self._backend.read_status())
+            try:
+                status = HostAdaptiveHopStatusV3.unpack(self._backend.read_status())
+            except OSError as error:
+                if (
+                    error.errno != errno.EBUSY
+                    or not self._rolling_direct_async
+                    or terminal_boundary_finished
+                ):
+                    raise
+                self._backend.finish_direct_async_segment()
+                terminal_boundary_finished = True
+                continue
             if status.geometry.state not in {
                 PersistentHopSessionState.ARMED,
                 PersistentHopSessionState.RUNNING,

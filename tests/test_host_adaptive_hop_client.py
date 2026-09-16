@@ -30,6 +30,7 @@ class ReplayBackend:
         self.feedback = []
         self.rearmed = 0
         self.finished_direct_segments = 0
+        self.status_busy_once = False
         self.error = None
 
     def blocks(self):
@@ -38,6 +39,9 @@ class ReplayBackend:
             yield single_wire(wire, self.rx)
 
     def read_status(self):
+        if self.status_busy_once:
+            self.status_busy_once = False
+            raise OSError(errno.EBUSY, "finite terminal segment has an unused slot")
         return HostAdaptiveHopStatusV3(
             self.capture.status(
                 sequence=self.sequence,
@@ -145,8 +149,17 @@ def test_rolling_direct_segment_is_rearmed_only_after_accepted_feedback():
     assert s.submit_feedback(result(s, sampled))
     assert backend.rearmed == 1
     s.close()
-    assert backend.finished_direct_segments == 1
+    assert backend.finished_direct_segments == 0
     iterator.close()
+
+
+def test_rolling_direct_terminal_status_finishes_unused_segment_once():
+    s, backend = session(rolling_direct_async=True)
+    backend.status_busy_once = True
+    for sampled in s.visits():
+        s.submit_feedback(result(s, sampled))
+    assert backend.finished_direct_segments == 1
+    assert backend.closed == 1
 
 
 def test_terminal_drain_failure_still_releases_backend():
