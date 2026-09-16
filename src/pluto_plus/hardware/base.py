@@ -387,6 +387,7 @@ class MetadataRadioDevice(RadioDevice, Protocol):
         sample_count: int,
         *,
         kernel_buffers: int,
+        counter_only: bool = False,
         batch_frames: int = 1,
         ddr_burst_bytes: int = 0,
         direct_async_frames: int = 0,

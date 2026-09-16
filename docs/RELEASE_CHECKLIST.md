@@ -1,5 +1,21 @@
 # Release checklist
 
+**Physical flash release gate**
+
+Before releasing changes to persistent update paths, run the shared policy,
+synthetic aliasing, final remote shell gate, helper/API, SSH and DFU-mode tests.
+Confirm that the wheel includes `flash_safety.py`, `flash_safety_io.py` and
+`dfu_safety.py`; unsafe routes must refuse before mutation. Keep the shipped
+qualification registry empty until reviewed hardware evidence is available.
+See [FLASH_SAFETY.md](FLASH_SAFETY.md) for the compatibility restriction and
+recovery evidence contract.
+
+Recovery releases must also include `recovery/` and `flash_ranges.py`, pass the
+synthetic full-image/power-loss and fragmented-UART suites, and verify diagnostic
+CLI behavior from the installed wheel. Each recovery profile and live recipe must
+remain limited to the exact scope established by its retained
+[SD hardware acceptance](SD_RECOVERY.md) evidence.
+
 This checklist records the standalone distribution audit performed on
 2026-08-15. It distinguishes offline package evidence from decisions and
 hardware validation that cannot be inferred from a successful Python build.

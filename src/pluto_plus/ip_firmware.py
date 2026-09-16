@@ -34,6 +34,18 @@ from pluto_plus.firmware import (
     RadioFirmwareIdentity,
     validate_frm,
 )
+from pluto_plus.flash_safety import (
+    FlashDecision,
+    FlashSafetyError,
+    require_same_flash,
+    validate_flash,
+)
+from pluto_plus.flash_safety_io import (
+    FLASH_COMMAND,
+    FlashSession,
+    FlashSshTransport,
+    observe_flash,
+)
 from pluto_plus.network_config import (
     NETWORK_KEYS,
     NetworkConfigExecutionResult,
@@ -100,9 +112,7 @@ def require_unambiguous_usb_ssh_route(
     reader = ip_json_reader or _read_ip_json
     try:
         addresses_document = json.loads(reader(("ip", "-j", "-4", "address", "show")))
-        routes_document = json.loads(
-            reader(("ip", "-j", "-4", "route", "show", "table", "all"))
-        )
+        routes_document = json.loads(reader(("ip", "-j", "-4", "route", "show", "table", "all")))
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         raise UsbSshRouteAmbiguous(
             f"cannot verify USB-bound SSH routing for {interface}: {error}"
@@ -291,6 +301,9 @@ class IpFirmwareEvidence:
     after: IpFirmwareAttestation | None
     updater_output: str | None
     error: str | None
+    flash_safety: FlashDecision | None = None
+    recovery_evidence: str | None = None
+    protected_integrity: str | None = None
 
 
 class IpFirmwareTransport(Protocol):
@@ -413,10 +426,7 @@ printf 'PPU\tstage_size\t%s\n' "$(wc -c <{_REMOTE_STAGE} | tr -d ' ')"
 _UPDATE_COMMAND = f"/sbin/update_frm.sh {_REMOTE_STAGE}"
 _CLEANUP_COMMAND = f"rm -f {_REMOTE_STAGE} {_REMOTE_STAGE}.incoming"
 _SYNC_COMMAND = "/bin/sync"
-_RESET_COMMAND = (
-    "printf 'PPU\\treset_dispatched\\t1\\n'; "
-    "/usr/sbin/device_reboot reset"
-)
+_RESET_COMMAND = "printf 'PPU\\treset_dispatched\\t1\\n'; /usr/sbin/device_reboot reset"
 _QSPI_COMMAND = "/bin/sh -s --"
 _QSPI_SCRIPT = rb"""set -eu
 fit_size="$1"
@@ -429,7 +439,25 @@ printf 'PPU\tfit_size\t%s\n' "$actual"
 printf 'PPU\tfit_sha256\t%s\n' "$digest"
 """
 
-_NETWORK_INSPECT_SCRIPT = rb"""set -eu
+# Pluto BusyBox builds may provide uuencode -m without the base64 applet.
+# Capture encoder status before filtering its output: a pipeline can otherwise
+# hide a missing/failed encoder and allow a persistent write without a backup.
+_NETWORK_BASE64_HELPER = rb"""
+encode_base64() {
+  if command -v base64 >/dev/null 2>&1; then
+    encoded=$(base64) || return 1
+  elif command -v uuencode >/dev/null 2>&1; then
+    encoded=$(uuencode -m -) || return 1
+    encoded=$(printf '%s\n' "$encoded" | sed '1d;$d') || return 1
+  else
+    printf 'network configuration requires base64 or uuencode -m\n' >&2
+    return 1
+  fi
+  printf '%s' "$encoded" | tr -d '\n'
+}
+"""
+
+_NETWORK_INSPECT_SCRIPT = b"set -eu\n" + _NETWORK_BASE64_HELPER + rb"""
 serial_expected="$1"
 emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
 read_env() { fw_printenv -n "$1" 2>/dev/null || true; }
@@ -456,10 +484,9 @@ env_sha=$({
 } | sha256sum | awk '{print $1}')
 config_sha=$(sha256sum /opt/config.txt | awk '{print $1}')
 config_redacted=$(
-  sed -e 's/^\([[:space:]]*pwd_wlan[[:space:]]*=[[:space:]]*\).*$/\1<redacted>/' \
+  sed -e 's/^\([[:blank:]]*pwd_wlan[[:blank:]]*=[[:blank:]]*\).*$/\1<redacted>/' \
     /opt/config.txt |
-  base64 |
-  tr -d '\n'
+  encode_base64
 )
 emit serial "$serial"
 emit hostname "$hostname"
@@ -474,7 +501,7 @@ emit config_txt_sha256 "$config_sha"
 emit config_txt_redacted_b64 "$config_redacted"
 """
 
-_NETWORK_APPLY_SCRIPT = rb"""set -eu
+_NETWORK_APPLY_SCRIPT = b"set -eu\n" + _NETWORK_BASE64_HELPER + rb"""
 serial_expected="$1"; expected_digest="$2"; plan_id="$3"; shift 3
 emit() { printf 'PPU\t%s\t%s\n' "$1" "$2"; }
 read_env() { fw_printenv -n "$1" 2>/dev/null || true; }
@@ -502,7 +529,8 @@ fw_printenv >"$backup"
 chmod 600 "$backup"
 sync
 backup_sha=$(sha256sum "$backup" | awk '{print $1}')
-backup_b64=$(base64 "$backup" | tr -d '\n')
+backup_b64=$(encode_base64 <"$backup")
+test -n "$backup_b64"
 batch="$backup_dir/$plan_id.batch"
 : >"$batch"; chmod 600 "$batch"
 count=0
@@ -771,10 +799,12 @@ class PinnedSshFirmwareTransport:
         )
 
     def invoke_update_frm(self) -> str:
-        result = self._raw_run(_UPDATE_COMMAND, timeout_s=180)
-        if result.returncode != 0:
-            self._raise_result(result)
-        return (result.stdout + result.stderr).decode(errors="replace").replace("\r", "")
+        raise IpFirmwareError(
+            "unguarded updater dispatch is disabled; use a physical flash session"
+        )
+
+    def flash_safety_transport(self) -> FlashSshTransport:
+        return _IpFlashSafetyTransport(self)
 
     def inspect_mtd3(self, fit_size: int) -> IpFirmwareQspiEvidence:
         if fit_size <= 0 or fit_size > 128 * 1024 * 1024:
@@ -817,9 +847,7 @@ class PinnedSshFirmwareTransport:
     def apply_network_config(self, plan: NetworkConfigPlan) -> NetworkConfigExecutionResult:
         return self._network_config_backend.apply_network_config(plan)
 
-    def _run(
-        self, command: str, *, stdin: bytes | None = None, timeout_s: float
-    ) -> str:
+    def _run(self, command: str, *, stdin: bytes | None = None, timeout_s: float) -> str:
         result = self._raw_run(command, stdin=stdin, timeout_s=timeout_s)
         if result.returncode != 0:
             self._raise_result(result)
@@ -840,9 +868,7 @@ class PinnedSshFirmwareTransport:
         ):
             raise IpFirmwareError("pinned SSH credential files changed after enrollment")
         try:
-            return self._runner.run(
-                (*self._base_argv, command), stdin=stdin, timeout_s=timeout_s
-            )
+            return self._runner.run((*self._base_argv, command), stdin=stdin, timeout_s=timeout_s)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise IpFirmwareError(f"SSH transport failed: {error}") from error
 
@@ -856,6 +882,22 @@ class PinnedSshFirmwareTransport:
             raise IpFirmwareHostKeyChanged("pinned radio SSH host key changed")
         detail = output[-1000:].decode(errors="replace").strip()
         raise IpFirmwareError(f"radio SSH command failed ({result.returncode}): {detail}")
+
+
+class _IpFlashSafetyTransport:
+    def __init__(self, transport: PinnedSshFirmwareTransport) -> None:
+        self.transport = transport
+
+    def run(
+        self,
+        command: str,
+        *,
+        stdin: bytes | None = None,
+        timeout_s: float = 15,
+    ) -> str:
+        if command != FLASH_COMMAND:
+            raise IpFirmwareError("unexpected flash safety command")
+        return self.transport._run(command, stdin=stdin, timeout_s=timeout_s)
 
 
 class IpFirmwareExecutor:
@@ -878,9 +920,7 @@ class IpFirmwareExecutor:
     ) -> None:
         if transport.endpoint != enrollment.endpoint:
             raise ValueError("SSH transport endpoint does not match enrollment")
-        if not hmac.compare_digest(
-            transport.host_key_fingerprint, enrollment.host_key_fingerprint
-        ):
+        if not hmac.compare_digest(transport.host_key_fingerprint, enrollment.host_key_fingerprint):
             raise ValueError("SSH transport host key does not match enrollment")
         if not evidence_directory.is_absolute() or evidence_directory == Path("/"):
             raise ValueError("firmware evidence directory must be an explicit absolute path")
@@ -950,7 +990,12 @@ class IpFirmwareExecutor:
         )
 
     def flash_persistent_qspi(
-        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str
+        self,
+        radio: RadioFirmwareIdentity,
+        image: Path,
+        *,
+        target_name: str,
+        expected_safety: FlashDecision | None = None,
     ) -> None:
         try:
             evidence = self._start_evidence(image)
@@ -962,6 +1007,7 @@ class IpFirmwareExecutor:
                 reconciliation_required=False,
             ) from error
         phase = "local_validation"
+        flash_session: FlashSession | None = None
         try:
             self.authorize_execution()
             if target_name != "pluto.frm" or Path(target_name).name != target_name:
@@ -1005,6 +1051,25 @@ class IpFirmwareExecutor:
                 )
             )
 
+            phase = "physical_flash_guard"
+            decision = self.prepare_flash_safety(radio, fit)
+            require_same_flash(expected_safety, decision)
+            flash_session = FlashSession(
+                self._flash_transport(),
+                decision,
+                fit,
+                self.evidence_directory / f"{evidence.attempt_id}-recovery",
+            )
+            flash_session.prepare()
+            evidence = self._record(
+                replace(
+                    evidence,
+                    flash_safety=decision,
+                    recovery_evidence=str(flash_session.directory),
+                    completed_phases=(*evidence.completed_phases, "physical_flash_guard_passed"),
+                )
+            )
+
             phase = "tx_safe_before_update"
             self.transport.ensure_tx_safe(self.enrollment.serial)
             evidence = self._record(
@@ -1026,9 +1091,7 @@ class IpFirmwareExecutor:
                     ),
                 )
             )
-            if staged.size != len(data) or not hmac.compare_digest(
-                staged.sha256, frm_sha256
-            ):
+            if staged.size != len(data) or not hmac.compare_digest(staged.sha256, frm_sha256):
                 raise IpFirmwareError("remote staged FRM hash or size mismatch")
             evidence = self._record(
                 replace(
@@ -1039,10 +1102,8 @@ class IpFirmwareExecutor:
 
             phase = "update_frm"
             evidence = self._record(replace(evidence, mutation_dispatched=True))
-            output = self.transport.invoke_update_frm()
-            evidence = self._record(
-                replace(evidence, updater_output=_bounded_text(output))
-            )
+            output = flash_session.invoke(_REMOTE_STAGE, frm_sha256)
+            evidence = self._record(replace(evidence, updater_output=_bounded_text(output)))
             if _FAILED_RE.search(output):
                 raise IpFirmwareError("/sbin/update_frm.sh reported Failed")
             if not _DONE_RE.search(output.replace("\r", "")):
@@ -1056,15 +1117,23 @@ class IpFirmwareExecutor:
 
             phase = "qspi_verification"
             qspi = self.transport.inspect_mtd3(len(fit))
-            if qspi.fit_size != len(fit) or not hmac.compare_digest(
-                qspi.fit_sha256, fit_sha256
-            ):
+            if qspi.fit_size != len(fit) or not hmac.compare_digest(qspi.fit_sha256, fit_sha256):
                 raise IpFirmwareError("MTD3 FIT body hash or size mismatch after updater")
             evidence = self._record(
                 replace(
                     evidence,
                     qspi=qspi,
                     completed_phases=(*evidence.completed_phases, "qspi_fit_verified"),
+                )
+            )
+
+            phase = "protected_integrity"
+            flash_session.verify()
+            evidence = self._record(
+                replace(
+                    evidence,
+                    protected_integrity="verified",
+                    completed_phases=(*evidence.completed_phases, "protected_regions_verified"),
                 )
             )
 
@@ -1146,13 +1215,17 @@ class IpFirmwareExecutor:
                 )
             )
         except BaseException as error:
+            if flash_session is not None:
+                evidence = replace(evidence, mutation_dispatched=flash_session.dispatched)
+                if phase == "protected_integrity":
+                    evidence = replace(evidence, protected_integrity="failed")
+                try:
+                    flash_session.close()
+                except Exception as close_error:
+                    error = IpFirmwareError(f"{error}; safety lock retained: {close_error}")
             if (
-                (
-                    phase == "remote_stage"
-                    or "remote_stage_uploaded" in evidence.completed_phases
-                )
-                and "remote_stage_cleaned" not in evidence.completed_phases
-            ):
+                phase == "remote_stage" or "remote_stage_uploaded" in evidence.completed_phases
+            ) and "remote_stage_cleaned" not in evidence.completed_phases:
                 try:
                     self.transport.cleanup_stage()
                     evidence = self._record(
@@ -1170,6 +1243,19 @@ class IpFirmwareExecutor:
                     )
             self._finish_failure(evidence, phase, error)
 
+    def _flash_transport(self) -> FlashSshTransport:
+        factory = getattr(self.transport, "flash_safety_transport", None)
+        if factory is None:
+            raise FlashSafetyError("flash_transport_unqualified", "no physical flash observer")
+        result: FlashSshTransport = factory()
+        return result
+
+    def prepare_flash_safety(self, radio: RadioFirmwareIdentity, fit: bytes) -> FlashDecision:
+        observed = observe_flash(self._flash_transport())
+        if observed.serial != radio.serial:
+            raise FlashSafetyError("flash_identity_unknown", "flash serial differs from enrollment")
+        return validate_flash(observed, fit)
+
     def reconcile_persistent_qspi(
         self,
         radio: RadioFirmwareIdentity,
@@ -1178,6 +1264,11 @@ class IpFirmwareExecutor:
         expected_fit_sha256: str,
         expected_fit_size: int,
     ) -> tuple[str, ...]:
+        if self._last_evidence is not None and self._last_evidence.protected_integrity == "failed":
+            raise FirmwareExecutorFailure(
+                "protected integrity failure requires recovery, not logical FIT reconciliation",
+                failure_phase="protected_integrity",
+            )
         if not _DIGEST_RE.fullmatch(expected_fit_sha256) or expected_fit_size <= 0:
             raise FirmwareExecutorFailure(
                 "invalid FIT evidence for reconciliation",
@@ -1188,9 +1279,7 @@ class IpFirmwareExecutor:
         try:
             attestation = self.attest(radio.serial)
             self._validate_stable_attestation(attestation)
-            if expected_firmware is not None and (
-                attestation.active_firmware != expected_firmware
-            ):
+            if expected_firmware is not None and (attestation.active_firmware != expected_firmware):
                 raise IpFirmwareError("reconciled active firmware does not match expectation")
             self.transport.ensure_tx_safe(self.enrollment.serial)
             qspi = self.transport.inspect_mtd3(expected_fit_size)
@@ -1319,10 +1408,10 @@ class IpFirmwareExecutor:
         self, evidence: IpFirmwareEvidence, phase: str, error: BaseException
     ) -> None:
         after_dispatch = evidence.mutation_dispatched
-        key_changed = self._key_reconciliation_required or isinstance(
-            error, IpFirmwareHostKeyChanged
-        ) or (
-            "host key changed" in str(error).lower()
+        key_changed = (
+            self._key_reconciliation_required
+            or isinstance(error, IpFirmwareHostKeyChanged)
+            or ("host key changed" in str(error).lower())
         )
         if key_changed:
             self._key_reconciliation_required = True
@@ -1332,9 +1421,7 @@ class IpFirmwareExecutor:
             outcome="unknown" if after_dispatch else "failed",
             failure_phase=phase,
             reconciliation_required=after_dispatch,
-            key_reconciliation_required=(
-                evidence.key_reconciliation_required or key_changed
-            ),
+            key_reconciliation_required=(evidence.key_reconciliation_required or key_changed),
             error=f"{type(error).__name__}: {error}",
         )
         try:
@@ -1416,6 +1503,7 @@ def _validate_fixed_command(command: str) -> None:
     if "\x00" in command:
         raise IpFirmwareError("invalid fixed SSH command")
     if command in {
+        FLASH_COMMAND,
         _ATTEST_COMMAND,
         _STAGE_COMMAND,
         _UPDATE_COMMAND,
@@ -1467,8 +1555,7 @@ def _pinned_host_key(path: Path, endpoint: str, port: int) -> tuple[str, str]:
             continue
         fields = stripped.split()
         if len(fields) < 3 or not any(
-            _known_host_pattern_matches(pattern, expected_host)
-            for pattern in fields[0].split(",")
+            _known_host_pattern_matches(pattern, expected_host) for pattern in fields[0].split(",")
         ):
             continue
         algorithm, encoded = fields[1], fields[2]
@@ -1485,9 +1572,7 @@ def _pinned_host_key(path: Path, endpoint: str, port: int) -> tuple[str, str]:
         digest = base64.b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
         matches.append((f"SHA256:{digest}", algorithm))
     if len(matches) != 1:
-        raise ValueError(
-            "SSH known-hosts must contain exactly one pinned key for the endpoint"
-        )
+        raise ValueError("SSH known-hosts must contain exactly one pinned key for the endpoint")
     return matches[0]
 
 

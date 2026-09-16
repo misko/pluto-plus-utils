@@ -3,7 +3,7 @@ from __future__ import annotations
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
     CANONICAL_UBOOT,
-    IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY,
+    COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY,
     PERSISTENT_UPGRADE_POLICY,
     diagnose_radio,
 )
@@ -43,12 +43,10 @@ def _snapshot(
 
 
 def test_persistent_upgrade_policy_selects_hardware_qualified_direct_async_release() -> None:
-    assert PERSISTENT_UPGRADE_POLICY is IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY
+    assert PERSISTENT_UPGRADE_POLICY is COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY
     assert PERSISTENT_UPGRADE_POLICY.hardware_qualified is True
-    assert PERSISTENT_UPGRADE_POLICY.profile_id == (
-        "iq-direct-async-v4-release-persistent-promotion"
-    )
-    assert PERSISTENT_UPGRADE_POLICY.device_firmware == ("v0.49-plutoplus-spf-iq-direct-async-v4")
+    assert PERSISTENT_UPGRADE_POLICY.profile_id == ("counter-rx-v1-release-persistent-promotion")
+    assert PERSISTENT_UPGRADE_POLICY.device_firmware == ("v0.50-plutoplus-spf-counter-rx-v1")
 
 
 def test_doctor_passes_only_with_complete_persistent_evidence() -> None:

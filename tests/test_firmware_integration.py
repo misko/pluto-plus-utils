@@ -4,6 +4,7 @@ import binascii
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from flash_fakes import decision
 
 from pluto_plus.admin import AdminMutationPolicy
 from pluto_plus.api import API_PREFIX, create_app
@@ -57,6 +58,9 @@ def _dfu() -> bytes:
 
 
 class FakePrivilegedExecutor:
+    def prepare_flash_safety(self, radio, fit):
+        return decision(radio.serial, fit)
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
 
@@ -67,7 +71,7 @@ class FakePrivilegedExecutor:
         self.calls.append(("volatile", radio.serial, image.name))
 
     def flash_persistent_qspi(
-        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str
+        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str, expected_safety=None
     ) -> None:
         self.calls.append(("persistent", radio.serial, target_name))
 
@@ -165,9 +169,7 @@ def test_api_firmware_plan_execute_reopens_and_receipts(tmp_path: Path) -> None:
         assert snapshot["revision"] == 1
         denied_receipts = client.get(f"{API_PREFIX}/firmware/receipts")
         assert denied_receipts.status_code == 403
-        receipts = client.get(
-            f"{API_PREFIX}/firmware/receipts", headers=_admin_headers()
-        ).json()
+        receipts = client.get(f"{API_PREFIX}/firmware/receipts", headers=_admin_headers()).json()
         assert [item["receipt_id"] for item in receipts] == [executed.json()["receipt_id"]]
 
 

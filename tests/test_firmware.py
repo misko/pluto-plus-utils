@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from flash_fakes import decision
 
 from pluto_plus.firmware import (
     DFU_PRODUCT_ID,
@@ -47,11 +48,7 @@ def _raw_dfu_crc(data: bytes) -> int:
     for byte in data:
         accumulator ^= byte
         for _ in range(8):
-            accumulator = (
-                (accumulator >> 1) ^ 0xEDB88320
-                if accumulator & 1
-                else accumulator >> 1
-            )
+            accumulator = (accumulator >> 1) ^ 0xEDB88320 if accumulator & 1 else accumulator >> 1
     return accumulator
 
 
@@ -76,6 +73,9 @@ def _dfu(
 
 
 class FakeExecutor:
+    def prepare_flash_safety(self, radio, fit):
+        return decision(radio.serial, fit)
+
     def __init__(self, *, uid: int = 0, failure: BaseException | None = None) -> None:
         self.uid = uid
         self.failure = failure
@@ -90,7 +90,7 @@ class FakeExecutor:
             raise self.failure
 
     def flash_persistent_qspi(
-        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str
+        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str, expected_safety=None
     ) -> None:
         self.calls.append(("qspi", radio, image, target_name))
         if self.failure:
@@ -262,9 +262,7 @@ def test_identity_drift_is_refused_before_token_consumption(
     tmp_path: Path, radio: RadioFirmwareIdentity
 ) -> None:
     current = {"identity": radio}
-    manager, executor, _ = _manager(
-        tmp_path, radio, probe=lambda _serial: current["identity"]
-    )
+    manager, executor, _ = _manager(tmp_path, radio, probe=lambda _serial: current["identity"])
     planned = manager.create_plan(radio, _image(tmp_path), FirmwareMode.VOLATILE_DFU)
     current["identity"] = replace(radio, observed_firmware="unexpected")
     with pytest.raises(FirmwareIdentityError, match="changed"):
@@ -376,9 +374,7 @@ def test_expected_post_update_firmware_is_re_attested(
     tmp_path: Path, radio: RadioFirmwareIdentity
 ) -> None:
     current = {"identity": radio}
-    manager, executor, _ = _manager(
-        tmp_path, radio, probe=lambda _serial: current["identity"]
-    )
+    manager, executor, _ = _manager(tmp_path, radio, probe=lambda _serial: current["identity"])
     planned = manager.create_plan(
         radio,
         _image(tmp_path),
@@ -437,143 +433,17 @@ def _updater(
     return updater, commands, filesystem, clock
 
 
-def test_mass_storage_qspi_success_is_serial_scoped(
-    tmp_path: Path, radio: RadioFirmwareIdentity
-) -> None:
-    selected = _block()
-    other = _block("SERIAL_B", "b")
-    updater, commands, filesystem, _ = _updater(
-        tmp_path, [[other, selected], [other], [other, selected]]
-    )
-    updater.install(
-        radio,
-        tmp_path / "staged" / "pluto.frm",
-        target_name="pluto.frm",
-    )
-    assert filesystem.writes == [
-        (
-            Path("/run/pluto-plus/firmware-SERIAL_A/pluto.frm"),
-            filesystem.source_data,
-        )
-    ]
-    assert commands.calls == [
-        (
-            "mount",
-            "-o",
-            "rw,nodev,nosuid,noexec",
-            "/dev/sda1",
-            "/run/pluto-plus/firmware-SERIAL_A",
-        ),
-        ("sync", "-f", "/run/pluto-plus/firmware-SERIAL_A/pluto.frm"),
-        ("umount", "/run/pluto-plus/firmware-SERIAL_A"),
-        ("eject", "/dev/sda"),
-    ]
-
-
-@pytest.mark.parametrize("states, count", [([[]], 0), ([[_block(), _block(suffix="b")]], 2)])
-def test_mass_storage_qspi_refuses_zero_or_duplicate_serial_matches(
-    tmp_path: Path,
-    radio: RadioFirmwareIdentity,
-    states: list[list[UpdaterBlockDevice]],
-    count: int,
-) -> None:
+@pytest.mark.parametrize("states", [[[]], [[_block()]], [[_block(), _block(suffix="b")]]])
+def test_mass_storage_refuses_before_mount_copy_or_eject(tmp_path, radio, states):
     updater, commands, filesystem, _ = _updater(tmp_path, states)
-    with pytest.raises(FirmwareError, match=f"found {count}"):
+    with pytest.raises(FirmwareImageError, match="flash_transport_unqualified"):
         updater.install(radio, filesystem.source, target_name="pluto.frm")
     assert commands.calls == []
-
-
-def test_mass_storage_qspi_refuses_every_other_target(
-    tmp_path: Path, radio: RadioFirmwareIdentity
-) -> None:
-    updater, commands, filesystem, _ = _updater(tmp_path, [[_block()]])
+    assert filesystem.writes == []
     with pytest.raises(FirmwareError, match="only pluto.frm"):
         updater.install(radio, filesystem.source, target_name="boot.frm")
-    assert commands.calls == []
-
-
-def test_mass_storage_qspi_revalidates_source_before_hardware(
-    tmp_path: Path, radio: RadioFirmwareIdentity
-) -> None:
-    updater, commands, filesystem, _ = _updater(tmp_path, [[_block()]])
     filesystem.source_data = b"not a frm"
     with pytest.raises(FirmwareImageError, match="too short"):
-        updater.install(radio, filesystem.source, target_name="pluto.frm")
-    assert commands.calls == []
-
-
-@pytest.mark.parametrize(
-    ("fail_on", "message"),
-    [
-        ("mount", "operation failed: mount failed"),
-        ("sync", "operation failed: sync failed"),
-        ("umount", "unmount failed: umount failed"),
-        ("eject", "eject failed"),
-    ],
-)
-def test_mass_storage_qspi_command_failures_fail_closed(
-    tmp_path: Path,
-    radio: RadioFirmwareIdentity,
-    fail_on: str,
-    message: str,
-) -> None:
-    updater, commands, filesystem, _ = _updater(
-        tmp_path, [[_block()], [], [_block()]], fail_on=fail_on
-    )
-    with pytest.raises(FirmwareError, match=message):
-        updater.install(radio, filesystem.source, target_name="pluto.frm")
-    if fail_on in {"mount", "sync", "umount"}:
-        assert any(call[0] == "umount" for call in commands.calls)
-    if fail_on != "eject":
-        assert not any(call[0] == "eject" for call in commands.calls)
-
-
-@pytest.mark.parametrize(
-    ("info", "fail_copy", "message"),
-    [
-        (False, False, "no info.html"),
-        (True, True, "copy failed"),
-    ],
-)
-def test_mass_storage_qspi_volume_or_copy_failure_always_unmounts(
-    tmp_path: Path,
-    radio: RadioFirmwareIdentity,
-    info: bool,
-    fail_copy: bool,
-    message: str,
-) -> None:
-    updater, commands, filesystem, _ = _updater(
-        tmp_path, [[_block()]], info=info, fail_copy=fail_copy
-    )
-    with pytest.raises(FirmwareError, match=message):
-        updater.install(radio, filesystem.source, target_name="pluto.frm")
-    assert commands.calls[-1][0] == "umount"
-    assert not any(call[0] == "eject" for call in commands.calls)
-
-
-def test_mass_storage_qspi_requires_disappearance(
-    tmp_path: Path, radio: RadioFirmwareIdentity
-) -> None:
-    updater, _, filesystem, _ = _updater(tmp_path, [[_block()]], timeout=2)
-    with pytest.raises(FirmwareError, match="did not disappear"):
-        updater.install(radio, filesystem.source, target_name="pluto.frm")
-
-
-def test_mass_storage_qspi_requires_reappearance(
-    tmp_path: Path, radio: RadioFirmwareIdentity
-) -> None:
-    updater, _, filesystem, _ = _updater(tmp_path, [[_block()], []], timeout=2)
-    with pytest.raises(FirmwareError, match="did not reappear"):
-        updater.install(radio, filesystem.source, target_name="pluto.frm")
-
-
-def test_mass_storage_qspi_refuses_duplicates_during_reenumeration(
-    tmp_path: Path, radio: RadioFirmwareIdentity
-) -> None:
-    updater, _, filesystem, _ = _updater(
-        tmp_path, [[_block()], [], [_block(), _block(suffix="b")]]
-    )
-    with pytest.raises(FirmwareError, match="duplicate updater identities"):
         updater.install(radio, filesystem.source, target_name="pluto.frm")
 
 

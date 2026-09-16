@@ -47,6 +47,7 @@ from pluto_plus.firmware import (
     validate_dfu,
     validate_frm,
 )
+from pluto_plus.flash_safety import FlashDecision
 
 PROTOCOL_VERSION: Final = 1
 MAX_FRAME_BYTES: Final = 16 * 1024
@@ -161,18 +162,17 @@ def _parse_radio(value: object) -> RadioFirmwareIdentity:
     _expect_exact_keys(radio, {"serial", "usb_sysfs_path", "observed_firmware"}, "radio")
     serial = _expect_string(radio["serial"], "radio.serial", maximum=256)
     sysfs = _expect_string(radio["usb_sysfs_path"], "radio.usb_sysfs_path", maximum=1024)
-    firmware = _expect_string(
-        radio["observed_firmware"], "radio.observed_firmware", maximum=256
-    )
+    firmware = _expect_string(radio["observed_firmware"], "radio.observed_firmware", maximum=256)
     try:
         identity = RadioFirmwareIdentity(serial, sysfs, firmware)
     except ValueError as caught:
         raise FirmwareHelperProtocolError(f"invalid radio identity: {caught}") from caught
     sysfs_path = PurePosixPath(sysfs)
-    if (
-        sysfs_path.parent != PurePosixPath("/sys/bus/usb/devices")
-        or sysfs_path.name in {"", ".", ".."}
-    ):
+    if sysfs_path.parent != PurePosixPath("/sys/bus/usb/devices") or sysfs_path.name in {
+        "",
+        ".",
+        "..",
+    }:
         raise FirmwareHelperProtocolError("radio sysfs path must name one direct USB device")
     return identity
 
@@ -184,8 +184,10 @@ def _parse_image(value: object, maximum_size: int) -> _ImageClaim:
     _expect_exact_keys(image, {"path", "sha256", "size"}, "image")
     path_text = _expect_string(image["path"], "image.path", maximum=2048)
     relative = PurePosixPath(path_text)
-    if relative.is_absolute() or not relative.parts or any(
-        part in {"", ".", ".."} for part in relative.parts
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
     ):
         raise FirmwareHelperProtocolError("image.path must be a confined relative path")
     digest = _expect_string(image["sha256"], "image.sha256", maximum=64)
@@ -266,7 +268,12 @@ class UnixFirmwareHelperClient:
         self._execute("load_volatile_dfu", radio, image)
 
     def flash_persistent_qspi(
-        self, radio: RadioFirmwareIdentity, image: Path, *, target_name: str
+        self,
+        radio: RadioFirmwareIdentity,
+        image: Path,
+        *,
+        target_name: str,
+        expected_safety: FlashDecision | None = None,
     ) -> None:
         if target_name != "pluto.frm":
             raise FirmwareImageError("persistent updater target must be exactly pluto.frm")
@@ -352,9 +359,7 @@ class UnixFirmwareHelperClient:
         # unauthorized peer therefore receives the all-zero sentinel rather
         # than an attacker-controlled request ID.
         response_id = response["request_id"]
-        if response_id != request_id and not (
-            response_id == "0" * 32 and code == "unauthorized"
-        ):
+        if response_id != request_id and not (response_id == "0" * 32 and code == "unauthorized"):
             raise FirmwareHelperProtocolError("helper response did not match the request")
         if code == "unauthorized":
             raise FirmwareAuthorizationError(message)
@@ -436,10 +441,14 @@ class UnixFirmwareHelperServer:
                 except FileNotFoundError:
                     pass
                 else:
-                    if stat.S_ISSOCK(current.st_mode) and (
-                        current.st_dev,
-                        current.st_ino,
-                    ) == bound_inode:
+                    if (
+                        stat.S_ISSOCK(current.st_mode)
+                        and (
+                            current.st_dev,
+                            current.st_ino,
+                        )
+                        == bound_inode
+                    ):
                         self._socket_path.unlink()
 
     def handle_connection(self, connection: socket.socket) -> None:
@@ -501,8 +510,9 @@ class UnixFirmwareHelperServer:
             if action == "load_volatile_dfu":
                 self._executor.load_volatile_dfu(radio, private_image)
             else:
-                self._executor.flash_persistent_qspi(
-                    radio, private_image, target_name=cast(str, target_name)
+                raise FirmwareImageError(
+                    "flash_transport_unqualified: helper protocol v1 cannot bind physical flash "
+                    "evidence or guarantee pre-reboot integrity; use attested SSH/FRM"
                 )
         finally:
             private_image.unlink(missing_ok=True)

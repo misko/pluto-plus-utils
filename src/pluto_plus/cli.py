@@ -91,6 +91,7 @@ from pluto_plus.metadata_soak import (
     prepare_metadata_soak,
     run_live_metadata_slot,
 )
+from pluto_plus.recovery.cli import app as recovery_app
 from pluto_plus.seeded_hop import (
     DEFAULT_FRAME_SIZE,
     DEFAULT_HOP_SECONDS,
@@ -152,6 +153,7 @@ job_app = typer.Typer(no_args_is_help=True, help="Inspect stream and capture job
 artifact_app = typer.Typer(no_args_is_help=True, help="Inspect captured artifacts.")
 scan_app = typer.Typer(no_args_is_help=True, help="Run exclusive frequency scans.")
 firmware_app = typer.Typer(no_args_is_help=True, help="Plan and execute guarded firmware updates.")
+firmware_app.add_typer(recovery_app, name="recover")
 candidate_ram_app = typer.Typer(
     no_args_is_help=True,
     help="Plan, execute, and verify local release-candidate RAM deployments.",
@@ -4822,7 +4824,9 @@ def firmware_flash_lan(
         if not execute:
             _emit(
                 {
-                    "mode": "dry_run",
+                    "mode": "inspection",
+                    "executable": False,
+                    "requires_flash_attestation": True,
                     "will_write": False,
                     "will_rotate_ephemeral_ssh_key": False,
                     "plan": asdict(plan),
@@ -4860,6 +4864,11 @@ def firmware_flash_lan(
             password=password,
             known_hosts_file=resolved_known_hosts,
             host=plan.host,
+        )
+
+        plan, frm = prepare_lan_flash_plan(
+            image, serial=serial, host=host, mutation_profile_id=profile,
+            flash_transport=transport,
         )
 
         def rotate_host_key() -> dict[str, str]:
@@ -6727,7 +6736,9 @@ def _standalone_usb_flash(
         if not execute:
             _emit(
                 {
-                    "mode": "dry_run",
+                    "mode": "inspection",
+                    "executable": False,
+                    "requires_flash_attestation": True,
                     "will_write": False,
                     "plan": asdict(plan),
                     "next_command": (
@@ -6778,6 +6789,10 @@ def _standalone_usb_flash(
                 password=password,
                 known_hosts_file=ssh_known_hosts_file.expanduser().resolve(),
                 host=ssh_host,
+            )
+            plan, frm = prepare_usb_flash_plan(
+                image, usb_sysfs_path, force_blank_serial=force_blank_serial,
+                mutation_profile_id=mutation_profile_id, flash_transport=ssh_transport,
             )
             result = execute_usb_flash_plan_ssh(
                 plan,

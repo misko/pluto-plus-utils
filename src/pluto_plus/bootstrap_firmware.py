@@ -23,7 +23,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -31,6 +31,10 @@ from typing import Any, Literal, Protocol, cast
 from pluto_plus.diagnostic_profiles import DIAGNOSTIC_PROFILES, SUPPORTED_AD936X_PHY_MODELS
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
+    COUNTER_RX_V1_1R1T_PERSISTENT_POLICY,
+    COUNTER_RX_V1_1R1T_RAM_POLICY,
+    COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY,
+    COUNTER_RX_V1_RELEASE_RAM_POLICY,
     DDR_BURST_V1_RC1_RAM_POLICY,
     DDR_BURST_V1_RC2_RAM_POLICY,
     DDR_BURST_V1_RC3_RAM_POLICY,
@@ -78,8 +82,12 @@ from pluto_plus.doctor import (
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_FROM_30M_IIO_PROMOTION_POLICY,
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_CANARY_POLICY,
     STARLINK_PSS_15M_RX_ONLY_DNM_V7_PERSISTENT_PROMOTION_POLICY,
+    STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_CANARY_POLICY,
+    STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_PROMOTION_POLICY,
     STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY,
     STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_PROMOTION_POLICY,
+    STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY,
+    STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_PROMOTION_POLICY,
     TANDEM_AGC_V7_PERSISTENT_POLICY,
     TANDEM_AGC_V7_RAM_POLICY,
     TANDEM_V6_DEVELOPMENT_POLICY,
@@ -88,6 +96,14 @@ from pluto_plus.doctor import (
 )
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.firmware import FirmwareImageError, generate_frm, validate_frm
+from pluto_plus.flash_safety import (
+    FlashDecision,
+    FlashSafetyError,
+    reject_uncontrolled_persistence,
+    require_same_flash,
+    validate_flash,
+)
+from pluto_plus.flash_safety_io import FlashSession, observe_flash
 from pluto_plus.hardware.discovery import _facts_from_context_xml, _inspect_iio_context
 from pluto_plus.hardware.iio_metadata import require_metadata_abi_capability
 from pluto_plus.hardware.preflight import inspect_iio_environment
@@ -177,6 +193,21 @@ SINGLE_RX_DETECTOR_ONLY_LAYOUT = StandaloneIioLayout(
     device_tree_contract="detector-only",
 )
 
+# The stripped GLRT image exposes its samples through starlink-glrt-iq; its
+# cf-ad9361-lpc device has no scan elements, although the RX DMA DT node is on.
+GLRT_STRIPPED_RX_ONLY_LAYOUT = StandaloneIioLayout(
+    layout_id="glrt-stripped-rx-only-v1",
+    rx_scan_channels=(),
+    dds_present=False,
+    tandem_agc=False,
+    tx_hardwaregain_count=1,
+    tx_scan_count=0,
+    tx_dds_tone_count=0,
+    minimum_buffer_count=1,
+    tx_lo_powerdown_count=1,
+    device_tree_contract="rx-only",
+)
+
 _IIO_LAYOUTS = {
     layout.layout_id: layout
     for layout in (
@@ -184,6 +215,7 @@ _IIO_LAYOUTS = {
         SINGLE_RX_TX_CAPABLE_LAYOUT,
         SINGLE_RX_RX_ONLY_LAYOUT,
         SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+        GLRT_STRIPPED_RX_ONLY_LAYOUT,
     )
 }
 
@@ -718,6 +750,54 @@ STANDALONE_FLASH_PROFILES = {
             ),
         )
     ),
+    STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_CANARY_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_CANARY_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_PROMOTION_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_PROMOTION_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_30M_IIO_V1_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
+    STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_PROMOTION_POLICY.profile_id: (
+        StandaloneFlashProfile(
+            STARLINK_PSS_30M_IIO_V1_DNM_FROM_60M_PROMOTION_POLICY,
+            3,
+            False,
+            source_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            return_iio_layout=SINGLE_RX_DETECTOR_ONLY_LAYOUT,
+            allowed_before_firmwares=(
+                STARLINK_PSS_60M_IIO_V5_DNM_PERSISTENT_CANARY_POLICY.device_firmware,
+            ),
+        )
+    ),
     IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_1R1T_ROLLBACK_POLICY.profile_id: (
         StandaloneFlashProfile(
             IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_1R1T_ROLLBACK_POLICY,
@@ -866,6 +946,49 @@ STANDALONE_FLASH_PROFILES = {
 }
 
 
+# Preserve every v0.49 return requirement and add exact counter discovery.
+# Physical topology is explicit: a one-receiver transfer mask is not 1R1T.
+for _counter_policy, _counter_layout, _counter_persistent in (
+    (COUNTER_RX_V1_RELEASE_RAM_POLICY, PAIRED_RX_TX_CAPABLE_LAYOUT, False),
+    (COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY, PAIRED_RX_TX_CAPABLE_LAYOUT, True),
+    (COUNTER_RX_V1_1R1T_RAM_POLICY, SINGLE_RX_TX_CAPABLE_LAYOUT, False),
+    (COUNTER_RX_V1_1R1T_PERSISTENT_POLICY, SINGLE_RX_TX_CAPABLE_LAYOUT, True),
+):
+    _counter_base = STANDALONE_FLASH_PROFILES[
+        IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY.profile_id
+    ]
+    STANDALONE_FLASH_PROFILES[_counter_policy.profile_id] = replace(
+        _counter_base,
+        policy=_counter_policy,
+        persistent_allowed=_counter_persistent,
+        source_iio_layout=_counter_layout,
+        return_iio_layout=_counter_layout,
+        required_iio_capabilities=_counter_base.required_iio_capabilities
+        + (
+            ("iio,buffer-counter-metadata", "1"),
+            ("iio,buffer-counter-metadata-profile", "ad9361:1r1t:rx0:manual:decimation1:spfc1"),
+            (
+                "iio,buffer-counter-metadata-topology-supported",
+                "1" if _counter_layout == SINGLE_RX_TX_CAPABLE_LAYOUT else "0",
+            ),
+        ),
+    )
+
+
+# Reuse the qualified v0.49 bytes and every return-side capability requirement.
+# This distinct transition authorizes only the observed stripped source, without
+# relaxing the ordinary v0.49 promotion profile or qualifying new firmware bytes.
+_GLRT_V049_RESTORE_ID = "iq-direct-async-v4-from-glrt-stripped-restore"
+STANDALONE_FLASH_PROFILES[_GLRT_V049_RESTORE_ID] = replace(
+    STANDALONE_FLASH_PROFILES[IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY.profile_id],
+    policy=IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY.model_copy(
+        update={"profile_id": _GLRT_V049_RESTORE_ID}
+    ),
+    source_iio_layout=GLRT_STRIPPED_RX_ONLY_LAYOUT,
+    allowed_before_firmwares=("glrt-native-exact-r60000000-stripped-v1",),
+)
+
+
 def _layout_tandem(profile: StandaloneFlashProfile, layout: StandaloneIioLayout) -> bool:
     return profile.tandem_agc if layout.tandem_agc is None else layout.tandem_agc
 
@@ -910,6 +1033,8 @@ def _require_iio_layout_shape(
         raise BootstrapFirmwareError(
             f"{transport} runtime lacks the required AD936x PHY/RX IIO devices"
         )
+    if layout is GLRT_STRIPPED_RX_ONLY_LAYOUT and "starlink-glrt-iq" not in names:
+        raise BootstrapFirmwareError(f"{transport} runtime lacks the GLRT IQ device")
     raw_scan = facts.get("cf-ad9361-lpc,scan_channels", ())
     scan = (
         {str(value) for value in raw_scan}
@@ -1687,6 +1812,7 @@ class BootstrapPlan:
     expected_tandem_agc: bool = False
     operation: Literal["flash", "force_flash"] = "force_flash"
     target_serial: str | None = None
+    flash_safety: FlashDecision | None = None
     source_iio_layout: str = PAIRED_RX_TX_CAPABLE_LAYOUT.layout_id
     return_iio_layout: str = PAIRED_RX_TX_CAPABLE_LAYOUT.layout_id
 
@@ -1712,6 +1838,7 @@ class LanFlashPlan:
     expected_tandem_agc: bool
     confirmation_phrase: str
     trust_model: str = "explicit_lan_tofu"
+    flash_safety: FlashDecision | None = None
     source_iio_layout: str = PAIRED_RX_TX_CAPABLE_LAYOUT.layout_id
     return_iio_layout: str = PAIRED_RX_TX_CAPABLE_LAYOUT.layout_id
 
@@ -1747,6 +1874,17 @@ class StandaloneReconciliationResult:
     reconciled_at: str
 
 
+def _plan_flash_safety(
+    transport: BootstrapSshTransport | None, fit: bytes, serial: str | None,
+) -> FlashDecision | None:
+    if transport is None:
+        return None  # explicitly non-executable image inspection
+    observed = observe_flash(transport)
+    if not serial or observed.serial != serial:
+        raise FlashSafetyError("flash_identity_unknown", "flash and IIO serials differ")
+    return validate_flash(observed, fit)
+
+
 def prepare_bootstrap_plan(
     image: Path,
     usb_sysfs_path: Path,
@@ -1762,6 +1900,7 @@ def prepare_usb_flash_plan(
     *,
     force_blank_serial: bool = False,
     mutation_profile_id: str = CANONICAL_POLICY.profile_id,
+    flash_transport: BootstrapSshTransport | None = None,
 ) -> tuple[BootstrapPlan, bytes]:
     """Create an exact-profile path-bound USB flash plan without mutation."""
 
@@ -1861,6 +2000,7 @@ def prepare_usb_flash_plan(
             image_sha256=image_sha256,
             fit_sha256=hashlib.sha256(fit).hexdigest(),
             fit_size=len(fit),
+            flash_safety=_plan_flash_safety(flash_transport, fit, local.serial),
             frm_sha256=hashlib.sha256(frm).hexdigest(),
             expected_firmware=policy.device_firmware,
             mutation_profile_id=mutation_profile_id,
@@ -1882,6 +2022,7 @@ def prepare_lan_flash_plan(
     serial: str,
     host: str,
     mutation_profile_id: str,
+    flash_transport: BootstrapSshTransport | None = None,
 ) -> tuple[LanFlashPlan, bytes]:
     """Create a read-only exact-image plan for one network-only Pluto+."""
 
@@ -1968,6 +2109,7 @@ def prepare_lan_flash_plan(
             image_sha256=image_sha256,
             fit_sha256=fit_sha256,
             fit_size=len(fit),
+            flash_safety=_plan_flash_safety(flash_transport, fit, serial),
             frm_sha256=hashlib.sha256(frm).hexdigest(),
             expected_firmware=profile.policy.device_firmware,
             mutation_profile_id=mutation_profile_id,
@@ -1989,195 +2131,15 @@ def execute_bootstrap_plan(
     receipt_directory: Path,
     return_timeout_s: float = 180,
 ) -> BootstrapResult:
-    """Write only ``pluto.frm`` and attest the same physical port after reboot."""
+    """Refuse legacy eject-triggered persistence before staging an actionable file."""
 
-    if confirmation != plan.confirmation_phrase:
-        raise BootstrapFirmwareError(f"confirmation must be exactly {plan.confirmation_phrase!r}")
-    if hashlib.sha256(frm).hexdigest() != plan.frm_sha256:
-        raise BootstrapFirmwareError("generated FRM changed after planning")
+    _validate_plan_payload(plan, frm, confirmation)
     try:
-        fit = validate_frm(frm)
-    except FirmwareImageError as error:
-        raise BootstrapFirmwareError(f"generated FRM is invalid: {error}") from error
-    if hashlib.sha256(fit).hexdigest() != plan.fit_sha256 or len(fit) != plan.fit_size:
-        raise BootstrapFirmwareError("generated FIT no longer matches the plan")
+        reject_uncontrolled_persistence()
+    except FlashSafetyError as error:
+        raise BootstrapFirmwareError(str(error)) from error
+    raise AssertionError("unreachable")
 
-    # Re-run every identity and topology check immediately before mutation.
-    fresh_plan, fresh_frm = prepare_usb_flash_plan(
-        Path(plan.image_path),
-        Path(plan.usb_sysfs_path),
-        force_blank_serial=plan.operation == "force_flash",
-        mutation_profile_id=plan.mutation_profile_id,
-    )
-    for field in (
-        "usb_sysfs_path",
-        "usb_interface",
-        "block_device",
-        "partition",
-        "before_firmware",
-        "before_model",
-        "before_phy",
-        "image_sha256",
-        "fit_sha256",
-        "fit_size",
-        "frm_sha256",
-        "expected_firmware",
-        "mutation_profile_id",
-        "expected_metadata_abi",
-        "expected_tandem_agc",
-        "operation",
-        "target_serial",
-        "source_iio_layout",
-        "return_iio_layout",
-    ):
-        if getattr(fresh_plan, field) != getattr(plan, field):
-            raise BootstrapFirmwareError(f"bootstrap precondition changed: {field}")
-    if fresh_frm != frm:
-        raise BootstrapFirmwareError("deterministic FRM changed during revalidation")
-
-    # Prove the daemon and exact device nodes are ready before an execution
-    # attempt or durable receipt is created. A failed readiness check is not a
-    # consumed mutation attempt because no updater volume was mounted or written.
-    _preflight_udisks(
-        partition=Path(plan.partition),
-        block_device=Path(plan.block_device),
-    )
-    drive_object = _resolve_udisks_drive(Path(plan.block_device))
-
-    receipt_id = str(uuid.uuid4())
-    receipt_path = receipt_directory / f"{receipt_id}.json"
-    phases: list[str] = ["preflight_revalidated"]
-    receipt = {
-        "schema_version": 1,
-        "receipt_id": receipt_id,
-        "outcome": "started",
-        "plan": asdict(plan),
-        "phases": phases,
-        "error": None,
-    }
-    _write_receipt(receipt_path, receipt)
-    wrote_image = False
-    eject_requested = False
-    try:
-        mountpoint = _mount_partition(Path(plan.partition))
-        phases.append("mounted")
-        _update_receipt(receipt_path, receipt, phases)
-        if not (mountpoint / "info.html").is_file():
-            raise BootstrapFirmwareError("selected updater volume has no info.html")
-        destination = mountpoint / "pluto.frm"
-        if destination.exists():
-            raise BootstrapFirmwareError(
-                "selected updater already contains pluto.frm; reconcile it before retrying"
-            )
-        _write_fat_atomic(destination, frm)
-        wrote_image = True
-        phases.append("pluto_frm_written")
-        _update_receipt(receipt_path, receipt, phases)
-        _run(("sync", "-f", str(destination)), timeout_s=30)
-        phases.append("synced")
-        _update_receipt(receipt_path, receipt, phases)
-        _run_udisks("unmount", Path(plan.partition), timeout_s=30)
-        phases.append("unmounted")
-        _update_receipt(receipt_path, receipt, phases)
-        if _resolve_udisks_drive(Path(plan.block_device)) != drive_object:
-            raise BootstrapFirmwareError("UDisks drive mapping changed before SCSI eject")
-        _validate_scsi_eject_target(
-            drive_object=drive_object,
-            usb_sysfs_path=Path(plan.usb_sysfs_path),
-            block_device=Path(plan.block_device),
-            partition=Path(plan.partition),
-        )
-        phases.append("eject_requested")
-        _update_receipt(receipt_path, receipt, phases)
-        eject_requested = True
-        _eject_scsi_media(
-            drive_object=drive_object,
-            usb_sysfs_path=Path(plan.usb_sysfs_path),
-            block_device=Path(plan.block_device),
-            partition=Path(plan.partition),
-            timeout_s=30,
-        )
-        phases.append("media_ejected")
-        _update_receipt(receipt_path, receipt, phases)
-        # Media removal can be acknowledged before the radio-side updater has
-        # finished its pre-reboot work. Use the operator-selected lifecycle
-        # bound for disappearance as well as return; a fixed 30-second window
-        # produced a false-unknown receipt on a healthy Pluto+ that disconnected
-        # immediately after the old deadline and then reconciled successfully.
-        _wait_for_path(Path(plan.usb_sysfs_path), present=False, timeout_s=return_timeout_s)
-        phases.append("disappeared")
-        _update_receipt(receipt_path, receipt, phases)
-        _wait_for_path(Path(plan.usb_sysfs_path), present=True, timeout_s=return_timeout_s)
-        phases.append("reappeared")
-        _update_receipt(receipt_path, receipt, phases)
-        returned_serial, returned_firmware, returned_phy = _attest_return_when_ready(
-            plan, timeout_s=return_timeout_s
-        )
-        phases.append("return_attested")
-        if plan.target_serial is not None:
-            phases.append("tx_safe_attested")
-        result = BootstrapResult(
-            receipt_id=receipt_id,
-            outcome="success",
-            phases=tuple(phases),
-            receipt_path=str(receipt_path),
-            returned_serial=returned_serial,
-            returned_firmware=returned_firmware,
-            returned_phy=returned_phy,
-        )
-    except Exception as error:
-        # Staging pluto.frm does not write QSPI. The radio-side updater is
-        # triggered only by SCSI media removal, so failures before the eject
-        # request are provable no-write failures. Once Eject has been
-        # dispatched, a missing acknowledgement is genuinely uncertain.
-        outcome: Literal["failed", "unknown"] = "unknown" if eject_requested else "failed"
-        # If mounting succeeded but writing did not, make a bounded cleanup attempt.
-        if "mounted" in phases and "unmounted" not in phases:
-            try:
-                _run_udisks("unmount", Path(plan.partition), timeout_s=30)
-                phases.append("cleanup_unmounted")
-            except Exception:
-                phases.append("cleanup_unmount_failed")
-        classification = (
-            error.classification
-            if isinstance(error, UdisksFailure)
-            else (
-                "post_eject_uncertain"
-                if eject_requested
-                else ("qspi_write_not_started" if wrote_image else "pre_write_failure")
-            )
-        )
-        remediation = (
-            error.remediation
-            if isinstance(error, UdisksFailure)
-            else (
-                "Do not retry automatically; reconcile the radio and this receipt first."
-                if eject_requested
-                else (
-                    "No SCSI eject was requested, so no QSPI write began. Reconcile or remove "
-                    "the staged pluto.frm from the exact updater volume, then re-plan."
-                    if wrote_image
-                    else (
-                        "This receipt proves no pluto.frm write began; "
-                        "correct the error and re-plan."
-                    )
-                )
-            )
-        )
-        result = BootstrapResult(
-            receipt_id=receipt_id,
-            outcome=outcome,
-            phases=tuple(phases),
-            receipt_path=str(receipt_path),
-            error=f"{type(error).__name__}: {error}",
-            failure_phase=_bootstrap_failure_phase(phases),
-            failure_classification=classification,
-            retryable=not eject_requested,
-            remediation=remediation,
-        )
-    receipt.update(asdict(result))
-    _write_receipt(receipt_path, receipt)
-    return result
 
 
 def execute_usb_flash_plan(
@@ -2232,6 +2194,7 @@ def execute_usb_flash_plan_ssh(
     }
     _write_receipt(receipt_path, receipt)
     updater_dispatched = False
+    flash_session: FlashSession | None = None
     try:
         before = transport.run(_REMOTE_ATTEST_COMMAND, timeout_s=15)
         remote = _remote_attestation(before)
@@ -2247,6 +2210,19 @@ def execute_usb_flash_plan_ssh(
         phases.append("remote_preflight_attested")
         _update_receipt(receipt_path, receipt, phases)
 
+        decision = validate_flash(observe_flash(transport), validate_frm(frm))
+        require_same_flash(plan.flash_safety, decision)
+        if decision.observation.serial != (plan.target_serial or ""):
+            raise FlashSafetyError("flash_identity_unknown", "flash and IIO serials differ")
+        flash_session = FlashSession(
+            transport, decision, validate_frm(frm), receipt_directory / f"{receipt_id}-recovery"
+        )
+        flash_session.prepare()
+        receipt["flash_safety"] = asdict(decision)
+        receipt["recovery_evidence"] = str(flash_session.directory)
+        phases.append("physical_flash_guard_passed")
+        _update_receipt(receipt_path, receipt, phases)
+
         transport.run(_REMOTE_STAGE_COMMAND, timeout_s=15)
         transport.upload_frm(frm, timeout_s=120)
         phases.append("pluto_frm_staged")
@@ -2258,7 +2234,9 @@ def execute_usb_flash_plan_ssh(
         _update_receipt(receipt_path, receipt, phases)
 
         updater_dispatched = True
-        update_output = transport.run(_REMOTE_UPDATE_COMMAND, timeout_s=120)
+        update_output = flash_session.invoke(
+            "/tmp/pluto-plus-utils/pluto.frm", plan.frm_sha256
+        )
         if "Failed" in update_output or not re.search(r"(?m)^Done\s*$", update_output):
             raise BootstrapFirmwareError("radio updater did not report an unambiguous Done")
         phases.append("updater_reported_done")
@@ -2271,6 +2249,8 @@ def execute_usb_flash_plan_ssh(
         )
         if flashed_hash != plan.fit_sha256:
             raise BootstrapFirmwareError("flashed mtd3 FIT hash does not match the plan")
+        flash_session.verify()
+        phases.append("protected_regions_verified")
         phases.append("mtd3_fit_verified")
         _update_receipt(receipt_path, receipt, phases)
         transport.run(_REMOTE_CLEANUP_COMMAND, timeout_s=30)
@@ -2302,6 +2282,12 @@ def execute_usb_flash_plan_ssh(
             returned_phy=returned_phy,
         )
     except Exception as error:
+        if flash_session is not None:
+            updater_dispatched = flash_session.dispatched
+            try:
+                flash_session.close()
+            except Exception as close_error:
+                receipt["safety_lock_cleanup_error"] = str(close_error)
         outcome: Literal["failed", "unknown"] = "unknown" if updater_dispatched else "failed"
         result = BootstrapResult(
             receipt_id=receipt_id,
@@ -2309,6 +2295,8 @@ def execute_usb_flash_plan_ssh(
             phases=tuple(phases),
             receipt_path=str(receipt_path),
             error=f"{type(error).__name__}: {error}",
+            failure_classification=(error.code if isinstance(error, FlashSafetyError) else None),
+            retryable=not updater_dispatched,
         )
     receipt.update(asdict(result))
     _write_receipt(receipt_path, receipt)
@@ -2355,6 +2343,7 @@ def execute_lan_flash_plan(
     }
     _write_receipt(receipt_path, receipt)
     updater_dispatched = False
+    flash_session: FlashSession | None = None
     stage_created = False
     try:
         before = transport.run(_REMOTE_ATTEST_COMMAND, timeout_s=15)
@@ -2392,6 +2381,19 @@ def execute_lan_flash_plan(
         phases.append("remote_tx_safe_read_only_attested")
         _update_receipt(receipt_path, receipt, phases)
 
+        decision = validate_flash(observe_flash(transport), validate_frm(frm))
+        require_same_flash(plan.flash_safety, decision)
+        if decision.observation.serial != (plan.target_serial or ""):
+            raise FlashSafetyError("flash_identity_unknown", "flash and IIO serials differ")
+        flash_session = FlashSession(
+            transport, decision, validate_frm(frm), receipt_directory / f"{receipt_id}-recovery"
+        )
+        flash_session.prepare()
+        receipt["flash_safety"] = asdict(decision)
+        receipt["recovery_evidence"] = str(flash_session.directory)
+        phases.append("physical_flash_guard_passed")
+        _update_receipt(receipt_path, receipt, phases)
+
         transport.run(_REMOTE_STAGE_COMMAND, timeout_s=15)
         stage_created = True
         transport.upload_frm(frm, timeout_s=120)
@@ -2404,7 +2406,9 @@ def execute_lan_flash_plan(
         _update_receipt(receipt_path, receipt, phases)
 
         updater_dispatched = True
-        update_output = transport.run(_REMOTE_UPDATE_COMMAND, timeout_s=120)
+        update_output = flash_session.invoke(
+            "/tmp/pluto-plus-utils/pluto.frm", plan.frm_sha256
+        )
         if "Failed" in update_output or not re.search(r"(?m)^Done\s*$", update_output):
             raise BootstrapFirmwareError("radio updater did not report an unambiguous Done")
         phases.append("updater_reported_done")
@@ -2417,6 +2421,8 @@ def execute_lan_flash_plan(
         )
         if flashed_hash != plan.fit_sha256:
             raise BootstrapFirmwareError("flashed mtd3 FIT hash does not match the LAN plan")
+        flash_session.verify()
+        phases.append("protected_regions_verified")
         phases.append("mtd3_fit_verified")
         _update_receipt(receipt_path, receipt, phases)
         transport.run(_REMOTE_CLEANUP_COMMAND, timeout_s=30)
@@ -2476,6 +2482,12 @@ def execute_lan_flash_plan(
             returned_phy=returned_phy,
         )
     except Exception as error:
+        if flash_session is not None:
+            updater_dispatched = flash_session.dispatched
+            try:
+                flash_session.close()
+            except Exception as close_error:
+                receipt["safety_lock_cleanup_error"] = str(close_error)
         if stage_created and not updater_dispatched:
             try:
                 transport.run(_REMOTE_CLEANUP_COMMAND, timeout_s=30)
@@ -2492,7 +2504,9 @@ def execute_lan_flash_plan(
             receipt_path=str(receipt_path),
             error=f"{type(error).__name__}: {error}",
             failure_phase=_lan_flash_failure_phase(phases),
-            failure_classification=classification,
+            failure_classification=(
+                error.code if isinstance(error, FlashSafetyError) else classification
+            ),
             retryable=not updater_dispatched,
             remediation=(
                 "Do not retry; read-only re-attest the endpoint and receipt first."
@@ -2530,6 +2544,12 @@ def reconcile_usb_flash_receipt(
     receipt = _read_receipt(receipt_path)
     if receipt.get("schema_version") != 1 or receipt.get("receipt_id") != receipt_id:
         raise BootstrapFirmwareError("standalone receipt identity or schema is invalid")
+    if receipt.get("failure_classification") in {
+        "protected_region_changed", "protected_verification_unavailable", "flash_fit_changed",
+    }:
+        raise BootstrapFirmwareError(
+            "integrity failure requires recovery; logical FIT reconciliation is insufficient"
+        )
     current_outcome = receipt.get("outcome")
     original_outcome = (
         receipt.get("original_outcome")
@@ -2721,7 +2741,11 @@ serial=$(cat /sys/kernel/config/usb_gadget/composite_gadget/strings/0x409/serial
 firmware=$(awk '$1 == "device-fw" {print $2; exit}' /opt/VERSIONS)
 boot_id=$(cat /proc/sys/kernel/random/boot_id)
 qspi_bytes=$(cat /sys/class/mtd/mtd3/size)
-qspi_sha256=$(sha256sum /dev/mtdblock3 | awk '{print $1}')
+qspi_offset=$(cat /sys/class/mtd/mtd3/offset)
+safe_bytes=$((16777216 - qspi_offset))
+test "$safe_bytes" -gt 0 && test "$fit_size" -le "$safe_bytes"
+if test "$qspi_bytes" -gt "$safe_bytes"; then qspi_bytes=$safe_bytes; fi
+qspi_sha256=$(head -c "$qspi_bytes" /dev/mtd3 | sha256sum | awk '{print $1}')
 fit_sha256=$(head -c "$fit_size" /dev/mtdblock3 | sha256sum | awk '{print $1}')
 test "$serial" = "$serial_expected"
 phy=''; dds=''; tandem_present=0
