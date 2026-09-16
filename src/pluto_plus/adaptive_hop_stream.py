@@ -239,10 +239,21 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
             raise PersistentHopClientError("adaptive stream reports lost/invalid capture state")
         if previous is not None and previous.state in _TERMINAL:
             raise PersistentHopClientError("adaptive IQ arrived after terminal evidence")
-        if base.buffer_sequence != (previous.buffer_sequence + 1 if previous else 0):
-            raise PersistentHopClientError("adaptive block sequence is not contiguous")
         if previous is not None and base.block_first_counter < previous.block_end_counter_exclusive:
             raise PersistentHopClientError("adaptive block counters regress")
+        missing_samples = (
+            base.block_first_counter - previous.block_end_counter_exclusive
+            if previous is not None
+            else 0
+        )
+        skipped_blocks = (
+            missing_samples // self.samples_per_block
+            if previous is not None and self.allow_counter_gaps
+            else 0
+        )
+        expected_sequence = previous.buffer_sequence + 1 + skipped_blocks if previous else 0
+        if base.buffer_sequence != expected_sequence:
+            raise PersistentHopClientError("adaptive block sequence disagrees with counter gap")
         if (
             previous is not None
             and base.block_first_counter != previous.block_end_counter_exclusive

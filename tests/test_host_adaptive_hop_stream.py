@@ -166,23 +166,9 @@ def test_wide_request_retains_sparse_complete_visits_across_accounted_gap():
     for original_index, wire in enumerate(wires[: last_original + 1]):
         if original_index == gap_index:
             continue
-        if original_index > gap_index:
-            evidence = HostAdaptiveHopEvidenceV3.unpack(wire.evidence)
-            wire = dc.replace(
-                wire,
-                evidence=dc.replace(
-                    evidence,
-                    geometry=dc.replace(
-                        evidence.geometry,
-                        buffer_sequence=evidence.geometry.buffer_sequence - 1,
-                    ),
-                ).pack(),
-            )
         seen.extend(stream.feed(wire))
     status = capture.status(sequence=last_original, cancelled=True)
-    receipt, final = stream.finish(
-        HostAdaptiveHopStatusV3(dc.replace(status.geometry, last_block_sequence=last_original - 1))
-    )
+    receipt, final = stream.finish(HostAdaptiveHopStatusV3(status.geometry))
     seen.extend(final)
     assert receipt.sparse is not None
     assert receipt.sparse.missing_sample_count == block
