@@ -768,6 +768,15 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
     assert refill_attempts == 3
     assert buffer.rearmed == [1, 1]
     assert feedback_packets == [b"source-bound feedback"]
+    # A sparse segment may retain no complete visit, so it has no feedback
+    # payload with which to request the next finite segment.  Refill's proven
+    # segment boundary must still rearm it and continue.
+    refill_attempts = 0
+    buffer.rearmed.clear()
+    sparse_boundary_block = session.read_block()
+    assert sparse_boundary_block.iq_payload == block.iq_payload
+    assert refill_attempts == 3
+    assert buffer.rearmed == [1, 1]
     buffer.refilled = False
     assert session.drain_metadata() == b"terminal metadata"
     assert drains == [65536]

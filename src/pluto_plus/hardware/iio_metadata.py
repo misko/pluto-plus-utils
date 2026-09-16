@@ -1365,7 +1365,7 @@ class IioRawSidecarCaptureSession:
             except OSError as error:
                 if (
                     error.errno not in {errno.ENODATA, errno.EBUSY}
-                    or not self._direct_async_rearm_pending
+                    or not self._direct_async_frames
                     or boundary_attempts >= 4
                 ):
                     raise
