@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
 from pluto_plus.adaptive_scan import ScanOutcome, ScanVisit, VisitResult
 from pluto_plus.adaptive_scan_client import AdaptiveScanVisit
-from pluto_plus.adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDetectorConfig
+from pluto_plus.adaptive_scan_detector import (
+    Ci16EnergyDetector,
+    Ci16EnergyDetectorConfig,
+    TargetMaskDetector,
+    TargetMaskDetectorConfig,
+)
 
 
 def _visit(amplitude: int, *, samples: int = 1024) -> AdaptiveScanVisit:
@@ -58,3 +65,20 @@ def test_detector_rejects_bad_threshold_and_ci16_geometry() -> None:
     visit = _visit(1_000)
     with pytest.raises(ValueError, match="geometry"):
         detector(AdaptiveScanVisit(visit.record, visit.iq[:-2]))
+
+
+def test_controlled_target_mask_is_hash_bound_and_not_rf_dependent() -> None:
+    config = TargetMaskDetectorConfig((1, 3))
+    assert config.analysis_digest == TargetMaskDetectorConfig((1, 3)).analysis_digest
+    assert config.analysis_digest != TargetMaskDetectorConfig((3, 1)).analysis_digest
+    detector = TargetMaskDetector(config)
+    quiet = _visit(0)
+    active = AdaptiveScanVisit(
+        dataclasses.replace(quiet.record, target=1),
+        quiet.iq,
+    )
+    assert detector(quiet) is ScanOutcome.QUIET
+    assert detector(active) is ScanOutcome.ACTIVE
+
+    with pytest.raises(ValueError, match="unique"):
+        TargetMaskDetectorConfig((1, 1))

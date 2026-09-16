@@ -76,3 +76,46 @@ class Ci16EnergyDetector:
             Ci16EnergyObservation(record.visit, record.target, power_dbfs, outcome)
         )
         return outcome
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TargetMaskDetectorConfig:
+    """Controlled-feedback detector used to isolate scheduler behavior from RF."""
+
+    active_targets: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.active_targets
+            or len(set(self.active_targets)) != len(self.active_targets)
+            or any(type(target) is not int or not 0 <= target < 8 for target in self.active_targets)
+        ):
+            raise ValueError("active targets must be unique indices in 0..7")
+
+    @property
+    def analysis_digest(self) -> bytes:
+        payload = json.dumps(
+            {
+                "algorithm": "controlled-target-mask-v1",
+                "active_targets": self.active_targets,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(payload).digest()
+
+
+class TargetMaskDetector:
+    """Emit deterministic active/quiet feedback while still consuming complete IQ."""
+
+    def __init__(self, config: TargetMaskDetectorConfig) -> None:
+        self.config = config
+
+    def __call__(self, visit: AdaptiveScanVisit) -> ScanOutcome:
+        if visit.record.result is not VisitResult.COMPLETE or not visit.iq:
+            raise ValueError("target-mask detector requires one complete nonempty visit")
+        return (
+            ScanOutcome.ACTIVE
+            if visit.record.target in self.config.active_targets
+            else ScanOutcome.QUIET
+        )
