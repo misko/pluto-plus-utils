@@ -6,10 +6,11 @@ import errno
 import gc
 import struct
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from pydantic import ValidationError
@@ -1159,6 +1160,7 @@ class IioRawSidecarCaptureSession:
         self._direct_async_frames = direct_async_frames
         self._drop_backlog_on_overrun = drop_backlog_on_overrun
         self._direct_async_rearm_pending = False
+        self._direct_async_feedback_pending: deque[bytes] = deque()
         self._buffer: Any | None = None
         self._open_clock_bracket: IioBufferOpenClockBracket | None = None
         self._start_time_anchors: list[HostTimeAnchorMeasurement] = []
@@ -1328,6 +1330,15 @@ class IioRawSidecarCaptureSession:
                 or not self._direct_async_rearm_pending
             ):
                 raise
+            submit = getattr(buffer, "submit_metadata_feedback", None)
+            if self._direct_async_feedback_pending and not callable(submit):
+                raise NotImplementedError(
+                    "installed pylibiio lacks owned-buffer feedback"
+                ) from error
+            submit_feedback = cast(Callable[[bytes], None], submit)
+            while self._direct_async_feedback_pending:
+                submit_feedback(self._direct_async_feedback_pending[0])
+                self._direct_async_feedback_pending.popleft()
             buffer.rearm_direct_async(self._direct_async_frames)
             buffer.refill()
             self._direct_async_rearm_pending = False
@@ -1375,7 +1386,10 @@ class IioRawSidecarCaptureSession:
         submit = getattr(self._buffer, "submit_metadata_feedback", None)
         if not callable(submit):
             raise NotImplementedError("installed pylibiio lacks owned-buffer feedback")
-        submit(payload)
+        if self._direct_async_frames:
+            self._direct_async_feedback_pending.append(payload)
+        else:
+            submit(payload)
 
     def rearm_direct_async(self) -> None:
         """Authorize one next segment after the current segment is drained."""
@@ -1426,6 +1440,7 @@ class IioRawSidecarCaptureSession:
         buffer = self._buffer
         self._buffer = None
         self._direct_async_rearm_pending = False
+        self._direct_async_feedback_pending.clear()
         if getattr(self._sdr, "_rxbuf", None) is buffer:
             self._sdr._rxbuf = None
         try:

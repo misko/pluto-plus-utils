@@ -759,18 +759,19 @@ def test_raw_binding_open_sidecar_status_cancel_and_legacy_isolation(
 
     buffer.rearm_direct_async = boundary_rearm
     buffer.refill = boundary_refill
+    session.submit_metadata_feedback(b"source-bound feedback")
+    assert feedback_packets == []
     session.rearm_direct_async()
     assert buffer.rearmed == []
     boundary_block = session.read_block()
     assert boundary_block.iq_payload == block.iq_payload
     assert refill_attempts == 2
     assert buffer.rearmed == [1]
+    assert feedback_packets == [b"source-bound feedback"]
     buffer.refilled = False
     assert session.drain_metadata() == b"terminal metadata"
     assert drains == [65536]
     assert not buffer.refilled and buffer.iq == block.iq_payload
-    session.submit_metadata_feedback(b"source-bound feedback")
-    assert feedback_packets == [b"source-bound feedback"]
     session.rearm_direct_async()
     session.rearm_direct_async()
     assert buffer.rearmed == [1]
