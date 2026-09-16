@@ -194,13 +194,23 @@ def _credentials(tmp_path: Path) -> Path:
     return path
 
 
-def _plan(tmp_path: Path, *, expected_return_firmware: str | None = None) -> LocalRebootPlan:
+def _plan(
+    tmp_path: Path,
+    *,
+    expected_return_firmware: str | None = None,
+    expected_return_rx_scan_channels: tuple[str, ...] | None = None,
+    expected_return_tandem_agc: bool | None = None,
+    expected_return_detector_only: bool | None = None,
+) -> LocalRebootPlan:
     return prepare_local_reboot(
         SERIAL,
         PATH,
         ssh_host="192.168.2.1",
         known_hosts_file=_credentials(tmp_path),
         expected_return_firmware=expected_return_firmware,
+        expected_return_rx_scan_channels=expected_return_rx_scan_channels,
+        expected_return_tandem_agc=expected_return_tandem_agc,
+        expected_return_detector_only=expected_return_detector_only,
         scanner=lambda: (_radio(),),
         route_checker=lambda interface, host: ROUTE,
         interface_validator=lambda interface, path: None,
@@ -224,7 +234,7 @@ def test_prepare_binds_exact_serial_path_interface_route_and_private_trust(
 def test_prepare_binds_expected_return_firmware(tmp_path: Path) -> None:
     plan = _plan(tmp_path, expected_return_firmware="v0.42-qspi")
 
-    assert plan.schema_version == 5
+    assert plan.schema_version == 6
     assert plan.expected_return_firmware == "v0.42-qspi"
 
 
@@ -275,7 +285,7 @@ def test_prepare_exact_usb_route_records_strategy_without_route_ambiguity_check(
         usb_access_checker=lambda path: True,
     )
 
-    assert plan.schema_version == 5
+    assert plan.schema_version == 6
     assert plan.ssh_route_mode == "usb_gadget_exact"
     assert plan.route_observation is None
     assert route_calls == []
@@ -390,6 +400,95 @@ def test_success_accepts_exact_expected_firmware_return(tmp_path: Path) -> None:
     assert receipt.outcome == "success"
     assert receipt.before and receipt.before.firmware == "v0.42-ram-candidate"
     assert receipt.after and receipt.after.firmware == "v0.42-qspi"
+
+
+def test_success_accepts_named_return_profile_topology(tmp_path: Path) -> None:
+    plan = _plan(
+        tmp_path,
+        expected_return_firmware="v0.42-qspi",
+        expected_return_rx_scan_channels=(
+            "voltage0",
+            "voltage1",
+            "voltage2",
+            "voltage3",
+        ),
+        expected_return_tandem_agc=True,
+        expected_return_detector_only=False,
+    )
+    known_hosts = tmp_path / "known_hosts"
+    ram_capabilities = replace(
+        CAPABILITIES,
+        rx_scan_channels=("voltage0", "voltage1"),
+        tandem_agc=False,
+    )
+    transport = FakeTransport(
+        (
+            replace(
+                _attestation("before", firmware="v0.42-ram-candidate"),
+                capabilities=ram_capabilities,
+            ),
+            _attestation("after", firmware="v0.42-qspi"),
+        )
+    )
+    scans = iter(((_radio(),), (), (_radio(),)))
+
+    receipt = execute_local_reboot(
+        plan,
+        confirmation=plan.confirmation_phrase,
+        transport=transport,
+        known_hosts_file=known_hosts,
+        receipt_directory=tmp_path / "receipts",
+        scanner=lambda: next(scans),
+        route_checker=lambda interface, host: ROUTE,
+        interface_validator=lambda interface, path: None,
+        usb_access_checker=lambda path: True,
+        timeout_s=0.2,
+        poll_interval_s=0.001,
+    )
+
+    assert receipt.outcome == "success"
+    assert receipt.before and receipt.before.capabilities == ram_capabilities
+    assert receipt.after and receipt.after.capabilities == CAPABILITIES
+
+
+def test_named_return_profile_rejects_unexpected_topology(tmp_path: Path) -> None:
+    plan = _plan(
+        tmp_path,
+        expected_return_firmware="v0.42-qspi",
+        expected_return_rx_scan_channels=CAPABILITIES.rx_scan_channels,
+        expected_return_tandem_agc=True,
+        expected_return_detector_only=False,
+    )
+    wrong_return = replace(
+        _attestation("after", firmware="v0.42-qspi"),
+        capabilities=replace(
+            CAPABILITIES,
+            rx_scan_channels=("voltage0", "voltage1"),
+            tandem_agc=False,
+        ),
+    )
+    transport = FakeTransport(
+        (_attestation("before", firmware="v0.42-ram-candidate"), wrong_return)
+    )
+    scans = iter(((_radio(),), (), (_radio(),)))
+
+    with pytest.raises(LocalRebootExecutionError) as caught:
+        execute_local_reboot(
+            plan,
+            confirmation=plan.confirmation_phrase,
+            transport=transport,
+            known_hosts_file=tmp_path / "known_hosts",
+            receipt_directory=tmp_path / "receipts",
+            scanner=lambda: next(scans),
+            route_checker=lambda interface, host: ROUTE,
+            interface_validator=lambda interface, path: None,
+            usb_access_checker=lambda path: True,
+            timeout_s=0.2,
+            poll_interval_s=0.001,
+        )
+
+    assert caught.value.receipt.outcome == "unknown"
+    assert "capabilities changed" in (caught.value.receipt.error or "")
 
 
 def test_refuses_confirmation_without_touching_transport(tmp_path: Path) -> None:
@@ -636,8 +735,21 @@ def test_usb_return_accepts_equivalent_rev_c_models_from_ssh_and_iiod(
 def test_usb_return_accepts_exact_expected_firmware_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = _plan(tmp_path, expected_return_firmware="v0.42-qspi")
-    before = _attestation("before", firmware="v0.42-ram-candidate")
+    plan = _plan(
+        tmp_path,
+        expected_return_firmware="v0.42-qspi",
+        expected_return_rx_scan_channels=CAPABILITIES.rx_scan_channels,
+        expected_return_tandem_agc=True,
+        expected_return_detector_only=False,
+    )
+    before = replace(
+        _attestation("before", firmware="v0.42-ram-candidate"),
+        capabilities=replace(
+            CAPABILITIES,
+            rx_scan_channels=("voltage0", "voltage1"),
+            tandem_agc=False,
+        ),
+    )
     monkeypatch.setattr(
         bootstrap,
         "inspect_bound_iiod",

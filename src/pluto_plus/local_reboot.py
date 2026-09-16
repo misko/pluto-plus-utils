@@ -75,6 +75,9 @@ class LocalRebootPlan:
     route_observation: UsbSshRouteObservation | None
     expected_return_firmware: str | None
     confirmation_phrase: str
+    expected_return_rx_scan_channels: tuple[str, ...] | None = None
+    expected_return_tandem_agc: bool | None = None
+    expected_return_detector_only: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +175,9 @@ def prepare_local_reboot(
     ssh_host: str,
     known_hosts_file: Path,
     expected_return_firmware: str | None = None,
+    expected_return_rx_scan_channels: tuple[str, ...] | None = None,
+    expected_return_tandem_agc: bool | None = None,
+    expected_return_detector_only: bool | None = None,
     exact_usb_route: bool = False,
     scanner: Callable[[], Sequence[LocalUsbPluto]] = scan_local_usb_plutos,
     route_checker: Callable[[str, str], UsbSshRouteObservation] = (
@@ -185,6 +191,17 @@ def prepare_local_reboot(
     _validate_serial(serial)
     if expected_return_firmware is not None and not expected_return_firmware.strip():
         raise LocalRebootError("expected return firmware must not be empty")
+    if expected_return_rx_scan_channels is not None and not all(
+        isinstance(item, str) and item for item in expected_return_rx_scan_channels
+    ):
+        raise LocalRebootError("expected return RX scan channels are invalid")
+    if expected_return_rx_scan_channels is None and (
+        expected_return_tandem_agc is not None
+        or expected_return_detector_only is not None
+    ):
+        raise LocalRebootError(
+            "expected return topology flags require expected RX scan channels"
+        )
     path = usb_sysfs_path.expanduser().absolute()
     if path.parent != Path("/sys/bus/usb/devices"):
         raise LocalRebootError("USB path must be one direct /sys/bus/usb/devices child")
@@ -218,7 +235,7 @@ def prepare_local_reboot(
         raise LocalRebootError(str(error)) from error
     known_hosts_sha256 = _private_file_sha256(known_hosts_file, "SSH known-hosts")
     return LocalRebootPlan(
-        schema_version=5,
+        schema_version=6,
         plan_id=uuid.uuid4().hex,
         created_at=_now(),
         serial=serial,
@@ -232,6 +249,9 @@ def prepare_local_reboot(
         route_observation=route,
         expected_return_firmware=expected_return_firmware,
         confirmation_phrase=f"REBOOT {serial}",
+        expected_return_rx_scan_channels=expected_return_rx_scan_channels,
+        expected_return_tandem_agc=expected_return_tandem_agc,
+        expected_return_detector_only=expected_return_detector_only,
     )
 
 
@@ -383,7 +403,7 @@ def execute_local_reboot(
             expected_firmware = plan.expected_return_firmware or before.firmware
             if candidate.firmware != expected_firmware:
                 raise LocalRebootError("radio firmware changed across reboot")
-            if not _equivalent_capabilities(candidate.capabilities, before.capabilities):
+            if not _return_capabilities_match(plan, before.capabilities, candidate.capabilities):
                 raise LocalRebootError("radio capabilities changed across reboot")
             after = candidate
             break
@@ -400,7 +420,7 @@ def execute_local_reboot(
             expected_firmware = plan.expected_return_firmware or before.firmware
             if candidate.firmware != expected_firmware:
                 raise LocalRebootError("radio firmware changed across reboot")
-            if not _equivalent_capabilities(candidate.capabilities, before.capabilities):
+            if not _return_capabilities_match(plan, before.capabilities, candidate.capabilities):
                 raise LocalRebootError("radio capabilities changed across reboot")
             after = candidate
             post_reboot_verified_over_usb = True
@@ -479,7 +499,7 @@ def attest_and_mute_returned_usb(
     )
     if candidate.firmware != (
         plan.expected_return_firmware or before.firmware
-    ) or not _equivalent_capabilities(candidate.capabilities, before.capabilities):
+    ) or not _return_capabilities_match(plan, before.capabilities, candidate.capabilities):
         raise LocalRebootError("returned USB-IIO firmware or capabilities changed across reboot")
     if "cf-ad9361-dds-core-lpc" in names:
         mute_returned_radio_at_path(plan.serial, Path(plan.usb_sysfs_path))
@@ -505,6 +525,32 @@ def _equivalent_capabilities(
         and first.rx_scan_channels == second.rx_scan_channels
         and first.tandem_agc is second.tandem_agc
         and first.detector_only is second.detector_only
+    )
+
+
+def _return_capabilities_match(
+    plan: LocalRebootPlan,
+    before: LocalRebootCapabilities,
+    returned: LocalRebootCapabilities,
+) -> bool:
+    """Compare with the named return profile when a RAM image changes topology."""
+
+    expected_channels = plan.expected_return_rx_scan_channels
+    if expected_channels is None:
+        return _equivalent_capabilities(returned, before)
+    return (
+        _is_plutosdr_rev_c(before.board_model)
+        and _is_plutosdr_rev_c(returned.board_model)
+        and returned.phy_model == before.phy_model
+        and returned.rx_scan_channels == tuple(sorted(expected_channels))
+        and (
+            plan.expected_return_tandem_agc is None
+            or returned.tandem_agc is plan.expected_return_tandem_agc
+        )
+        and (
+            plan.expected_return_detector_only is None
+            or returned.detector_only is plan.expected_return_detector_only
+        )
     )
 
 

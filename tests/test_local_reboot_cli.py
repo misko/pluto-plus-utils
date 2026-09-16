@@ -22,9 +22,12 @@ def _plan(
     *,
     raw_usb_write_access: bool = True,
     expected_return_firmware: str | None = None,
+    expected_return_rx_scan_channels: tuple[str, ...] | None = None,
+    expected_return_tandem_agc: bool | None = None,
+    expected_return_detector_only: bool | None = None,
 ) -> LocalRebootPlan:
     return LocalRebootPlan(
-        schema_version=5,
+        schema_version=6,
         plan_id="plan-a",
         created_at="2026-08-18T00:00:00+00:00",
         serial=SERIAL,
@@ -41,6 +44,9 @@ def _plan(
         ),
         expected_return_firmware=expected_return_firmware,
         confirmation_phrase="REBOOT SERIAL_A",
+        expected_return_rx_scan_channels=expected_return_rx_scan_channels,
+        expected_return_tandem_agc=expected_return_tandem_agc,
+        expected_return_detector_only=expected_return_detector_only,
     )
 
 
@@ -72,7 +78,14 @@ def test_reboot_local_binds_hardware_qualified_return_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def prepare(*args, **kwargs):
-        return _plan(expected_return_firmware=kwargs["expected_return_firmware"])
+        return _plan(
+            expected_return_firmware=kwargs["expected_return_firmware"],
+            expected_return_rx_scan_channels=kwargs[
+                "expected_return_rx_scan_channels"
+            ],
+            expected_return_tandem_agc=kwargs["expected_return_tandem_agc"],
+            expected_return_detector_only=kwargs["expected_return_detector_only"],
+        )
 
     monkeypatch.setattr("pluto_plus.local_reboot.prepare_local_reboot", prepare)
 
@@ -96,6 +109,14 @@ def test_reboot_local_binds_hardware_qualified_return_profile(
     assert document["plan"]["expected_return_firmware"] == (
         "v0.43-plutoplus-spf-ddr-ring-v1"
     )
+    assert document["plan"]["expected_return_rx_scan_channels"] == [
+        "voltage0",
+        "voltage1",
+        "voltage2",
+        "voltage3",
+    ]
+    assert document["plan"]["expected_return_tandem_agc"] is None
+    assert document["plan"]["expected_return_detector_only"] is False
 
 
 def test_reboot_local_rejects_unqualified_return_profile() -> None:
