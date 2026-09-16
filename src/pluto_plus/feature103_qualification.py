@@ -196,7 +196,7 @@ def _csv_ints(value: str) -> tuple[int, ...]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pluto-feature103-qualify",
-        description="Run one exact RC11-full-gated adaptive-scan qualification cell.",
+        description="Run one exact RC12-full-gated adaptive-scan qualification cell.",
     )
     parser.add_argument("--serial", required=True, choices=AUTHORIZED_FEATURE_103_SERIALS)
     parser.add_argument("--uri", required=True)

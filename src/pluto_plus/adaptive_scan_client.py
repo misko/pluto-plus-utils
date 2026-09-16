@@ -221,7 +221,8 @@ class AdaptiveScanSession:
         if not record.profile_crc32:
             raise AdaptiveScanTransportError(
                 "visit Fast Lock CRC is zero "
-                f"(visit={record.visit}, target={record.target}, result={record.result.name})"
+                f"(visit={record.visit}, target={record.target}, result={record.result.name}, "
+                f"record={record!r})"
             )
         if (
             record.source_rate_hz != self.setup.source_rate_hz
