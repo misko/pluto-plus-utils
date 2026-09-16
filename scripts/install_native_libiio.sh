@@ -77,7 +77,7 @@ if ((scanner_glrt)); then
         printf 'ERROR: --scanner-glrt requires --metadata-abi 3\n' >&2
         exit 2
     }
-    source_commit="24f936547acac5b37f9b789131d135b371f32aa8"
+    source_commit="18b721c663c848a06a83a6ccd1f04244ba109a46"
     source_ref="$source_commit"
 fi
 if [[ -n "$local_source_repository" ]]; then
