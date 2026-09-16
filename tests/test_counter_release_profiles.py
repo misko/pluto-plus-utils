@@ -57,34 +57,34 @@ def test_counter_release_is_known_without_version_prefix_inference():
     ("profile_id", "asset_sha256", "fit_sha256", "fit_size"),
     [
         (
-            "feature-103-rc10-parent-ram",
+            "feature-103-rc11-parent-ram",
             "435a26369018e86ee66262b79c32895dbaaacef510a1efb71c566d6409555344",
             "a53efc46f3c65d1a15e5063374551d2daa3cb9d0df51257de53b6af80be39493",
             12_829_435,
         ),
         (
-            "feature-103-rc10-repack-ram",
+            "feature-103-rc11-repack-ram",
             "42353c6d25d0dfa1692e2ef05c43736ebf7c2342b93bc1316a48a8d05bf6b769",
             "aed5b10e692bc683e04ef9c5d9cde0442f6bd5af4250cbdd7e52969eb5b54e42",
             12_828_795,
         ),
         (
-            "feature-103-rc10-kernel-ram",
+            "feature-103-rc11-kernel-ram",
             "407bcf54c77a2237bde68b0b184674c6376ea8b29cc503ce1a5647dd1edfc50a",
             "79caea519d6f67f0b5521f45641c61956b20b86f9d003490a815f14cabd44518",
             12_831_827,
         ),
         (
-            "feature-103-rc10-rx0-ram",
+            "feature-103-rc11-rx0-ram",
             "3b7ee6b229c64227d569a15744aedf7a50b549f36f328f4707c69df6a02e8477",
             "7ec535917eabffbd4b5689eda053e258d042e1c76325d31a0850c89ec2dc067d",
             12_832_079,
         ),
         (
-            "feature-103-rc10-full-ram",
-            "cdd25fcb2fa422d515500f0f144bae0c1d543405e1a0bdbd687b6a939950074a",
-            "95760da77b70cefaf1ee9bb0d43c2d012846893f8edee8f50645c39c3c4daf5f",
-            13_185_287,
+            "feature-103-rc11-full-ram",
+            "d6c129c9562920e671826efeb3d3eebc0cd3cb95ac91d27fa59dadd9e718526c",
+            "f4563a66b72c832abec4da78dc688c6153926922212c0de6ea5b2e2449d87067",
+            13_185_431,
         ),
     ],
 )
@@ -98,9 +98,9 @@ def test_feature_103_candidate_is_exactly_ram_only(
     assert profile.policy.asset_sha256 == asset_sha256
     assert profile.policy.fit_body_sha256 == fit_sha256
     assert profile.policy.fit_body_size == fit_size
-    if profile_id not in {"feature-103-rc10-parent-ram", "feature-103-rc10-repack-ram"}:
+    if profile_id not in {"feature-103-rc11-parent-ram", "feature-103-rc11-repack-ram"}:
         assert ("iio,adaptive-scan", "1") in profile.required_iio_capabilities
-    if profile_id != "feature-103-rc10-parent-ram":
+    if profile_id != "feature-103-rc11-parent-ram":
         assert not any(
             candidate.policy.asset_sha256 == profile.policy.asset_sha256
             and candidate.persistent_allowed
@@ -108,7 +108,7 @@ def test_feature_103_candidate_is_exactly_ram_only(
         )
 
 
-@pytest.mark.parametrize("profile_id", ["feature-103-rc10-rx0-ram", "feature-103-rc10-full-ram"])
+@pytest.mark.parametrize("profile_id", ["feature-103-rc11-rx0-ram", "feature-103-rc11-full-ram"])
 def test_feature_103_rx0_candidates_attest_physical_rx0_topology(profile_id: str) -> None:
     profile = flash.STANDALONE_FLASH_PROFILES[profile_id]
     capabilities = dict(profile.required_iio_capabilities)
@@ -118,6 +118,6 @@ def test_feature_103_rx0_candidates_attest_physical_rx0_topology(profile_id: str
     assert capabilities["iio,buffer-counter-metadata-topology-supported"] == "1"
 
 
-def test_feature_103_rc1_through_rc9_are_quarantined() -> None:
-    for revision in range(1, 10):
+def test_feature_103_rc1_through_rc10_are_quarantined() -> None:
+    for revision in range(1, 11):
         assert f"feature-103-rc{revision}-ram" not in flash.STANDALONE_FLASH_PROFILES

@@ -24,11 +24,11 @@ AUTHORIZED_FEATURE_103_SERIALS = (
     "1040007c4a94000211000b009186843ef2",
     "104000b29905000e17000800065934759d",
 )
-FEATURE_103_RC10_DFU_SHA256 = (
-    "cdd25fcb2fa422d515500f0f144bae0c1d543405e1a0bdbd687b6a939950074a"
+FEATURE_103_RC11_DFU_SHA256 = (
+    "d6c129c9562920e671826efeb3d3eebc0cd3cb95ac91d27fa59dadd9e718526c"
 )
-FEATURE_103_RC10_FIT_SHA256 = (
-    "95760da77b70cefaf1ee9bb0d43c2d012846893f8edee8f50645c39c3c4daf5f"
+FEATURE_103_RC11_FIT_SHA256 = (
+    "f4563a66b72c832abec4da78dc688c6153926922212c0de6ea5b2e2449d87067"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -57,7 +57,7 @@ class Feature103RamBootIdentity:
 def attest_feature103_ram_boot_receipt(
     path: Path, *, expected_serial: str
 ) -> Feature103RamBootIdentity:
-    """Require a private successful RC10-full volatile-return receipt for this serial."""
+    """Require a private successful RC11-full volatile-return receipt for this serial."""
 
     if expected_serial not in AUTHORIZED_FEATURE_103_SERIALS:
         raise AdaptiveScanEvidenceError("serial is not authorized for feature 103 qualification")
@@ -85,12 +85,12 @@ def attest_feature103_ram_boot_receipt(
         or phases[-2:] != ("return_attested", "tx_safe_attested")
         or payload.get("returned_serial") != expected_serial
         or plan.get("serial") != expected_serial
-        or plan.get("profile_id") != "feature-103-rc10-full-ram"
-        or plan.get("image_sha256") != FEATURE_103_RC10_DFU_SHA256
-        or plan.get("fit_sha256") != FEATURE_103_RC10_FIT_SHA256
-        or plan.get("fit_size") != 13_185_287
+        or plan.get("profile_id") != "feature-103-rc11-full-ram"
+        or plan.get("image_sha256") != FEATURE_103_RC11_DFU_SHA256
+        or plan.get("fit_sha256") != FEATURE_103_RC11_FIT_SHA256
+        or plan.get("fit_size") != 13_185_431
     ):
-        raise AdaptiveScanEvidenceError("RAM-boot receipt does not attest exact RC10-full return")
+        raise AdaptiveScanEvidenceError("RAM-boot receipt does not attest exact RC11-full return")
     usb_path = str(plan.get("usb_sysfs_path", ""))
     if not usb_path.startswith("/sys/bus/usb/devices/") or ":" in Path(usb_path).name:
         raise AdaptiveScanEvidenceError("RAM-boot receipt USB identity is invalid")
@@ -99,15 +99,15 @@ def attest_feature103_ram_boot_receipt(
         receipt_path=selected,
         serial=expected_serial,
         usb_sysfs_path=usb_path,
-        dfu_sha256=FEATURE_103_RC10_DFU_SHA256,
-        fit_sha256=FEATURE_103_RC10_FIT_SHA256,
+        dfu_sha256=FEATURE_103_RC11_DFU_SHA256,
+        fit_sha256=FEATURE_103_RC11_FIT_SHA256,
     )
 
 
 def attest_feature103_fleet_ram_boot_receipts(
     paths: Sequence[Path],
 ) -> tuple[Feature103RamBootIdentity, ...]:
-    """Require one distinct successful RC10-full RAM return for each authorized radio."""
+    """Require one distinct successful RC11-full RAM return for each authorized radio."""
 
     if len(paths) != len(AUTHORIZED_FEATURE_103_SERIALS):
         raise AdaptiveScanEvidenceError("fleet qualification requires exactly two boot receipts")

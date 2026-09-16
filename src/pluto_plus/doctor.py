@@ -1162,6 +1162,51 @@ FEATURE_103_RC10_FULL_RAM_POLICY = FEATURE_103_RC10_RX0_RAM_POLICY.model_copy(
     }
 )
 
+# RC11 keeps RC10's kernel and all-slot RX0 topology.  Its userspace gives
+# adaptive feedback/ACK control a provider-lifetime lock independent of the
+# stream transport lock, and returns every leased DMA block before destroying
+# its parent libiio buffer during cancellation or disconnect teardown.
+FEATURE_103_RC11_PARENT_RAM_POLICY = FEATURE_103_RC10_PARENT_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc11-parent-ram",
+        "release_tag": "feature-103-rc11-byte-exact-parent-local-ram",
+        "asset_name": "feature103-rc11-parent.dfu",
+    }
+)
+FEATURE_103_RC11_REPACK_RAM_POLICY = FEATURE_103_RC10_REPACK_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc11-repack-ram",
+        "release_tag": "feature-103-rc11-canonical-repack-local-ram",
+        "asset_name": "feature103-rc11-repack.dfu",
+    }
+)
+FEATURE_103_RC11_KERNEL_RAM_POLICY = FEATURE_103_RC10_KERNEL_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc11-kernel-ram",
+        "release_tag": "feature-103-rc11-live-rfpll-kernel-local-ram",
+        "asset_name": "feature103-rc11-kernel.dfu",
+    }
+)
+FEATURE_103_RC11_RX0_RAM_POLICY = FEATURE_103_RC10_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc11-rx0-ram",
+        "release_tag": "feature-103-rc11-all-fit-slots-rx0-local-ram",
+        "asset_name": "feature103-rc11-rx0.dfu",
+    }
+)
+FEATURE_103_RC11_FULL_RAM_POLICY = FEATURE_103_RC11_RX0_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "feature-103-rc11-full-ram",
+        "release_tag": "feature-103-rc11-full-local-ram",
+        "device_firmware": "v0.50-plutoplus-feature103-rc11",
+        "asset_name": "feature103-rc11-full.dfu",
+        "asset_sha256": "d6c129c9562920e671826efeb3d3eebc0cd3cb95ac91d27fa59dadd9e718526c",
+        "source_commit": "cb6b02ab4b995a370e54fe2f8a4623357e6413b4",
+        "fit_body_sha256": "f4563a66b72c832abec4da78dc688c6153926922212c0de6ea5b2e2449d87067",
+        "fit_body_size": 13_185_431,
+    }
+)
+
 # Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
 # ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a
 # local, recoverable-radio persistent canary only: ``hardware_qualified=False``
