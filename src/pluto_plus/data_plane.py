@@ -210,6 +210,7 @@ def probe_iio_data_plane(
     serial: str,
     *,
     samples_per_channel: int = DEFAULT_DATA_PLANE_PROBE_SAMPLES,
+    expected_receiver_count: int | None = None,
     adi_module: ModuleType | Any | None = None,
     iio_contexts: Mapping[str, str] | None = None,
 ) -> DataPlaneProbe:
@@ -217,7 +218,9 @@ def probe_iio_data_plane(
 
     if not _SERIAL_PATTERN.fullmatch(serial):
         raise ValueError("invalid radio serial")
-    require_safe_iio_buffer(samples_per_channel, 2)
+    if expected_receiver_count is not None and expected_receiver_count not in {1, 2}:
+        raise ValueError("expected_receiver_count must be one or two")
+    require_safe_iio_buffer(samples_per_channel, expected_receiver_count or 2)
     started = time.perf_counter_ns()
     resolved_uri = uri
     device: Any | None = None
@@ -234,7 +237,8 @@ def probe_iio_data_plane(
                 )
         module = adi_module or importlib.import_module("adi")
         resolved_uri = resolve_iio_uri(uri, serial, contexts=iio_contexts)
-        device = module.ad9361(uri=resolved_uri)
+        device_type = module.ad9364 if expected_receiver_count == 1 else module.ad9361
+        device = device_type(uri=resolved_uri)
         configure_iio_context_timeout(device.ctx)
         facts = context_facts(device.ctx)
         observed_serial = str(facts.get("serial") or "")
@@ -242,10 +246,17 @@ def probe_iio_data_plane(
             raise DataPlaneRecoveryError(
                 f"data-plane context attested serial {observed_serial!r}, expected {serial!r}"
             )
+        if expected_receiver_count is not None:
+            device.rx_enabled_channels = list(range(expected_receiver_count))
         channels = tuple(int(value) for value in device.rx_enabled_channels)
         if not channels:
             raise DataPlaneRecoveryError("data-plane context has no enabled RX channels")
         receiver_count = len(channels)
+        if expected_receiver_count is not None and receiver_count != expected_receiver_count:
+            raise DataPlaneRecoveryError(
+                "data-plane receiver topology did not accept the expected "
+                f"{expected_receiver_count} channel(s): {channels!r}"
+            )
         wire_bytes = require_safe_iio_buffer(samples_per_channel, receiver_count)
         device.rx_destroy_buffer()
         device.rx_buffer_size = samples_per_channel

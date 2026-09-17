@@ -32,7 +32,7 @@ CheckStatus = Literal["pass", "fail", "unknown"]
 # Reads (and, when enabled, repairs) one radio's persistent U-Boot tuple.  Injected so
 # the read-only lane stays free of any SSH or credential dependency.
 SetupProbe = Callable[[LocalUsbPluto, "str | None"], SetupProbeOutcome]
-DataPlaneProbeRunner = Callable[[LocalUsbPluto], DataPlaneProbe]
+DataPlaneProbeRunner = Callable[[LocalUsbPluto, int], DataPlaneProbe]
 LOCAL_POLICY = BOOTSTRAP_POLICY
 # Rendered from the single canonical definition so the advertised tuple cannot drift
 # away from the one the provisioner actually writes.
@@ -218,7 +218,17 @@ def _diagnose_radio(
         )
     else:
         try:
-            data_plane = data_plane_probe(device)
+            raw_scan = facts.get("cf-ad9361-lpc,scan_channels", ())
+            scan_channels = (
+                tuple(str(value) for value in raw_scan)
+                if isinstance(raw_scan, (tuple, list, set, frozenset))
+                else ()
+            )
+            if len(scan_channels) not in {2, 4}:
+                raise ValueError(
+                    "live RX scan topology must expose one or two complex receivers"
+                )
+            data_plane = data_plane_probe(device, len(scan_channels) // 2)
         except Exception as error:
             _check(
                 checks,

@@ -41,6 +41,12 @@ def test_local_doctor_reports_fresh_canonical_and_unknown_persistence(
             "ad9361-phy,model": "ad9361",
             "iio,buffer-metadata": "1",
             "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+            "cf-ad9361-lpc,scan_channels": (
+                "voltage0",
+                "voltage1",
+                "voltage2",
+                "voltage3",
+            ),
         },
     )
 
@@ -72,12 +78,18 @@ def test_local_doctor_reports_explicit_bounded_data_plane_probe(
             "ad9361-phy,model": "ad9361",
             "iio,buffer-metadata": "1",
             "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+            "cf-ad9361-lpc,scan_channels": (
+                "voltage0",
+                "voltage1",
+                "voltage2",
+                "voltage3",
+            ),
         },
     )
 
     radio = local_doctor.diagnose_local_usb_radios(
         devices=(_device(),),
-        data_plane_probe=lambda device: DataPlaneProbe(
+        data_plane_probe=lambda device, receiver_count: DataPlaneProbe(
             status="fail",
             serial=device.serial or "missing",
             uri="usb:1",
@@ -94,6 +106,46 @@ def test_local_doctor_reports_explicit_bounded_data_plane_probe(
     assert check.status == "fail"
     assert "TimeoutError" in check.summary
     assert radio.overall == "fail"
+
+
+def test_local_doctor_passes_live_single_rx_topology_to_data_plane_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        local_doctor,
+        "inspect_bound_iiod",
+        lambda interface: {
+            "hw_serial": "SERIAL_A",
+            "hw_model": "Analog Devices PlutoSDR Rev.C",
+            "fw_version": "v0.52-plutoplus-spf-adaptive-scan-v1",
+            "ad9361-phy,model": "ad9361",
+            "iio,buffer-metadata": "3",
+            "iio,tandem-agc": "1",
+            "device_names": ("ad9361-phy", "cf-ad9361-lpc"),
+            "cf-ad9361-lpc,scan_channels": ("voltage0", "voltage1"),
+        },
+    )
+    observed: list[int] = []
+
+    def probe(device: object, receiver_count: int) -> DataPlaneProbe:
+        observed.append(receiver_count)
+        return DataPlaneProbe(
+            status="pass",
+            serial="SERIAL_A",
+            uri="usb:1",
+            samples_per_channel=65_536,
+            receiver_count=receiver_count,
+            wire_bytes=262_144,
+            elapsed_ms=1,
+        )
+
+    radio = local_doctor.diagnose_local_usb_radios(
+        devices=(_device(),), data_plane_probe=probe
+    ).radios[0]
+
+    assert observed == [1]
+    check = next(item for item in radio.checks if item.code == "transport.rx_data_plane")
+    assert check.status == "pass"
 
 
 def test_local_doctor_flags_blank_identity_old_firmware_and_wrong_phy(
