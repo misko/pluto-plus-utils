@@ -17,3 +17,4 @@ def test_slot_configuration_cycles_rates_and_omitted_channel() -> None:
     assert configure(1_800)[1] == 10_000_000
     assert frequencies[1] not in configure(600)[2]
     assert len(configure(600)[2]) == 7
+    assert frequencies[0] == 959_687_498
