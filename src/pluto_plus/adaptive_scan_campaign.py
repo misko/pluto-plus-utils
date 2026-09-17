@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 
-from .adaptive_scan import ScanOutcome, ScanSetup, ScanTarget
+from .adaptive_scan import ScanOutcome, ScanSetup, ScanTarget, ScanTerminal
 from .adaptive_scan_client import AdaptiveScanClient, AdaptiveScanVisit
 from .adaptive_scan_radio import (
     AdaptiveScanRadioPreparation,
@@ -19,6 +19,7 @@ from .persistent_hop import require_physical_lan_uri
 
 ClientFactory = Callable[[str], AdaptiveScanClient]
 Detector = Callable[[AdaptiveScanVisit], ScanOutcome]
+VisitSink = Callable[[AdaptiveScanVisit], None]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -27,6 +28,7 @@ class AdaptiveScanCampaignReceipt:
     serial: str
     preparation: AdaptiveScanRadioPreparation
     run: ScannerRunReport
+    terminal: ScanTerminal
     restoration: AdaptiveScanRadioRestoration
 
 
@@ -96,6 +98,7 @@ def run_adaptive_scan_campaign(
     feedback_period_visits: int = 1,
     radio_factory: RadioFactory | None = None,
     client_factory: ClientFactory = AdaptiveScanClient,
+    visit_sink: VisitSink | None = None,
 ) -> AdaptiveScanCampaignReceipt:
     """Run one bounded campaign and always restore the pre-session host state."""
 
@@ -132,6 +135,7 @@ def run_adaptive_scan_campaign(
                 detector,
                 mode=mode,
                 feedback_period_visits=feedback_period_visits,
+                visit_observer=visit_sink,
             )
     except BaseException as error:
         failure = error
@@ -154,10 +158,13 @@ def run_adaptive_scan_campaign(
         raise failure
     if run is None or restoration is None:
         raise RuntimeError("adaptive scan campaign did not produce a complete receipt")
+    if session.terminal is None:
+        raise RuntimeError("adaptive scan campaign lost its terminal record")
     return AdaptiveScanCampaignReceipt(
         uri=selected_uri,
         serial=serial,
         preparation=preparation,
         run=run,
+        terminal=session.terminal,
         restoration=restoration,
     )

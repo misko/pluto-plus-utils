@@ -834,7 +834,8 @@ class _ProbeBackend:
     attributes: dict[str, str] = {}
     closed = False
 
-    def __init__(self, uri: str, *, expected_serial: str) -> None:
+    def __init__(self, uri: str, *, expected_serial: str, **kwargs: object) -> None:
+        del kwargs
         assert uri in {f"ip:{HOST}:30431", f"ip:{HOST}:30432"}
         assert expected_serial == SERIAL
 

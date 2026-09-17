@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 
+from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.hardware.iio_persistent_hop import IioPersistentHopBackend
 from pluto_plus.persistent_hop import (
     PERSISTENT_HOP_CAPABILITIES,
@@ -18,6 +19,7 @@ from pluto_plus.persistent_hop import (
     require_allowed_serial,
     require_physical_lan_uri,
 )
+from pluto_plus.setup_profiles import AD9361_1R1T_TARGET_PROFILE
 
 
 def probe_report(host: str, port: int, expected_serial: str) -> bytes:
@@ -27,7 +29,24 @@ def probe_report(host: str, port: int, expected_serial: str) -> bytes:
         raise ValueError("iiOD probe port must be 30431 or 30432")
     uri = require_physical_lan_uri(f"ip:{host}:{port}")
     serial = require_allowed_serial(expected_serial)
-    backend = IioPersistentHopBackend(uri, expected_serial=serial)
+    def rx0_radio(selected_uri: str, selected_serial: str) -> IioRadioDevice:
+        radio = IioRadioDevice(
+            selected_uri,
+            serial=selected_serial,
+            radio_id=selected_serial,
+            expected_metadata_abi=3,
+        )
+        radio.configure_rx_layout(AD9361_1R1T_TARGET_PROFILE.rx_layout_expectation)
+        return radio
+
+    # Endpoint health is an identity/capability probe.  Firmware 0.52 exposes
+    # the production radio as physical 1R1T, so requiring the historical paired
+    # layout here rejects a healthy endpoint before any capture begins.
+    backend = IioPersistentHopBackend(
+        uri,
+        expected_serial=serial,
+        radio_factory=rx0_radio,
+    )
     try:
         backend.open()
         attributes = dict(backend.context_attributes())

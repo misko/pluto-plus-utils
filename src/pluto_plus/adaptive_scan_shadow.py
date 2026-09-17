@@ -31,6 +31,7 @@ class AdaptiveScanMode(enum.StrEnum):
 
 
 Detector = Callable[[AdaptiveScanVisit], ScanOutcome]
+VisitObserver = Callable[[AdaptiveScanVisit], None]
 ACK_DRAIN_WATERMARK = 32
 
 
@@ -124,6 +125,7 @@ def run_scanner_session(
     rejected_race_retries: int = 5,
     retry_delay_s: float = 0.001,
     sleeper: Callable[[float], None] = time.sleep,
+    visit_observer: VisitObserver | None = None,
 ) -> ScannerRunReport:
     """Run one stream; shadow mode constructs but never transmits feedback."""
 
@@ -149,6 +151,8 @@ def run_scanner_session(
     complete_visits = 0
     for visit in session.visits():
         accumulator.add(visit)
+        if visit_observer is not None:
+            visit_observer(visit)
         if accepted_count - len(acknowledgements) >= ACK_DRAIN_WATERMARK:
             drain_ready_acknowledgements()
         if not visit.iq:

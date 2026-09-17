@@ -14,6 +14,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pluto_plus.adaptive_scan_archive import AdaptiveScanArchive
 from pluto_plus.adaptive_scan_campaign import build_adaptive_scan_setup, run_adaptive_scan_campaign
 from pluto_plus.adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDetectorConfig
 from pluto_plus.adaptive_scan_shadow import AdaptiveScanMode
@@ -80,6 +81,7 @@ def publish(path: Path, document: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--evidence-root", type=Path, required=True)
+    parser.add_argument("--iq-spool-root", type=Path, required=True)
     parser.add_argument("--duration-ms", type=int, default=300_000)
     parser.add_argument("--epoch", type=int, default=None)
     args = parser.parse_args()
@@ -101,17 +103,36 @@ def main() -> int:
         transition_budget_ms=20,
         maximum_revisit_ms=3_000,
     )
-    receipt = run_adaptive_scan_campaign(
-        URI,
-        SERIAL,
-        setup,
-        detector,
-        mode=AdaptiveScanMode.ADAPTIVE,
-        manual_gain_db=40.0,
-        samples_per_block=1_000_000,
-        feedback_period_visits=8,
-    )
     stamp = datetime.fromtimestamp(ordinal * 600, UTC).strftime("%Y%m%dT%H%M%SZ")
+    session_id = f"scan-fw-{identity[:8].hex()}"
+    archive = AdaptiveScanArchive(args.iq_spool_root, session_id, setup)
+    try:
+        receipt = run_adaptive_scan_campaign(
+            URI,
+            SERIAL,
+            setup,
+            detector,
+            mode=AdaptiveScanMode.ADAPTIVE,
+            manual_gain_db=40.0,
+            samples_per_block=1_000_000,
+            feedback_period_visits=8,
+            visit_sink=archive.append,
+        )
+        evidence = {
+            "schema": "leo.v052-adaptive-live/v2",
+            "slot_ordinal": ordinal,
+            "radio_serial": SERIAL,
+            "rate_hz": rate,
+            "omitted_frequency_hz": next(item for item in FREQUENCIES if item not in frequencies),
+            "preparation": json_value(receipt.preparation),
+            "run": json_value(receipt.run),
+            "restoration": json_value(receipt.restoration),
+            "energy_observations": json_value(detector.observations),
+        }
+        archive_path = archive.finish(receipt.terminal, evidence)
+    except BaseException:
+        archive.abort()
+        raise
     path = args.evidence_root / f"adaptive-v052-{stamp}-{rate // 1_000_000}m.json"
     publish(
         path,
@@ -126,6 +147,7 @@ def main() -> int:
             "run": json_value(receipt.run),
             "restoration": json_value(receipt.restoration),
             "energy_observations": json_value(detector.observations),
+            "iq_archive": str(archive_path),
         },
     )
     print(path)
