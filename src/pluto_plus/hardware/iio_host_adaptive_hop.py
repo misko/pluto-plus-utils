@@ -1,8 +1,10 @@
 """Major-3 host feedback over the existing serial-attested single-RX lifecycle."""
 
+from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
+from pluto_plus.hardware.iio import IioRadioDevice
 from pluto_plus.hardware.iio_persistent_hop import IioPersistentHopBackend
 from pluto_plus.host_adaptive_hop import (
     HOST_ADAPTIVE_REQUEST_BYTES,
@@ -68,6 +70,7 @@ def iio_host_adaptive_hop_client(
     expected_serial: str,
     adi_module: ModuleType | Any | None = None,
     iio_module: ModuleType | Any | None = None,
+    radio_factory: Callable[[str, str], IioRadioDevice] | None = None,
 ) -> HostAdaptiveHopClient:
     return HostAdaptiveHopClient(
         uri,
@@ -77,5 +80,6 @@ def iio_host_adaptive_hop_client(
             expected_serial=expected_serial,
             adi_module=adi_module,
             iio_module=iio_module,
+            radio_factory=radio_factory,
         ),
     )

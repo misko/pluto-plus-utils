@@ -8,7 +8,10 @@ from test_host_adaptive_hop import feedback
 from test_iio_persistent_hop import SERIAL, URI, _FakeRadio, _plan
 
 from pluto_plus.adaptive_hop import AdaptiveHopPolicyV2
-from pluto_plus.hardware.iio_host_adaptive_hop import IioHostAdaptiveHopBackend
+from pluto_plus.hardware.iio_host_adaptive_hop import (
+    IioHostAdaptiveHopBackend,
+    iio_host_adaptive_hop_client,
+)
 from pluto_plus.host_adaptive_hop import (
     HostAdaptiveHopRequestV3,
     HostAdaptiveHopStatusV3,
@@ -31,6 +34,28 @@ CAPS = {
     "iio,buffer-adaptive-hop-modes": "shadow,adaptive",
     "iio,buffer-adaptive-hop-policy": "three-miss-two-second-v1",
 }
+
+
+def test_client_forwards_reviewed_radio_factory(monkeypatch):
+    captured = {}
+
+    class Client:
+        def __init__(self, uri, *, expected_serial, backend_factory):
+            captured.update(
+                uri=uri,
+                expected_serial=expected_serial,
+                backend=backend_factory(uri),
+            )
+
+    def factory(*_):
+        return _FakeRadio()
+
+    monkeypatch.setattr("pluto_plus.hardware.iio_host_adaptive_hop.HostAdaptiveHopClient", Client)
+    iio_host_adaptive_hop_client(URI, expected_serial=SERIAL, radio_factory=factory)
+
+    assert captured["uri"] == URI
+    assert captured["expected_serial"] == SERIAL
+    assert captured["backend"]._radio_factory is factory
 
 
 def plan(rx=0):
@@ -85,9 +110,10 @@ def test_major_three_open_selects_exact_rx_and_submits_on_existing_capture(rx):
 def test_unprepared_fastlock_crcs_are_bound_before_wire_validation(rx):
     radio, backend = setup()
     original = plan(rx)
-    unprepared = dc.replace(original, profiles=tuple(
-        dc.replace(profile, profile_crc32=0) for profile in original.profiles
-    ))
+    unprepared = dc.replace(
+        original,
+        profiles=tuple(dc.replace(profile, profile_crc32=0) for profile in original.profiles),
+    )
     session = start(backend, rx, requested_plan=unprepared)
     request = HostAdaptiveHopRequestV3.unpack(radio.open_request[104:])
     assert all(profile.profile_crc32 for profile in request.geometry.profiles)
@@ -100,9 +126,10 @@ def test_unprepared_fastlock_crcs_are_bound_before_wire_validation(rx):
 def test_missing_prepared_crc_still_fails_before_buffer_start():
     radio, backend = setup()
     original = plan()
-    unprepared = dc.replace(original, profiles=tuple(
-        dc.replace(profile, profile_crc32=0) for profile in original.profiles
-    ))
+    unprepared = dc.replace(
+        original,
+        profiles=tuple(dc.replace(profile, profile_crc32=0) for profile in original.profiles),
+    )
     backend.prepare_plan = lambda _: unprepared
     with pytest.raises(ValueError, match="CRC must be non-zero"):
         start(backend, requested_plan=unprepared)
