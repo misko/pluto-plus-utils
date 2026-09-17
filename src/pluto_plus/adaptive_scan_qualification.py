@@ -71,7 +71,12 @@ class AdaptiveScanAccumulator:
         if iq_bytes != record.iq_bytes:
             raise AdaptiveScanQualificationError("IQ payload length disagrees with visit")
         expected_samples = self.setup.source_rate_hz * self.setup.dwell_ms // 1_000
-        if record.valid_end - record.valid_start != expected_samples:
+        valid_samples = record.valid_end - record.valid_start
+        if record.result is VisitResult.CANCELLED:
+            expected_intervals = (0, expected_samples)
+        else:
+            expected_intervals = (expected_samples,)
+        if valid_samples not in expected_intervals:
             raise AdaptiveScanQualificationError("visit valid interval disagrees with dwell")
         self._records.append(record)
         self._iq_bytes += iq_bytes
@@ -84,7 +89,10 @@ class AdaptiveScanAccumulator:
         first = self._records[0].transition_before
         if terminal.final_counter <= first:
             raise AdaptiveScanQualificationError("qualification source span is empty")
-        planned_valid = sum(item.valid_end - item.valid_start for item in self._records)
+        dwell_samples = self.setup.source_rate_hz * self.setup.dwell_ms // 1_000
+        planned_valid = dwell_samples * sum(
+            item.result is not VisitResult.CANCELLED for item in self._records
+        )
         delivered_valid = sum(
             item.valid_end - item.valid_start
             for item in self._records

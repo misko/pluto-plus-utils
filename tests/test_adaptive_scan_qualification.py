@@ -140,3 +140,54 @@ def test_metrics_reject_terminal_or_iq_inconsistency() -> None:
     accumulator = AdaptiveScanAccumulator(setup)
     with pytest.raises(AdaptiveScanQualificationError, match="IQ payload"):
         accumulator.add(AdaptiveScanVisit(records[0], b""))
+
+
+def test_zero_length_cancelled_cleanup_record_is_valid() -> None:
+    setup = _setup(20_000_000, dwell_ms=120)
+    records, _ = _stream(setup, visits=1, delivered=1, transition_samples=400_000)
+    complete = records[0]
+    cancelled = ScanVisit(
+        session=setup.session,
+        generation=setup.generation,
+        visit=1,
+        selection_counter=complete.valid_end,
+        transition_before=complete.valid_end,
+        transition_after=complete.valid_end,
+        valid_start=complete.valid_end,
+        valid_end=complete.valid_end,
+        frequency_hz=setup.targets[0].frequency_hz,
+        iq_bytes=0,
+        missing_samples_before=0,
+        analog_bandwidth_hz=setup.analog_bandwidth_hz,
+        source_rate_hz=setup.source_rate_hz,
+        target=0,
+        profile=0,
+        result=VisitResult.CANCELLED,
+        eligible_mask=1,
+        effective_weight=65_536,
+        profile_crc32=setup.targets[0].profile_crc32,
+    )
+    terminal = ScanTerminal(
+        session=setup.session,
+        generation=setup.generation,
+        final_counter=complete.valid_end + 1,
+        restore_before=complete.valid_end,
+        restore_after=complete.valid_end + 1,
+        planned=2,
+        delivered=1,
+        skipped=0,
+        invalid=0,
+        cancelled=1,
+        iq_bytes=complete.iq_bytes,
+        state=TerminalState.COMPLETED,
+        reason=1,
+        error=0,
+    )
+
+    accumulator = AdaptiveScanAccumulator(setup)
+    accumulator.observe(complete, complete.iq_bytes)
+    accumulator.observe(cancelled, 0)
+    metrics = accumulator.finish(terminal)
+
+    assert metrics.planned_valid_samples == setup.source_rate_hz * setup.dwell_ms // 1_000
+    assert metrics.cancelled == 1

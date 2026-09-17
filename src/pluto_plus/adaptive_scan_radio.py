@@ -144,8 +144,12 @@ def prepare_adaptive_scan_radio(
         words: list[tuple[int, ...]] = []
         for target in setup.targets:
             radio.write_center_frequency_bufferless(target.frequency_hz)
-            if round(radio.read_center_frequency()) != target.frequency_hz:
-                raise RadioConfigurationError("adaptive scan LO did not read back exactly")
+            observed_frequency = round(radio.read_center_frequency())
+            if observed_frequency != target.frequency_hz:
+                raise RadioConfigurationError(
+                    "adaptive scan LO did not read back exactly: "
+                    f"requested={target.frequency_hz} observed={observed_frequency}"
+                )
             stored = radio.store_rx_fastlock_profile(target.profile)
             if radio.save_rx_fastlock_profile(target.profile) != stored:
                 raise RadioConfigurationError("adaptive scan Fast Lock save changed")
