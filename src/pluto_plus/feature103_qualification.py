@@ -25,7 +25,7 @@ from .adaptive_scan_detector import (
 from .adaptive_scan_evidence import (
     AUTHORIZED_FEATURE_103_SERIALS,
     AdaptiveScanEvidenceIdentity,
-    attest_feature103_rc14_ram_boot_receipt,
+    attest_feature103_v1_ram_boot_receipt,
     write_adaptive_scan_evidence,
 )
 from .adaptive_scan_shadow import AdaptiveScanMode
@@ -118,7 +118,7 @@ def run_feature103_qualification(
         raise ValueError("manual gain must be in 0..73 dB")
     if request.samples_per_block <= 0 or request.samples_per_block % 2:
         raise ValueError("samples per block must be positive and even")
-    boot = attest_feature103_rc14_ram_boot_receipt(
+    boot = attest_feature103_v1_ram_boot_receipt(
         request.ram_receipt, expected_serial=request.serial
     )
     detector = _detector(request)
@@ -196,7 +196,7 @@ def _csv_ints(value: str) -> tuple[int, ...]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pluto-feature103-qualify",
-        description="Run one exact RC14-full-gated adaptive-scan qualification cell.",
+        description="Run one exact v0.52-gated adaptive-scan qualification cell.",
     )
     parser.add_argument("--serial", required=True, choices=AUTHORIZED_FEATURE_103_SERIALS)
     parser.add_argument("--uri", required=True)
