@@ -17,13 +17,13 @@ from typing import Any, cast
 
 from .adaptive_scan_evidence import (
     AUTHORIZED_FEATURE_103_SERIALS,
-    FEATURE_103_RC14_DFU_SHA256,
-    FEATURE_103_RC14_FIT_SHA256,
+    FEATURE_103_V1_DFU_SHA256,
+    FEATURE_103_V1_FIT_SHA256,
     SCHEMA,
     AdaptiveScanEvidenceError,
     AdaptiveScanEvidenceIdentity,
     Feature103RamBootIdentity,
-    attest_feature103_rc14_ram_boot_receipt,
+    attest_feature103_v1_ram_boot_receipt,
 )
 
 MATRIX_RATES = (10_000_000, 15_000_000, 20_000_000, 30_000_000)
@@ -31,21 +31,21 @@ ACTIVE_TARGET = 1
 TARGET_FREQUENCIES_HZ = (960_000_000, 1_190_312_500)
 RELEASE_EVIDENCE_SHA256: Mapping[tuple[str, int], str] = {
     (AUTHORIZED_FEATURE_103_SERIALS[0], 10_000_000):
-        "114beef6e7bc43ea0b0500335e2e57f2dab169ad60f7bdb17b53698cfdf6b0da",
+        "11f1176094906f7f682a661a9d1b962f8f4a8c2ec451e4c404f404a0fc261c92",
     (AUTHORIZED_FEATURE_103_SERIALS[0], 15_000_000):
-        "4ca0173b179d6457067be3052bb9da3b04671401a944085056ccdfb4711dd7d9",
+        "190de8ba86ea17421ffe9ed08be2ae37c84d5ced5ccb12f37828a12c4ffbb670",
     (AUTHORIZED_FEATURE_103_SERIALS[0], 20_000_000):
-        "fba438897f03066d0e8a87731348aad99ef818df78ce9d746dcd462f05d86747",
+        "fdeba1a1cd76cc60698e594b5397631bd46695f37edd480b1974e0c4c5c9e976",
     (AUTHORIZED_FEATURE_103_SERIALS[0], 30_000_000):
-        "270861e218d728ea7740948069d2c9385485237e27066c4581a979cc4638b82f",
+        "1edcfb43186f731fc32bf994a8753cdcf111861f29984c662899c8f612518603",
     (AUTHORIZED_FEATURE_103_SERIALS[1], 10_000_000):
-        "85fb3e5f2cbf8ac134ae28ba60660ddf00b942a022881c327ba10a3744a9c35e",
+        "6acdce8bf3d9f7fd1637a7de133e86c30f4adc4135362ad315cbfd9544c245d9",
     (AUTHORIZED_FEATURE_103_SERIALS[1], 15_000_000):
-        "27974eeaed663d963d28e52faf8c28e3c34488076a84c9034c97a9b3bbdcfb86",
+        "8b0e0bebc6433a0ae99507d32e4161f78e8b375bed12b4151e272f734ff8b753",
     (AUTHORIZED_FEATURE_103_SERIALS[1], 20_000_000):
-        "953784c24338ecc120f2308d60f499da0135a5005fddb19635df2e71e80a3c49",
+        "52bbf390bb0e79594b17d4d7df64d9180881b62ef57856ed2ae32de86a6313f8",
     (AUTHORIZED_FEATURE_103_SERIALS[1], 30_000_000):
-        "b5578716a78b523ec6af078ff963dec356e4ec6c2fd8332eb7503aeda4696039",
+        "07abd0188cecd52f736b023f688363e6f3eaa5feda7e5ccaaa843f2876922f18",
 }
 
 _EXPECTED_DURATION_MS = {10_000_000: 30_000, 15_000_000: 30_000,
@@ -256,9 +256,9 @@ def _verify_cell(path: Path) -> tuple[tuple[str, int], Feature103CellVerificatio
     if payload["rf_observations"] != []:
         _fail("release matrix must use the controlled detector")
     candidate = _mapping(payload["candidate"], "candidate")
-    if candidate != {"dfu_sha256": FEATURE_103_RC14_DFU_SHA256,
-                      "fit_sha256": FEATURE_103_RC14_FIT_SHA256}:
-        _fail("campaign is not bound to exact RC14 candidate bytes")
+    if candidate != {"dfu_sha256": FEATURE_103_V1_DFU_SHA256,
+                      "fit_sha256": FEATURE_103_V1_FIT_SHA256}:
+        _fail("campaign is not bound to exact v0.52 candidate bytes")
     campaign = _mapping(payload["campaign"], "campaign")
     _exact_keys(campaign, {"uri", "serial", "preparation", "run", "restoration"}, "campaign")
     serial = str(campaign["serial"])
@@ -417,12 +417,12 @@ def verify_feature103_matrix(
     *,
     expected_evidence_sha256: Mapping[tuple[str, int], str] | None = None,
 ) -> Feature103MatrixVerification:
-    """Verify exactly one RC14 boot and four independent cells per authorized radio."""
+    """Verify one exact v0.52 RAM boot and four cells per authorized radio."""
 
     if set(ram_receipts) != set(AUTHORIZED_FEATURE_103_SERIALS):
         _fail("matrix requires one named boot receipt for each authorized radio")
     boots = tuple(
-        attest_feature103_rc14_ram_boot_receipt(
+        attest_feature103_v1_ram_boot_receipt(
             ram_receipts[serial], expected_serial=serial
         )
         for serial in AUTHORIZED_FEATURE_103_SERIALS
@@ -447,11 +447,11 @@ def verify_feature103_matrix(
             _fail("expected evidence identity map is incomplete")
         for key, cell in cells.items():
             if cell.evidence.sha256 != expected_evidence_sha256[key]:
-                _fail("campaign evidence identity is not the pinned RC14 release record")
+                _fail("campaign evidence identity is not the pinned v0.52 release record")
     return Feature103MatrixVerification(
         schema="pluto-plus-utils.feature-103-release-matrix.v1",
-        candidate_dfu_sha256=FEATURE_103_RC14_DFU_SHA256,
-        candidate_fit_sha256=FEATURE_103_RC14_FIT_SHA256,
+        candidate_dfu_sha256=FEATURE_103_V1_DFU_SHA256,
+        candidate_fit_sha256=FEATURE_103_V1_FIT_SHA256,
         boot_receipts=boots,
         cells=tuple(cells[(serial, rate)] for serial in AUTHORIZED_FEATURE_103_SERIALS
                     for rate in MATRIX_RATES),
@@ -482,7 +482,7 @@ def _json_value(value: Any) -> Any:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="pluto-feature103-verify",
-        description="Verify the exact two-radio RC14 feature-103 release matrix.",
+        description="Verify the exact two-radio v0.52 feature-103 release matrix.",
     )
     parser.add_argument("--ram-receipt", action="append", required=True,
                         metavar="SERIAL=PATH")

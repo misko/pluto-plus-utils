@@ -3,7 +3,7 @@ from __future__ import annotations
 from pluto_plus.doctor import (
     CANONICAL_POLICY,
     CANONICAL_UBOOT,
-    IQ_DIRECT_ASYNC_V5_RELEASE_PERSISTENT_POLICY,
+    FEATURE_103_V1_RELEASE_PERSISTENT_POLICY,
     PERSISTENT_UPGRADE_POLICY,
     diagnose_radio,
 )
@@ -42,14 +42,14 @@ def _snapshot(
     )
 
 
-def test_persistent_upgrade_policy_selects_hardware_qualified_direct_async_release() -> None:
-    assert PERSISTENT_UPGRADE_POLICY is IQ_DIRECT_ASYNC_V5_RELEASE_PERSISTENT_POLICY
+def test_persistent_upgrade_policy_selects_hardware_qualified_adaptive_scan_release() -> None:
+    assert PERSISTENT_UPGRADE_POLICY is FEATURE_103_V1_RELEASE_PERSISTENT_POLICY
     assert PERSISTENT_UPGRADE_POLICY.hardware_qualified is True
     assert PERSISTENT_UPGRADE_POLICY.profile_id == (
-        "iq-direct-async-v5-release-persistent-promotion"
+        "adaptive-scan-v1-release-persistent-promotion"
     )
     assert PERSISTENT_UPGRADE_POLICY.device_firmware == (
-        "v0.51-plutoplus-spf-iq-direct-async-v5"
+        "v0.52-plutoplus-spf-adaptive-scan-v1"
     )
 
 

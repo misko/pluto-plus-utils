@@ -401,6 +401,15 @@ IQ_DIRECT_ASYNC_V5_RELEASE_PROFILE = DiagnosticProfile(
     release_rank=38,
 )
 
+ADAPTIVE_SCAN_V1_RELEASE_PROFILE = DiagnosticProfile(
+    profile_id="adaptive-scan-v1-release",
+    firmware_version="v0.52-plutoplus-spf-adaptive-scan-v1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="hardware-qualified adaptive scan release",
+    release_rank=39,
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -440,6 +449,7 @@ DIAGNOSTIC_PROFILES = (
     IQ_DIRECT_ASYNC_V4_RELEASE_PROFILE,
     COUNTER_RX_V1_RELEASE_PROFILE,
     IQ_DIRECT_ASYNC_V5_RELEASE_PROFILE,
+    ADAPTIVE_SCAN_V1_RELEASE_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
@@ -479,7 +489,7 @@ def parse_metadata_abi(value: object) -> MetadataAbi:
 # hardware-qualified release.  Release candidates, development builds, and
 # RAM-only promotion candidates are deliberately excluded, so doctor never
 # proposes moving a radio onto an image that was not qualified for persistence.
-UPGRADE_TARGET_PROFILE = DDR_RING_V1_RELEASE_PROFILE
+UPGRADE_TARGET_PROFILE = ADAPTIVE_SCAN_V1_RELEASE_PROFILE
 
 
 def upgrade_target_for(profile: DiagnosticProfile | None) -> DiagnosticProfile | None:

@@ -36,6 +36,12 @@ FEATURE_103_RC14_DFU_SHA256 = (
 FEATURE_103_RC14_FIT_SHA256 = (
     "26db9c700ad5b2cf01a3a9fc841f847bc0d06f7a1660cbbd3f181dcc4bdf048e"
 )
+FEATURE_103_V1_DFU_SHA256 = (
+    "f88c5fe44160f0a09031fb8b68f92b2280022e0f38174845b7edc3a37c26eea2"
+)
+FEATURE_103_V1_FIT_SHA256 = (
+    "1f3ec2b6937e09a349e952a7bcc499a2902043f09f35c51fb0a5d50eb34d5403"
+)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -146,6 +152,22 @@ def attest_feature103_rc14_ram_boot_receipt(
         fit_sha256=FEATURE_103_RC14_FIT_SHA256,
         fit_size=13_200_115,
         candidate="RC14-full",
+    )
+
+
+def attest_feature103_v1_ram_boot_receipt(
+    path: Path, *, expected_serial: str
+) -> Feature103RamBootIdentity:
+    """Require a private successful exact-v0.52 RAM return for this serial."""
+
+    return _attest_feature103_ram_boot_receipt(
+        path,
+        expected_serial=expected_serial,
+        profile_id="adaptive-scan-v1-release-ram",
+        dfu_sha256=FEATURE_103_V1_DFU_SHA256,
+        fit_sha256=FEATURE_103_V1_FIT_SHA256,
+        fit_size=13_007_023,
+        candidate="v0.52 adaptive-scan-v1",
     )
 
 

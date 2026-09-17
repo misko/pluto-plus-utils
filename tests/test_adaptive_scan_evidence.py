@@ -12,10 +12,13 @@ from pluto_plus.adaptive_scan_evidence import (
     AUTHORIZED_FEATURE_103_SERIALS,
     FEATURE_103_RC12_DFU_SHA256,
     FEATURE_103_RC12_FIT_SHA256,
+    FEATURE_103_V1_DFU_SHA256,
+    FEATURE_103_V1_FIT_SHA256,
     SCHEMA,
     AdaptiveScanEvidenceError,
     attest_feature103_fleet_ram_boot_receipts,
     attest_feature103_ram_boot_receipt,
+    attest_feature103_v1_ram_boot_receipt,
     write_adaptive_scan_evidence,
 )
 
@@ -154,3 +157,37 @@ def test_boot_gate_rejects_unapproved_serial(tmp_path: Path) -> None:
         attest_feature103_ram_boot_receipt(
             path, expected_serial="104000bac4950008230026001b440a003a"
         )
+
+
+def test_exact_v052_ram_receipt_is_required(tmp_path: Path) -> None:
+    receipt_id = "5" * 32
+    path = tmp_path / f"{receipt_id}.json"
+    serial = AUTHORIZED_FEATURE_103_SERIALS[0]
+    path.write_text(
+        json.dumps(
+            {
+                "receipt_id": receipt_id,
+                "outcome": "success",
+                "phases": ["return_attested", "tx_safe_attested"],
+                "returned_serial": serial,
+                "plan": {
+                    "serial": serial,
+                    "profile_id": "adaptive-scan-v1-release-ram",
+                    "image_sha256": FEATURE_103_V1_DFU_SHA256,
+                    "fit_sha256": FEATURE_103_V1_FIT_SHA256,
+                    "fit_size": 13_007_023,
+                    "usb_sysfs_path": "/sys/bus/usb/devices/3-11",
+                },
+            }
+        )
+    )
+    path.chmod(0o600)
+
+    identity = attest_feature103_v1_ram_boot_receipt(path, expected_serial=serial)
+    assert identity.dfu_sha256 == FEATURE_103_V1_DFU_SHA256
+
+    payload = json.loads(path.read_bytes())
+    payload["plan"]["fit_sha256"] = FEATURE_103_RC12_FIT_SHA256
+    path.write_text(json.dumps(payload))
+    with pytest.raises(AdaptiveScanEvidenceError, match="exact v0.52"):
+        attest_feature103_v1_ram_boot_receipt(path, expected_serial=serial)

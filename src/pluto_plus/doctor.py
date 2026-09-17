@@ -1317,6 +1317,38 @@ FEATURE_103_RC14_FULL_RAM_POLICY = FEATURE_103_RC13_FULL_RAM_POLICY.model_copy(
     }
 )
 
+# Exact v0.52 trusted-build bytes from run 35168772895.  The RAM identity and
+# local persistent canary deliberately remain hardware-unqualified until these
+# exact bytes repeat the two-radio release matrix, abrupt-client recovery,
+# rollback, persistent return, and cold-boot gates.
+FEATURE_103_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
+    profile_id="adaptive-scan-v1-release-ram",
+    release_tag="adaptive-scan-v1-candidate-2da11edf69bb",
+    device_firmware="v0.52-plutoplus-spf-adaptive-scan-v1",
+    asset_name="plutoplus-spf-adaptive-scan-v1-2da11edf69bb-pluto.dfu",
+    asset_sha256="f88c5fe44160f0a09031fb8b68f92b2280022e0f38174845b7edc3a37c26eea2",
+    release_url="https://github.com/misko/plutosdr-fw/actions/runs/35168772895",
+    source_commit="2da11edf69bba3e193b816da037da13e41c51a4d",
+    fit_body_sha256="1f3ec2b6937e09a349e952a7bcc499a2902043f09f35c51fb0a5d50eb34d5403",
+    fit_body_size=13_007_023,
+    hardware_qualified=False,
+    published_at=datetime(2026, 9, 17, 1, 17, tzinfo=UTC),
+)
+FEATURE_103_V1_PERSISTENT_CANARY_POLICY = FEATURE_103_V1_RELEASE_RAM_POLICY.model_copy(
+    update={"profile_id": "adaptive-scan-v1-persistent-canary"}
+)
+FEATURE_103_V1_RELEASE_PERSISTENT_POLICY = FEATURE_103_V1_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "adaptive-scan-v1-release-persistent-promotion",
+        "release_tag": "v0.52-plutoplus-spf-adaptive-scan-v1",
+        "release_url": (
+            "https://github.com/misko/plutosdr-fw/releases/tag/"
+            "v0.52-plutoplus-spf-adaptive-scan-v1"
+        ),
+        "hardware_qualified": True,
+    }
+)
+
 # Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
 # ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a
 # local, recoverable-radio persistent canary only: ``hardware_qualified=False``
@@ -1564,7 +1596,7 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 # repair. USB and enrolled-network upgrades select the newest release that has
 # completed the persistent hardware gate; setup keeps the immutable U-Boot
 # tuple but accepts only an exact QSPI image in the allowlist below.
-PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_V5_RELEASE_PERSISTENT_POLICY
+PERSISTENT_UPGRADE_POLICY = FEATURE_103_V1_RELEASE_PERSISTENT_POLICY
 
 # Canonical U-Boot repair may run only while one of these exact, reviewed,
 # hardware-qualified QSPI images is active. The tuple itself remains fixed;
@@ -1578,6 +1610,7 @@ SETUP_REPAIR_POLICIES = (
     IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY,
+    IQ_DIRECT_ASYNC_V5_RELEASE_PERSISTENT_POLICY,
     COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY,
     PERSISTENT_UPGRADE_POLICY,
 )
@@ -1597,6 +1630,8 @@ SETUP_INSPECTION_POLICIES = (
     IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V5_CANDIDATE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V5_RELEASE_RAM_POLICY,
+    FEATURE_103_V1_RELEASE_RAM_POLICY,
+    FEATURE_103_V1_PERSISTENT_CANARY_POLICY,
 )
 
 

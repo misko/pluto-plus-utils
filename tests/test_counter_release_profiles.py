@@ -98,6 +98,12 @@ def test_counter_release_is_known_without_version_prefix_inference():
             "26db9c700ad5b2cf01a3a9fc841f847bc0d06f7a1660cbbd3f181dcc4bdf048e",
             13_200_115,
         ),
+        (
+            "adaptive-scan-v1-release-ram",
+            "f88c5fe44160f0a09031fb8b68f92b2280022e0f38174845b7edc3a37c26eea2",
+            "1f3ec2b6937e09a349e952a7bcc499a2902043f09f35c51fb0a5d50eb34d5403",
+            13_007_023,
+        ),
     ],
 )
 def test_feature_103_candidate_is_exactly_ram_only(
@@ -112,7 +118,10 @@ def test_feature_103_candidate_is_exactly_ram_only(
     assert profile.policy.fit_body_size == fit_size
     if profile_id not in {"feature-103-rc12-parent-ram", "feature-103-rc12-repack-ram"}:
         assert ("iio,adaptive-scan", "1") in profile.required_iio_capabilities
-    if profile_id != "feature-103-rc12-parent-ram":
+    if profile_id not in {
+        "feature-103-rc12-parent-ram",
+        "adaptive-scan-v1-release-ram",
+    }:
         assert not any(
             candidate.policy.asset_sha256 == profile.policy.asset_sha256
             and candidate.persistent_allowed
@@ -141,3 +150,35 @@ def test_feature_103_rx0_candidates_attest_physical_rx0_topology(profile_id: str
 def test_feature_103_rc1_through_rc11_are_quarantined() -> None:
     for revision in range(1, 12):
         assert f"feature-103-rc{revision}-ram" not in flash.STANDALONE_FLASH_PROFILES
+
+
+def test_feature_103_v1_separates_ram_and_local_persistent_canary() -> None:
+    ram = flash.STANDALONE_FLASH_PROFILES["adaptive-scan-v1-release-ram"]
+    canary = flash.STANDALONE_FLASH_PROFILES["adaptive-scan-v1-persistent-canary"]
+    promotion = flash.STANDALONE_FLASH_PROFILES[
+        "adaptive-scan-v1-release-persistent-promotion"
+    ]
+
+    assert ram.persistent_allowed is False
+    assert canary.persistent_allowed is True
+    assert canary.policy.hardware_qualified is False
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.hardware_qualified is True
+    assert ram.policy.asset_sha256 == canary.policy.asset_sha256 == promotion.policy.asset_sha256
+    assert (
+        ram.policy.fit_body_sha256
+        == canary.policy.fit_body_sha256
+        == promotion.policy.fit_body_sha256
+    )
+    assert ram.source_iio_layout == flash.PAIRED_RX_TX_CAPABLE_LAYOUT
+    assert ram.return_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
+    assert canary.source_iio_layout == flash.PAIRED_RX_TX_CAPABLE_LAYOUT
+    assert canary.return_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
+    assert promotion.source_iio_layout == flash.PAIRED_RX_TX_CAPABLE_LAYOUT
+    assert promotion.return_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
+    assert ("iio,adaptive-scan", "1") in canary.required_iio_capabilities
+    assert ("iio,adaptive-scan", "1") in promotion.required_iio_capabilities
+    assert doctor.PERSISTENT_UPGRADE_POLICY is promotion.policy
+    assert promotion.policy in doctor.SETUP_REPAIR_POLICIES
+    assert ram.policy in doctor.SETUP_INSPECTION_POLICIES
+    assert canary.policy in doctor.SETUP_INSPECTION_POLICIES

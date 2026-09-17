@@ -9,8 +9,8 @@ import pytest
 
 from pluto_plus.adaptive_scan_evidence import (
     AUTHORIZED_FEATURE_103_SERIALS,
-    FEATURE_103_RC14_DFU_SHA256,
-    FEATURE_103_RC14_FIT_SHA256,
+    FEATURE_103_V1_DFU_SHA256,
+    FEATURE_103_V1_FIT_SHA256,
     AdaptiveScanEvidenceIdentity,
 )
 from pluto_plus.adaptive_scan_shadow import AdaptiveScanMode
@@ -34,10 +34,10 @@ def _boot_receipt(tmp_path: Path, *, serial: str = AUTHORIZED_FEATURE_103_SERIAL
                 "returned_serial": serial,
                 "plan": {
                     "serial": serial,
-                    "profile_id": "feature-103-rc14-full-ram",
-                    "image_sha256": FEATURE_103_RC14_DFU_SHA256,
-                    "fit_sha256": FEATURE_103_RC14_FIT_SHA256,
-                    "fit_size": 13_200_115,
+                    "profile_id": "adaptive-scan-v1-release-ram",
+                    "image_sha256": FEATURE_103_V1_DFU_SHA256,
+                    "fit_sha256": FEATURE_103_V1_FIT_SHA256,
+                    "fit_size": 13_007_023,
                     "usb_sysfs_path": "/sys/bus/usb/devices/3-11",
                 },
             }
@@ -68,12 +68,12 @@ def _request(tmp_path: Path) -> Feature103QualificationRequest:
     )
 
 
-def test_dry_run_is_rc14_receipt_gated_and_non_mutating(tmp_path: Path) -> None:
+def test_dry_run_is_v052_receipt_gated_and_non_mutating(tmp_path: Path) -> None:
     request = _request(tmp_path)
     result = run_feature103_qualification(request, execute=False)
 
     assert result["mode"] == "dry_run"
-    assert result["plan"]["ram_boot"]["dfu_sha256"] == FEATURE_103_RC14_DFU_SHA256
+    assert result["plan"]["ram_boot"]["dfu_sha256"] == FEATURE_103_V1_DFU_SHA256
     assert result["plan"]["setup"]["source_rate_hz"] == 10_000_000
     assert result["plan"]["will_mutate_radio_settings"] is False
     assert result["plan"]["will_write_qspi"] is False
@@ -122,7 +122,7 @@ def test_execute_requires_confirmation_and_writes_gate_evidence(tmp_path: Path) 
     assert result["passed"] is True
     assert result["will_write_qspi"] is False
     assert len(calls) == 2
-    assert calls[1][2]["candidate_fit_sha256"] == FEATURE_103_RC14_FIT_SHA256
+    assert calls[1][2]["candidate_fit_sha256"] == FEATURE_103_V1_FIT_SHA256
 
 
 def test_rejects_unapproved_serial_before_campaign(tmp_path: Path) -> None:

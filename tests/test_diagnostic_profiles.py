@@ -206,7 +206,7 @@ def test_upgrade_target_is_strictly_upgrade_only() -> None:
 
     older = select_diagnostic_profile("v0.38-plutoplus-spf-libiio-metadata-v5")
     intermediate = select_diagnostic_profile("v0.40-plutoplus-spf-tandem-agc-v7")
-    at_target = select_diagnostic_profile("v0.43-plutoplus-spf-ddr-ring-v1")
+    at_target = select_diagnostic_profile("v0.52-plutoplus-spf-adaptive-scan-v1")
 
     assert upgrade_target_for(older) is UPGRADE_TARGET_PROFILE
     # Never a sideways move, never a downgrade, never a guess.
@@ -218,7 +218,7 @@ def test_upgrade_target_is_strictly_upgrade_only() -> None:
 def test_upgrade_target_is_a_full_release_not_a_candidate() -> None:
     from pluto_plus.diagnostic_profiles import UPGRADE_TARGET_PROFILE
 
-    assert UPGRADE_TARGET_PROFILE.release_status == "hardware-qualified release"
+    assert UPGRADE_TARGET_PROFILE.release_status == "hardware-qualified adaptive scan release"
 
 
 def test_release_ranks_are_unique_and_ordered() -> None:
