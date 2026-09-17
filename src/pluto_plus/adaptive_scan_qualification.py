@@ -83,7 +83,13 @@ class AdaptiveScanAccumulator:
 
     def finish(self, terminal: ScanTerminal) -> AdaptiveScanMetrics:
         if terminal.state is not TerminalState.COMPLETED:
-            raise AdaptiveScanQualificationError("qualification session did not complete")
+            raise AdaptiveScanQualificationError(
+                "qualification session did not complete: "
+                f"state={terminal.state.name} reason={terminal.reason} error={terminal.error} "
+                f"planned={terminal.planned} delivered={terminal.delivered} "
+                f"skipped={terminal.skipped} invalid={terminal.invalid} "
+                f"cancelled={terminal.cancelled}"
+            )
         if not self._records:
             raise AdaptiveScanQualificationError("qualification session returned no visits")
         first = self._records[0].transition_before
