@@ -3867,10 +3867,12 @@ def doctor(
         if probe_data_plane:
             from pluto_plus.data_plane import probe_iio_data_plane
 
-            def active_probe(device: LocalUsbPluto) -> Any:
+            def active_probe(device: LocalUsbPluto, receiver_count: int) -> Any:
                 if device.serial is None:
                     raise ValueError("selected USB radio has no stable serial")
-                return probe_iio_data_plane("usb:", device.serial)
+                return probe_iio_data_plane(
+                    "usb:", device.serial, expected_receiver_count=receiver_count
+                )
 
             doctor_options["data_plane_probe"] = active_probe
         return diagnose_local_usb_radios(usb_sysfs_path, **doctor_options)

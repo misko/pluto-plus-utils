@@ -41,7 +41,7 @@ class _ProbeDevice:
     def rx(self) -> np.ndarray:
         if self.fail:
             raise TimeoutError(110, "synthetic iiOD wedge")
-        return np.ones((2, self.rx_buffer_size), dtype=np.complex64)
+        return np.ones((len(self.rx_enabled_channels), self.rx_buffer_size), dtype=np.complex64)
 
 
 class _ProbeAdi:
@@ -52,6 +52,11 @@ class _ProbeAdi:
 
     def ad9361(self, uri: str) -> _ProbeDevice:
         self.device = _ProbeDevice(uri, serial=self.serial, fail=self.fail)
+        return self.device
+
+    def ad9364(self, uri: str) -> _ProbeDevice:
+        self.device = _ProbeDevice(uri, serial=self.serial, fail=self.fail)
+        self.device.rx_enabled_channels = [0]
         return self.device
 
 
@@ -80,6 +85,24 @@ def test_bounded_data_plane_probe_attests_serial_shape_and_cleanup() -> None:
     assert probe.uri == "usb:1.2.3"
     assert module.device is not None
     assert module.device.destroy_calls == 3
+
+
+def test_bounded_data_plane_probe_selects_live_single_receiver_topology() -> None:
+    module = _ProbeAdi()
+
+    probe = probe_iio_data_plane(
+        "usb:",
+        "SERIAL_A",
+        expected_receiver_count=1,
+        adi_module=module,
+        iio_contexts={"usb:1.2.3": "Pluto serial=SERIAL_A"},
+    )
+
+    assert probe.status == "pass"
+    assert probe.receiver_count == 1
+    assert probe.wire_bytes == 262_144
+    assert module.device is not None
+    assert module.device.rx_enabled_channels == [0]
 
 
 def test_bounded_data_plane_probe_reports_timeout_without_throwing() -> None:
