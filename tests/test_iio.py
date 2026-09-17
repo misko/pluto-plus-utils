@@ -552,6 +552,47 @@ def test_iio_adapter_accepts_negotiated_multirate_host_adaptive_rx0(rate) -> Non
         radio.close()
 
 
+@pytest.mark.parametrize("rate", [10_000_000, 15_000_000, 20_000_000, 30_000_000])
+def test_iio_adapter_configures_feature_103_fixed_bandwidth_rx0(rate) -> None:
+    module = CaptureRateFakeAdi()
+    radio = IioRadioDevice("ip:192.168.1.18", serial="SERIAL_A", adi_module=module)
+    radio.open()
+    try:
+        readback = radio.configure_adaptive_scan_rx0_geometry(
+            sample_rate_hz=rate,
+            rf_bandwidth_hz=8_000_000,
+            manual_gain_db=40.0,
+        )
+        assert readback.sample_rate_hz == rate
+        assert readback.bandwidth_hz == 8_000_000
+        assert readback.channels == (0,)
+        assert readback.gain_modes == (GainMode.MANUAL,)
+        assert readback.gain_db == (40.0,)
+        assert module.device is not None
+        assert module.device.tx_hardwaregain_chan0 == -80.0
+        assert module.device.tx_hardwaregain_chan1 == -80.0
+        assert module.device.dds_enabled == [0] * 8
+    finally:
+        radio.close()
+
+
+@pytest.mark.parametrize("rate", [5_000_000, 60_000_000])
+def test_iio_adapter_rejects_out_of_scope_adaptive_scan_rates(rate) -> None:
+    radio = IioRadioDevice(
+        "ip:192.168.1.18", serial="SERIAL_A", adi_module=CaptureRateFakeAdi()
+    )
+    radio.open()
+    try:
+        with pytest.raises(ValueError, match="10, 15, 20, or 30"):
+            radio.configure_adaptive_scan_rx0_geometry(
+                sample_rate_hz=rate,
+                rf_bandwidth_hz=8_000_000,
+                manual_gain_db=40.0,
+            )
+    finally:
+        radio.close()
+
+
 @pytest.mark.parametrize("channels", [(1,), (0,)])
 def test_iio_adapter_rejects_unnegotiated_multirate_single_rx(channels) -> None:
     module = CaptureRateFakeAdi()

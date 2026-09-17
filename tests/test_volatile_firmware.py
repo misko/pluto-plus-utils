@@ -214,11 +214,40 @@ def test_ssh_transition_accepts_equivalent_rev_c_models_from_iiod_and_device_tre
     )
     transition._radio = radio  # type: ignore[assignment]
 
+    transition.preflight(plan)
     transition.enter_ram(plan)
 
     assert radio.muted == [plan.serial]
     assert len(transport.commands) == 1
     assert "/usr/sbin/device_reboot ram" in transport.commands[0]
+
+
+def test_ssh_transition_preflight_failure_precedes_tx_or_reboot(
+    ram_plan: tuple[volatile.VolatileFirmwarePlan, Path, Path, tuple[LocalUsbPluto, ...]],
+) -> None:
+    plan, _, _, _ = ram_plan
+    transport = RecordingSshTransport()
+    transition = volatile.SshRamBootTransition(transport)  # type: ignore[arg-type]
+    radio = FixedAttestationRadio(
+        LocalRebootAttestation(
+            serial=plan.serial,
+            firmware="unexpected-firmware",
+            boot_id="boot-a",
+            capabilities=LocalRebootCapabilities(
+                board_model="Analog Devices PlutoSDR Rev.C (Z7010/AD9363)",
+                phy_model=plan.before_phy,
+                rx_scan_channels=("voltage0", "voltage1"),
+                tandem_agc=False,
+            ),
+        )
+    )
+    transition._radio = radio  # type: ignore[assignment]
+
+    with pytest.raises(volatile.VolatileFirmwareError, match="SSH facts changed"):
+        transition.preflight(plan)
+
+    assert radio.muted == []
+    assert transport.commands == []
 
 
 def test_execute_uses_only_exact_path_firmware_alt_and_attests_return(

@@ -976,6 +976,9 @@ def radio_reboot_local(
 
     selected_known_hosts = ssh_known_hosts_file.expanduser().absolute()
     expected_return_firmware = None
+    expected_return_rx_scan_channels = None
+    expected_return_tandem_agc = None
+    expected_return_detector_only = None
     if expect_return_profile is not None:
         from pluto_plus.bootstrap_firmware import STANDALONE_FLASH_PROFILES
 
@@ -992,6 +995,11 @@ def radio_reboot_local(
                 2,
             )
         expected_return_firmware = str(return_profile.policy.device_firmware)
+        expected_return_rx_scan_channels = tuple(
+            return_profile.return_iio_layout.rx_scan_channels
+        )
+        expected_return_tandem_agc = return_profile.return_iio_layout.tandem_agc
+        expected_return_detector_only = not expected_return_rx_scan_channels
     if isolate_usb_route and exact_usb_route:
         _fail(
             "local_reboot_route_mode_conflict",
@@ -1050,6 +1058,9 @@ def radio_reboot_local(
             ssh_host=ssh_host,
             known_hosts_file=selected_known_hosts,
             expected_return_firmware=expected_return_firmware,
+            expected_return_rx_scan_channels=expected_return_rx_scan_channels,
+            expected_return_tandem_agc=expected_return_tandem_agc,
+            expected_return_detector_only=expected_return_detector_only,
             exact_usb_route=exact_usb_route,
             **prepare_options,
         )

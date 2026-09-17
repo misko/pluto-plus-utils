@@ -989,6 +989,41 @@ class IioRadioDevice:
             )
         return readback
 
+    def configure_adaptive_scan_rx0_geometry(
+        self,
+        *,
+        sample_rate_hz: int,
+        rf_bandwidth_hz: int,
+        manual_gain_db: float,
+    ) -> IioReceiverSettingsReadback:
+        """Apply feature-103's fixed-bandwidth, factor-one RX0 geometry."""
+
+        if sample_rate_hz not in (10_000_000, 15_000_000, 20_000_000, 30_000_000):
+            raise ValueError("adaptive scan rate must be 10, 15, 20, or 30 MS/s")
+        if not 200_000 <= rf_bandwidth_hz <= 56_000_000:
+            raise ValueError("adaptive scan bandwidth is outside the AD9361 range")
+        if not np.isfinite(manual_gain_db):
+            raise ValueError("adaptive scan manual gain must be finite")
+        self.configure_source_locked_rx_rate(sample_rate_hz)
+        device = self._require_bufferless_device()
+        device.rx_rf_bandwidth = rf_bandwidth_hz
+        device.rx_enabled_channels = [0]
+        device.gain_control_mode_chan0 = GainMode.MANUAL.value
+        device.rx_hardwaregain_chan0 = manual_gain_db
+        _mute_transmit(device)
+        readback = self.read_receiver_settings_readback()
+        if (
+            round(readback.sample_rate_hz) != sample_rate_hz
+            or round(readback.bandwidth_hz) != rf_bandwidth_hz
+            or readback.channels != (0,)
+            or readback.gain_modes != (GainMode.MANUAL,)
+            or readback.gain_db != (manual_gain_db,)
+        ):
+            raise RadioConfigurationError(
+                "adaptive scan RX0 geometry did not read back exactly"
+            )
+        return readback
+
     def _require_persistent_receiver_geometry(
         self, channels: tuple[int, ...], sample_rate_hz: int
     ) -> None:
@@ -1048,6 +1083,16 @@ class IioRadioDevice:
                 f"invalid RX Fast Lock profile {profile} readback: {raw!r}"
             )
         return values
+
+    def load_rx_fastlock_profile(self, profile: int, values: tuple[int, ...]) -> None:
+        """Reload one previously attested 16-byte RX Fast Lock profile."""
+
+        _validate_fastlock_profile(profile)
+        if len(values) != 16 or any(value < 0 or value > 255 for value in values):
+            raise ValueError("RX Fast Lock profile must contain sixteen bytes")
+        device = self._require_bufferless_device()
+        payload = f"{profile} {values[0]}," + ",".join(str(value) for value in values[1:])
+        _rx_fastlock_channel(device).attrs["fastlock_load"].value = payload
 
     def recall_rx_fastlock_profile(self, profile: int) -> None:
         """Issue one RX Fast Lock recall write without arming an RX buffer."""
