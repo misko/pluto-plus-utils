@@ -23,7 +23,7 @@ SERIAL = "104000bac4950008230026001b440a003a"
 URI = "ip:192.168.1.17"
 RATES = (10_000_000, 15_000_000, 20_000_000)
 FREQUENCIES = (
-    960_000_000,
+    959_687_500,
     1_190_312_500,
     1_209_687_498,
     1_440_312_500,
@@ -106,6 +106,20 @@ def main() -> int:
     stamp = datetime.fromtimestamp(ordinal * 600, UTC).strftime("%Y%m%dT%H%M%SZ")
     session_id = f"scan-fw-{identity[:8].hex()}"
     archive = AdaptiveScanArchive(args.iq_spool_root, session_id, setup)
+    clock_bracket: dict[str, int] = {}
+
+    def record_clock_bracket(
+        before_realtime_ns: int,
+        before_monotonic_ns: int,
+        after_realtime_ns: int,
+        after_monotonic_ns: int,
+    ) -> None:
+        clock_bracket.update(
+            begin_before_realtime_ns=before_realtime_ns,
+            begin_before_monotonic_ns=before_monotonic_ns,
+            begin_after_realtime_ns=after_realtime_ns,
+            begin_after_monotonic_ns=after_monotonic_ns,
+        )
     try:
         receipt = run_adaptive_scan_campaign(
             URI,
@@ -117,7 +131,10 @@ def main() -> int:
             samples_per_block=1_000_000,
             feedback_period_visits=8,
             visit_sink=archive.append,
+            session_clock_sink=record_clock_bracket,
         )
+        terminal_realtime_ns = time.time_ns()
+        terminal_monotonic_ns = time.monotonic_ns()
         evidence = {
             "schema": "leo.v052-adaptive-live/v2",
             "slot_ordinal": ordinal,
@@ -128,6 +145,11 @@ def main() -> int:
             "run": json_value(receipt.run),
             "restoration": json_value(receipt.restoration),
             "energy_observations": json_value(detector.observations),
+            "utc_timing": {
+                **clock_bracket,
+                "terminal_realtime_ns": terminal_realtime_ns,
+                "terminal_monotonic_ns": terminal_monotonic_ns,
+            },
         }
         archive_path = archive.finish(receipt.terminal, evidence)
     except BaseException:

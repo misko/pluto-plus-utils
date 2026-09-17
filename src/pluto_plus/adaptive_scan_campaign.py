@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import time
 from collections.abc import Callable
 
 from .adaptive_scan import ScanOutcome, ScanSetup, ScanTarget, ScanTerminal
@@ -20,6 +21,7 @@ from .persistent_hop import require_physical_lan_uri
 ClientFactory = Callable[[str], AdaptiveScanClient]
 Detector = Callable[[AdaptiveScanVisit], ScanOutcome]
 VisitSink = Callable[[AdaptiveScanVisit], None]
+SessionClockSink = Callable[[int, int, int, int], None]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -99,6 +101,7 @@ def run_adaptive_scan_campaign(
     radio_factory: RadioFactory | None = None,
     client_factory: ClientFactory = AdaptiveScanClient,
     visit_sink: VisitSink | None = None,
+    session_clock_sink: SessionClockSink | None = None,
 ) -> AdaptiveScanCampaignReceipt:
     """Run one bounded campaign and always restore the pre-session host state."""
 
@@ -126,10 +129,19 @@ def run_adaptive_scan_campaign(
     try:
         client = client_factory(host)
         client.capabilities()
+        begin_before_realtime_ns = time.time_ns()
+        begin_before_monotonic_ns = time.monotonic_ns()
         with client.start(
             preparation.setup,
             samples_per_block=samples_per_block,
         ) as session:
+            if session_clock_sink is not None:
+                session_clock_sink(
+                    begin_before_realtime_ns,
+                    begin_before_monotonic_ns,
+                    time.time_ns(),
+                    time.monotonic_ns(),
+                )
             run = run_scanner_session(
                 session,
                 detector,
