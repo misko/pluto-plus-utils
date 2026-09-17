@@ -155,13 +155,30 @@ def test_feature_103_rc1_through_rc11_are_quarantined() -> None:
 def test_feature_103_v1_separates_ram_and_local_persistent_canary() -> None:
     ram = flash.STANDALONE_FLASH_PROFILES["adaptive-scan-v1-release-ram"]
     canary = flash.STANDALONE_FLASH_PROFILES["adaptive-scan-v1-persistent-canary"]
+    promotion = flash.STANDALONE_FLASH_PROFILES[
+        "adaptive-scan-v1-release-persistent-promotion"
+    ]
 
     assert ram.persistent_allowed is False
     assert canary.persistent_allowed is True
     assert canary.policy.hardware_qualified is False
-    assert ram.policy.asset_sha256 == canary.policy.asset_sha256
+    assert promotion.persistent_allowed is True
+    assert promotion.policy.hardware_qualified is True
+    assert ram.policy.asset_sha256 == canary.policy.asset_sha256 == promotion.policy.asset_sha256
+    assert (
+        ram.policy.fit_body_sha256
+        == canary.policy.fit_body_sha256
+        == promotion.policy.fit_body_sha256
+    )
     assert ram.source_iio_layout == flash.PAIRED_RX_TX_CAPABLE_LAYOUT
     assert ram.return_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
     assert canary.source_iio_layout == flash.PAIRED_RX_TX_CAPABLE_LAYOUT
     assert canary.return_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
+    assert promotion.source_iio_layout == flash.PAIRED_RX_TX_CAPABLE_LAYOUT
+    assert promotion.return_iio_layout == flash.SINGLE_RX_TX_CAPABLE_LAYOUT
     assert ("iio,adaptive-scan", "1") in canary.required_iio_capabilities
+    assert ("iio,adaptive-scan", "1") in promotion.required_iio_capabilities
+    assert doctor.PERSISTENT_UPGRADE_POLICY is promotion.policy
+    assert promotion.policy in doctor.SETUP_REPAIR_POLICIES
+    assert ram.policy in doctor.SETUP_INSPECTION_POLICIES
+    assert canary.policy in doctor.SETUP_INSPECTION_POLICIES

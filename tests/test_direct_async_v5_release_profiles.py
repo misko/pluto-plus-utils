@@ -21,7 +21,7 @@ def test_v5_release_identity_and_persistent_authority_are_exact() -> None:
     assert ram.fit_body_size == 12_829_587
     assert ram.hardware_qualified is False
     assert persistent.hardware_qualified is True
-    assert doctor.PERSISTENT_UPGRADE_POLICY is persistent
+    assert persistent in doctor.SETUP_REPAIR_POLICIES
     assert persistent in doctor.SETUP_REPAIR_POLICIES
     assert ram in doctor.SETUP_INSPECTION_POLICIES
 

@@ -263,7 +263,9 @@ def _healthy_environment() -> IioEnvironmentReport:
         ("v0.40-plutoplus-spf-tandem-agc-v7", "fail"),
         ("v0.42-plutoplus-spf-ddr-burst-v1", "fail"),
         ("v0.42-plutoplus-spf-ddr-burst-v2", "fail"),
-        ("v0.43-plutoplus-spf-ddr-ring-v1", "pass"),
+        ("v0.43-plutoplus-spf-ddr-ring-v1", "fail"),
+        ("v0.51-plutoplus-spf-iq-direct-async-v5", "fail"),
+        ("v0.52-plutoplus-spf-adaptive-scan-v1", "pass"),
         ("v0.32-dirty", "unknown"),
     ],
 )

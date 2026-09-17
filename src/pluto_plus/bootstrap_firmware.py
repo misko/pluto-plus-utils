@@ -62,6 +62,7 @@ from pluto_plus.doctor import (
     FEATURE_103_RC13_FULL_RAM_POLICY,
     FEATURE_103_RC14_FULL_RAM_POLICY,
     FEATURE_103_V1_PERSISTENT_CANARY_POLICY,
+    FEATURE_103_V1_RELEASE_PERSISTENT_POLICY,
     FEATURE_103_V1_RELEASE_RAM_POLICY,
     IIO_THROUGHPUT_AFFINITY_V1_RC1_RAM_POLICY,
     IIO_THROUGHPUT_BUFFERED_SAMPLER_V7_RC1_RAM_POLICY,
@@ -1084,10 +1085,12 @@ for _feature_103_policy, _feature_103_counter_policy, _adaptive in (
 # The final candidate starts from either authorized radio's qualified 2R2T
 # persistent image and returns as the one-RX/TX2 adaptive topology.  RAM and
 # local-QSPI authority are separate exact profile names; the canary remains
-# ineligible for LAN flashing while hardware_qualified is false.
+# ineligible for LAN flashing while hardware_qualified is false, while the
+# promotion is the same qualified byte identity with network authority.
 for _feature_103_v1_policy, _feature_103_v1_persistent in (
     (FEATURE_103_V1_RELEASE_RAM_POLICY, False),
     (FEATURE_103_V1_PERSISTENT_CANARY_POLICY, True),
+    (FEATURE_103_V1_RELEASE_PERSISTENT_POLICY, True),
 ):
     _feature_103_v1_base = STANDALONE_FLASH_PROFILES[
         COUNTER_RX_V1_1R1T_RAM_POLICY.profile_id

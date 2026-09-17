@@ -1337,6 +1337,17 @@ FEATURE_103_V1_RELEASE_RAM_POLICY = FirmwarePolicy(
 FEATURE_103_V1_PERSISTENT_CANARY_POLICY = FEATURE_103_V1_RELEASE_RAM_POLICY.model_copy(
     update={"profile_id": "adaptive-scan-v1-persistent-canary"}
 )
+FEATURE_103_V1_RELEASE_PERSISTENT_POLICY = FEATURE_103_V1_RELEASE_RAM_POLICY.model_copy(
+    update={
+        "profile_id": "adaptive-scan-v1-release-persistent-promotion",
+        "release_tag": "v0.52-plutoplus-spf-adaptive-scan-v1",
+        "release_url": (
+            "https://github.com/misko/plutosdr-fw/releases/tag/"
+            "v0.52-plutoplus-spf-adaptive-scan-v1"
+        ),
+        "hardware_qualified": True,
+    }
+)
 
 # Exact 15 MS/s RX-only PSS candidate bytes from the deliberately isolated
 # ``codex/starlink-rx-only-do-not-merge`` firmware branch.  This identity is a
@@ -1585,7 +1596,7 @@ DDR_BURST_V1_RELEASE_PERSISTENT_POLICY = DDR_BURST_V1_RELEASE_RAM_POLICY.model_c
 # repair. USB and enrolled-network upgrades select the newest release that has
 # completed the persistent hardware gate; setup keeps the immutable U-Boot
 # tuple but accepts only an exact QSPI image in the allowlist below.
-PERSISTENT_UPGRADE_POLICY = IQ_DIRECT_ASYNC_V5_RELEASE_PERSISTENT_POLICY
+PERSISTENT_UPGRADE_POLICY = FEATURE_103_V1_RELEASE_PERSISTENT_POLICY
 
 # Canonical U-Boot repair may run only while one of these exact, reviewed,
 # hardware-qualified QSPI images is active. The tuple itself remains fixed;
@@ -1599,6 +1610,7 @@ SETUP_REPAIR_POLICIES = (
     IQ_DIRECT_ASYNC_V2_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V3_RELEASE_PERSISTENT_POLICY,
     IQ_DIRECT_ASYNC_V4_RELEASE_PERSISTENT_POLICY,
+    IQ_DIRECT_ASYNC_V5_RELEASE_PERSISTENT_POLICY,
     COUNTER_RX_V1_RELEASE_PERSISTENT_POLICY,
     PERSISTENT_UPGRADE_POLICY,
 )
@@ -1618,6 +1630,8 @@ SETUP_INSPECTION_POLICIES = (
     IQ_DIRECT_ASYNC_V4_RELEASE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V5_CANDIDATE_RAM_POLICY,
     IQ_DIRECT_ASYNC_V5_RELEASE_RAM_POLICY,
+    FEATURE_103_V1_RELEASE_RAM_POLICY,
+    FEATURE_103_V1_PERSISTENT_CANARY_POLICY,
 )
 
 
