@@ -527,6 +527,22 @@ def test_hops_event_permits_conservative_scheduler_lead_time() -> None:
     assert PersistentHopEventV1.unpack(event.pack()) == event
 
 
+def test_hops_event_permits_an_adaptive_unchanged_target_without_recall() -> None:
+    event = dataclasses.replace(
+        _event(sequence=1, dwell=1, invalid_start=301_011),
+        from_profile_index=0,
+        to_profile_index=0,
+        transition_before_counter=301_011,
+        transition_after_counter=301_011,
+        invalid_end_counter_exclusive=301_011,
+        flags=PersistentHopEventFlag.COUNTER_BOUNDS_ATTESTED
+        | PersistentHopEventFlag.LO_ATTESTED
+        | PersistentHopEventFlag.NO_RECALL,
+        device_event_id=0,
+    )
+    assert PersistentHopEventV1.unpack(event.pack()) == event
+
+
 @pytest.mark.parametrize(
     "uri",
     (

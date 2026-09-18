@@ -114,6 +114,7 @@ class PersistentHopStatusFlag(enum.IntFlag):
 class PersistentHopEventFlag(enum.IntFlag):
     COUNTER_BOUNDS_ATTESTED = 0x01
     LO_ATTESTED = 0x02
+    NO_RECALL = 0x04
 
 
 class PersistentHopEventKind(enum.IntEnum):
@@ -145,6 +146,7 @@ class PersistentHopTerminalReason(enum.IntEnum):
 
 _KNOWN_STATUS_FLAGS = PersistentHopStatusFlag(0x3F)
 _REQUIRED_EVENT_FLAGS = PersistentHopEventFlag(0x03)
+_NO_RECALL_EVENT_FLAGS = _REQUIRED_EVENT_FLAGS | PersistentHopEventFlag.NO_RECALL
 _TERMINAL_STATES = {
     PersistentHopSessionState.COMPLETED,
     PersistentHopSessionState.CANCELLED,
@@ -526,8 +528,8 @@ class PersistentHopEventV1:
         ):
             _uint(name, value, bits)
         _int64("actual_if_offset_hz", self.actual_if_offset_hz)
-        if self.flags != _REQUIRED_EVENT_FLAGS:
-            raise PersistentHopProtocolError("hop event lacks exact counter and LO attestations")
+        if self.flags not in (_REQUIRED_EVENT_FLAGS, _NO_RECALL_EVENT_FLAGS):
+            raise PersistentHopProtocolError("hop event has unsupported counter/LO attestations")
         if self.to_profile_index >= PERSISTENT_HOP_PROFILE_COUNT:
             raise PersistentHopProtocolError("hop event target profile is outside 0..7")
         if self.from_profile_index not in range(PERSISTENT_HOP_PROFILE_COUNT) and (
@@ -536,10 +538,22 @@ class PersistentHopEventV1:
             raise PersistentHopProtocolError("hop event source profile is invalid")
         if self.fastlock_slot >= PERSISTENT_HOP_PROFILE_COUNT:
             raise PersistentHopProtocolError("hop event Fast Lock slot is outside 0..7")
-        if not self.actual_lo_frequency_hz or not self.device_event_id:
+        if not self.actual_lo_frequency_hz:
             raise PersistentHopProtocolError(
-                "hop event tuning and device identity must be non-zero"
+                "hop event tuning must be non-zero"
             )
+        if self.flags & PersistentHopEventFlag.NO_RECALL:
+            if (
+                self.kind != PersistentHopEventKind.RETUNE
+                or self.from_profile_index != self.to_profile_index
+                or self.device_event_id
+                or self.transition_after_counter != self.transition_before_counter
+                or self.invalid_start_counter != self.invalid_end_counter_exclusive
+            ):
+                raise PersistentHopProtocolError("no-recall event is not an unchanged target boundary")
+            return
+        if not self.device_event_id:
+            raise PersistentHopProtocolError("hop event device identity must be non-zero")
         if self.transition_after_counter < self.transition_before_counter:
             raise PersistentHopProtocolError("hop transition counter interval regressed")
         if self.invalid_start_counter > self.transition_before_counter:

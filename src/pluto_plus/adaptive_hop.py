@@ -14,6 +14,7 @@ from collections.abc import Mapping
 
 from .persistent_hop import (
     PersistentHopClientError,
+    PersistentHopEventFlag,
     PersistentHopEventV1,
     PersistentHopEvidenceV1,
     PersistentHopProtocolError,
@@ -295,8 +296,15 @@ class AdaptiveHopEvidenceV2:
                 or event.actual_lo_frequency_hz != profile.lo_hz
                 or event.actual_if_offset_hz != request.geometry.if_offset_hz
                 or event.fastlock_slot != profile.fastlock_profile_index
-                or event.invalid_end_counter_exclusive
-                != event.transition_after_counter + request.geometry.transition_guard_samples
+                or (
+                    event.flags & PersistentHopEventFlag.NO_RECALL
+                    and event.invalid_end_counter_exclusive != event.invalid_start_counter
+                )
+                or (
+                    not event.flags & PersistentHopEventFlag.NO_RECALL
+                    and event.invalid_end_counter_exclusive
+                    != event.transition_after_counter + request.geometry.transition_guard_samples
+                )
                 or (
                     previous is not None
                     and (

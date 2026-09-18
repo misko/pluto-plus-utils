@@ -22,6 +22,7 @@ from .adaptive_hop import (
 from .direct_radio.samples import ci16_dual_rx
 from .persistent_hop import (
     PersistentHopClientError,
+    PersistentHopEventFlag,
     PersistentHopEventKind,
     PersistentHopEventV1,
     PersistentHopProfileV1,
@@ -226,7 +227,10 @@ class AdaptiveHopStreamV2:
         elif (
             event.invalid_start_counter
             != previous.invalid_end_counter_exclusive + geometry.dwell_samples
-            or event.device_event_id <= previous.device_event_id
+            or (
+                not event.flags & PersistentHopEventFlag.NO_RECALL
+                and event.device_event_id <= previous.device_event_id
+            )
             or choice.decision_counter < event.invalid_start_counter
             or event.invalid_start_counter - self._events[0].invalid_start_counter
             >= geometry.capture_span_samples
