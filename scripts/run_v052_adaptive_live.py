@@ -32,14 +32,15 @@ FREQUENCIES = (
     1_709_687_500,
     1_940_312_500,
 )
+LOWER_FREQUENCIES = FREQUENCIES[0::2]
+UPPER_FREQUENCIES = FREQUENCIES[1::2]
 
 
-def slot_configuration(epoch_seconds: int) -> tuple[int, int, tuple[int, ...]]:
+def slot_configuration(epoch_seconds: int) -> tuple[int, int, str, tuple[int, ...]]:
     ordinal = epoch_seconds // 600
-    omitted = ordinal % len(FREQUENCIES)
-    return ordinal, RATES[ordinal % len(RATES)], tuple(
-        frequency for index, frequency in enumerate(FREQUENCIES) if index != omitted
-    )
+    edge = "lower" if ordinal % 2 == 0 else "upper"
+    frequencies = LOWER_FREQUENCIES if edge == "lower" else UPPER_FREQUENCIES
+    return ordinal, RATES[ordinal % len(RATES)], edge, frequencies
 
 
 def json_value(value):
@@ -86,7 +87,7 @@ def main() -> int:
     parser.add_argument("--epoch", type=int, default=None)
     args = parser.parse_args()
     epoch = int(time.time()) if args.epoch is None else args.epoch
-    ordinal, rate, frequencies = slot_configuration(epoch)
+    ordinal, rate, selected_edge, frequencies = slot_configuration(epoch)
     identity = hashlib.sha256(f"{SERIAL}\0{ordinal}".encode()).digest()
     detector = Ci16EnergyDetector(Ci16EnergyDetectorConfig(-38.0))
     setup = build_adaptive_scan_setup(
@@ -140,7 +141,10 @@ def main() -> int:
             "slot_ordinal": ordinal,
             "radio_serial": SERIAL,
             "rate_hz": rate,
-            "omitted_frequency_hz": next(item for item in FREQUENCIES if item not in frequencies),
+            "selected_edge": selected_edge,
+            "omitted_frequencies_hz": [
+                item for item in FREQUENCIES if item not in frequencies
+            ],
             "preparation": json_value(receipt.preparation),
             "run": json_value(receipt.run),
             "restoration": json_value(receipt.restoration),
@@ -164,7 +168,10 @@ def main() -> int:
             "slot_ordinal": ordinal,
             "radio_serial": SERIAL,
             "rate_hz": rate,
-            "omitted_frequency_hz": next(item for item in FREQUENCIES if item not in frequencies),
+            "selected_edge": selected_edge,
+            "omitted_frequencies_hz": [
+                item for item in FREQUENCIES if item not in frequencies
+            ],
             "setup": json_value(setup),
             "run": json_value(receipt.run),
             "restoration": json_value(receipt.restoration),
