@@ -4,7 +4,9 @@ import dataclasses
 import hashlib
 import json
 import runpy
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -136,3 +138,60 @@ def test_gate_recomputes_source_and_iq_evidence_for_every_cell(tmp_path, unusual
     paths[0].write_text(json.dumps(changed))
     with pytest.raises(ValueError, match="does not reproduce"):
         module["require_gate"]({"asset_sha256": "a" * 64}, "b" * 64, ram, paths)
+
+
+def test_ram_profile_attestation_requires_marker_and_binds_receipt(monkeypatch, tmp_path):
+    module = runpy.run_path(str(SCRIPT))
+    document = {"asset_sha256": "a" * 64, "fit_sha256": "b" * 64, "fit_size": 1234}
+    profile_id = module["register_profile"](document, Path("candidate.dfu"), qualified=False)
+    profile = STANDALONE_FLASH_PROFILES[profile_id]
+    facts = {**dict(profile.required_iio_capabilities), "hw_serial": module["RAM_SERIAL"],
+             "fw_version": module["FIRMWARE"],
+             "device_names": ["ad9361-phy", "cf-ad9361-lpc", "tandem-agc"],
+             "cf-ad9361-lpc,scan_channels": [f"voltage{i}" for i in range(4)]}
+    plan = SimpleNamespace(usb_sysfs_path="/sys/bus/usb/devices/3-5", usb_interface="usb0",
+                           profile_id=profile_id, image_sha256="a" * 64)
+    local = SimpleNamespace(serial=module["RAM_SERIAL"], usb_path=plan.usb_sysfs_path,
+                            host_network_interfaces=[SimpleNamespace(name="usb0")])
+    attest = module["attest_ram_profile"]
+    monkeypatch.setitem(attest.__globals__, "scan_local_usb_plutos", lambda: [local])
+    monkeypatch.setitem(attest.__globals__, "inspect_bound_iiod", lambda _: facts)
+    receipt = tmp_path / "ram.json"
+    receipt.write_text(json.dumps({"plan": {"usb_sysfs_path": plan.usb_sysfs_path,
+                                           "usb_interface": "usb0"}}))
+    try:
+        result = attest(plan, receipt, "c" * 64)
+        output = tmp_path / "attestation.json"
+        output.write_text(json.dumps(result))
+        assert module["require_ram_attestation"](output, document, "c" * 64, receipt)
+        facts["iio,adaptive-scan-runtime-rates"] = "1"
+        with pytest.raises(RuntimeError, match="capability"):
+            attest(plan, receipt, "c" * 64)
+        receipt.write_text(receipt.read_text() + "\n")
+        with pytest.raises(ValueError, match="bind"):
+            module["require_ram_attestation"](output, document, "c" * 64, receipt)
+    finally:
+        del STANDALONE_FLASH_PROFILES[profile_id]
+
+
+def test_ram_helper_refuses_wrong_source_before_writing_plan(monkeypatch, tmp_path):
+    module = runpy.run_path(str(SCRIPT))
+    main = module["main"]
+    namespace = main.__globals__
+    monkeypatch.setitem(namespace, "manifest", lambda *_: ({}, "a" * 64))
+    monkeypatch.setitem(namespace, "register_profile", lambda *_, **__: "fake")
+    monkeypatch.setitem(namespace, "private_bytes", lambda _: b"")
+    monkeypatch.setitem(namespace, "acquire_radio_lock", lambda _: nullcontext())
+    monkeypatch.setitem(namespace, "scan_local_usb_plutos", lambda: [
+        SimpleNamespace(serial=module["RAM_SERIAL"], usb_path="/sys/bus/usb/devices/3-5")
+    ])
+    monkeypatch.setitem(namespace, "prepare_ram_boot_plan", lambda *_, **__: (
+        SimpleNamespace(before_firmware="wrong-v0.53")
+    ))
+    evidence = tmp_path / "evidence"
+    monkeypatch.setattr("sys.argv", [str(SCRIPT), "--phase", "ram", "--image", "unused",
+                                    "--manifest", "unused", "--known-hosts", "unused",
+                                    "--evidence", str(evidence)])
+    with pytest.raises(ValueError, match="exact v0.54"):
+        main()
+    assert not evidence.exists()

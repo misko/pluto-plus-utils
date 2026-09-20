@@ -81,10 +81,18 @@ executors, and uncertain outcomes are never automatically retried.
 Run qualification with `--candidate` pointing to the same immutable manifest.
 Reports bind live serial/firmware discovery and the manifest/image hashes.
 After testing, `--phase restore` reboots the canary and requires paired-RX
-v0.54 to return. The `lan` phase requires `--ram-receipt`, `--restore-receipt`,
+v0.54 to return. The `lan` phase requires `--ram-receipt`, `--ram-attestation`, `--restore-receipt`,
 and each of the six cell reports via repeated `--report` arguments. It
 recomputes source and byte accounting from recorded visit metadata, verifies
 the exact source-rate/topology/duration cells and restoration, and records
 every evidence digest. Only then does it register that exact image as
 functionally hardware-qualified for `.21`, whose source firmware must be
 v0.53. This qualification does not assert independent absolute UTC accuracy.
+
+RAM success also produces `ram-profile-attestation.json`, separately bound to
+the image, manifest, and executor receipt hashes. It checks the exact local
+serial/path/interface, paired RX layout, and every required context capability
+including runtime-rate marker 2. A failed supplemental check leaves the original
+executor receipt intact and the separate restoration phase available. Source
+firmware is explicitly checked before RAM execution because the existing RAM
+executor does not enforce the standalone profile's source allowlist.

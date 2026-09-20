@@ -18,7 +18,10 @@ from pluto_plus.bootstrap_firmware import (
     PAIRED_RX_TX_CAPABLE_LAYOUT,
     STANDALONE_FLASH_PROFILES,
     BoundSshBootstrapTransport,
+    _require_iio_layout,
+    _require_profile_iio_capabilities,
     execute_lan_flash_plan,
+    inspect_bound_iiod,
     prepare_lan_flash_plan,
     rotate_lan_ssh_host_key_after_attested_return,
 )
@@ -178,6 +181,52 @@ def register_profile(document, image, *, qualified):
     return profile_id
 
 
+def attest_ram_profile(plan, receipt_path, manifest_sha):
+    """Supplement the existing RAM receipt with profile checks its executor lacks."""
+    matches = [item for item in scan_local_usb_plutos()
+               if item.serial == RAM_SERIAL and item.usb_path == plan.usb_sysfs_path]
+    if (len(matches) != 1
+            or tuple(item.name for item in matches[0].host_network_interfaces)
+            != (plan.usb_interface,)):
+        raise ValueError("RAM profile attestation lost exact serial/USB path/interface")
+    facts = inspect_bound_iiod(plan.usb_interface)
+    if facts.get("hw_serial") != RAM_SERIAL or facts.get("fw_version") != FIRMWARE:
+        raise ValueError("RAM profile attestation firmware or serial mismatch")
+    profile = STANDALONE_FLASH_PROFILES[plan.profile_id]
+    _require_iio_layout(facts, profile, profile.return_iio_layout, transport="RAM USB")
+    _require_profile_iio_capabilities(facts, profile, transport="RAM USB")
+    return {"schema": "issue111.ram-profile-attestation/v1", "passed": True,
+            "serial": RAM_SERIAL, "firmware": FIRMWARE, "image_sha256": plan.image_sha256,
+            "manifest_sha256": manifest_sha,
+            "ram_receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+            "usb_sysfs_path": plan.usb_sysfs_path, "usb_interface": plan.usb_interface,
+            "rx_scan_channels": sorted(facts["cf-ad9361-lpc,scan_channels"]),
+            "capabilities": {key: str(facts[key]) for key, _ in profile.required_iio_capabilities}}
+
+
+def require_ram_attestation(path, document, manifest_sha, ram_receipt_path):
+    raw = path.read_bytes()
+    evidence = json.loads(raw)
+    ram = json.loads(ram_receipt_path.read_bytes())
+    plan = ram.get("plan", {})
+    if (evidence.get("schema") != "issue111.ram-profile-attestation/v1"
+            or evidence.get("passed") is not True or evidence.get("serial") != RAM_SERIAL
+            or evidence.get("firmware") != FIRMWARE
+            or evidence.get("image_sha256") != document["asset_sha256"]
+            or evidence.get("manifest_sha256") != manifest_sha
+            or evidence.get("ram_receipt_sha256")
+            != hashlib.sha256(ram_receipt_path.read_bytes()).hexdigest()
+            or evidence.get("usb_sysfs_path") != plan.get("usb_sysfs_path")
+            or evidence.get("usb_interface") != plan.get("usb_interface")
+            or not set(evidence.get("rx_scan_channels", [])) >= {f"voltage{i}" for i in range(4)}):
+        raise ValueError("RAM profile attestation does not bind this exact image and receipt")
+    base = STANDALONE_FLASH_PROFILES[FEATURE_103_V1_RELEASE_RAM_POLICY.profile_id]
+    for key, value in (*base.required_iio_capabilities, ("iio,adaptive-scan-runtime-rates", "2")):
+        if evidence.get("capabilities", {}).get(key) != value:
+            raise ValueError("RAM profile attestation lacks a required exact capability")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def write_json(path, document):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -197,6 +246,7 @@ def main():
     parser.add_argument("--password-file", type=Path)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--ram-receipt", type=Path)
+    parser.add_argument("--ram-attestation", type=Path)
     parser.add_argument("--restore-receipt", type=Path)
     parser.add_argument("--report", action="append", type=Path, default=[])
     parser.add_argument("--execute", action="store_true")
@@ -205,9 +255,12 @@ def main():
     document, manifest_sha = manifest(args.image, args.manifest)
     gate = None
     if args.phase == "lan":
-        if not args.ram_receipt or not args.restore_receipt:
-            parser.error("LAN promotion requires RAM/restoration receipts and capture reports")
+        if not args.ram_receipt or not args.restore_receipt or not args.ram_attestation:
+            parser.error("LAN requires RAM/restoration receipts, RAM attestation, and captures")
         gate = require_gate(document, manifest_sha, args.ram_receipt, args.report)
+        gate["ram_attestation_sha256"] = require_ram_attestation(
+            args.ram_attestation, document, manifest_sha, args.ram_receipt
+        )
         restore_raw = args.restore_receipt.read_bytes()
         restore = json.loads(restore_raw)
         if (restore.get("outcome") != "success"
@@ -245,6 +298,8 @@ def main():
                     args.image, usb, profile_id=profile,
                     transition_host=host, known_hosts_file=args.known_hosts,
                 )
+                if plan.before_firmware != RESTORE_FIRMWARE:
+                    raise ValueError("RAM canary source must be exact v0.54 firmware")
             else:
                 observed = discover_network_iio([f"{host}/32"], max_hosts=1, workers=1)
                 if (len(observed) != 1 or observed[0].serial != RAM_SERIAL
@@ -269,6 +324,9 @@ def main():
                 transition=SshRamBootTransition(transport),
                 receipt_directory=args.evidence / "receipts",
             )
+            if result.outcome == "success":
+                attestation = attest_ram_profile(plan, Path(result.receipt_path), manifest_sha)
+                write_json(args.evidence / "ram-profile-attestation.json", attestation)
         elif args.phase == "restore":
             result = execute_local_reboot(
                 plan, confirmation=args.confirm or "", known_hosts_file=args.known_hosts,
