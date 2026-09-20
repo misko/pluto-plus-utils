@@ -30,3 +30,31 @@ For a dwell of `ms`, the retained sample count uses `rate * ms // 1000`.
 For example, 120 ms at 7.5 MS/s is 900000 sample periods, or 7200000 bytes
 for two CI16 receivers. Arbitrary integer rates may produce fractional sample
 durations, so source-counter accounting remains authoritative.
+
+## Bounded issue-111 qualification
+
+`scripts/issue111_adaptive_qualification.py` runs one explicitly selected cell
+and never retries. `--cell caps` performs capability discovery only. Capture
+cells are `baseline-dual2p5` and `baseline-single15` (15 seconds each),
+`dual5`, `dual7p5`, `dual8` (120 seconds each), and `unusual` (5 seconds at
+12345679 S/s; either exact admission or explicit restored rejection is useful).
+All use four lower-edge targets and 120 ms dwells. `--utc` additionally collects
+counter-clock evidence without asserting absolute UTC accuracy.
+
+The default serial is the issue's radio at 192.168.1.21. `--serial
+1040007c4a94000211000b009186843ef2` selects the local RAM-test radio over its
+physical LAN address 192.168.1.18. Always use the same `--ledger` file across
+both radios, cells, and attempts. The exclusive ledger charges duration plus
+60 seconds per attempt, including failed/interrupted attempts, and refuses
+reservations exceeding 1200 seconds cumulatively. A wall-clock alarm cancels
+an overlong attempt through the ordinary cleanup path. Cleanup must complete
+before another cell; the ledger never automatically refunds time or retries.
+This conservative reservation includes setup overhead, so two complete suites
+do not fit: choose the planned acceptance cells and subsequent deployment checks
+within the aggregate budget.
+
+Each unique `--output` JSON contains metadata-only visit records, exact IQ-byte
+and terminal accounting, a source interval partition including skips and the
+terminal tail, gap samples in milliseconds, and independent ordinary-libiio
+readback/restoration checks. A failed cell returns nonzero and retains failure
+details. Do not treat an unusual-rate rejection as successful rate qualification.
