@@ -44,6 +44,19 @@ def slot_configuration(epoch_seconds: int) -> tuple[int, int, str, tuple[int, ..
     return ordinal, RATES[ordinal % len(RATES)], edge, frequencies
 
 
+def campaign_configuration(
+    epoch_seconds: int,
+    serial: str,
+    sample_rate_hz: int | None,
+) -> tuple[int, int, str, tuple[int, ...], bytes]:
+    ordinal, scheduled_rate, edge, frequencies = slot_configuration(epoch_seconds)
+    rate = scheduled_rate if sample_rate_hz is None else sample_rate_hz
+    if rate not in RATES:
+        raise ValueError("sample rate must be 10, 15, or 20 MS/s")
+    identity = hashlib.sha256(f"{serial}\0{ordinal}\0{rate}".encode()).digest()
+    return ordinal, rate, edge, frequencies, identity
+
+
 def json_value(value):
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {
@@ -86,6 +99,14 @@ def main() -> int:
     parser.add_argument("--iq-spool-root", type=Path, required=True)
     parser.add_argument("--duration-ms", type=int, default=300_000)
     parser.add_argument("--epoch", type=int, default=None)
+    parser.add_argument("--serial", default=SERIAL, help="exact radio serial (default: legacy R17)")
+    parser.add_argument("--uri", default=URI, help="physical LAN IIO URI for that serial")
+    parser.add_argument(
+        "--sample-rate",
+        type=int,
+        choices=RATES,
+        help="sample rate in samples/second; defaults to the current 10-minute slot rate",
+    )
     parser.add_argument(
         "--timing-policy",
         type=Path,
@@ -98,8 +119,9 @@ def main() -> int:
         else TimingPolicy()
     )
     epoch = int(time.time()) if args.epoch is None else args.epoch
-    ordinal, rate, selected_edge, frequencies = slot_configuration(epoch)
-    identity = hashlib.sha256(f"{SERIAL}\0{ordinal}".encode()).digest()
+    ordinal, rate, selected_edge, frequencies, identity = campaign_configuration(
+        epoch, args.serial, args.sample_rate
+    )
     detector = Ci16EnergyDetector(Ci16EnergyDetectorConfig(-38.0))
     setup = build_adaptive_scan_setup(
         session=int.from_bytes(identity[:8], "little") or 1,
@@ -136,8 +158,8 @@ def main() -> int:
 
     try:
         receipt = run_adaptive_scan_campaign(
-            URI,
-            SERIAL,
+            args.uri,
+            args.serial,
             setup,
             detector,
             mode=AdaptiveScanMode.ADAPTIVE,
@@ -156,7 +178,8 @@ def main() -> int:
         evidence = {
             "schema": "leo.v052-adaptive-live/v2",
             "slot_ordinal": ordinal,
-            "radio_serial": SERIAL,
+            "radio_serial": args.serial,
+            "radio_uri": args.uri,
             "rate_hz": rate,
             "selected_edge": selected_edge,
             "omitted_frequencies_hz": [item for item in FREQUENCIES if item not in frequencies],
@@ -175,14 +198,16 @@ def main() -> int:
     except BaseException:
         archive.abort()
         raise
-    path = args.evidence_root / f"adaptive-v052-{stamp}-{rate // 1_000_000}m.json"
+    serial_key = hashlib.sha256(args.serial.encode()).hexdigest()[:12]
+    path = args.evidence_root / (f"adaptive-v052-{serial_key}-{stamp}-{rate // 1_000_000}m.json")
     publish(
         path,
         {
             "schema": "leo.v052-adaptive-live/v1",
             "created_at": datetime.now(UTC).isoformat(),
             "slot_ordinal": ordinal,
-            "radio_serial": SERIAL,
+            "radio_serial": args.serial,
+            "radio_uri": args.uri,
             "rate_hz": rate,
             "selected_edge": selected_edge,
             "omitted_frequencies_hz": [item for item in FREQUENCIES if item not in frequencies],
