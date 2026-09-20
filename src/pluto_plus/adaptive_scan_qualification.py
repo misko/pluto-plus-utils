@@ -72,6 +72,7 @@ class AdaptiveScanAccumulator:
             raise AdaptiveScanQualificationError("IQ payload length disagrees with visit")
         expected_samples = self.setup.source_rate_hz * self.setup.dwell_ms // 1_000
         valid_samples = record.valid_end - record.valid_start
+        expected_intervals: tuple[int, ...]
         if record.result is VisitResult.CANCELLED:
             expected_intervals = (0, expected_samples)
         else:

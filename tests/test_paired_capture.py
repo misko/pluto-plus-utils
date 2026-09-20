@@ -214,7 +214,9 @@ class NativeHarness:
 def test_real_public_clients_concurrently_record_and_reconcile_full_finite_envelope(tmp_path):
     radio = NativeHarness()
     recorder = radio.recorder()
-    receipt = recorder.record(tmp_path / "paired")
+    # This test exercises the full 20 MB envelope and persists hundreds of
+    # artifacts; leave room for loaded CI runners while retaining a hard cap.
+    receipt = recorder.record(tmp_path / "paired", deadline_seconds=30)
     assert receipt.finite_transport_complete and receipt.cleanup_complete
     assert receipt.pilot_bytes_received == 20_000_000
     assert receipt.fine_results_received == 768 and receipt.maps_received >= 16
@@ -413,7 +415,9 @@ def test_late_external_cancellation_cannot_be_hidden_by_internal_cleanup(tmp_pat
 
         recorder.attest = owner
     with pytest.raises(paired.PairedCaptureError) as caught:
-        recorder.record(tmp_path / phase)
+        # These assertions target cancellation at the terminal boundary, so
+        # use a bounded deadline that tolerates scheduling delay on CI.
+        recorder.record(tmp_path / phase, deadline_seconds=30)
     receipt = caught.value.receipt
     assert not receipt.finite_transport_complete and receipt.cleanup_complete
     assert any("external cancellation accepted" in error for error in receipt.errors)

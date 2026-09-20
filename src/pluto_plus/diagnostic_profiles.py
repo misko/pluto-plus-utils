@@ -515,6 +515,11 @@ def upgrade_target_for(profile: DiagnosticProfile | None) -> DiagnosticProfile |
 
     if profile is None:
         return None
-    if profile.release_rank is None or profile.release_rank >= UPGRADE_TARGET_PROFILE.release_rank:
+    target_rank = UPGRADE_TARGET_PROFILE.release_rank
+    if (
+        profile.release_rank is None
+        or target_rank is None
+        or profile.release_rank >= target_rank
+    ):
         return None
     return UPGRADE_TARGET_PROFILE
