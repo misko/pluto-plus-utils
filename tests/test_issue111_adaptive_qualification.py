@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import runpy
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,24 @@ def test_failed_attempt_is_charged_and_parallel_attempt_is_refused(tmp_path):
             pytest.fail("parallel radio use must fail")
         raise RuntimeError("interrupted")
     assert len(ledger.read_text().splitlines()) == 1
+
+
+def test_target_smoke_cells_fit_remaining_aggregate_budget(tmp_path):
+    values = module()
+    cells = values["CELLS"]
+    assert cells["smoke-dual7p5"] == (7_500_000, 3, 15_000)
+    assert cells["smoke-dual8"] == (8_000_000, 3, 15_000)
+    reserve = values["reserve_attempt"]
+    ledger = tmp_path / "budget.jsonl"
+    for cell in ("baseline-dual2p5", "baseline-dual2p5", "baseline-single15",
+                 "dual5", "dual7p5", "dual8", "unusual",
+                 "dual5", "smoke-dual7p5", "smoke-dual8"):
+        with reserve(ledger, cell):
+            pass
+    used = sum(json.loads(line)["reserved_seconds"] for line in ledger.read_text().splitlines())
+    assert used == 1160
+    with pytest.raises(ValueError, match="budget exhausted"), reserve(ledger, "smoke-dual8"):
+        pytest.fail("another attempt exceeds the shared budget")
 
 
 def test_accounting_partitions_skipped_and_complete_source_intervals():

@@ -99,6 +99,8 @@ def test_gate_recomputes_source_and_iq_evidence_for_every_cell(tmp_path, unusual
     }))
     paths = []
     for name, (rate, rx, duration) in qualification["CELLS"].items():
+        if name.startswith("smoke-"):
+            continue
         samples = rate * 120 // 1000
         visit = ScanVisit(session=1, generation=2, visit=0, selection_counter=0,
                           transition_before=0, transition_after=10, valid_start=20,
