@@ -28,7 +28,9 @@ VISIT_BYTES: Final = 160
 FEEDBACK_BYTES: Final = 112
 ACK_BYTES: Final = 96
 TERMINAL_BYTES: Final = 128
-SUPPORTED_RATES: Final = frozenset((10_000_000, 15_000_000, 20_000_000, 30_000_000))
+# 2.5 MS/s is admitted only after the endpoint capability negotiation in the
+# campaign runner.  Older v0.52 endpoints advertise mask 0x0f and are refused.
+SUPPORTED_RATES: Final = frozenset((2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000))
 
 
 class AdaptiveScanProtocolError(ValueError):
@@ -87,8 +89,34 @@ class ScanCapabilities:
     source_counter_bits: int = 64
 
     def validate(self) -> None:
-        if self != ScanCapabilities():
-            raise AdaptiveScanProtocolError("capabilities are not exact feature-103 v1")
+        """Accept a feature-103 endpoint that is a strict capability superset.
+
+        The fixed v0.52 client consumes RX0 CI16 at 10/15/20/30 MS/s.  A
+        later firmware may additionally advertise other rates or receivers;
+        those additions do not change this client's wire contract.  All
+        non-negotiated feature-103 limits stay exact, so this is not a broad
+        forward-compatibility escape hatch.
+        """
+
+        required = ScanCapabilities()
+        if (
+            self.rate_mask & required.rate_mask != required.rate_mask
+            or self.rx_mask & required.rx_mask != required.rx_mask
+            or self.formats != required.formats
+            or self.maximum_targets != required.maximum_targets
+            or self.maximum_fastlock_profiles != required.maximum_fastlock_profiles
+            or self.minimum_dwell_ms != required.minimum_dwell_ms
+            or self.maximum_dwell_ms != required.maximum_dwell_ms
+            or self.maximum_duration_ms != required.maximum_duration_ms
+            or self.maximum_queue_bytes != required.maximum_queue_bytes
+            or self.maximum_queue_age_ms != required.maximum_queue_age_ms
+            or self.feedback_capacity != required.feedback_capacity
+            or self.maximum_feedback_age_ms != required.maximum_feedback_age_ms
+            or self.maximum_application_delay_ms != required.maximum_application_delay_ms
+            or self.maximum_analog_bandwidth_hz != required.maximum_analog_bandwidth_hz
+            or self.source_counter_bits != required.source_counter_bits
+        ):
+            raise AdaptiveScanProtocolError("capabilities are incompatible with feature-103 v1")
 
     def pack(self) -> bytes:
         self.validate()
@@ -232,7 +260,7 @@ class ScanSetup:
         if not self.session or not self.generation or not self.seed:
             raise AdaptiveScanProtocolError("session, generation, and seed must be nonzero")
         if self.source_rate_hz not in SUPPORTED_RATES:
-            raise AdaptiveScanProtocolError("only fixed 10/15/20/30 MS/s is supported")
+            raise AdaptiveScanProtocolError("only fixed 2.5 or 10/15/20/30 MS/s is supported")
         if not 200_000 <= self.analog_bandwidth_hz <= 56_000_000:
             raise AdaptiveScanProtocolError("analog bandwidth is outside the admitted range")
         if not 1 <= self.duration_ms <= 300_000:
@@ -255,7 +283,7 @@ class ScanSetup:
             raise AdaptiveScanProtocolError("queue age is outside range")
         if not 1 <= self.maximum_queue_visits <= 64:
             raise AdaptiveScanProtocolError("queue visit limit is outside range")
-        if self.rx_mask != 1 or self.format != FORMAT_CI16 or self.flags != SETUP_FLAGS:
+        if self.rx_mask not in (1, 3) or self.format != FORMAT_CI16 or self.flags != SETUP_FLAGS:
             raise AdaptiveScanProtocolError("RX, format, or setup flags are not exact")
         _digest(self.analysis_digest)
         if not 1 <= len(self.targets) <= 8:
@@ -458,7 +486,10 @@ class ScanVisit:
             or not self.flags & VISIT_FLAGS
             or self.flags & ~VISIT_FLAG_MASK
             or (self.result is VisitResult.COMPLETE) != bool(self.iq_bytes)
-            or (self.result is VisitResult.COMPLETE and self.iq_bytes != samples * 4)
+            or (
+                self.result is VisitResult.COMPLETE
+                and self.iq_bytes not in (samples * 4, samples * 8)
+            )
         ):
             raise AdaptiveScanProtocolError("visit record is inconsistent")
         packet = bytearray(VISIT_BYTES)

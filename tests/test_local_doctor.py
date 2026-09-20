@@ -319,6 +319,7 @@ def _healthy_environment() -> IioEnvironmentReport:
         ("v0.51-plutoplus-spf-iq-direct-async-v5", "fail"),
         ("v0.52-plutoplus-spf-adaptive-scan-v1", "pass"),
         ("v0.52-plutoplus-spf-counter-utc-v1-rc1", "unknown"),
+        ("v0.54-plutoplus-spf-counter-utc-v1-rc1", "unknown"),
         ("v0.32-dirty", "unknown"),
     ],
 )
@@ -333,7 +334,10 @@ def test_release_currency_never_proposes_a_downgrade(
 
     statuses = {check.code: check.status for check in radio.checks}
     assert statuses["firmware.release_currency"] == expected
-    if firmware == "v0.52-plutoplus-spf-counter-utc-v1-rc1":
+    if firmware in (
+        "v0.52-plutoplus-spf-counter-utc-v1-rc1",
+        "v0.54-plutoplus-spf-counter-utc-v1-rc1",
+    ):
         profile_check = next(
             check for check in radio.checks if check.code == "firmware.diagnostic_profile"
         )

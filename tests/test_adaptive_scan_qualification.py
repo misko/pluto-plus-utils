@@ -18,7 +18,7 @@ from pluto_plus.adaptive_scan_qualification import (
 )
 
 
-def _setup(rate: int, dwell_ms: int = 240) -> ScanSetup:
+def _setup(rate: int, dwell_ms: int = 240, rx_mask: int = 1) -> ScanSetup:
     return ScanSetup(
         session=1,
         generation=2,
@@ -38,6 +38,7 @@ def _setup(rate: int, dwell_ms: int = 240) -> ScanSetup:
         maximum_queue_visits=50,
         analysis_digest=bytes(range(1, 33)),
         targets=(ScanTarget(1, 0, 2_400_000_000, 1, 0x12345678),),
+        rx_mask=rx_mask,
     )
 
 
@@ -52,7 +53,11 @@ def _stream(
         start = before + transition_samples
         end = start + dwell_samples
         result = VisitResult.COMPLETE if index < delivered else VisitResult.SKIP_CAPACITY
-        iq_bytes = dwell_samples * 4 if result is VisitResult.COMPLETE else 0
+        iq_bytes = (
+            dwell_samples * 4 * setup.rx_mask.bit_count()
+            if result is VisitResult.COMPLETE
+            else 0
+        )
         record = ScanVisit(
             session=setup.session,
             generation=setup.generation,
@@ -87,7 +92,7 @@ def _stream(
         skipped=visits - delivered,
         invalid=0,
         cancelled=0,
-        iq_bytes=delivered * dwell_samples * 4,
+        iq_bytes=delivered * dwell_samples * 4 * setup.rx_mask.bit_count(),
         state=TerminalState.COMPLETED,
         reason=1,
         error=0,
@@ -140,6 +145,20 @@ def test_metrics_reject_terminal_or_iq_inconsistency() -> None:
     accumulator = AdaptiveScanAccumulator(setup)
     with pytest.raises(AdaptiveScanQualificationError, match="IQ payload"):
         accumulator.add(AdaptiveScanVisit(records[0], b""))
+
+
+def test_dual_rx_metrics_count_payload_twice_but_duty_once() -> None:
+    setup = _setup(2_500_000, dwell_ms=120, rx_mask=3)
+    records, terminal = _stream(
+        setup, visits=4, delivered=4, transition_samples=50_000
+    )
+    accumulator = AdaptiveScanAccumulator(setup)
+    for record in records:
+        accumulator.observe(record, record.iq_bytes)
+    metrics = accumulator.finish(terminal)
+
+    assert metrics.iq_bytes == metrics.delivered_valid_samples * 8
+    assert metrics.full_session_retained_duty == pytest.approx(120 / 140)
 
 
 def test_zero_length_cancelled_cleanup_record_is_valid() -> None:

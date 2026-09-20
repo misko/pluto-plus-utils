@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import struct
+import threading
 from dataclasses import replace
 
 import pytest
@@ -256,6 +258,7 @@ def test_long_adaptive_run_drains_bounded_ack_mailbox_during_stream() -> None:
         session,
         lambda _visit: ScanOutcome.ACTIVE,
         mode=AdaptiveScanMode.ADAPTIVE,
+        classifier_queue_visits=128,
     )
 
     assert len(session.sent) == 100
@@ -326,3 +329,119 @@ def test_noncompleted_terminal_cannot_qualify() -> None:
     session.visits = visits
     with pytest.raises(ValueError, match="did not complete"):
         run_scanner_session(session, _detector, mode=AdaptiveScanMode.SHADOW)
+
+
+def test_dual_rx_classifier_receives_only_physical_rx1() -> None:
+    session = Session()
+    session.setup = replace(
+        session.setup,
+        source_rate_hz=2_500_000,
+        analog_bandwidth_hz=2_500_000,
+        rx_mask=3,
+    )
+    samples = session.setup.source_rate_hz * session.setup.dwell_ms // 1_000
+    frame = struct.pack("<hhhh", 101, -102, 3001, -3002)
+    iq = frame * samples
+    session.items = [
+        AdaptiveScanVisit(replace(item.record, iq_bytes=len(iq)), iq)
+        for item in _visits(session.setup)
+    ]
+
+    def detector(visit: AdaptiveScanVisit) -> ScanOutcome:
+        assert visit.record.iq_bytes == samples * 4
+        assert len(visit.iq) == samples * 4
+        assert visit.iq[:4] == struct.pack("<hh", 101, -102)
+        assert struct.pack("<hh", 3001, -3002) not in visit.iq[:4]
+        return ScanOutcome.ACTIVE
+
+    report = run_scanner_session(
+        session, detector, mode=AdaptiveScanMode.SHADOW
+    )
+    assert report.classification_dropped == 0
+
+
+def test_blocked_classifier_does_not_block_iq_stream_drain() -> None:
+    class DrainSession(Session):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setup = replace(
+                self.setup,
+                source_rate_hz=2_500_000,
+                analog_bandwidth_hz=2_500_000,
+                duration_ms=1_000,
+            )
+            template = _visits(self.setup)[0]
+            samples = self.setup.source_rate_hz * self.setup.dwell_ms // 1_000
+            cursor = 1_000
+            self.items = []
+            for index in range(20):
+                start = cursor + self.setup.source_rate_hz // 1_000
+                end = start + samples
+                record = replace(
+                    template.record,
+                    visit=index,
+                    selection_counter=cursor,
+                    transition_before=cursor,
+                    transition_after=start,
+                    valid_start=start,
+                    valid_end=end,
+                )
+                self.items.append(AdaptiveScanVisit(record, template.iq))
+                cursor = end
+            self.stream_drained = threading.Event()
+
+        def visits(self):
+            yield from self.items
+            final = self.items[-1].record.valid_end
+            self.terminal = ScanTerminal(
+                session=self.setup.session,
+                generation=self.setup.generation,
+                final_counter=final,
+                restore_before=final,
+                restore_after=final + 1,
+                planned=len(self.items),
+                delivered=len(self.items),
+                skipped=0,
+                invalid=0,
+                cancelled=0,
+                iq_bytes=sum(len(item.iq) for item in self.items),
+                state=TerminalState.COMPLETED,
+                reason=1,
+                error=0,
+            )
+            self.stream_drained.set()
+
+    session = DrainSession()
+    detector_started = threading.Event()
+    release_detector = threading.Event()
+    result = []
+    errors = []
+
+    def detector(_visit: AdaptiveScanVisit) -> ScanOutcome:
+        detector_started.set()
+        if not release_detector.wait(5):
+            raise TimeoutError("test did not release classifier")
+        return ScanOutcome.ACTIVE
+
+    def run() -> None:
+        try:
+            result.append(
+                run_scanner_session(
+                    session,
+                    detector,
+                    mode=AdaptiveScanMode.SHADOW,
+                    classifier_queue_visits=2,
+                )
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert detector_started.wait(2)
+    assert session.stream_drained.wait(2)
+    release_detector.set()
+    thread.join(5)
+
+    assert not thread.is_alive() and not errors
+    assert result[0].classification_dropped > 0

@@ -6,6 +6,7 @@ from collections import deque
 import pytest
 
 from pluto_plus.adaptive_scan import (
+    AdaptiveScanProtocolError,
     FeedbackResult,
     ScanAck,
     ScanCapabilities,
@@ -153,6 +154,82 @@ def test_capabilities_and_complete_stream_are_exact() -> None:
     assert request.pack() in stream_socket.sent
     assert stream_socket.sent.endswith(b"READSCAN cf-ad9361-lpc\nCLOSE cf-ad9361-lpc\n")
     assert capabilities_socket.closed and stream_socket.closed
+
+
+def test_capabilities_accept_rate_and_receiver_supersets() -> None:
+    advertised = dataclasses.replace(ScanCapabilities(), rate_mask=0x1F, rx_mask=0x03)
+    socket = ScriptedSocket(b"96\n" + advertised.pack())
+    client = AdaptiveScanClient(
+        "192.0.2.1", connector=lambda _host, _port, _timeout: socket
+    )
+
+    assert client.capabilities() == advertised
+    assert socket.sent == b"SCANCAPS 96\n"
+    assert socket.closed
+
+
+def test_dual_rx_start_derives_full_scan_mask_and_validates_eight_byte_frames() -> None:
+    request = dataclasses.replace(setup(), source_rate_hz=2_500_000, rx_mask=3)
+    iq = bytes(range(32))
+    visit = ScanVisit(
+        session=request.session,
+        generation=request.generation,
+        visit=0,
+        selection_counter=100,
+        transition_before=101,
+        transition_after=102,
+        valid_start=110,
+        valid_end=114,
+        frequency_hz=request.targets[0].frequency_hz,
+        iq_bytes=len(iq),
+        missing_samples_before=0,
+        analog_bandwidth_hz=request.analog_bandwidth_hz,
+        source_rate_hz=request.source_rate_hz,
+        target=0,
+        profile=request.targets[0].profile,
+        result=VisitResult.COMPLETE,
+        eligible_mask=1,
+        effective_weight=65_536,
+        profile_crc32=request.targets[0].profile_crc32,
+    )
+    terminal = dataclasses.replace(
+        _terminal(request, final_counter=114), iq_bytes=len(iq)
+    )
+    wire = ScriptedSocket(
+        b"0\n160\n"
+        + visit.pack()
+        + b"32\n"
+        + iq
+        + b"128\n"
+        + terminal.pack()
+        + b"0\n0\n"
+    )
+    client = AdaptiveScanClient(
+        "192.0.2.1", connector=lambda _host, _port, _timeout: wire
+    )
+
+    with client.start(request) as session:
+        assert list(session.visits())[0].iq == iq
+    assert wire.sent.startswith(b"OPENM cf-ad9361-lpc 1000000 0000000f 352\n")
+
+
+def test_capabilities_reject_changed_feature103_limit() -> None:
+    incompatible = dataclasses.replace(ScanCapabilities(), maximum_targets=7)
+    # Construct the valid CRC-protected wire record directly: the client must
+    # reject the semantic limit rather than rely on the encoder to do so.
+    packet = bytearray(ScanCapabilities().pack())
+    import struct
+    import zlib
+
+    struct.pack_into("<I", packet, 28, incompatible.maximum_targets)
+    struct.pack_into("<I", packet, len(packet) - 4, zlib.crc32(packet[:-4]) & 0xFFFF_FFFF)
+    socket = ScriptedSocket(b"96\n" + bytes(packet))
+    client = AdaptiveScanClient(
+        "192.0.2.1", connector=lambda _host, _port, _timeout: socket
+    )
+
+    with pytest.raises(AdaptiveScanProtocolError, match="incompatible"):
+        client.capabilities()
 
 
 def _complete_visit(request: ScanSetup, iq: bytes) -> ScanVisit:

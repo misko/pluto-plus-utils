@@ -86,8 +86,11 @@ class AdaptiveScanArchive:
             "session_id": self.session_id,
             "created_utc_ns": time.time_ns(),
             "sample_format": "ci16_le",
-            "sample_layout": "sample_iq",
-            "physical_receiver": 0,
+            "sample_layout": (
+                "sample_rx_iq_interleaved" if self.setup.rx_mask == 3 else "sample_iq"
+            ),
+            "physical_receivers": list(range(self.setup.rx_mask.bit_count())),
+            "classifier_physical_receiver": 0,
             "setup": _json(self.setup),
             "terminal": _json(terminal),
             "visits": self._visits,

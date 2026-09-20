@@ -423,6 +423,16 @@ COUNTER_UTC_V1_RC1_CANDIDATE_PROFILE = DiagnosticProfile(
     rx_scan_channels=("voltage0", "voltage1"),
 )
 
+COUNTER_UTC_V1_RC1_DUAL_RX_CANDIDATE_PROFILE = DiagnosticProfile(
+    profile_id="counter-utc-v1-rc1-dual-rx-candidate",
+    firmware_version="v0.54-plutoplus-spf-counter-utc-v1-rc1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="RC1 candidate; UTC accuracy unqualified",
+    release_rank=None,
+    rx_scan_channels=("voltage0", "voltage1", "voltage2", "voltage3"),
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -464,6 +474,7 @@ DIAGNOSTIC_PROFILES = (
     IQ_DIRECT_ASYNC_V5_RELEASE_PROFILE,
     ADAPTIVE_SCAN_V1_RELEASE_PROFILE,
     COUNTER_UTC_V1_RC1_CANDIDATE_PROFILE,
+    COUNTER_UTC_V1_RC1_DUAL_RX_CANDIDATE_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 

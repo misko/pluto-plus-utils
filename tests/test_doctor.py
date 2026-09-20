@@ -136,12 +136,12 @@ def test_old_firmware_recommends_only_guarded_profile_aware_flash() -> None:
 
 def test_counter_utc_candidate_is_read_only_recognized_without_2r2t_repair_advice() -> None:
     report = diagnose_radio(
-        _snapshot(firmware="v0.52-plutoplus-spf-counter-utc-v1-rc1"),
+        _snapshot(firmware="v0.54-plutoplus-spf-counter-utc-v1-rc1"),
         {
             "phy_model": "ad9361",
             "buffer_metadata_abi": 3,
             "tandem_agc": True,
-            "rx_scan_channels": ("voltage0", "voltage1"),
+            "rx_scan_channels": ("voltage0", "voltage1", "voltage2", "voltage3"),
             "uboot": {"attr_name": None, "attr_val": None, "compatible": "ad9361", "mode": "1r1t"},
         },
         firmware_helper_available=True,
@@ -157,3 +157,22 @@ def test_counter_utc_candidate_is_read_only_recognized_without_2r2t_repair_advic
     assert report.diagnostic_profile is not None
     assert "UTC accuracy unqualified" in report.diagnostic_profile.release_status
     assert report.canonical_policy.device_firmware != report.diagnostic_profile.firmware_version
+
+
+def test_counter_utc_v052_candidate_remains_read_only_recognized() -> None:
+    report = diagnose_radio(
+        _snapshot(firmware="v0.52-plutoplus-spf-counter-utc-v1-rc1"),
+        {
+            "phy_model": "ad9363a",
+            "buffer_metadata_abi": 3,
+            "tandem_agc": True,
+            "rx_scan_channels": ("voltage0", "voltage1"),
+        },
+        firmware_helper_available=True,
+    )
+    findings = {finding.code: finding for finding in report.findings}
+    assert findings["firmware.device_version"].status is DoctorStatus.PASS
+    assert findings["firmware.device_version"].remediation is None
+    assert report.diagnostic_profile is not None
+    assert report.diagnostic_profile.profile_id == "counter-utc-v1-rc1-candidate"
+    assert "UTC accuracy unqualified" in report.diagnostic_profile.release_status

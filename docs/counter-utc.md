@@ -7,6 +7,10 @@ the new evidence as `evidence.counter_utc_timing`, alongside the historical
 start-call bracket. Unsupported firmware or clock failures preserve IQ and
 record unqualified timing.
 
+The v1 wire layout supports 2.5, 10, 15, 20 and 30 MS/s sample rates; 2.5 MS/s
+is included for the dual-RX v0.54 RC1 capture mode. This adds a supported rate
+without changing the observation record or its version.
+
 The collector takes up to eight startup queries, then one every five seconds.
 Network and chrony calls have timeouts. Epoch, request, rate, counter progression,
 query width, anchor gaps, host steps and endpoint coverage are checked. Each

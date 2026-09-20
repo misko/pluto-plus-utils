@@ -107,7 +107,8 @@ class AdaptiveScanAccumulator:
         )
         if not planned_valid or not delivered_valid:
             raise AdaptiveScanQualificationError("qualification has no valid delivered samples")
-        if terminal.iq_bytes != self._iq_bytes or self._iq_bytes != delivered_valid * 4:
+        expected_iq_bytes = delivered_valid * 4 * self.setup.rx_mask.bit_count()
+        if terminal.iq_bytes != self._iq_bytes or self._iq_bytes != expected_iq_bytes:
             raise AdaptiveScanQualificationError("IQ byte accounting is inconsistent")
         counts = Counter(item.result for item in self._records)
         expected = (

@@ -125,12 +125,17 @@ class AdaptiveScanClient:
         *,
         device: str = "cf-ad9361-lpc",
         samples_per_block: int = 1_000_000,
-        scan_mask: str = "00000003",
+        scan_mask: str | None = None,
     ) -> AdaptiveScanSession:
         if samples_per_block <= 0 or samples_per_block % 2:
             raise ValueError("samples_per_block must be positive and even")
-        if scan_mask != "00000003":
-            raise ValueError("feature-103 supports RX0 CI16 only")
+        expected_scan_mask = {1: "00000003", 3: "0000000f"}.get(setup.rx_mask)
+        if expected_scan_mask is None:
+            raise ValueError("feature-103 supports RX1 or shared-LO RX1+RX2 only")
+        if scan_mask is None:
+            scan_mask = expected_scan_mask
+        if scan_mask != expected_scan_mask:
+            raise ValueError("IIO scan mask disagrees with adaptive-scan RX selection")
         request = setup.pack()
         connection = self._connection()
         try:
@@ -267,6 +272,10 @@ class AdaptiveScanSession:
             or record.analog_bandwidth_hz != self.setup.analog_bandwidth_hz
         ):
             raise AdaptiveScanTransportError("visit rate or analog bandwidth changed")
+        samples = record.valid_end - record.valid_start
+        expected_iq_bytes = samples * 4 * self.setup.rx_mask.bit_count()
+        if record.result is VisitResult.COMPLETE and record.iq_bytes != expected_iq_bytes:
+            raise AdaptiveScanTransportError("visit IQ geometry disagrees with setup RX mask")
         expected_visit = 0 if self._last_visit is None else self._last_visit + 1
         if record.visit != expected_visit:
             raise AdaptiveScanTransportError("visit sequence is not contiguous")
@@ -334,7 +343,7 @@ class AdaptiveScanSession:
                 self._closed = True
 
     def submit_feedback(self, feedback: ScanFeedback) -> FeedbackResult:
-        if self._closed or self.terminal is not None:
+        if self._closed:
             raise AdaptiveScanTransportError("adaptive scan session is no longer active")
         return self._owner.submit_feedback(self.device, feedback)
 

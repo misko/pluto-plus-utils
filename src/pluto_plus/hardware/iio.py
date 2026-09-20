@@ -989,6 +989,46 @@ class IioRadioDevice:
             )
         return readback
 
+    def configure_adaptive_scan_geometry(
+        self,
+        *,
+        sample_rate_hz: int,
+        rf_bandwidth_hz: int,
+        manual_gain_db: float,
+        rx_mask: int,
+    ) -> IioReceiverSettingsReadback:
+        """Apply feature-103's shared-LO manual RX geometry."""
+
+        if sample_rate_hz not in (2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000):
+            raise ValueError("adaptive scan rate is not supported")
+        if not 200_000 <= rf_bandwidth_hz <= 56_000_000:
+            raise ValueError("adaptive scan bandwidth is outside the AD9361 range")
+        if not np.isfinite(manual_gain_db):
+            raise ValueError("adaptive scan manual gain must be finite")
+        channels = {1: (0,), 3: (0, 1)}.get(rx_mask)
+        if channels is None:
+            raise ValueError("adaptive scan RX mask must select RX1 or RX1+RX2")
+        self.configure_source_locked_rx_rate(sample_rate_hz)
+        device = self._require_bufferless_device()
+        device.rx_rf_bandwidth = rf_bandwidth_hz
+        device.rx_enabled_channels = list(channels)
+        for channel in channels:
+            setattr(device, f"gain_control_mode_chan{channel}", GainMode.MANUAL.value)
+            setattr(device, f"rx_hardwaregain_chan{channel}", manual_gain_db)
+        _mute_transmit(device)
+        readback = self.read_receiver_settings_readback()
+        if (
+            round(readback.sample_rate_hz) != sample_rate_hz
+            or round(readback.bandwidth_hz) != rf_bandwidth_hz
+            or readback.channels != channels
+            or readback.gain_modes != (GainMode.MANUAL,) * len(channels)
+            or readback.gain_db != (manual_gain_db,) * len(channels)
+        ):
+            raise RadioConfigurationError(
+                "adaptive scan RX geometry did not read back exactly"
+            )
+        return readback
+
     def configure_adaptive_scan_rx0_geometry(
         self,
         *,
@@ -996,33 +1036,14 @@ class IioRadioDevice:
         rf_bandwidth_hz: int,
         manual_gain_db: float,
     ) -> IioReceiverSettingsReadback:
-        """Apply feature-103's fixed-bandwidth, factor-one RX0 geometry."""
+        """Compatibility wrapper for the original single-receiver API."""
 
-        if sample_rate_hz not in (10_000_000, 15_000_000, 20_000_000, 30_000_000):
-            raise ValueError("adaptive scan rate must be 10, 15, 20, or 30 MS/s")
-        if not 200_000 <= rf_bandwidth_hz <= 56_000_000:
-            raise ValueError("adaptive scan bandwidth is outside the AD9361 range")
-        if not np.isfinite(manual_gain_db):
-            raise ValueError("adaptive scan manual gain must be finite")
-        self.configure_source_locked_rx_rate(sample_rate_hz)
-        device = self._require_bufferless_device()
-        device.rx_rf_bandwidth = rf_bandwidth_hz
-        device.rx_enabled_channels = [0]
-        device.gain_control_mode_chan0 = GainMode.MANUAL.value
-        device.rx_hardwaregain_chan0 = manual_gain_db
-        _mute_transmit(device)
-        readback = self.read_receiver_settings_readback()
-        if (
-            round(readback.sample_rate_hz) != sample_rate_hz
-            or round(readback.bandwidth_hz) != rf_bandwidth_hz
-            or readback.channels != (0,)
-            or readback.gain_modes != (GainMode.MANUAL,)
-            or readback.gain_db != (manual_gain_db,)
-        ):
-            raise RadioConfigurationError(
-                "adaptive scan RX0 geometry did not read back exactly"
-            )
-        return readback
+        return self.configure_adaptive_scan_geometry(
+            sample_rate_hz=sample_rate_hz,
+            rf_bandwidth_hz=rf_bandwidth_hz,
+            manual_gain_db=manual_gain_db,
+            rx_mask=1,
+        )
 
     def _require_persistent_receiver_geometry(
         self, channels: tuple[int, ...], sample_rate_hz: int

@@ -211,6 +211,20 @@ def test_counter_utc_rc1_is_recognized_but_unranked_and_unqualified() -> None:
     assert upgrade_target_for(profile) is None
 
 
+def test_counter_utc_v054_dual_rx_rc1_is_recognized_but_unranked_and_unqualified() -> None:
+    from pluto_plus.diagnostic_profiles import (
+        COUNTER_UTC_V1_RC1_DUAL_RX_CANDIDATE_PROFILE,
+        upgrade_target_for,
+    )
+
+    profile = select_diagnostic_profile("v0.54-plutoplus-spf-counter-utc-v1-rc1")
+    assert profile is COUNTER_UTC_V1_RC1_DUAL_RX_CANDIDATE_PROFILE
+    assert profile.release_rank is None
+    assert profile.rx_scan_channels == ("voltage0", "voltage1", "voltage2", "voltage3")
+    assert profile.release_status == "RC1 candidate; UTC accuracy unqualified"
+    assert upgrade_target_for(profile) is None
+
+
 def test_upgrade_target_is_strictly_upgrade_only() -> None:
     from pluto_plus.diagnostic_profiles import (
         UPGRADE_TARGET_PROFILE,

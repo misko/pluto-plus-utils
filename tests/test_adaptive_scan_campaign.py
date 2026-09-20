@@ -218,7 +218,7 @@ def test_timing_sink_failure_still_restores_radio(monkeypatch) -> None:
     assert events == ["prepare", "timing-start", "timing-stop", "restore"]
 
 
-@pytest.mark.parametrize("rate", [10_000_000, 15_000_000, 20_000_000, 30_000_000])
+@pytest.mark.parametrize("rate", [2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000])
 def test_campaign_setup_builder_is_fixed_rate_and_profile_bounded(rate) -> None:
     setup = campaign.build_adaptive_scan_setup(
         session=1,
@@ -236,6 +236,52 @@ def test_campaign_setup_builder_is_fixed_rate_and_profile_bounded(rate) -> None:
     assert setup.analog_bandwidth_hz == 8_000_000
     assert [target.profile for target in setup.targets] == [1, 2]
     assert all(target.profile_crc32 == 0 for target in setup.targets)
+
+
+def test_campaign_setup_builder_preserves_dual_rx_request() -> None:
+    setup = campaign.build_adaptive_scan_setup(
+        session=1,
+        generation=2,
+        seed=3,
+        source_rate_hz=2_500_000,
+        analog_bandwidth_hz=2_500_000,
+        duration_ms=300_000,
+        dwell_ms=120,
+        frequencies_hz=(959_687_498, 1_209_687_498),
+        baseline_weights=(1, 1),
+        analysis_digest=b"x" * 32,
+        rx_mask=3,
+    )
+    assert setup.rx_mask == 3
+
+
+def test_campaign_rejects_2p5_without_the_appended_capability(monkeypatch) -> None:
+    setup = campaign.build_adaptive_scan_setup(
+        session=1,
+        generation=2,
+        seed=3,
+        source_rate_hz=2_500_000,
+        analog_bandwidth_hz=2_500_000,
+        duration_ms=30_000,
+        dwell_ms=120,
+        frequencies_hz=(959_687_500,),
+        baseline_weights=(1,),
+        analysis_digest=b"x" * 32,
+    )
+
+    class LegacyClient(Client):
+        def capabilities(self):
+            return ScanCapabilities(rate_mask=0x0F)
+
+    with pytest.raises(ValueError, match="does not advertise"):
+        campaign.run_adaptive_scan_campaign(
+            "ip:192.168.1.18",
+            "SERIAL_A",
+            setup,
+            lambda _visit: ScanOutcome.ACTIVE,
+            mode=AdaptiveScanMode.SHADOW,
+            client_factory=LegacyClient,
+        )
 
 
 def test_campaign_setup_builder_rejects_sixty_mss() -> None:

@@ -25,6 +25,16 @@ Detector = Callable[[AdaptiveScanVisit], ScanOutcome]
 VisitSink = Callable[[AdaptiveScanVisit], None]
 SessionClockSink = Callable[[int, int, int, int], None]
 
+# The v1 firmware's original fixed-rate bits are 10/15/20/30 MS/s.  The
+# issue-108 dual-RX extension adds the fifth bit for its 2.5 MS/s mode.
+_RATE_CAPABILITY_BITS = {
+    2_500_000: 1 << 4,
+    10_000_000: 1 << 0,
+    15_000_000: 1 << 1,
+    20_000_000: 1 << 2,
+    30_000_000: 1 << 3,
+}
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class AdaptiveScanCampaignReceipt:
@@ -50,6 +60,7 @@ def build_adaptive_scan_setup(
     analysis_digest: bytes,
     transition_budget_ms: int = 10,
     maximum_revisit_ms: int = 3_000,
+    rx_mask: int = 1,
 ) -> ScanSetup:
     """Build the canonical bounded campaign setup before profile compilation."""
 
@@ -85,6 +96,7 @@ def build_adaptive_scan_setup(
             )
             for index, frequency in enumerate(frequencies_hz)
         ),
+        rx_mask=rx_mask,
     )
     setup.validate()
     return setup
@@ -111,6 +123,16 @@ def run_adaptive_scan_campaign(
 
     selected_uri = require_physical_lan_uri(uri)
     host = selected_uri.removeprefix("ip:")
+    capability_bit = _RATE_CAPABILITY_BITS[setup.source_rate_hz]
+    capabilities = client_factory(host).capabilities()
+    if not capabilities.rate_mask & capability_bit:
+        raise ValueError(
+            f"radio does not advertise adaptive-scan support for {setup.source_rate_hz} S/s"
+        )
+    if capabilities.rx_mask & setup.rx_mask != setup.rx_mask:
+        raise ValueError(
+            f"radio does not advertise adaptive-scan RX mask {setup.rx_mask:#x}"
+        )
     preparation = (
         prepare_adaptive_scan_radio(
             selected_uri,

@@ -85,6 +85,33 @@ def test_exact_capabilities_round_trip() -> None:
             ScanCapabilities.unpack(changed)
 
 
+def test_dual_rx_setup_and_eight_byte_visit_round_trip() -> None:
+    request = dataclasses.replace(setup(), source_rate_hz=2_500_000, rx_mask=3)
+    assert ScanSetup.unpack(request.pack()) == request
+    visit = ScanVisit(
+        session=request.session,
+        generation=request.generation,
+        visit=0,
+        selection_counter=100,
+        transition_before=100,
+        transition_after=110,
+        valid_start=110,
+        valid_end=114,
+        frequency_hz=request.targets[0].frequency_hz,
+        iq_bytes=4 * 8,
+        missing_samples_before=0,
+        analog_bandwidth_hz=request.analog_bandwidth_hz,
+        source_rate_hz=request.source_rate_hz,
+        target=0,
+        profile=request.targets[0].profile,
+        result=VisitResult.COMPLETE,
+        eligible_mask=7,
+        effective_weight=65_536,
+        profile_crc32=request.targets[0].profile_crc32,
+    )
+    assert ScanVisit.unpack(visit.pack()) == visit
+
+
 def test_source_bound_records_round_trip_and_reject_corruption() -> None:
     request = setup()
     visit = ScanVisit(

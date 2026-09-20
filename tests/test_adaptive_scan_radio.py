@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import zlib
 
 import pytest
@@ -13,7 +14,10 @@ from pluto_plus.adaptive_scan_radio import (
 from pluto_plus.errors import RadioConfigurationError
 from pluto_plus.hardware.iio import IioReceiverSettingsReadback
 from pluto_plus.models import GainMode, RadioIdentity, Transport
-from pluto_plus.setup_profiles import AD9361_1R1T_TARGET_PROFILE
+from pluto_plus.setup_profiles import (
+    AD9361_1R1T_TARGET_PROFILE,
+    AD9361_2R2T_TARGET_PROFILE,
+)
 
 ORIGINAL = IioReceiverSettingsReadback(
     915_000_000.0,
@@ -91,16 +95,17 @@ class Radio:
         self.restored = True
         return snapshot
 
-    def configure_adaptive_scan_rx0_geometry(
-        self, *, sample_rate_hz, rf_bandwidth_hz, manual_gain_db
+    def configure_adaptive_scan_geometry(
+        self, *, sample_rate_hz, rf_bandwidth_hz, manual_gain_db, rx_mask
     ):
+        channels = (0,) if rx_mask == 1 else (0, 1)
         self.settings = IioReceiverSettingsReadback(
             float(self.frequency),
             float(sample_rate_hz),
             float(rf_bandwidth_hz),
-            (0,),
-            (GainMode.MANUAL,),
-            (manual_gain_db,),
+            channels,
+            (GainMode.MANUAL,) * len(channels),
+            (manual_gain_db,) * len(channels),
         )
         return self.settings
 
@@ -184,6 +189,29 @@ def test_prepare_failure_restores_and_closes() -> None:
     assert radio.restored and radio.closed and radio.settings == ORIGINAL
 
 
+def test_prepare_dual_rx_uses_shared_lo_manual_geometry() -> None:
+    radios = []
+
+    def factory(uri, serial):
+        radio = Radio(uri, serial)
+        radios.append(radio)
+        return radio
+
+    setup = dataclasses.replace(
+        _setup(),
+        source_rate_hz=2_500_000,
+        analog_bandwidth_hz=2_500_000,
+        rx_mask=3,
+    )
+    preparation = prepare_adaptive_scan_radio(
+        "ip:192.168.1.18", "SERIAL_A", setup, radio_factory=factory
+    )
+
+    assert preparation.configured.channels == (0, 1)
+    assert preparation.configured.gain_modes == (GainMode.MANUAL, GainMode.MANUAL)
+    assert preparation.configured.gain_db == (40.0, 40.0)
+
+
 def test_production_factory_selects_exact_rx0_layout_before_open(monkeypatch) -> None:
     class Device:
         def __init__(self, *args, **kwargs):
@@ -197,6 +225,24 @@ def test_production_factory_selects_exact_rx0_layout_before_open(monkeypatch) ->
     monkeypatch.setattr(adaptive_scan_radio, "IioRadioDevice", Device)
     radio = adaptive_scan_radio._default_factory("ip:192.168.1.15", "SERIAL_A")
 
-    assert radio.layout == AD9361_1R1T_TARGET_PROFILE.rx_layout_expectation
+    assert radio.layout == AD9361_1R1T_TARGET_PROFILE.rx_layout_expectation.model_copy(
+        update={"allow_additional_scan_channels": True}
+    )
     assert radio.kwargs["expected_metadata_abi"] == 3
     assert radio.kwargs["require_idle_tandem_owner"] is True
+
+
+def test_production_factory_selects_exact_dual_rx_layout(monkeypatch) -> None:
+    class Device:
+        def __init__(self, *args, **kwargs):
+            self.layout = None
+
+        def configure_rx_layout(self, expectation):
+            self.layout = expectation
+
+    monkeypatch.setattr(adaptive_scan_radio, "IioRadioDevice", Device)
+    radio = adaptive_scan_radio._default_factory(
+        "ip:192.168.1.15", "SERIAL_A", rx_mask=3
+    )
+
+    assert radio.layout == AD9361_2R2T_TARGET_PROFILE.rx_layout_expectation

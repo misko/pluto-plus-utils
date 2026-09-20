@@ -16,7 +16,7 @@ from .hardware.iio import (
 )
 from .models import RadioIdentity, Transport
 from .persistent_hop import require_physical_lan_uri
-from .setup_profiles import AD9361_1R1T_TARGET_PROFILE
+from .setup_profiles import AD9361_1R1T_TARGET_PROFILE, AD9361_2R2T_TARGET_PROFILE
 
 ADAPTIVE_SCAN_KERNEL_BUFFERS = 16
 
@@ -37,8 +37,13 @@ class AdaptiveScanRadio(Protocol):
         self, snapshot: IioReceiverSettingsReadback
     ) -> IioReceiverSettingsReadback: ...
 
-    def configure_adaptive_scan_rx0_geometry(
-        self, *, sample_rate_hz: int, rf_bandwidth_hz: int, manual_gain_db: float
+    def configure_adaptive_scan_geometry(
+        self,
+        *,
+        sample_rate_hz: int,
+        rf_bandwidth_hz: int,
+        manual_gain_db: float,
+        rx_mask: int,
     ) -> IioReceiverSettingsReadback: ...
 
     def read_kernel_buffers_count(self) -> int: ...
@@ -84,7 +89,7 @@ class AdaptiveScanRadioRestoration:
     fastlock_inactive: bool
 
 
-def _default_factory(uri: str, serial: str) -> AdaptiveScanRadio:
+def _default_factory(uri: str, serial: str, rx_mask: int = 1) -> AdaptiveScanRadio:
     radio = IioRadioDevice(
         uri,
         serial=serial,
@@ -92,7 +97,18 @@ def _default_factory(uri: str, serial: str) -> AdaptiveScanRadio:
         expected_metadata_abi=3,
         require_idle_tandem_owner=True,
     )
-    radio.configure_rx_layout(AD9361_1R1T_TARGET_PROFILE.rx_layout_expectation)
+    if rx_mask == 1:
+        # A 2R2T Pluto+ may expose the second complex stream while a single-RX
+        # scan deliberately selects only its first physical receiver.
+        radio.configure_rx_layout(
+            AD9361_1R1T_TARGET_PROFILE.rx_layout_expectation.model_copy(
+                update={"allow_additional_scan_channels": True}
+            )
+        )
+    elif rx_mask == 3:
+        radio.configure_rx_layout(AD9361_2R2T_TARGET_PROFILE.rx_layout_expectation)
+    else:
+        raise ValueError("adaptive scan RX mask must select RX1 or RX1+RX2")
     return radio
 
 
@@ -115,13 +131,17 @@ def prepare_adaptive_scan_radio(
     setup: ScanSetup,
     *,
     manual_gain_db: float = 40.0,
-    radio_factory: RadioFactory = _default_factory,
+    radio_factory: RadioFactory | None = None,
 ) -> AdaptiveScanRadioPreparation:
-    """Program exact RX0 geometry and volatile profiles, restoring on failure."""
+    """Program exact manual-gain RX geometry and volatile profiles."""
 
     selected_uri = require_physical_lan_uri(uri)
     setup.validate()
-    radio = radio_factory(selected_uri, serial)
+    radio = (
+        _default_factory(selected_uri, serial, setup.rx_mask)
+        if radio_factory is None
+        else radio_factory(selected_uri, serial)
+    )
     original: IioReceiverSettingsReadback | None = None
     original_kernel_buffers: int | None = None
     failure: BaseException | None = None
@@ -133,10 +153,11 @@ def prepare_adaptive_scan_radio(
         original_kernel_buffers = radio.read_kernel_buffers_count()
         if radio.read_active_rx_fastlock_profile() is not None:
             raise RadioConfigurationError("adaptive scan preparation found active Fast Lock")
-        configured = radio.configure_adaptive_scan_rx0_geometry(
+        configured = radio.configure_adaptive_scan_geometry(
             sample_rate_hz=setup.source_rate_hz,
             rf_bandwidth_hz=setup.analog_bandwidth_hz,
             manual_gain_db=manual_gain_db,
+            rx_mask=setup.rx_mask,
         )
         configured_kernel_buffers = radio.configure_kernel_buffers(
             ADAPTIVE_SCAN_KERNEL_BUFFERS
@@ -239,11 +260,15 @@ def prepare_adaptive_scan_radio(
 def restore_adaptive_scan_radio(
     preparation: AdaptiveScanRadioPreparation,
     *,
-    radio_factory: RadioFactory = _default_factory,
+    radio_factory: RadioFactory | None = None,
 ) -> AdaptiveScanRadioRestoration:
     """Restore the exact pre-session host state over the same serial/IP route."""
 
-    radio = radio_factory(preparation.uri, preparation.serial)
+    radio = (
+        _default_factory(preparation.uri, preparation.serial, preparation.setup.rx_mask)
+        if radio_factory is None
+        else radio_factory(preparation.uri, preparation.serial)
+    )
     radio.open()
     try:
         _attest_identity(radio, preparation.uri, preparation.serial)

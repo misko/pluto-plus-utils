@@ -74,7 +74,7 @@ def evidence(rate: int = 20_000_000, ppm: int = 0) -> CounterUtcEvidence:
     )
 
 
-@pytest.mark.parametrize("rate", [10_000_000, 15_000_000, 20_000_000])
+@pytest.mark.parametrize("rate", [2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000])
 @pytest.mark.parametrize("ppm", [-100, -37, 0, 51, 100])
 def test_every_sample_time_is_bounded_through_wrap_and_drift(rate: int, ppm: int) -> None:
     value = evidence(rate, ppm)
