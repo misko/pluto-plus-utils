@@ -21,6 +21,7 @@ from pluto_plus.adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDete
 from pluto_plus.adaptive_scan_radio import _default_factory
 from pluto_plus.adaptive_scan_shadow import AdaptiveScanMode
 from pluto_plus.hardware.discovery import discover_network_iio
+from pluto_plus.hardware.iio import _receiver_settings_restored
 
 SERIAL = "10400056f695001322002d0010ad1719f2"
 URI = "ip:192.168.1.21"
@@ -34,6 +35,9 @@ CELLS = {
     "dual8": (8_000_000, 3, 120_000),
     "smoke-dual7p5": (7_500_000, 3, 15_000),
     "smoke-dual8": (8_000_000, 3, 15_000),
+    "target-short-dual5": (5_000_000, 3, 3_000),
+    "target-short-dual7p5": (7_500_000, 3, 3_000),
+    "target-short-dual8": (8_000_000, 3, 3_000),
     "unusual": (12_345_679, 1, 5_000),
 }
 FREQUENCIES = (959_687_498, 1_209_687_498, 1_459_687_498, 1_709_687_500)
@@ -143,6 +147,7 @@ def run_cell(cell, *, utc=False, serial=SERIAL):
     records, timing = [], {}
     report = {"cell": cell, "capabilities": plain(caps), "requested_setup": plain(setup)}
     original = ordinary_settings(rx_mask, uri, serial)
+    report["ordinary_libiio_before"] = plain(original)
     try:
         receipt = run_adaptive_scan_campaign(
             uri, serial, setup, detector, mode=AdaptiveScanMode.ADAPTIVE,
@@ -151,9 +156,11 @@ def run_cell(cell, *, utc=False, serial=SERIAL):
             counter_clock_sink=(lambda evidence: timing.update(evidence.model_dump(mode="json")))
             if utc else None,
         )
+        # Preserve terminal and restoration evidence even when validation fails.
+        report["receipt"] = plain(receipt)
         restoration = receipt.restoration
         exact_restore = (
-            restoration.expected == restoration.observed
+            _receiver_settings_restored(restoration.expected, restoration.observed)
             and restoration.expected_kernel_buffers == restoration.observed_kernel_buffers
             and restoration.fastlock_inactive
         )
@@ -172,8 +179,8 @@ def run_cell(cell, *, utc=False, serial=SERIAL):
     try:
         observed = ordinary_settings(rx_mask, uri, serial)
         report["ordinary_libiio_readback"] = plain(observed)
-        report["restored_to_pre_attempt"] = original == observed
-        if original != observed:
+        report["restored_to_pre_attempt"] = _receiver_settings_restored(original, observed)
+        if not report["restored_to_pre_attempt"]:
             report["status"] = "rejected_or_failed"
     except Exception as error:
         report.update({"status": "rejected_or_failed", "post_access_error": str(error)})

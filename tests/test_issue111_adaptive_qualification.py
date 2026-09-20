@@ -9,12 +9,22 @@ from types import SimpleNamespace
 import pytest
 
 from pluto_plus.adaptive_scan import ScanCapabilities, VisitResult
+from pluto_plus.hardware.iio import IioReceiverSettingsReadback
+from pluto_plus.models import GainMode
 
 SCRIPT = Path(__file__).parents[1] / "scripts/issue111_adaptive_qualification.py"
 
 
 def module():
     return runpy.run_path(str(SCRIPT))
+
+
+def settings(mode=GainMode.SLOW_ATTACK, gains=(42.0, 40.0)):
+    return IioReceiverSettingsReadback(
+        center_frequency_hz=2_400_000_000, sample_rate_hz=30_720_000,
+        bandwidth_hz=18_000_000, channels=(0, 1),
+        gain_modes=(mode, mode), gain_db=gains,
+    )
 
 
 def test_cells_bound_every_session_and_total_attempt_ledger(tmp_path):
@@ -81,6 +91,58 @@ def test_accounting_partitions_skipped_and_complete_source_intervals():
         summarize([complete, skipped], terminal, 7_500_000, 3)
 
 
+def test_target_short_cells_preserve_shared_1199_second_limit(tmp_path):
+    values = module()
+    ledger = tmp_path / "budget.jsonl"
+    reserve = values["reserve_attempt"]
+    cells = ("baseline-dual2p5", "baseline-dual2p5", "baseline-single15",
+             "dual5", "dual7p5", "dual8", "unusual", "dual5")
+    for cell in cells:
+        with reserve(ledger, cell):
+            pass
+    for suffix, rate in (("5", 5_000_000), ("7p5", 7_500_000), ("8", 8_000_000)):
+        cell = f"target-short-dual{suffix}"
+        assert values["CELLS"][cell] == (rate, 3, 3000)
+        with reserve(ledger, cell) as allowance:
+            assert allowance == 63
+    assert sum(json.loads(row)["reserved_seconds"]
+               for row in ledger.read_text().splitlines()) == 1199
+    with pytest.raises(ValueError, match="budget exhausted"), reserve(ledger, cell):
+        pytest.fail("no further capture attempt fits")
+
+
+@pytest.mark.parametrize("mode, expected_status", [
+    (GainMode.SLOW_ATTACK, "completed"), (GainMode.MANUAL, "rejected_or_failed"),
+])
+def test_restoration_handles_volatile_agc_and_preserves_receipt(monkeypatch, mode, expected_status):
+    values = module()
+    run = values["run_cell"]
+    namespace = run.__globals__
+    caps = ScanCapabilities(rate_mask=31, rx_mask=3, protocol_version=2,
+                            rate_mode=1, minimum_rate_hz=520_833, maximum_rate_hz=61_440_000)
+    monkeypatch.setitem(namespace, "AdaptiveScanClient",
+                        lambda *_: SimpleNamespace(runtime_capabilities=lambda: caps))
+    before, after = settings(mode), settings(mode, (43.0, 41.0))
+    observations = iter((before, after))
+    monkeypatch.setitem(namespace, "ordinary_settings", lambda *_: next(observations))
+    receipt = SimpleNamespace(
+        restoration=SimpleNamespace(expected=before, observed=after,
+                                    expected_kernel_buffers=4, observed_kernel_buffers=4,
+                                    fastlock_inactive=True),
+        preparation=SimpleNamespace(configured=SimpleNamespace(sample_rate_hz=5_000_000)),
+        terminal=SimpleNamespace(planned=1),
+        run=SimpleNamespace(metrics=SimpleNamespace(planned_valid_delivery=1.0)),
+    )
+    monkeypatch.setitem(namespace, "run_adaptive_scan_campaign", lambda *_, **__: receipt)
+    monkeypatch.setitem(namespace, "summarize", lambda *_: {"checked": True})
+    report = run("target-short-dual5")
+    assert report["status"] == expected_status
+    assert report["restored_to_pre_attempt"] == (mode is GainMode.SLOW_ATTACK)
+    assert report["ordinary_libiio_before"] == values["plain"](before)
+    assert report["receipt"] is receipt
+    assert report["receipt"].terminal.planned == 1
+
+
 def test_unusual_rejection_records_restoration_without_retry(monkeypatch):
     values = module()
     run = values["run_cell"]
@@ -91,7 +153,7 @@ def test_unusual_rejection_records_restoration_without_retry(monkeypatch):
                         lambda *_: SimpleNamespace(runtime_capabilities=lambda: caps))
     observations = []
     monkeypatch.setitem(namespace, "ordinary_settings",
-                        lambda *_: observations.append("ordinary") or (15_000_000,))
+                        lambda *_: observations.append("ordinary") or settings())
     def reject(*_args, **kwargs):
         observations.append("attempt")
         raise ValueError("driver rejects exact integer rate")
