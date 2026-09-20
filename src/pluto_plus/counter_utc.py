@@ -84,6 +84,7 @@ class HostClock(EvidenceModel):
     source: str
     utc_error_bound_ns: Nonnegative | None
     reason: str
+    tracking_csv: str | None = None
 
     @model_validator(mode="after")
     def _ordered(self) -> Self:

@@ -28,11 +28,13 @@ def chrony_bound(output: str, realtime_ns: int) -> tuple[str, int]:
     The upstream reference being correct remains an explicit NTP assumption.
     """
     fields = next(csv.reader([output.strip()]))
-    if len(fields) != 13 or fields[12] != "Normal" or not 0 < int(fields[1]) < 16:
+    # Reference ID and address occupy separate CSV columns (unlike the
+    # human-readable report's single "Reference ID" line).
+    if len(fields) != 14 or fields[13] != "Normal" or not 0 < int(fields[2]) < 16:
         raise ValueError("chrony is not synchronized")
     if fields[0] in ("00000000", "0", "127.127.1.1", "7F7F0101"):
         raise ValueError("chrony source is not an external UTC reference")
-    values = [Decimal(fields[i]) for i in (2, 3, 8, 9, 10)]
+    values = [Decimal(fields[i]) for i in (3, 4, 9, 10, 11)]
     if any(not x.is_finite() for x in values):
         raise ValueError("chrony returned nonfinite clock evidence")
     reference, offset, skew, delay, dispersion = values
@@ -40,16 +42,18 @@ def chrony_bound(output: str, realtime_ns: int) -> tuple[str, int]:
     if age < -1 or age > 1200 or min(skew, delay, dispersion) < 0:
         raise ValueError("chrony reference is stale or invalid")
     bound = abs(offset) + dispersion + delay / 2 + skew / 10**6
-    return f"chrony:{fields[0]}:stratum-{fields[1]}", math.ceil(bound * 10**9)
+    return f"chrony:{fields[0]}:{fields[1]}:stratum-{fields[2]}", math.ceil(bound * 10**9)
 
 
 def read_host_clock() -> HostClock:
     source, bound, reason = "unavailable", None, "chrony evidence unavailable"
+    tracking_csv = None
     try:
         result = subprocess.run(
             ["chronyc", "-c", "tracking"], capture_output=True, text=True, timeout=0.5, check=True
         )
-        source, bound = chrony_bound(result.stdout, time.time_ns())
+        tracking_csv = result.stdout.strip()
+        source, bound = chrony_bound(tracking_csv, time.time_ns())
         reason = "chrony tracking bound; assumes a correct external reference"
     except (OSError, subprocess.SubprocessError, ValueError, InvalidOperation) as error:
         reason = str(error)
@@ -63,6 +67,7 @@ def read_host_clock() -> HostClock:
         source=source,
         utc_error_bound_ns=bound,
         reason=reason,
+        tracking_csv=tracking_csv,
     )
 
 

@@ -192,7 +192,7 @@ def test_wire_rejects_every_single_byte_corruption() -> None:
 
 
 def test_chrony_bound_and_failure() -> None:
-    line = "12345678,2,1800000000,0.001,0,0,0,0,1,0.010,0.002,64,Normal"
+    line = "12345678,192.0.2.1,2,1800000000,0.001,0,0,0,0,1,0.010,0.002,64,Normal"
     assert chrony_bound(line, UTC)[1] == 8_001_000
     for bad in (
         line.replace("Normal", "Not synchronised"),
@@ -203,6 +203,16 @@ def test_chrony_bound_and_failure() -> None:
             chrony_bound(bad, UTC)
     with pytest.raises(ValueError):
         chrony_bound(line, UTC + 1300 * 10**9)
+
+
+def test_observed_chrony_csv_layout_includes_reference_id_and_address() -> None:
+    line = (
+        "5BBD5B71,91.189.91.113,3,1789922022.446231300,-0.000690079,"
+        "0.000437797,0.000333419,-18.802,0.003,0.051,0.121894792,0.005066424,1031.5,Normal"
+    )
+    source, bound = chrony_bound(line, 1789922023_000000000)
+    assert source == "chrony:5BBD5B71:91.189.91.113:stratum-3"
+    assert bound == 66_703_950
 
 
 def test_json_round_trip_preserves_raw_evidence() -> None:
