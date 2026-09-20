@@ -23,6 +23,7 @@ from .adaptive_scan import (
     ScanVisit,
     VisitResult,
 )
+from .counter_utc import QUERY_BYTES, RESPONSE_BYTES, CounterObservation, pack_query
 
 
 class AdaptiveScanTransportError(RuntimeError):
@@ -144,6 +145,46 @@ class AdaptiveScanClient:
             raise
         return AdaptiveScanSession(self, connection, device, setup)
 
+    def supports_counter_time(self) -> bool:
+        connection = self._connection()
+        try:
+            connection.sendall(b"SCANTIMECAPS\n")
+            version = _integer(connection)
+            if version in (-errno.EINVAL, -errno.ENOSYS, -errno.EOPNOTSUPP):
+                return False
+            if version != 1:
+                raise AdaptiveScanTransportError("unsupported counter-time protocol")
+            return True
+        finally:
+            connection.close()
+
+    def counter_time(
+        self, device: str, setup: ScanSetup, request: int
+    ) -> CounterObservation | None:
+        connection = self._connection()
+        try:
+            connection.sendall(
+                f"SCANTIME {device} {QUERY_BYTES}\n".encode()
+                + pack_query(request, setup.session, setup.generation)
+            )
+            size = _integer(connection)
+            if size in (-errno.EAGAIN, -errno.ENODATA, -errno.ESHUTDOWN):
+                return None
+            _require_success(size, "SCANTIME")
+            if size != RESPONSE_BYTES:
+                raise AdaptiveScanTransportError("SCANTIME returned the wrong record size")
+            result = CounterObservation.unpack(_exact(connection, size))
+            if (result.request, result.session, result.generation, result.sample_rate_hz) != (
+                request,
+                setup.session,
+                setup.generation,
+                setup.source_rate_hz,
+            ):
+                raise AdaptiveScanTransportError("SCANTIME returned stale identity or rate")
+            return result
+        finally:
+            connection.close()
+
     def submit_feedback(self, device: str, feedback: ScanFeedback) -> FeedbackResult:
         wire = feedback.pack()
         connection = self._connection()
@@ -210,10 +251,7 @@ class AdaptiveScanSession:
         if record.target >= len(self.setup.targets):
             raise AdaptiveScanTransportError("visit target is outside the setup whitelist")
         target = self.setup.targets[record.target]
-        if (
-            record.frequency_hz != target.frequency_hz
-            or record.profile != target.profile
-        ):
+        if record.frequency_hz != target.frequency_hz or record.profile != target.profile:
             raise AdaptiveScanTransportError("visit target metadata changed from setup")
         # The AD9361 recall path can legitimately adapt the stored ALC byte.
         # OPENM verifies the setup CRC before recall; every kernel recall then

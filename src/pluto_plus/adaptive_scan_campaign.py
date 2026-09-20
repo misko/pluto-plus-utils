@@ -16,6 +16,8 @@ from .adaptive_scan_radio import (
     restore_adaptive_scan_radio,
 )
 from .adaptive_scan_shadow import AdaptiveScanMode, ScannerRunReport, run_scanner_session
+from .counter_utc import DEFAULT_TIMING_POLICY, CounterUtcEvidence, TimingPolicy
+from .counter_utc_capture import CounterUtcCollector
 from .persistent_hop import require_physical_lan_uri
 
 ClientFactory = Callable[[str], AdaptiveScanClient]
@@ -102,6 +104,8 @@ def run_adaptive_scan_campaign(
     client_factory: ClientFactory = AdaptiveScanClient,
     visit_sink: VisitSink | None = None,
     session_clock_sink: SessionClockSink | None = None,
+    counter_clock_sink: Callable[[CounterUtcEvidence], None] | None = None,
+    timing_policy: TimingPolicy = DEFAULT_TIMING_POLICY,
 ) -> AdaptiveScanCampaignReceipt:
     """Run one bounded campaign and always restore the pre-session host state."""
 
@@ -126,6 +130,7 @@ def run_adaptive_scan_campaign(
     run: ScannerRunReport | None = None
     restoration: AdaptiveScanRadioRestoration | None = None
     failure: BaseException | None = None
+    collector: CounterUtcCollector | None = None
     try:
         client = client_factory(host)
         client.capabilities()
@@ -135,6 +140,14 @@ def run_adaptive_scan_campaign(
             preparation.setup,
             samples_per_block=samples_per_block,
         ) as session:
+            if counter_clock_sink is not None:
+                collector = CounterUtcCollector(
+                    AdaptiveScanClient(host, timeout_s=1.0),
+                    preparation.setup,
+                    serial,
+                    policy=timing_policy,
+                )
+                collector.start()
             if session_clock_sink is not None:
                 session_clock_sink(
                     begin_before_realtime_ns,
@@ -152,6 +165,14 @@ def run_adaptive_scan_campaign(
     except BaseException as error:
         failure = error
     finally:
+        if collector is not None and counter_clock_sink is not None:
+            try:
+                counter_clock_sink(collector.stop())
+            except BaseException as timing_error:
+                if failure is None:
+                    failure = timing_error
+                else:
+                    failure.add_note(f"timing evidence persistence failed: {timing_error!r}")
         try:
             restoration = (
                 restore_adaptive_scan_radio(preparation)

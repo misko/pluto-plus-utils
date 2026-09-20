@@ -60,6 +60,30 @@ def setup() -> ScanSetup:
     )
 
 
+def test_counter_time_negotiation_busy_stale_and_wire() -> None:
+    from test_counter_utc import response_wire
+
+    sockets = deque(
+        [
+            ScriptedSocket(b"1\n"),
+            ScriptedSocket(b"-11\n"),
+            ScriptedSocket(b"128\n" + response_wire()),
+        ]
+    )
+    client = AdaptiveScanClient("fixture", connector=lambda *_: sockets.popleft())
+    assert client.supports_counter_time()
+    assert client.counter_time("cf-ad9361-lpc", setup(), 1) is None
+    assert client.counter_time("cf-ad9361-lpc", setup(), 1).counter == 4_000_000_000
+    old = ScriptedSocket(b"-22\n")
+    assert not AdaptiveScanClient("fixture", connector=lambda *_: old).supports_counter_time()
+    assert old.closed
+    stale = ScriptedSocket(b"128\n" + response_wire())
+    client = AdaptiveScanClient("fixture", connector=lambda *_: stale)
+    with pytest.raises(AdaptiveScanTransportError, match="stale"):
+        client.counter_time("cf-ad9361-lpc", setup(), 2)
+    assert stale.closed
+
+
 def test_capabilities_and_complete_stream_are_exact() -> None:
     request = setup()
     capabilities_socket = ScriptedSocket(b"96\n" + ScanCapabilities().pack())
@@ -188,9 +212,7 @@ def test_stream_rejects_setup_mismatch_and_closes(changed, message) -> None:
     iq = b"\x01\x02\x03\x04" * 4
     visit = changed(_complete_visit(request, iq))
     wire = ScriptedSocket(b"0\n160\n" + visit.pack() + b"16\n" + iq)
-    client = AdaptiveScanClient(
-        "192.0.2.1", connector=lambda _host, _port, _timeout: wire
-    )
+    client = AdaptiveScanClient("192.0.2.1", connector=lambda _host, _port, _timeout: wire)
 
     with (
         pytest.raises(AdaptiveScanTransportError, match=message),
@@ -205,9 +227,7 @@ def test_stream_rejects_truncated_iq_and_closes() -> None:
     iq = b"\x01\x02\x03\x04" * 4
     visit = _complete_visit(request, iq)
     wire = ScriptedSocket(b"0\n160\n" + visit.pack() + b"16\n" + iq[:4])
-    client = AdaptiveScanClient(
-        "192.0.2.1", connector=lambda _host, _port, _timeout: wire
-    )
+    client = AdaptiveScanClient("192.0.2.1", connector=lambda _host, _port, _timeout: wire)
 
     with (
         pytest.raises(AdaptiveScanTransportError, match="inside a binary record"),
@@ -221,21 +241,11 @@ def test_stream_rejects_terminal_accounting_mismatch() -> None:
     request = setup()
     iq = b"\x01\x02\x03\x04" * 4
     visit = _complete_visit(request, iq)
-    terminal = dataclasses.replace(
-        _terminal(request), planned=2, skipped=1
-    )
+    terminal = dataclasses.replace(_terminal(request), planned=2, skipped=1)
     wire = ScriptedSocket(
-        b"0\n160\n"
-        + visit.pack()
-        + b"16\n"
-        + iq
-        + b"128\n"
-        + terminal.pack()
-        + b"0\n"
+        b"0\n160\n" + visit.pack() + b"16\n" + iq + b"128\n" + terminal.pack() + b"0\n"
     )
-    client = AdaptiveScanClient(
-        "192.0.2.1", connector=lambda _host, _port, _timeout: wire
-    )
+    client = AdaptiveScanClient("192.0.2.1", connector=lambda _host, _port, _timeout: wire)
 
     with (
         pytest.raises(AdaptiveScanTransportError, match="terminal accounting"),
@@ -286,9 +296,7 @@ def test_stream_accepts_kernel_attested_post_recall_crc_change() -> None:
         + b"0\n"
         + b"0\n"
     )
-    client = AdaptiveScanClient(
-        "192.0.2.1", connector=lambda _host, _port, _timeout: wire
-    )
+    client = AdaptiveScanClient("192.0.2.1", connector=lambda _host, _port, _timeout: wire)
 
     with client.start(request) as session:
         assert tuple(session.visits())[0].record.profile_crc32 == visit.profile_crc32

@@ -18,6 +18,7 @@ from pluto_plus.adaptive_scan_archive import AdaptiveScanArchive
 from pluto_plus.adaptive_scan_campaign import build_adaptive_scan_setup, run_adaptive_scan_campaign
 from pluto_plus.adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDetectorConfig
 from pluto_plus.adaptive_scan_shadow import AdaptiveScanMode
+from pluto_plus.counter_utc import TimingPolicy
 
 SERIAL = "104000bac4950008230026001b440a003a"
 URI = "ip:192.168.1.17"
@@ -85,7 +86,17 @@ def main() -> int:
     parser.add_argument("--iq-spool-root", type=Path, required=True)
     parser.add_argument("--duration-ms", type=int, default=300_000)
     parser.add_argument("--epoch", type=int, default=None)
+    parser.add_argument(
+        "--timing-policy",
+        type=Path,
+        help="Validated hardware timing bounds; omitted means unqualified UTC",
+    )
     args = parser.parse_args()
+    timing_policy = (
+        TimingPolicy.model_validate_json(args.timing_policy.read_text())
+        if args.timing_policy
+        else TimingPolicy()
+    )
     epoch = int(time.time()) if args.epoch is None else args.epoch
     ordinal, rate, selected_edge, frequencies = slot_configuration(epoch)
     identity = hashlib.sha256(f"{SERIAL}\0{ordinal}".encode()).digest()
@@ -108,6 +119,7 @@ def main() -> int:
     session_id = f"scan-fw-{identity[:8].hex()}"
     archive = AdaptiveScanArchive(args.iq_spool_root, session_id, setup)
     clock_bracket: dict[str, int] = {}
+    counter_clock: dict = {}
 
     def record_clock_bracket(
         before_realtime_ns: int,
@@ -121,6 +133,7 @@ def main() -> int:
             begin_after_realtime_ns=after_realtime_ns,
             begin_after_monotonic_ns=after_monotonic_ns,
         )
+
     try:
         receipt = run_adaptive_scan_campaign(
             URI,
@@ -133,6 +146,10 @@ def main() -> int:
             feedback_period_visits=8,
             visit_sink=archive.append,
             session_clock_sink=record_clock_bracket,
+            counter_clock_sink=lambda evidence: counter_clock.update(
+                evidence.model_dump(mode="json")
+            ),
+            timing_policy=timing_policy,
         )
         terminal_realtime_ns = time.time_ns()
         terminal_monotonic_ns = time.monotonic_ns()
@@ -142,9 +159,7 @@ def main() -> int:
             "radio_serial": SERIAL,
             "rate_hz": rate,
             "selected_edge": selected_edge,
-            "omitted_frequencies_hz": [
-                item for item in FREQUENCIES if item not in frequencies
-            ],
+            "omitted_frequencies_hz": [item for item in FREQUENCIES if item not in frequencies],
             "preparation": json_value(receipt.preparation),
             "run": json_value(receipt.run),
             "restoration": json_value(receipt.restoration),
@@ -154,6 +169,7 @@ def main() -> int:
                 "terminal_realtime_ns": terminal_realtime_ns,
                 "terminal_monotonic_ns": terminal_monotonic_ns,
             },
+            "counter_utc_timing": counter_clock,
         }
         archive_path = archive.finish(receipt.terminal, evidence)
     except BaseException:
@@ -169,9 +185,7 @@ def main() -> int:
             "radio_serial": SERIAL,
             "rate_hz": rate,
             "selected_edge": selected_edge,
-            "omitted_frequencies_hz": [
-                item for item in FREQUENCIES if item not in frequencies
-            ],
+            "omitted_frequencies_hz": [item for item in FREQUENCIES if item not in frequencies],
             "setup": json_value(setup),
             "run": json_value(receipt.run),
             "restoration": json_value(receipt.restoration),

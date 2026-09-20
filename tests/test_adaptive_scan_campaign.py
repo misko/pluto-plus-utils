@@ -181,6 +181,43 @@ def test_campaign_restores_after_detector_failure(monkeypatch) -> None:
     assert events == ["prepare", "restore"]
 
 
+def test_timing_sink_failure_still_restores_radio(monkeypatch) -> None:
+    from pluto_plus.counter_utc import CounterUtcEvidence
+
+    events = []
+    setup = _setup()
+    _install_lifecycle(monkeypatch, setup, events)
+
+    class Collector:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            events.append("timing-start")
+
+        def stop(self):
+            events.append("timing-stop")
+            return CounterUtcEvidence(
+                session=setup.session, generation=setup.generation, radio_serial="SERIAL_A"
+            )
+
+    def sink(_evidence):
+        raise RuntimeError("evidence sink failed")
+
+    monkeypatch.setattr(campaign, "CounterUtcCollector", Collector)
+    with pytest.raises(RuntimeError, match="evidence sink failed"):
+        campaign.run_adaptive_scan_campaign(
+            "ip:192.168.1.18",
+            "SERIAL_A",
+            setup,
+            lambda _: ScanOutcome.ACTIVE,
+            mode=AdaptiveScanMode.SHADOW,
+            client_factory=Client,
+            counter_clock_sink=sink,
+        )
+    assert events == ["prepare", "timing-start", "timing-stop", "restore"]
+
+
 @pytest.mark.parametrize("rate", [10_000_000, 15_000_000, 20_000_000, 30_000_000])
 def test_campaign_setup_builder_is_fixed_rate_and_profile_bounded(rate) -> None:
     setup = campaign.build_adaptive_scan_setup(
