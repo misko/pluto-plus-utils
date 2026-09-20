@@ -5,6 +5,7 @@ import zlib
 
 import pytest
 
+from pluto_plus.adaptive_scan import ScanSetup, ScanTarget
 from pluto_plus.counter_utc import (
     UNKNOWN_AGE,
     CounterObservation,
@@ -14,7 +15,7 @@ from pluto_plus.counter_utc import (
     TimingPolicy,
     pack_query,
 )
-from pluto_plus.counter_utc_capture import chrony_bound
+from pluto_plus.counter_utc_capture import CounterUtcCollector, chrony_bound
 
 UTC = 1_800_000_000_000_000_000
 MONO = 1_000_000_000_000
@@ -213,6 +214,98 @@ def test_observed_chrony_csv_layout_includes_reference_id_and_address() -> None:
     source, bound = chrony_bound(line, 1789922023_000000000)
     assert source == "chrony:5BBD5B71:91.189.91.113:stratum-3"
     assert bound == 66_703_950
+
+
+def test_busy_counter_queries_retry_fast_then_restore_five_second_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observation = CounterObservation(
+        request=2,
+        session=11,
+        generation=12,
+        boot_id="01" * 16,
+        epoch=99,
+        counter=COUNTER + 1,
+        device_before_ns=100,
+        device_after_ns=200,
+        sample_rate_hz=15_000_000,
+        maximum_snapshot_age_ns=UNKNOWN_AGE,
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.requests: list[int] = []
+
+        def supports_counter_time(self) -> bool:
+            return True
+
+        def counter_time(self, _device, _setup, request):
+            self.requests.append(request)
+            if request == 9:
+                return None
+            return observation.model_copy(update={"request": request, "counter": COUNTER + request})
+
+    class StopAfterTenWaits:
+        def __init__(self) -> None:
+            self.waits: list[float] = []
+
+        def is_set(self) -> bool:
+            return False
+
+        def wait(self, timeout: float) -> bool:
+            self.waits.append(timeout)
+            return len(self.waits) == 10
+
+    setup = ScanSetup(
+        session=11,
+        generation=12,
+        seed=13,
+        source_rate_hz=15_000_000,
+        analog_bandwidth_hz=10_000_000,
+        duration_ms=2_000,
+        dwell_ms=120,
+        transition_budget_ms=10,
+        maximum_revisit_ms=1_000,
+        feedback_age_ms=1_000,
+        application_delay_ms=1_000,
+        decay_ms=5_000,
+        maximum_boost=3,
+        maximum_queue_bytes=200_000_000,
+        maximum_queue_age_ms=5_000,
+        maximum_queue_visits=50,
+        analysis_digest=bytes(range(1, 33)),
+        targets=(ScanTarget(0, 1, 2_400_000_000, 1, 1),),
+    )
+    client = Client()
+    monotonic_state = {"value": MONO}
+
+    def monotonic_ns() -> int:
+        monotonic_state["value"] += 1_000
+        return monotonic_state["value"]
+
+    def host_clock() -> HostClock:
+        mono = monotonic_ns()
+        return HostClock(
+            monotonic_before_ns=mono - 1_000,
+            monotonic_after_ns=mono,
+            realtime_ns=UTC + mono - MONO,
+            source="fixture",
+            utc_error_bound_ns=1_000_000,
+            reason="fixture",
+        )
+
+    collector = CounterUtcCollector(client, setup, "fixture", clock=host_clock)
+    stop = StopAfterTenWaits()
+    collector._stop = stop  # type: ignore[assignment]
+    monkeypatch.setattr("pluto_plus.counter_utc_capture.time.monotonic_ns", monotonic_ns)
+
+    collector._run()
+
+    assert client.requests == list(range(1, 11))
+    assert stop.waits == [0.05] * 7 + [5, 0.05, 5]
+    assert len(collector.anchors) == 9
+    assert all(anchor.observation.request != 9 for anchor in collector.anchors)
+    assert collector.errors == []
 
 
 def test_json_round_trip_preserves_raw_evidence() -> None:

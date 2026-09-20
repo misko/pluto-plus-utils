@@ -121,10 +121,13 @@ class CounterUtcCollector:
             request = 0
             while not self._stop.is_set():
                 request += 1
+                observation = None
+                query_completed = False
                 try:
                     before = self.clock()
                     send = time.monotonic_ns()
                     observation = self.client.counter_time("cf-ad9361-lpc", self.setup, request)
+                    query_completed = True
                     receive = time.monotonic_ns()
                     after = self.clock()
                     if observation is not None:
@@ -139,7 +142,10 @@ class CounterUtcCollector:
                         )
                 except (OSError, RuntimeError, ValueError) as error:
                     self.errors.append(f"query {request}: {error}")
-                if self._stop.wait(0.05 if request < 8 else 5):
+                retry_delay = (
+                    0.05 if request < 8 or (query_completed and observation is None) else 5
+                )
+                if self._stop.wait(retry_delay):
                     break
         except (OSError, RuntimeError, ValueError) as error:
             self.errors.append(str(error))
