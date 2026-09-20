@@ -168,6 +168,26 @@ def test_capabilities_accept_rate_and_receiver_supersets() -> None:
     assert socket.closed
 
 
+def test_runtime_discovery_returns_setup_validated_bounds() -> None:
+    caps = ScanCapabilities(rate_mask=0x1F, rx_mask=3, protocol_version=2,
+                            rate_mode=1, minimum_rate_hz=520_833, maximum_rate_hz=61_440_000)
+    socket = ScriptedSocket(b"96\n" + caps.pack())
+    client = AdaptiveScanClient("192.0.2.1", connector=lambda *_: socket)
+    assert client.runtime_capabilities() == caps
+    assert socket.sent == b"SCANCAPS2 96\n"
+
+
+@pytest.mark.parametrize("reply", [b"-22\n", b"-38\n"])
+def test_runtime_discovery_falls_back_to_fresh_legacy_connection(reply) -> None:
+    unavailable = ScriptedSocket(reply)
+    legacy = ScriptedSocket(b"96\n" + ScanCapabilities().pack())
+    sockets = deque((unavailable, legacy))
+    client = AdaptiveScanClient("192.0.2.1", connector=lambda *_: sockets.popleft())
+    assert client.runtime_capabilities() == ScanCapabilities()
+    assert unavailable.closed and legacy.closed
+    assert legacy.sent == b"SCANCAPS 96\n"
+
+
 def test_dual_rx_start_derives_full_scan_mask_and_validates_eight_byte_frames() -> None:
     request = dataclasses.replace(setup(), source_rate_hz=2_500_000, rx_mask=3)
     iq = bytes(range(32))
@@ -281,6 +301,7 @@ def _terminal(request: ScanSetup, *, final_counter: int = 200) -> ScanTerminal:
         (lambda item: dataclasses.replace(item, session=item.session + 1), "identity"),
         (lambda item: dataclasses.replace(item, frequency_hz=2_500_000_000), "metadata"),
         (lambda item: dataclasses.replace(item, source_rate_hz=15_000_000), "rate"),
+        (lambda item: dataclasses.replace(item, protocol_version=2), "protocol version"),
         (lambda item: dataclasses.replace(item, visit=1), "contiguous"),
     ],
 )

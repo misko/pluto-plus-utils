@@ -159,6 +159,11 @@ def prepare_adaptive_scan_radio(
             manual_gain_db=manual_gain_db,
             rx_mask=setup.rx_mask,
         )
+        if configured.sample_rate_hz != setup.source_rate_hz:
+            raise RadioConfigurationError(
+                "adaptive scan rate did not read back exactly: "
+                f"requested={setup.source_rate_hz} observed={configured.sample_rate_hz}"
+            )
         configured_kernel_buffers = radio.configure_kernel_buffers(
             ADAPTIVE_SCAN_KERNEL_BUFFERS
         )

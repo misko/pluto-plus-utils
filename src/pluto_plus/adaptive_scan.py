@@ -31,6 +31,16 @@ TERMINAL_BYTES: Final = 128
 # 2.5 MS/s is admitted only after the endpoint capability negotiation in the
 # campaign runner.  Older v0.52 endpoints advertise mask 0x0f and are refused.
 SUPPORTED_RATES: Final = frozenset((2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000))
+RUNTIME_VERSION: Final = 2
+MINIMUM_RUNTIME_RATE: Final = 520_833
+MAXIMUM_RUNTIME_RATE: Final = 61_440_000
+
+
+def _rate_valid(rate: int, version: int) -> bool:
+    return type(rate) is int and (
+        (version == VERSION and rate in SUPPORTED_RATES)
+        or (version == RUNTIME_VERSION and MINIMUM_RUNTIME_RATE <= rate <= MAXIMUM_RUNTIME_RATE)
+    )
 
 
 class AdaptiveScanProtocolError(ValueError):
@@ -87,6 +97,10 @@ class ScanCapabilities:
     maximum_application_delay_ms: int = 10_000
     maximum_analog_bandwidth_hz: int = 56_000_000
     source_counter_bits: int = 64
+    protocol_version: int = VERSION
+    rate_mode: int = 0
+    minimum_rate_hz: int = 0
+    maximum_rate_hz: int = 0
 
     def validate(self) -> None:
         """Accept a feature-103 endpoint that is a strict capability superset.
@@ -99,6 +113,15 @@ class ScanCapabilities:
         """
 
         required = ScanCapabilities()
+        legacy = (self.protocol_version, self.rate_mode,
+                  self.minimum_rate_hz, self.maximum_rate_hz) == (VERSION, 0, 0, 0)
+        runtime = (
+            self.protocol_version == RUNTIME_VERSION and self.rate_mode == 1
+            and MINIMUM_RUNTIME_RATE <= self.minimum_rate_hz
+            <= self.maximum_rate_hz <= MAXIMUM_RUNTIME_RATE
+        )
+        if not (legacy or runtime):
+            raise AdaptiveScanProtocolError("unsupported runtime rate capability")
         if (
             self.rate_mask & required.rate_mask != required.rate_mask
             or self.rx_mask & required.rx_mask != required.rx_mask
@@ -121,7 +144,7 @@ class ScanCapabilities:
     def pack(self) -> bytes:
         self.validate()
         packet = bytearray(CAPS_BYTES)
-        _header(packet, b"SPCP", 0)
+        _header(packet, b"SPCP", 0, self.protocol_version)
         struct.pack_into(
             "<IIIIIIIIQIIIIII",
             packet,
@@ -142,14 +165,20 @@ class ScanCapabilities:
             self.maximum_analog_bandwidth_hz,
             self.source_counter_bits,
         )
+        struct.pack_into(
+            "<III", packet, 80, self.rate_mode, self.minimum_rate_hz, self.maximum_rate_hz
+        )
         return _finish(packet)
 
     @classmethod
     def unpack(cls, raw: bytes | bytearray | memoryview) -> ScanCapabilities:
-        packet = _check(raw, b"SPCP", CAPS_BYTES, 0)
-        _require_zero(packet, 80, 92)
+        packet = _check(raw, b"SPCP", CAPS_BYTES, 0, versions=(VERSION, RUNTIME_VERSION))
         values = struct.unpack_from("<IIIIIIIIQIIIIII", packet, 16)
         result = cls(
+            protocol_version=struct.unpack_from("<H", packet, 4)[0],
+            rate_mode=struct.unpack_from("<I", packet, 80)[0],
+            minimum_rate_hz=struct.unpack_from("<I", packet, 84)[0],
+            maximum_rate_hz=struct.unpack_from("<I", packet, 88)[0],
             rate_mask=values[0],
             rx_mask=values[1],
             formats=values[2],
@@ -174,8 +203,8 @@ def _crc(record: bytes | bytearray) -> int:
     return zlib.crc32(record) & 0xFFFF_FFFF
 
 
-def _header(packet: bytearray, magic: bytes, flags: int) -> None:
-    struct.pack_into("<4sHHII", packet, 0, magic, VERSION, len(packet), FEATURES, flags)
+def _header(packet: bytearray, magic: bytes, flags: int, version: int = VERSION) -> None:
+    struct.pack_into("<4sHHII", packet, 0, magic, version, len(packet), FEATURES, flags)
 
 
 def _finish(packet: bytearray) -> bytes:
@@ -183,14 +212,15 @@ def _finish(packet: bytearray) -> bytes:
     return bytes(packet)
 
 
-def _check(raw: bytes | bytearray | memoryview, magic: bytes, size: int, flags: int) -> bytes:
+def _check(raw: bytes | bytearray | memoryview, magic: bytes, size: int, flags: int,
+           *, versions: tuple[int, ...] = (VERSION,)) -> bytes:
     packet = bytes(raw)
     if len(packet) != size:
         raise AdaptiveScanProtocolError(f"record size must be exactly {size} bytes")
     actual_magic, version, encoded_size, features, actual_flags = struct.unpack_from(
         "<4sHHII", packet
     )
-    if actual_magic != magic or version != VERSION or encoded_size != size:
+    if actual_magic != magic or version not in versions or encoded_size != size:
         raise AdaptiveScanProtocolError("unknown record magic, version, or encoded size")
     if features != FEATURES or actual_flags != flags:
         raise AdaptiveScanProtocolError("feature or flag mask is not exact")
@@ -255,12 +285,16 @@ class ScanSetup:
     rx_mask: int = 1
     format: int = FORMAT_CI16
     flags: int = SETUP_FLAGS
+    protocol_version: int = VERSION
 
     def validate(self) -> None:
         if not self.session or not self.generation or not self.seed:
             raise AdaptiveScanProtocolError("session, generation, and seed must be nonzero")
-        if self.source_rate_hz not in SUPPORTED_RATES:
-            raise AdaptiveScanProtocolError("only fixed 2.5 or 10/15/20/30 MS/s is supported")
+        if not _rate_valid(self.source_rate_hz, self.protocol_version):
+            raise AdaptiveScanProtocolError(
+                "rate must be fixed 2.5 or 10/15/20/30 MS/s for v1, "
+                "or an integer in 520833..61440000 S/s for runtime v2"
+            )
         if not 200_000 <= self.analog_bandwidth_hz <= 56_000_000:
             raise AdaptiveScanProtocolError("analog bandwidth is outside the admitted range")
         if not 1 <= self.duration_ms <= 300_000:
@@ -303,7 +337,7 @@ class ScanSetup:
     def pack(self) -> bytes:
         self.validate()
         packet = bytearray(SETUP_BYTES)
-        _header(packet, b"SPSQ", self.flags)
+        _header(packet, b"SPSQ", self.flags, self.protocol_version)
         struct.pack_into(
             "<QQQIIIIIIIIIIQIIII",
             packet,
@@ -344,7 +378,7 @@ class ScanSetup:
 
     @classmethod
     def unpack(cls, raw: bytes | bytearray | memoryview) -> ScanSetup:
-        packet = _check(raw, b"SPSQ", SETUP_BYTES, SETUP_FLAGS)
+        packet = _check(raw, b"SPSQ", SETUP_BYTES, SETUP_FLAGS, versions=(VERSION, RUNTIME_VERSION))
         _require_zero(packet, 108, 112)
         _require_zero(packet, 336, 348)
         values = struct.unpack_from("<QQQIIIIIIIIIIQIIII", packet, 16)
@@ -357,6 +391,7 @@ class ScanSetup:
         )
         _require_zero(packet, 144 + target_count * 24, 336)
         result = cls(
+            protocol_version=struct.unpack_from("<H", packet, 4)[0],
             session=values[0],
             generation=values[1],
             seed=values[2],
@@ -469,6 +504,7 @@ class ScanVisit:
     effective_weight: int
     profile_crc32: int
     flags: int = VISIT_FLAGS
+    protocol_version: int = VERSION
 
     def pack(self) -> bytes:
         samples = self.valid_end - self.valid_start
@@ -478,7 +514,7 @@ class ScanVisit:
             or not self.transition_before <= self.transition_after <= self.valid_start
             or samples < 0
             or not 70_000_000 <= self.frequency_hz <= 6_000_000_000
-            or self.source_rate_hz not in SUPPORTED_RATES
+            or not _rate_valid(self.source_rate_hz, self.protocol_version)
             or not 200_000 <= self.analog_bandwidth_hz <= 56_000_000
             or not 0 <= self.target < 8
             or not 0 <= self.profile < 8
@@ -493,7 +529,7 @@ class ScanVisit:
         ):
             raise AdaptiveScanProtocolError("visit record is inconsistent")
         packet = bytearray(VISIT_BYTES)
-        _header(packet, b"SPVR", self.flags)
+        _header(packet, b"SPVR", self.flags, self.protocol_version)
         struct.pack_into(
             "<QQQQQQQQQQQIIIIIIIII",
             packet,
@@ -527,7 +563,7 @@ class ScanVisit:
         if len(packet) != VISIT_BYTES:
             raise AdaptiveScanProtocolError("visit size is not exact")
         flags = struct.unpack_from("<I", packet, 12)[0]
-        packet = _check(packet, b"SPVR", VISIT_BYTES, flags)
+        packet = _check(packet, b"SPVR", VISIT_BYTES, flags, versions=(VERSION, RUNTIME_VERSION))
         _require_zero(packet, 140, 156)
         values = struct.unpack_from("<QQQQQQQQQQQIIIIIIIII", packet, 16)
         try:
@@ -535,6 +571,7 @@ class ScanVisit:
         except ValueError as error:
             raise AdaptiveScanProtocolError("visit result is unknown") from error
         result = cls(
+            protocol_version=struct.unpack_from("<H", packet, 4)[0],
             session=values[0],
             generation=values[1],
             visit=values[2],

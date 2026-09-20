@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from contextlib import AbstractContextManager
 
 import pytest
@@ -284,13 +285,46 @@ def test_campaign_rejects_2p5_without_the_appended_capability(monkeypatch) -> No
         )
 
 
-def test_campaign_setup_builder_rejects_sixty_mss() -> None:
+@pytest.mark.parametrize("rate", [5_000_000, 7_500_000, 8_000_000, 12_345_679])
+def test_campaign_runtime_negotiation_precedes_radio_mutation(monkeypatch, rate) -> None:
+    setup = dataclasses.replace(_setup(), source_rate_hz=rate, protocol_version=2)
+    events = []
+    _install_lifecycle(monkeypatch, setup, events)
+
+    class RuntimeClient(Client):
+        def runtime_capabilities(self):
+            events.append("negotiate")
+            return ScanCapabilities(rate_mask=0x1F, rx_mask=3, protocol_version=2,
+                                    rate_mode=1, minimum_rate_hz=520_833,
+                                    maximum_rate_hz=61_440_000)
+
+    receipt = campaign.run_adaptive_scan_campaign(
+        "ip:192.168.1.18", "SERIAL_A", setup, lambda _: ScanOutcome.ACTIVE,
+        mode=AdaptiveScanMode.SHADOW, client_factory=RuntimeClient,
+    )
+    assert events == ["negotiate", "prepare", "restore"]
+    assert receipt.preparation.setup.source_rate_hz == rate
+
+    class LegacyClient(Client):
+        def runtime_capabilities(self):
+            return ScanCapabilities(rate_mask=0x1F, rx_mask=3)
+
+    events.clear()
+    with pytest.raises(ValueError, match="does not advertise"):
+        campaign.run_adaptive_scan_campaign(
+            "ip:192.168.1.18", "SERIAL_A", setup, lambda _: ScanOutcome.ACTIVE,
+            mode=AdaptiveScanMode.SHADOW, client_factory=LegacyClient,
+        )
+    assert events == []
+
+
+def test_campaign_setup_builder_rejects_rate_above_runtime_bounds() -> None:
     with pytest.raises(ValueError, match="10/15/20/30"):
         campaign.build_adaptive_scan_setup(
             session=1,
             generation=2,
             seed=3,
-            source_rate_hz=60_000_000,
+            source_rate_hz=61_440_001,
             analog_bandwidth_hz=8_000_000,
             duration_ms=300_000,
             dwell_ms=240,

@@ -6,7 +6,14 @@ import dataclasses
 import time
 from collections.abc import Callable
 
-from .adaptive_scan import ScanOutcome, ScanSetup, ScanTarget, ScanTerminal
+from .adaptive_scan import (
+    RUNTIME_VERSION,
+    SUPPORTED_RATES,
+    ScanOutcome,
+    ScanSetup,
+    ScanTarget,
+    ScanTerminal,
+)
 from .adaptive_scan_client import AdaptiveScanClient, AdaptiveScanVisit
 from .adaptive_scan_radio import (
     AdaptiveScanRadioPreparation,
@@ -97,6 +104,7 @@ def build_adaptive_scan_setup(
             for index, frequency in enumerate(frequencies_hz)
         ),
         rx_mask=rx_mask,
+        protocol_version=1 if source_rate_hz in SUPPORTED_RATES else RUNTIME_VERSION,
     )
     setup.validate()
     return setup
@@ -123,9 +131,20 @@ def run_adaptive_scan_campaign(
 
     selected_uri = require_physical_lan_uri(uri)
     host = selected_uri.removeprefix("ip:")
-    capability_bit = _RATE_CAPABILITY_BITS[setup.source_rate_hz]
-    capabilities = client_factory(host).capabilities()
-    if not capabilities.rate_mask & capability_bit:
+    setup.validate()
+    discovery = client_factory(host)
+    capabilities = (
+        discovery.runtime_capabilities()
+        if setup.protocol_version == RUNTIME_VERSION
+        else discovery.capabilities()
+    )
+    supported = (
+        capabilities.protocol_version == RUNTIME_VERSION
+        and capabilities.minimum_rate_hz <= setup.source_rate_hz <= capabilities.maximum_rate_hz
+        if setup.protocol_version == RUNTIME_VERSION
+        else bool(capabilities.rate_mask & _RATE_CAPABILITY_BITS[setup.source_rate_hz])
+    )
+    if not supported:
         raise ValueError(
             f"radio does not advertise adaptive-scan support for {setup.source_rate_hz} S/s"
         )

@@ -999,7 +999,7 @@ class IioRadioDevice:
     ) -> IioReceiverSettingsReadback:
         """Apply feature-103's shared-LO manual RX geometry."""
 
-        if sample_rate_hz not in (2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000):
+        if type(sample_rate_hz) is not int or not 520_833 <= sample_rate_hz <= 61_440_000:
             raise ValueError("adaptive scan rate is not supported")
         if not 200_000 <= rf_bandwidth_hz <= 56_000_000:
             raise ValueError("adaptive scan bandwidth is outside the AD9361 range")
@@ -1018,7 +1018,7 @@ class IioRadioDevice:
         _mute_transmit(device)
         readback = self.read_receiver_settings_readback()
         if (
-            round(readback.sample_rate_hz) != sample_rate_hz
+            readback.sample_rate_hz != sample_rate_hz
             or round(readback.bandwidth_hz) != rf_bandwidth_hz
             or readback.channels != channels
             or readback.gain_modes != (GainMode.MANUAL,) * len(channels)

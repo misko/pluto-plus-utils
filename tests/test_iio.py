@@ -576,13 +576,14 @@ def test_iio_adapter_configures_feature_103_fixed_bandwidth_rx0(rate) -> None:
         radio.close()
 
 
-def test_iio_adapter_configures_feature_103_dual_rx_manual_geometry() -> None:
+@pytest.mark.parametrize("rate", [2_500_000, 5_000_000, 7_500_000, 8_000_000, 12_345_679])
+def test_iio_adapter_configures_feature_103_dual_rx_manual_geometry(rate) -> None:
     module = CaptureRateFakeAdi()
     radio = IioRadioDevice("ip:192.168.1.18", serial="SERIAL_A", adi_module=module)
     radio.open()
     try:
         readback = radio.configure_adaptive_scan_geometry(
-            sample_rate_hz=2_500_000,
+            sample_rate_hz=rate,
             rf_bandwidth_hz=2_500_000,
             manual_gain_db=40.0,
             rx_mask=3,
@@ -594,7 +595,7 @@ def test_iio_adapter_configures_feature_103_dual_rx_manual_geometry() -> None:
         radio.close()
 
 
-@pytest.mark.parametrize("rate", [5_000_000, 60_000_000])
+@pytest.mark.parametrize("rate", [520_832, 61_440_001, True, 7_500_000.0])
 def test_iio_adapter_rejects_out_of_scope_adaptive_scan_rates(rate) -> None:
     radio = IioRadioDevice(
         "ip:192.168.1.18", serial="SERIAL_A", adi_module=CaptureRateFakeAdi()

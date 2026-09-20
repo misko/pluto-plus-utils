@@ -35,7 +35,7 @@ class CounterObservation(EvidenceModel):
     counter: U64
     device_before_ns: U64
     device_after_ns: U64
-    sample_rate_hz: Literal[2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000]
+    sample_rate_hz: Annotated[int, Field(strict=True, ge=520_833, le=61_440_000)]
     maximum_snapshot_age_ns: U64
 
     @model_validator(mode="after")

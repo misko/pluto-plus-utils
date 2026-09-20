@@ -112,6 +112,36 @@ def test_dual_rx_setup_and_eight_byte_visit_round_trip() -> None:
     assert ScanVisit.unpack(visit.pack()) == visit
 
 
+@pytest.mark.parametrize("rate", [520_833, 5_000_000, 7_500_000, 8_000_000, 12_345_679, 61_440_000])
+def test_runtime_setup_and_visit_preserve_exact_integer_rate(rate) -> None:
+    request = dataclasses.replace(setup(), source_rate_hz=rate, protocol_version=2)
+    assert ScanSetup.unpack(request.pack()) == request
+    samples = rate * 120 // 1000
+    visit = ScanVisit(
+        session=1, generation=2, visit=0, selection_counter=0,
+        transition_before=0, transition_after=0, valid_start=0, valid_end=samples,
+        frequency_hz=2_400_000_000, iq_bytes=samples * 8, missing_samples_before=0,
+        analog_bandwidth_hz=200_000, source_rate_hz=rate, target=0, profile=1,
+        result=VisitResult.COMPLETE, eligible_mask=1, effective_weight=65536,
+        profile_crc32=1, protocol_version=2,
+    )
+    assert ScanVisit.unpack(visit.pack()) == visit
+
+
+@pytest.mark.parametrize("rate", [520_832, 61_440_001, True, 7_500_000.0])
+def test_runtime_setup_rejects_out_of_bounds_or_noninteger_rate(rate) -> None:
+    with pytest.raises(AdaptiveScanProtocolError):
+        dataclasses.replace(setup(), source_rate_hz=rate, protocol_version=2).pack()
+
+
+def test_runtime_capabilities_keep_v1_reserved_contract() -> None:
+    caps = ScanCapabilities(rate_mask=0x1F, rx_mask=3, protocol_version=2,
+                            rate_mode=1, minimum_rate_hz=520_833, maximum_rate_hz=61_440_000)
+    assert ScanCapabilities.unpack(caps.pack()) == caps
+    with pytest.raises(AdaptiveScanProtocolError):
+        dataclasses.replace(caps, protocol_version=1).pack()
+
+
 def test_source_bound_records_round_trip_and_reject_corruption() -> None:
     request = setup()
     visit = ScanVisit(

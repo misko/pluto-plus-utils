@@ -153,9 +153,14 @@ def main() -> int:
         maximum_revisit_ms=3_000,
         rx_mask=args.rx_mask,
     )
-    capabilities = AdaptiveScanClient(
+    capability_client = AdaptiveScanClient(
         args.uri.removeprefix("ip:").split(":", maxsplit=1)[0]
-    ).capabilities()
+    )
+    capabilities = (
+        capability_client.runtime_capabilities()
+        if setup.protocol_version == 2
+        else capability_client.capabilities()
+    )
     timing_rows: list[tuple[int, int, int, int, int]] = []
     counter_clock: dict[str, object] = {}
 

@@ -12,6 +12,7 @@ from .adaptive_scan import (
     ACK_BYTES,
     CAPS_BYTES,
     FEEDBACK_BYTES,
+    RUNTIME_VERSION,
     TERMINAL_BYTES,
     VISIT_BYTES,
     FeedbackResult,
@@ -118,6 +119,26 @@ class AdaptiveScanClient:
             return ScanCapabilities.unpack(_exact(connection, size))
         finally:
             connection.close()
+
+    def runtime_capabilities(self) -> ScanCapabilities:
+        """Discover setup-validated rates; old servers retain their v1 contract."""
+        connection = self._connection()
+        try:
+            connection.sendall(f"SCANCAPS2 {CAPS_BYTES}\n".encode())
+            size = _integer(connection)
+            if size not in (-errno.ENOSYS, -errno.EINVAL):
+                _require_success(size, "SCANCAPS2")
+                if size != CAPS_BYTES:
+                    raise AdaptiveScanTransportError("SCANCAPS2 returned the wrong record size")
+                caps = ScanCapabilities.unpack(_exact(connection, size))
+                if caps.protocol_version != RUNTIME_VERSION:
+                    raise AdaptiveScanTransportError(
+                        "SCANCAPS2 did not return runtime capabilities"
+                    )
+                return caps
+        finally:
+            connection.close()
+        return self.capabilities()
 
     def start(
         self,
@@ -253,6 +274,8 @@ class AdaptiveScanSession:
     def _validate_visit(self, record: ScanVisit) -> None:
         if record.session != self.setup.session or record.generation != self.setup.generation:
             raise AdaptiveScanTransportError("visit identity changed")
+        if record.protocol_version != self.setup.protocol_version:
+            raise AdaptiveScanTransportError("visit protocol version changed")
         if record.target >= len(self.setup.targets):
             raise AdaptiveScanTransportError("visit target is outside the setup whitelist")
         target = self.setup.targets[record.target]

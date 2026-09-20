@@ -246,3 +246,22 @@ def test_production_factory_selects_exact_dual_rx_layout(monkeypatch) -> None:
     )
 
     assert radio.layout == AD9361_2R2T_TARGET_PROFILE.rx_layout_expectation
+
+
+@pytest.mark.parametrize("failure", ["rounded", "rejected"])
+def test_runtime_rate_failure_restores_before_profile_compilation(failure) -> None:
+    class RateFailureRadio(Radio):
+        def configure_adaptive_scan_geometry(self, **kwargs):
+            configured = super().configure_adaptive_scan_geometry(**kwargs)
+            if failure == "rejected":
+                raise RadioConfigurationError("driver rejected rate")
+            return dataclasses.replace(configured, sample_rate_hz=7_500_001.0)
+
+    radio = RateFailureRadio("ip:192.168.1.18", "SERIAL_A")
+    request = dataclasses.replace(_setup(), source_rate_hz=7_500_000, protocol_version=2)
+    with pytest.raises(RadioConfigurationError):
+        prepare_adaptive_scan_radio("ip:192.168.1.18", "SERIAL_A", request,
+                                    radio_factory=lambda *_: radio)
+    assert radio.restored and radio.closed
+    assert radio.settings == ORIGINAL
+    assert radio.profiles == {}

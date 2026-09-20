@@ -22,6 +22,12 @@ MONO = 1_000_000_000_000
 COUNTER = 4_000_000_000
 
 
+@pytest.mark.parametrize("rate", [520_833, 5_000_000, 7_500_000, 8_000_000, 12_345_679, 61_440_000])
+def test_runtime_rate_counter_evidence_preserves_exact_integer(rate) -> None:
+    observation = anchor(0, 1, rate).observation
+    assert CounterObservation.model_validate(observation.model_dump()).sample_rate_hz == rate
+
+
 def clock(mono: int, error: int | None = 1_000_000) -> HostClock:
     return HostClock(
         monotonic_before_ns=mono,
