@@ -58,3 +58,30 @@ and terminal accounting, a source interval partition including skips and the
 terminal tail, gap samples in milliseconds, and independent ordinary-libiio
 readback/restoration checks. A failed cell returns nonzero and retains failure
 details. Do not treat an unusual-rate rejection as successful rate qualification.
+
+## Exact-image deployment helper
+
+`scripts/issue111_deploy.py` accepts an exact v0.55 candidate manifest and DFU.
+It verifies DFU/FIT hashes, FIT size, and the reviewed firmware/libiio/Buildroot
+source commits before preparing any operation. Its `ram` phase starts only
+from v0.54 on the local `.18` canary and retains all previous profile capability
+checks, paired RX topology, and the new runtime-rate marker. RAM profiles are
+explicitly hardware-unqualified and cannot authorize persistent flashing.
+
+Use a unique `--evidence` directory for each phase, `--image`, `--manifest`,
+and private `--known-hosts`. Default operation is planning. Execution requires
+`--execute`, a private `--password-file`, and the existing exact confirmation:
+`RAM BOOT SERIAL` for RAM, `REBOOT SERIAL` for restoration, or
+`FLASH LAN SERIAL HOST` for LAN deployment. Receipts use the existing PPU
+executors, and uncertain outcomes are never automatically retried.
+
+Run qualification with `--candidate` pointing to the same immutable manifest.
+Reports bind live serial/firmware discovery and the manifest/image hashes.
+After testing, `--phase restore` reboots the canary and requires paired-RX
+v0.54 to return. The `lan` phase requires `--ram-receipt`, `--restore-receipt`,
+and each of the six cell reports via repeated `--report` arguments. It
+recomputes source and byte accounting from recorded visit metadata, verifies
+the exact source-rate/topology/duration cells and restoration, and records
+every evidence digest. Only then does it register that exact image as
+functionally hardware-qualified for `.21`, whose source firmware must be
+v0.53. This qualification does not assert independent absolute UTC accuracy.

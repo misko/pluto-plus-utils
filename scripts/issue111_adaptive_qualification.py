@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import fcntl
+import hashlib
 import json
 import os
 import signal
@@ -19,6 +20,7 @@ from pluto_plus.adaptive_scan_client import AdaptiveScanClient
 from pluto_plus.adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDetectorConfig
 from pluto_plus.adaptive_scan_radio import _default_factory
 from pluto_plus.adaptive_scan_shadow import AdaptiveScanMode
+from pluto_plus.hardware.discovery import discover_network_iio
 
 SERIAL = "10400056f695001322002d0010ad1719f2"
 URI = "ip:192.168.1.21"
@@ -181,9 +183,25 @@ def main():
                         help="Reuse this same durable ledger for every attempt; never reset it.")
     parser.add_argument("--utc", action="store_true")
     parser.add_argument("--serial", choices=tuple(RADIOS), default=SERIAL)
+    parser.add_argument("--candidate", type=Path,
+                        help="Candidate manifest binding evidence to the deployed exact image.")
     args = parser.parse_args()
     if args.output.exists():
         parser.error("output already exists; retain prior evidence")
+    binding = {}
+    if args.candidate:
+        raw = args.candidate.read_bytes()
+        candidate = json.loads(raw)
+        host = RADIOS[args.serial][3:]
+        devices = discover_network_iio([f"{host}/32"], max_hosts=1, workers=1)
+        if len(devices) != 1 or devices[0].serial != args.serial:
+            parser.error("candidate binding did not attest the exact serial")
+        if devices[0].firmware_version != candidate["firmware"]:
+            parser.error("live firmware differs from candidate manifest")
+        binding = {"firmware": devices[0].firmware_version,
+                   "image_sha256": candidate["asset_sha256"],
+                   "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+                   "observed_realtime_ns": time.time_ns()}
     if args.cell == "caps":
         report = {"capabilities": plain(
             AdaptiveScanClient(RADIOS[args.serial][3:]).runtime_capabilities()
@@ -205,7 +223,8 @@ def main():
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, previous)
     report.update({"schema": "org.leo.issue111-adaptive-qualification/v1",
-                   "serial": args.serial, "uri": RADIOS[args.serial]})
+                   "serial": args.serial, "uri": RADIOS[args.serial],
+                   "candidate_binding": binding})
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as stream:
         json.dump(report, stream, sort_keys=True)
