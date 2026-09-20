@@ -1790,19 +1790,31 @@ def diagnose_radio(
     )
 
     scan_channels = _strings(observed.get("rx_scan_channels"))
-    required_channels = ("voltage0", "voltage1", "voltage2", "voltage3")
+    required_channels = (
+        diagnostic_profile.rx_scan_channels
+        if diagnostic_profile is not None
+        else ("voltage0", "voltage1", "voltage2", "voltage3")
+    )
     dual_rx = set(required_channels).issubset(scan_channels)
     findings.append(
         _comparison(
             "rf.dual_rx_scan",
             dual_rx,
-            "Both complex receive channels are exposed"
+            (
+                "The diagnostic profile receive scan layout is exposed"
+                if diagnostic_profile is not None and len(required_channels) == 2
+                else "Both complex receive channels are exposed"
+            )
             if dual_rx
             else "Dual-receiver scan layout is incomplete",
             sorted(scan_channels),
             list(required_channels),
             "cf-ad9361-lpc enabled scan elements; voltage0..3 are RX1 I/Q and RX2 I/Q",
-            remediation=_setup_remediation(),
+            remediation=(
+                None
+                if diagnostic_profile is not None and diagnostic_profile.release_rank is None
+                else _setup_remediation()
+            ),
             unknown=not scan_channels,
         )
     )
@@ -1916,7 +1928,12 @@ def diagnose_radio(
                 "all four values are read after reboot; this tuple finding is combined with "
                 "the live dual-RX and restored 5.8 GHz LO findings"
             ),
-            remediation=None if status is DoctorStatus.PASS else _setup_remediation(),
+            remediation=(
+                None
+                if status is DoctorStatus.PASS
+                or (diagnostic_profile is not None and diagnostic_profile.release_rank is None)
+                else _setup_remediation()
+            ),
         )
     )
 

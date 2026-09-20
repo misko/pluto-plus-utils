@@ -267,7 +267,11 @@ def _diagnose_radio(
         "pass" if profile is not None else "fail",
         firmware,
         tuple(item.firmware_version for item in DIAGNOSTIC_PROFILES),
-        f"Active firmware matches diagnostic profile {profile.profile_id}"
+        (
+            f"Active firmware matches {profile.profile_id}; UTC accuracy is unqualified"
+            if profile is not None and profile.release_rank is None
+            else f"Active firmware matches diagnostic profile {profile.profile_id}"
+        )
         if profile is not None
         else "Active firmware has no supported diagnostic profile",
     )
@@ -275,11 +279,15 @@ def _diagnose_radio(
     _check(
         checks,
         "firmware.release_currency",
-        "unknown" if profile is None else "fail" if upgrade is not None else "pass",
+        "unknown"
+        if profile is None or profile.release_rank is None
+        else "fail"
+        if upgrade is not None
+        else "pass",
         firmware,
         UPGRADE_TARGET_PROFILE.firmware_version,
-        "Active firmware has no known profile, so it cannot be ranked"
-        if profile is None
+        "Active firmware has no qualified release rank, so release currency is unknown"
+        if profile is None or profile.release_rank is None
         else f"A newer qualified release is available: {upgrade.firmware_version}"
         if upgrade is not None
         else "Active firmware is at or newer than the newest qualified release",

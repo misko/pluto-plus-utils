@@ -35,7 +35,10 @@ class DiagnosticProfile:
     # Explicit chronological rank.  Upgrade decisions must never infer order from
     # DIAGNOSTIC_PROFILES tuple position: reordering it would silently propose a
     # firmware downgrade.
-    release_rank: int
+    release_rank: int | None
+    # Profiles can describe exact observed hardware without claiming release
+    # chronology or qualification. None means deliberately unranked.
+    rx_scan_channels: tuple[str, ...] = ("voltage0", "voltage1", "voltage2", "voltage3")
 
 
 V5_PROFILE = DiagnosticProfile(
@@ -410,6 +413,16 @@ ADAPTIVE_SCAN_V1_RELEASE_PROFILE = DiagnosticProfile(
     release_rank=39,
 )
 
+COUNTER_UTC_V1_RC1_CANDIDATE_PROFILE = DiagnosticProfile(
+    profile_id="counter-utc-v1-rc1-candidate",
+    firmware_version="v0.52-plutoplus-spf-counter-utc-v1-rc1",
+    metadata_abis=(3,),
+    tandem_agc_required=True,
+    release_status="RC1 candidate; UTC accuracy unqualified",
+    release_rank=None,
+    rx_scan_channels=("voltage0", "voltage1"),
+)
+
 DIAGNOSTIC_PROFILES = (
     V5_PROFILE,
     V6_PROFILE,
@@ -450,6 +463,7 @@ DIAGNOSTIC_PROFILES = (
     COUNTER_RX_V1_RELEASE_PROFILE,
     IQ_DIRECT_ASYNC_V5_RELEASE_PROFILE,
     ADAPTIVE_SCAN_V1_RELEASE_PROFILE,
+    COUNTER_UTC_V1_RC1_CANDIDATE_PROFILE,
 )
 _PROFILES_BY_FIRMWARE = {profile.firmware_version: profile for profile in DIAGNOSTIC_PROFILES}
 
@@ -501,6 +515,6 @@ def upgrade_target_for(profile: DiagnosticProfile | None) -> DiagnosticProfile |
 
     if profile is None:
         return None
-    if profile.release_rank >= UPGRADE_TARGET_PROFILE.release_rank:
+    if profile.release_rank is None or profile.release_rank >= UPGRADE_TARGET_PROFILE.release_rank:
         return None
     return UPGRADE_TARGET_PROFILE
