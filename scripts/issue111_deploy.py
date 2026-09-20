@@ -43,7 +43,7 @@ LAN_SERIAL = "10400056f695001322002d0010ad1719f2"
 FIRMWARE = "v0.55-plutoplus-spf-adaptive-runtime-rates"
 RESTORE_FIRMWARE = "v0.54-plutoplus-spf-counter-utc-v1-rc1"
 LAN_BEFORE = "v0.53-plutoplus-spf-adaptive-scan-v2"
-SOURCES = {"firmware_base": "55f93fd79c93fa41c8ec67457e12d35f2c389f00",
+SOURCES = {"firmware_base": "b7fb39e42daa2b0eb8a897ee1b6c321489a93caf",
            "libiio_0_25": "c93db89b27fd46faf5479ceb5bf08460226a88ce",
            "buildroot": "a6ee97729ee2494c759a942ae8b26239bb840833"}
 REQUIRED_CELLS = {"baseline-dual2p5", "baseline-single15", "dual5", "dual7p5", "dual8"}
@@ -112,7 +112,15 @@ def require_gate(document, manifest_sha, ram_receipt_path, report_paths):
         if cell in seen:
             raise ValueError("duplicate qualification cell")
         seen.add(cell)
-        if cell in REQUIRED_CELLS:
+        if cell == "unusual" and report.get("status") not in ("completed", "rate_rejected"):
+            raise ValueError("unusual rate must complete or explicitly reject with restoration")
+        if report.get("status") == "rate_rejected" and (
+            report.get("visits")
+            or report.get("error") not in ("RadioConfigurationError", "ValueError")
+            or "rate" not in report.get("message", "").lower()
+        ):
+            raise ValueError("unusual rejection lacks an explicit pre-capture rate failure")
+        if cell in REQUIRED_CELLS or report.get("status") == "completed":
             terminal = report.get("receipt", {}).get("terminal", {})
             accounting = report.get("accounting", {})
             records = [ScanVisit(**{**row, "result": VisitResult(row["result"])})
@@ -124,6 +132,7 @@ def require_gate(document, manifest_sha, ram_receipt_path, report_paths):
             terminal_record = ScanTerminal(
                 **{**terminal, "state": TerminalState(terminal["state"])}
             )
+            terminal_record.pack()
             computed = qualification["summarize"](
                 records, terminal_record, expected[0], expected[1]
             )

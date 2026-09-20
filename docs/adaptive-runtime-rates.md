@@ -57,7 +57,10 @@ Each unique `--output` JSON contains metadata-only visit records, exact IQ-byte
 and terminal accounting, a source interval partition including skips and the
 terminal tail, gap samples in milliseconds, and independent ordinary-libiio
 readback/restoration checks. A failed cell returns nonzero and retains failure
-details. Do not treat an unusual-rate rejection as successful rate qualification.
+details. An unusual-rate driver rejection or clock mismatch before capture is
+reported as `rate_rejected` and returns zero only after exact restoration and
+ordinary readback succeed. This is a successful fail-closed test, not evidence
+that the requested rate is achievable. Other failures remain nonzero.
 
 ## Exact-image deployment helper
 

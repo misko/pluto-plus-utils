@@ -78,7 +78,7 @@ def test_unusual_rejection_records_restoration_without_retry(monkeypatch):
         raise ValueError("driver rejects exact integer rate")
     monkeypatch.setitem(namespace, "run_adaptive_scan_campaign", reject)
     report = run("unusual")
-    assert report["status"] == "rejected_or_failed"
+    assert report["status"] == "rate_rejected"
     assert report["restored_to_pre_attempt"]
     assert report["requested_setup"]["source_rate_hz"] == 12_345_679
     assert observations == ["ordinary", "attempt", "ordinary"]

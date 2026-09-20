@@ -1008,7 +1008,12 @@ class IioRadioDevice:
         channels = {1: (0,), 3: (0, 1)}.get(rx_mask)
         if channels is None:
             raise ValueError("adaptive scan RX mask must select RX1 or RX1+RX2")
-        self.configure_source_locked_rx_rate(sample_rate_hz)
+        try:
+            self.configure_source_locked_rx_rate(sample_rate_hz)
+        except OSError as error:
+            raise RadioConfigurationError(
+                f"adaptive scan source rate {sample_rate_hz} rejected by driver"
+            ) from error
         device = self._require_bufferless_device()
         device.rx_rf_bandwidth = rf_bandwidth_hz
         device.rx_enabled_channels = list(channels)

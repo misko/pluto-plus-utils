@@ -612,6 +612,20 @@ def test_iio_adapter_rejects_out_of_scope_adaptive_scan_rates(rate) -> None:
         radio.close()
 
 
+def test_iio_adapter_names_runtime_driver_rate_rejection(monkeypatch) -> None:
+    radio = IioRadioDevice(
+        "ip:192.168.1.18", serial="SERIAL_A", adi_module=CaptureRateFakeAdi()
+    )
+    def reject(_rate):
+        raise OSError(22, "Invalid argument")
+    monkeypatch.setattr(radio, "configure_source_locked_rx_rate", reject)
+    with pytest.raises(RadioConfigurationError, match="source rate 12345679 rejected by driver"):
+        radio.configure_adaptive_scan_geometry(
+            sample_rate_hz=12_345_679, rf_bandwidth_hz=8_000_000,
+            manual_gain_db=40.0, rx_mask=1,
+        )
+
+
 @pytest.mark.parametrize("channels", [(1,), (0,)])
 def test_iio_adapter_rejects_unnegotiated_multirate_single_rx(channels) -> None:
     module = CaptureRateFakeAdi()

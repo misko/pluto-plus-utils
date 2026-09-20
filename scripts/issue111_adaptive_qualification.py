@@ -163,6 +163,10 @@ def run_cell(cell, *, utc=False, serial=SERIAL):
     except Exception as error:
         report.update({"status": "rejected_or_failed", "error": type(error).__name__,
                        "message": str(error), "notes": getattr(error, "__notes__", [])})
+        if (cell == "unusual" and not records
+                and type(error).__name__ in ("RadioConfigurationError", "ValueError")
+                and "rate" in str(error).lower()):
+            report["status"] = "rate_rejected"
     try:
         observed = ordinary_settings(rx_mask, uri, serial)
         report["ordinary_libiio_readback"] = plain(observed)

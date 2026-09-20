@@ -83,7 +83,8 @@ def test_private_ssh_material_rejects_public_permissions(tmp_path):
     assert private(path) == b"never-print"
 
 
-def test_gate_recomputes_source_and_iq_evidence_for_every_cell(tmp_path):
+@pytest.mark.parametrize("unusual_outcome", ["completed", "rate_rejected"])
+def test_gate_recomputes_source_and_iq_evidence_for_every_cell(tmp_path, unusual_outcome):
     module = runpy.run_path(str(SCRIPT))
     qualification = runpy.run_path(str(SCRIPT.with_name("issue111_adaptive_qualification.py")))
     ram = tmp_path / "ram.json"
@@ -121,6 +122,11 @@ def test_gate_recomputes_source_and_iq_evidence_for_every_cell(tmp_path):
                   "visits": [dataclasses.asdict(visit)],
                   "accounting": qualification["summarize"]([visit], terminal, rate, rx)}
         path = tmp_path / f"{name}.json"
+        if name == "unusual" and unusual_outcome == "rate_rejected":
+            report.update({"status": "rate_rejected", "receipt": None,
+                           "accounting": None, "visits": [],
+                           "error": "RadioConfigurationError",
+                           "message": "AD936x source rate read back 12345678, expected 12345679"})
         path.write_text(json.dumps(report))
         paths.append(path)
     gate = module["require_gate"]({"asset_sha256": "a" * 64}, "b" * 64, ram, paths)
