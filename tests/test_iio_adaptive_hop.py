@@ -111,6 +111,30 @@ def test_masked_policy_uses_feature_gated_request():
     backend.close()
 
 
+@pytest.mark.parametrize(("mask", "first_target"), [(0x0F, 0), (0xF0, 4)])
+def test_masked_policy_attests_first_eligible_lo_before_capture(mask, first_target):
+    radio, backend, _ = setup(caps=MASK_CAPS)
+    backend.open()
+    plan = backend.prepare_plan(_plan())
+    assert radio.lo_hz == plan.profiles[0].lo_hz
+    request = AdaptiveHopRequestV3(
+        plan.request(session_id=17), AdaptiveHopPolicyV3(9, eligible_target_mask=mask)
+    )
+    payload = request.append_to_tandem_request(
+        TandemSessionRequestV1(mode=TandemMode.HOLD), plan.samples_per_block
+    )
+
+    backend.start(
+        payload, samples_per_block=plan.samples_per_block, kernel_buffers=plan.kernel_buffers
+    )
+
+    expected = next(profile for profile in plan.profiles if profile.target_index == first_target)
+    assert radio.lo_hz == expected.lo_hz
+    assert radio.active_profile is None
+    assert radio.open_request == b"LGO1-fixture-only" + payload
+    backend.close()
+
+
 @pytest.mark.parametrize("mode", ["missing", "raise", "unavailable"])
 def test_detector_negotiation_failure_never_opens_unlabeled_fixed_capture(mode):
     radio, backend, extension = setup(mode)

@@ -16,6 +16,8 @@ from pluto_plus.metadata_extension import PersistentHopMetadataExtension
 from pluto_plus.persistent_hop import (
     PersistentHopClientError,
     PersistentHopEvidenceV1,
+    PersistentHopPlanV1,
+    PersistentHopProfileV1,
     PersistentHopRequestV1,
 )
 
@@ -51,6 +53,16 @@ class IioAdaptiveHopBackend(IioPersistentHopBackend):
         decoded = AdaptiveHopEvidenceV2.unpack(payload)
         decoded.validate_binding(self._adaptive_request)
         return decoded.geometry
+
+    def _initial_profile(self, plan: PersistentHopPlanV1) -> PersistentHopProfileV1:
+        request = self._adaptive_request
+        if isinstance(request, AdaptiveHopRequestV3):
+            mask = request.policy.eligible_target_mask
+            target_index = (mask & -mask).bit_length() - 1
+            return next(
+                profile for profile in plan.profiles if profile.target_index == target_index
+            )
+        return super()._initial_profile(plan)
 
 
 def iio_adaptive_hop_client(

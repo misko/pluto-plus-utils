@@ -30,6 +30,7 @@ from pluto_plus.persistent_hop import (
     PersistentHopEvidenceV1,
     PersistentHopHostLifecycleReceiptV1,
     PersistentHopPlanV1,
+    PersistentHopProfileV1,
     PersistentHopReceiverSettingsV1,
     PersistentHopRequestV1,
     PersistentHopSessionState,
@@ -226,6 +227,14 @@ class IioPersistentHopBackend(PersistentHopBackend):
             raise PersistentHopClientError(
                 "persistent-hop OPEN request differs from the prepared hardware plan"
             )
+        initial_profile = self._initial_profile(plan)
+        radio = self._require_radio()
+        _write_exact_center_frequency(radio, initial_profile.lo_hz)
+        if (
+            radio.read_active_rx_fastlock_profile() is not None
+            or round(radio.read_center_frequency()) != initial_profile.lo_hz
+        ):
+            raise RadioConfigurationError("initial persistent-hop LO was not attested")
         module = self._iio_module
         if module is None:
             module = importlib.import_module("iio")
@@ -281,6 +290,10 @@ class IioPersistentHopBackend(PersistentHopBackend):
         self._kernel_buffers_readback = readback
         self._capture = capture
         self._start_clock_bracket = _map_start_clock_bracket(capture.open_clock_bracket)
+
+    def _initial_profile(self, plan: PersistentHopPlanV1) -> PersistentHopProfileV1:
+        """Return the profile whose LO must be active before the first refill."""
+        return plan.profiles[0]
 
     def _request_geometry(self, request: bytes) -> PersistentHopRequestV1:
         if len(request) != _TANDEM_REQUEST_BYTES + PERSISTENT_HOP_REQUEST_BYTES:
