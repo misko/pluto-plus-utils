@@ -26,7 +26,10 @@ ADAPTIVE_HOP_REQUEST_BYTES = 352
 ADAPTIVE_HOP_EVENT_BYTES = 144
 ADAPTIVE_HOP_EVIDENCE_MAX_BYTES = 1216
 ADAPTIVE_HOP_POLICY_ID = "three-miss-two-second-v1"
+ADAPTIVE_HOP_ELIGIBLE_TARGETS_FEATURE = 0x40
+ADAPTIVE_HOP_ELIGIBLE_TARGETS_CAPABILITY = "iio,buffer-adaptive-hop-eligible-targets"
 _POLICY = struct.Struct("<Q10I16s")
+_POLICY_V3 = struct.Struct("<Q10IB15s")
 _CHOICE = struct.Struct("<4Q6I8s")
 _NO_VISIT = (1 << 64) - 1
 
@@ -49,6 +52,8 @@ def require_adaptive_capabilities(
         "iio,buffer-adaptive-hop-policy": ADAPTIVE_HOP_POLICY_ID,
         "iio,buffer-scanner-glrt-mode": "positive-only-v1",
     }
+    if isinstance(policy, AdaptiveHopPolicyV3):
+        required[ADAPTIVE_HOP_ELIGIBLE_TARGETS_CAPABILITY] = "1"
     if any(attributes.get(key) != value for key, value in required.items()):
         raise PersistentHopClientError("adaptive peer capabilities/policy are incompatible")
 
@@ -124,6 +129,45 @@ class AdaptiveHopPolicyV2:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class AdaptiveHopPolicyV3(AdaptiveHopPolicyV2):
+    """Add one eligible-target bitmap without changing the published wire major."""
+
+    eligible_target_mask: int = 0xFF
+
+    def _validate(self) -> None:
+        super()._validate()
+        _uint(self.eligible_target_mask, 8)
+        if not self.eligible_target_mask or self.mode != AdaptiveHopMode.ADAPTIVE:
+            raise PersistentHopProtocolError("unsupported adaptive eligible-target policy")
+
+    def pack(self) -> bytes:
+        self._validate()
+        values = dataclasses.astuple(self)
+        return _POLICY_V3.pack(*values[:-1], values[-1], bytes(15))
+
+    @classmethod
+    def unpack(cls, payload: bytes) -> AdaptiveHopPolicyV3:
+        if len(payload) != 64:
+            raise PersistentHopProtocolError("adaptive policy size mismatch")
+        values = _POLICY_V3.unpack(payload)
+        if values[-1] != bytes(15):
+            raise PersistentHopProtocolError("adaptive policy reserved bytes are nonzero")
+        try:
+            result = cls(values[0], AdaptiveHopMode(values[1]), *values[2:-1])
+        except ValueError as error:
+            raise PersistentHopProtocolError("unknown adaptive policy mode") from error
+        result._validate()
+        return result
+
+    def require_pinned_policy(self) -> None:
+        self._validate()
+        if self != AdaptiveHopPolicyV3(
+            self.generation, self.mode, eligible_target_mask=self.eligible_target_mask
+        ):
+            raise PersistentHopProtocolError("policy differs from three-miss-two-second-v1")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class AdaptiveHopRequestV2:
     geometry: PersistentHopRequestV1
     policy: AdaptiveHopPolicyV2
@@ -168,6 +212,36 @@ class AdaptiveHopRequestV2:
             tandem_request, samples_per_block, retention_frames=retention_frames
         )
         return packet[:-288] + self.pack()
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class AdaptiveHopRequestV3(AdaptiveHopRequestV2):
+    """Eligible-target extension carried by feature bit 0x40 in HOPR major 2."""
+
+    policy: AdaptiveHopPolicyV3
+
+    def pack(self) -> bytes:
+        packet = bytearray(super().pack())
+        struct.pack_into(
+            "<I", packet, 8, 0x3F | ADAPTIVE_HOP_ELIGIBLE_TARGETS_FEATURE
+        )
+        return bytes(packet)
+
+    @classmethod
+    def unpack(cls, payload: bytes | bytearray | memoryview) -> AdaptiveHopRequestV3:
+        raw = bytes(payload)
+        geometry = _header(raw, b"HOPR", ADAPTIVE_HOP_REQUEST_BYTES)[:288]
+        if (
+            struct.unpack_from("<I", raw, 8)[0]
+            != 0x3F | ADAPTIVE_HOP_ELIGIBLE_TARGETS_FEATURE
+            or struct.unpack_from("<H", raw, 76)[0] != ADAPTIVE_HOP_EVENT_BYTES
+        ):
+            raise PersistentHopProtocolError("adaptive request features/event size mismatch")
+        struct.pack_into("<HHI", geometry, 4, 1, 288, 0x1F)
+        struct.pack_into("<H", geometry, 76, 80)
+        result = cls(PersistentHopRequestV1.unpack(geometry), AdaptiveHopPolicyV3.unpack(raw[288:]))
+        result.pack()
+        return result
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -294,11 +368,15 @@ def _validate_event_binding(
     if evidence.session_id != geometry.session_id:
         raise PersistentHopProtocolError("adaptive session identity mismatch")
     previous = None
+    eligible_target_mask = getattr(policy, "eligible_target_mask", 0xFF)
     for event, choice in zip(evidence.events, choices, strict=True):
         profile = geometry.profiles[event.to_profile_index]
         if (
             choice.generation != policy.generation
             or choice.mode != policy.mode
+            or not eligible_target_mask & (1 << choice.proposed_target)
+            or not eligible_target_mask & (1 << event.to_profile_index)
+            or (choice.active_mask | choice.quiet_mask) & ~eligible_target_mask
             or choice.consecutive_misses > policy.missed_dwells
             or choice.cooldown_remaining_samples
             > geometry.sample_rate_hz * policy.cooldown_ms // 1000

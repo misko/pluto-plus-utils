@@ -10,7 +10,9 @@ from contextlib import suppress
 from .adaptive_hop import (
     AdaptiveHopEvidenceV2,
     AdaptiveHopPolicyV2,
+    AdaptiveHopPolicyV3,
     AdaptiveHopRequestV2,
+    AdaptiveHopRequestV3,
     AdaptiveHopStatusV2,
     require_adaptive_capabilities,
 )
@@ -99,7 +101,11 @@ class AdaptiveHopClient:
                 ):
                     raise PersistentHopClientError("adaptive hardware preparation changed geometry")
                 plan = prepared
-            request = AdaptiveHopRequestV2(plan.request(session_id=session_id), policy)
+            request = (
+                AdaptiveHopRequestV3(plan.request(session_id=session_id), policy)
+                if isinstance(policy, AdaptiveHopPolicyV3)
+                else AdaptiveHopRequestV2(plan.request(session_id=session_id), policy)
+            )
             stream = AdaptiveHopStreamV2(
                 request,
                 samples_per_block=plan.samples_per_block,

@@ -4,6 +4,23 @@
 qualification. Existing fixed V1 readers and sessions still reject adaptive
 records. No firmware, FPGA or kernel changes.
 
+## Eligible-target extension
+
+`AdaptiveHopPolicyV3` adds the single-byte `eligible_target_mask` and defaults
+it to `0xff`. `AdaptiveHopRequestV3` carries that byte at policy offset 48 and
+sets additive HOPR feature bit `0x40`; the record remains the published
+352-byte HOPR major 2. Legacy `AdaptiveHopPolicyV2` and
+`AdaptiveHopRequestV2` retain their exact zero-reserved encoding and mean all
+eight targets are eligible.
+
+The extension is adaptive-mode only and requires the explicit iiOD capability
+`iio,buffer-adaptive-hop-eligible-targets=1`. A zero mask, a shadow-mode mask,
+an old peer, or classifier/choice evidence outside the mask fails closed. The
+userspace scheduler uses the existing eight physical profiles directly and
+restricts startup, warmup, weighted service, revisit exploration, no-active
+round robin, and fault fallback to eligible indices. It never aliases an
+excluded index onto another frequency.
+
 ## Public components
 
 - `adaptive_hop` owns immutable HOPR/HOPS/HOPT V2 byte codecs and exact policy

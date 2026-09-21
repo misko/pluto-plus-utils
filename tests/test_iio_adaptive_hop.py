@@ -9,7 +9,9 @@ from test_iio_persistent_hop import SERIAL, URI, _FakeRadio, _plan
 from pluto_plus.adaptive_hop import (
     AdaptiveHopEvidenceV2,
     AdaptiveHopPolicyV2,
+    AdaptiveHopPolicyV3,
     AdaptiveHopRequestV2,
+    AdaptiveHopRequestV3,
     AdaptiveHopStatusV2,
 )
 from pluto_plus.adaptive_hop_client import AdaptiveHopClient
@@ -30,6 +32,7 @@ CAPS = {
     "iio,buffer-adaptive-hop-policy": "three-miss-two-second-v1",
     "iio,buffer-scanner-glrt-mode": "positive-only-v1",
 }
+MASK_CAPS = CAPS | {"iio,buffer-adaptive-hop-eligible-targets": "1"}
 
 
 class Extension:
@@ -75,6 +78,37 @@ def test_missing_adaptive_capability_refuses_before_profile_preparation(name):
             tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
         )
     assert radio.closed and radio.geometry is None and radio.open_request is None
+
+
+def test_masked_policy_rejects_old_iiod_before_profile_preparation():
+    radio, backend, _ = setup(caps=CAPS)
+    client = AdaptiveHopClient(URI, expected_serial=SERIAL, backend_factory=lambda _: backend)
+    with pytest.raises(PersistentHopClientError, match="capabilities"):
+        client.start(
+            _plan(),
+            session_id=17,
+            policy=AdaptiveHopPolicyV3(9, eligible_target_mask=0x0F),
+            tandem_request=TandemSessionRequestV1(mode=TandemMode.HOLD),
+        )
+    assert radio.closed and radio.geometry is None and radio.open_request is None
+
+
+def test_masked_policy_uses_feature_gated_request():
+    radio, backend, _ = setup(caps=MASK_CAPS)
+    backend.open()
+    plan = backend.prepare_plan(_plan())
+    request = AdaptiveHopRequestV3(
+        plan.request(session_id=17), AdaptiveHopPolicyV3(9, eligible_target_mask=0xF0)
+    )
+    payload = request.append_to_tandem_request(
+        TandemSessionRequestV1(mode=TandemMode.HOLD), plan.samples_per_block
+    )
+    backend.start(
+        payload, samples_per_block=plan.samples_per_block, kernel_buffers=plan.kernel_buffers
+    )
+    assert radio.open_request == b"LGO1-fixture-only" + payload
+    assert backend._adaptive_request == request
+    backend.close()
 
 
 @pytest.mark.parametrize("mode", ["missing", "raise", "unavailable"])

@@ -7,6 +7,7 @@ from pluto_plus.adaptive_hop import (
     ADAPTIVE_HOP_REQUEST_BYTES,
     AdaptiveHopEvidenceV2,
     AdaptiveHopRequestV2,
+    AdaptiveHopRequestV3,
     require_adaptive_capabilities,
 )
 from pluto_plus.adaptive_hop_client import AdaptiveHopClient
@@ -33,7 +34,12 @@ class IioAdaptiveHopBackend(IioPersistentHopBackend):
     def _request_geometry(self, request: bytes) -> PersistentHopRequestV1:
         if len(request) != 104 + ADAPTIVE_HOP_REQUEST_BYTES:
             raise PersistentHopClientError("adaptive OPEN request has the wrong size")
-        decoded = AdaptiveHopRequestV2.unpack(request[104:])
+        features = int.from_bytes(request[112:116], "little")
+        decoded = (
+            AdaptiveHopRequestV3.unpack(request[104:])
+            if features & 0x40
+            else AdaptiveHopRequestV2.unpack(request[104:])
+        )
         decoded.policy.require_pinned_policy()
         require_adaptive_capabilities(self.context_attributes(), decoded.policy)
         self._adaptive_request = decoded

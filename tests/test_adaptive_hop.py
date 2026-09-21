@@ -11,7 +11,9 @@ from pluto_plus.adaptive_hop import (
     AdaptiveHopEvidenceV2,
     AdaptiveHopMode,
     AdaptiveHopPolicyV2,
+    AdaptiveHopPolicyV3,
     AdaptiveHopRequestV2,
+    AdaptiveHopRequestV3,
     AdaptiveHopStatusV2,
 )
 from pluto_plus.persistent_hop import (
@@ -32,6 +34,13 @@ def request(rate=2500000, mode=AdaptiveHopMode.ADAPTIVE):
             71, rate, rate, 1000, rate * 120 // 1000, 10, 2500, rate * 300, _profiles()
         ),
         AdaptiveHopPolicyV2(9, mode),
+    )
+
+
+def masked_request(mask=0xFF):
+    base = request()
+    return AdaptiveHopRequestV3(
+        base.geometry, AdaptiveHopPolicyV3(9, eligible_target_mask=mask)
     )
 
 
@@ -107,6 +116,57 @@ def test_request_reserved_bytes_are_rejected_without_mutating_input(offset):
     with pytest.raises(PersistentHopProtocolError):
         AdaptiveHopRequestV2.unpack(raw)
     assert bytes(raw) == snapshot
+
+
+@pytest.mark.parametrize("mask", [0x0F, 0xF0, 0xFF])
+def test_eligible_target_policy_roundtrips_without_changing_v2_wire_major(mask):
+    masked = masked_request(mask)
+    wire = masked.pack()
+    assert len(wire) == 352
+    assert struct.unpack_from("<H", wire, 4)[0] == 2
+    assert struct.unpack_from("<I", wire, 8)[0] == 0x7F
+    assert wire[336] == mask and wire[337:] == bytes(15)
+    assert AdaptiveHopRequestV3.unpack(wire) == masked
+    with pytest.raises(PersistentHopProtocolError):
+        AdaptiveHopRequestV2.unpack(wire)
+
+
+def test_eligible_target_default_preserves_exact_v2_policy_values_and_legacy_bytes():
+    legacy = request()
+    masked = masked_request()
+    assert dc.astuple(masked.policy)[:-1] == dc.astuple(legacy.policy)
+    assert masked.policy.eligible_target_mask == 0xFF
+    assert legacy.pack()[336:] == bytes(16)
+    masked_prefix = bytearray(masked.pack()[:336])
+    struct.pack_into("<I", masked_prefix, 8, 0x3F)
+    assert bytes(masked_prefix) == legacy.pack()[:336]
+
+
+@pytest.mark.parametrize("mask", [0, 0x100, True])
+def test_invalid_eligible_target_mask_fails_closed(mask):
+    with pytest.raises(PersistentHopProtocolError):
+        masked_request(mask).pack()
+
+
+def test_eligible_target_extension_is_adaptive_only():
+    with pytest.raises(PersistentHopProtocolError):
+        dc.replace(masked_request(), policy=AdaptiveHopPolicyV3(9, AdaptiveHopMode.SHADOW)).pack()
+
+
+def test_masked_binding_rejects_excluded_targets_and_classifier_bits():
+    masked = masked_request(0x0F)
+    valid = evidence(masked)
+    valid = dc.replace(
+        valid,
+        choices=(valid.choices[0], dc.replace(valid.choices[1], quiet_mask=0x06)),
+    )
+    valid.validate_binding(masked)
+    for changed in (
+        dc.replace(valid.choices[1], proposed_target=4),
+        dc.replace(valid.choices[1], quiet_mask=0x10),
+    ):
+        with pytest.raises(PersistentHopProtocolError):
+            dc.replace(valid, choices=(valid.choices[0], changed)).validate_binding(masked)
 
 
 @pytest.mark.parametrize("offset", range(200, 208))
