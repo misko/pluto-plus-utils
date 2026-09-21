@@ -78,7 +78,7 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
 
 def test_scanner_runtime_pin_includes_eligible_target_scheduler() -> None:
     assert SCANNER_GLRT_RUNTIME_SOURCE_COMMIT == (
-        "e96d1960790a4bcf80ee3c045737e55a50b7c383"
+        "e96d196ba276588f1e0f8a2a9376c37a471b8b95"
     )
 
 
