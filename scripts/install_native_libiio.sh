@@ -98,7 +98,7 @@ if ((scanner_glrt)); then
         printf 'ERROR: --scanner-glrt requires --metadata-abi 3 and excludes other runtime selectors\n' >&2
         exit 2
     }
-    source_commit="e96d196ba276588f1e0f8a2a9376c37a471b8b95"
+    source_commit="d0044c59d795a40f06111e7f469716c5af4b7aaa"
     source_ref="$source_commit"
 fi
 if ((direct_peer_limit)); then
