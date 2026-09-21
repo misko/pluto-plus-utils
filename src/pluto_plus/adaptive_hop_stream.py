@@ -20,6 +20,7 @@ from .adaptive_hop import (
     AdaptiveHopEvidenceV2,
     AdaptiveHopPolicyV2,
     AdaptiveHopRequestV2,
+    AdaptiveHopRequestV3,
     AdaptiveHopStatusV2,
 )
 from .direct_radio.samples import ci16_dual_rx
@@ -159,7 +160,7 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         self,
         request: _R,
         *,
-        request_type: type[_R],
+        request_type: type[_R] | tuple[type[_R], ...],
         status_type: type[_S],
         decode_evidence: Callable[
             [bytes, _R], tuple[PersistentHopEvidenceV1, tuple[AdaptiveHopChoiceV2, ...]]
@@ -174,7 +175,8 @@ class _AdaptiveHopStream(Generic[_R, _S, _V, _T]):
         allow_counter_gaps: bool = False,
         close_visits_from_geometry: bool = False,
     ) -> None:
-        if type(request) is not request_type:
+        request_types = request_type if isinstance(request_type, tuple) else (request_type,)
+        if type(request) not in request_types:
             raise PersistentHopClientError("adaptive stream request major mismatch")
         request.pack()
         self._status_type = status_type
@@ -612,7 +614,7 @@ class AdaptiveHopStreamV2(
     ) -> None:
         super().__init__(
             request,
-            request_type=AdaptiveHopRequestV2,
+            request_type=(AdaptiveHopRequestV2, AdaptiveHopRequestV3),
             status_type=AdaptiveHopStatusV2,
             decode_evidence=_decode_v2,
             decode_samples=ci16_dual_rx,

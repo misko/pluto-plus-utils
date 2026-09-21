@@ -12,6 +12,8 @@ from pluto_plus.adaptive_hop import (
     AdaptiveHopChoiceV2,
     AdaptiveHopEvidenceV2,
     AdaptiveHopMode,
+    AdaptiveHopPolicyV3,
+    AdaptiveHopRequestV3,
     AdaptiveHopStatusV2,
 )
 from pluto_plus.adaptive_hop_stream import AdaptiveHopStreamV2
@@ -33,6 +35,16 @@ from pluto_plus.persistent_hop import (
 
 FIRST = (1 << 53) + 101
 FLAGS = Flag.RESTORE_REQUIRED | Flag.TERMINAL | Flag.RESTORE_ATTEMPTED | Flag.RESTORE_SUCCEEDED
+
+
+def test_stream_accepts_explicit_eligible_target_request() -> None:
+    legacy = request()
+    masked = AdaptiveHopRequestV3(
+        legacy.geometry,
+        AdaptiveHopPolicyV3(**dc.asdict(legacy.policy), eligible_target_mask=0x0F),
+    )
+    stream = AdaptiveHopStreamV2(masked, samples_per_block=131072)
+    assert stream.request is masked
 
 
 class Capture:
