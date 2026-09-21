@@ -76,6 +76,12 @@ def test_source_installer_requires_explicit_sealed_uv() -> None:
     assert '[[ "$actual_commit" == "$source_commit" ]]' in text
 
 
+def test_scanner_runtime_pin_includes_eligible_target_scheduler() -> None:
+    assert SCANNER_GLRT_RUNTIME_SOURCE_COMMIT == (
+        "e96d1960790a4bcf80ee3c045737e55a50b7c383"
+    )
+
+
 @pytest.mark.parametrize("abi", ("1", "2", "4"))
 def test_scanner_runtime_rejects_other_metadata_abis_before_build(abi: str) -> None:
     script = Path(__file__).parents[1] / "scripts/install_native_libiio.sh"

@@ -11,6 +11,8 @@ import pytest
 
 import pluto_plus.hardware.preflight as preflight
 
+MASKED_SCANNER_RUNTIME_COMMIT = "e96d1960790a4bcf80ee3c045737e55a50b7c383"
+
 
 @pytest.fixture
 def scanner_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
@@ -87,6 +89,7 @@ def scanner_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNa
 
 
 def test_scanner_runtime_accepts_exact_source_hashes_and_public_apis(scanner_runtime):
+    assert preflight.SCANNER_GLRT_RUNTIME_SOURCE_COMMIT == MASKED_SCANNER_RUNTIME_COMMIT
     result = preflight.verify_metadata_runtime(expected_abi=3)
     assert result.source_commit == preflight.SCANNER_GLRT_RUNTIME_SOURCE_COMMIT
     assert result.native_libiio_path == str(scanner_runtime.native)

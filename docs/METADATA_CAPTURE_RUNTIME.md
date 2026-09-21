@@ -272,7 +272,9 @@ fallback.
 The original ABI-3 source pin remains the default. Scanner GLRT's terminal
 result drain requires the newer host runtime, selected explicitly by adding
 `--scanner-glrt` to the ABI-3 installer command. This selects exactly
-`a1088b61de3c57762cfed5533e1baf8076a7b726`; it is rejected for other metadata ABIs.
+`e96d1960790a4bcf80ee3c045737e55a50b7c383`; it is rejected for other metadata
+ABIs. This source includes the eligible-target request codec, capability
+advertisement, and scheduler enforcement used by the transient scanner iiOD.
 The verifier accepts this additional pinned ABI-3 runtime and checks the public
 cancel, status and metadata-drain method signatures as well as the existing
 native/binding hashes and loaded paths. The receipt schema and metadata
