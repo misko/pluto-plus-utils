@@ -11,7 +11,7 @@ import pytest
 
 import pluto_plus.hardware.preflight as preflight
 
-MASKED_SCANNER_RUNTIME_COMMIT = "d0044c59d795a40f06111e7f469716c5af4b7aaa"
+MASKED_SCANNER_RUNTIME_COMMIT = "40b83b3f173568f7cf247fb2d8e4d022a597a5e6"
 
 
 @pytest.fixture
