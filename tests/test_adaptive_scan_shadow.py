@@ -179,9 +179,7 @@ def test_adaptive_transmits_periodic_source_bound_feedback() -> None:
         item.feedback for item in report.observations if item.feedback is not None
     ]
     assert all(
-        item.receipt is FeedbackResult.ACCEPTED
-        for item in report.observations
-        if item.feedback
+        item.receipt is FeedbackResult.ACCEPTED for item in report.observations if item.feedback
     )
     assert [ack.sequence for ack in report.acknowledgements] == [1, 2]
 
@@ -331,7 +329,7 @@ def test_noncompleted_terminal_cannot_qualify() -> None:
         run_scanner_session(session, _detector, mode=AdaptiveScanMode.SHADOW)
 
 
-def test_dual_rx_classifier_receives_only_physical_rx1() -> None:
+def test_dual_rx_classifier_receives_only_receiver_id_one() -> None:
     session = Session()
     session.setup = replace(
         session.setup,
@@ -350,13 +348,11 @@ def test_dual_rx_classifier_receives_only_physical_rx1() -> None:
     def detector(visit: AdaptiveScanVisit) -> ScanOutcome:
         assert visit.record.iq_bytes == samples * 4
         assert len(visit.iq) == samples * 4
-        assert visit.iq[:4] == struct.pack("<hh", 101, -102)
-        assert struct.pack("<hh", 3001, -3002) not in visit.iq[:4]
+        assert visit.iq[:4] == struct.pack("<hh", 3001, -3002)
+        assert struct.pack("<hh", 101, -102) not in visit.iq[:4]
         return ScanOutcome.ACTIVE
 
-    report = run_scanner_session(
-        session, detector, mode=AdaptiveScanMode.SHADOW
-    )
+    report = run_scanner_session(session, detector, mode=AdaptiveScanMode.SHADOW)
     assert report.classification_dropped == 0
 
 

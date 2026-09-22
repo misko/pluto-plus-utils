@@ -20,8 +20,7 @@ from .adaptive_scan_client import AdaptiveScanVisit
 def _json(value: object) -> object:
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {
-            field.name: _json(getattr(value, field.name))
-            for field in dataclasses.fields(value)
+            field.name: _json(getattr(value, field.name)) for field in dataclasses.fields(value)
         }
     if isinstance(value, enum.Enum):
         return value.value
@@ -90,7 +89,7 @@ class AdaptiveScanArchive:
                 "sample_rx_iq_interleaved" if self.setup.rx_mask == 3 else "sample_iq"
             ),
             "physical_receivers": list(range(self.setup.rx_mask.bit_count())),
-            "classifier_physical_receiver": 0,
+            "classifier_physical_receiver": 1 if self.setup.rx_mask == 3 else 0,
             "setup": _json(self.setup),
             "terminal": _json(terminal),
             "visits": self._visits,

@@ -161,12 +161,12 @@ def run_scanner_session(
         raw = np.frombuffer(visit.iq, dtype=np.uint8)
         if raw.size != samples * receiver_count * 4:
             raise ValueError("dual-RX CI16 payload geometry is inconsistent")
-        # IIO scan order is sample, receiver, I/Q.  The classifier consumes
-        # physical RX1 (receiver index zero); archival retains the original
-        # two-receiver payload passed to visit_observer above.
-        rx1_iq = raw.reshape(samples, receiver_count, 4)[:, 0, :].copy().tobytes()
+        # IIO scan order is sample, receiver, I/Q.  The dual-RX Leo contract
+        # assigns adaptive classification to receiver ID 1; archival retains
+        # the original two-receiver payload passed to visit_observer above.
+        classifier_iq = raw.reshape(samples, receiver_count, 4)[:, 1, :].copy().tobytes()
         return AdaptiveScanVisit(
-            dataclasses.replace(visit.record, iq_bytes=len(rx1_iq)), rx1_iq
+            dataclasses.replace(visit.record, iq_bytes=len(classifier_iq)), classifier_iq
         )
 
     def drain_ready_acknowledgements() -> None:
@@ -229,10 +229,7 @@ def run_scanner_session(
                                 attempts += 1
                             if receipt is FeedbackResult.ACCEPTED:
                                 accepted_count[0] += 1
-                                if (
-                                    accepted_count[0] - len(acknowledgements)
-                                    >= ACK_DRAIN_WATERMARK
-                                ):
+                                if accepted_count[0] - len(acknowledgements) >= ACK_DRAIN_WATERMARK:
                                     drain_ready_acknowledgements()
                     observations.append(
                         ScannerObservation(
@@ -309,9 +306,7 @@ def run_scanner_session(
         for item in accepted
         if item.feedback is not None
     }
-    observed = {
-        ack.sequence: (ack.source_visit, ack.target) for ack in acknowledgements
-    }
+    observed = {ack.sequence: (ack.source_visit, ack.target) for ack in acknowledgements}
     if len(observed) != len(acknowledgements) or observed != expected:
         raise RuntimeError("feedback acknowledgements do not match accepted observations")
     metrics = accumulator.finish(session.terminal)
