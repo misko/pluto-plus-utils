@@ -14,7 +14,7 @@ from .adaptive_scan import (
     FEEDBACK_BYTES,
     RUNTIME_VERSION,
     TERMINAL_BYTES,
-    VARIABLE_DWELL_VERSION,
+    FIXED_DWELL_VERSION,
     VISIT_BYTES,
     FeedbackResult,
     ScanAck,
@@ -141,18 +141,18 @@ class AdaptiveScanClient:
             connection.close()
         return self.capabilities()
 
-    def variable_dwell_capabilities(self) -> ScanCapabilities:
-        """Require explicit v3 support; never fall back to fixed dwell firmware."""
+    def fixed_dwell_capabilities(self) -> ScanCapabilities:
+        """Require explicit v4 support; never silently downgrade a dwell."""
         connection = self._connection()
         try:
-            connection.sendall(f"SCANCAPS3 {CAPS_BYTES}\n".encode())
-            size = _require_success(_integer(connection), "SCANCAPS3")
+            connection.sendall(f"SCANCAPS4 {CAPS_BYTES}\n".encode())
+            size = _require_success(_integer(connection), "SCANCAPS4")
             if size != CAPS_BYTES:
-                raise AdaptiveScanTransportError("SCANCAPS3 returned the wrong record size")
+                raise AdaptiveScanTransportError("SCANCAPS4 returned the wrong record size")
             caps = ScanCapabilities.unpack(_exact(connection, size))
-            if caps.protocol_version != VARIABLE_DWELL_VERSION:
+            if caps.protocol_version != FIXED_DWELL_VERSION:
                 raise AdaptiveScanTransportError(
-                    "SCANCAPS3 did not return variable-dwell capabilities"
+                    "SCANCAPS4 did not return fixed-dwell capabilities"
                 )
             return caps
         finally:

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from .adaptive_scan import (
     RUNTIME_VERSION,
     SUPPORTED_RATES,
-    VARIABLE_DWELL_VERSION,
+    FIXED_DWELL_VERSION,
     ScanOutcome,
     ScanSetup,
     ScanTarget,
@@ -69,7 +69,7 @@ def build_adaptive_scan_setup(
     transition_budget_ms: int = 10,
     maximum_revisit_ms: int = 3_000,
     rx_mask: int = 1,
-    variable_dwell: bool = False,
+    fixed_dwell: bool = False,
 ) -> ScanSetup:
     """Build the canonical bounded campaign setup before profile compilation."""
 
@@ -107,8 +107,8 @@ def build_adaptive_scan_setup(
         ),
         rx_mask=rx_mask,
         protocol_version=(
-            VARIABLE_DWELL_VERSION
-            if variable_dwell
+            FIXED_DWELL_VERSION
+            if fixed_dwell
             else 1
             if source_rate_hz in SUPPORTED_RATES
             else RUNTIME_VERSION
@@ -142,8 +142,8 @@ def run_adaptive_scan_campaign(
     setup.validate()
     discovery = client_factory(host)
     capabilities = (
-        discovery.variable_dwell_capabilities()
-        if setup.protocol_version == VARIABLE_DWELL_VERSION
+        discovery.fixed_dwell_capabilities()
+        if setup.protocol_version == FIXED_DWELL_VERSION
         else discovery.runtime_capabilities()
         if setup.protocol_version == RUNTIME_VERSION
         else discovery.capabilities()

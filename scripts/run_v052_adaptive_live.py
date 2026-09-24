@@ -22,8 +22,8 @@ from pluto_plus.counter_utc import TimingPolicy
 
 SERIAL = "10400056f695001322002d0010ad1719f2"
 URI = "ip:192.168.1.21"
-RATES = (2_500_000, 10_000_000)
-ACTIVE_DWELLS_MS = (120, 240, 360)
+RATES = (2_500_000,)
+FIXED_DWELLS_MS = (120, 240, 360)
 FREQUENCIES_2P5 = (
     959_687_498,
     1_190_312_500,
@@ -86,17 +86,17 @@ def campaign_configuration(
     ordinal, scheduled_rate, edge, _ = slot_configuration(epoch_seconds, serial)
     rate = scheduled_rate if sample_rate_hz is None else sample_rate_hz
     if rate not in RATES:
-        raise ValueError("sample rate must be 2.5 or 10 MS/s")
+        raise ValueError("sample rate must be 2.5 MS/s")
     all_frequencies = FREQUENCIES_BY_RATE[rate]
     frequencies = all_frequencies[0::2] if edge == "lower" else all_frequencies[1::2]
-    identity = hashlib.sha256(f"variable-dwell-v3\0{serial}\0{ordinal}\0{rate}".encode()).digest()
+    identity = hashlib.sha256(f"fixed-dwell-v4\0{serial}\0{ordinal}\0{rate}".encode()).digest()
     return ordinal, rate, edge, frequencies, identity
 
 
-def slot_active_dwell_ms(epoch_seconds: int, serial: str) -> int:
-    """Uniform active dwell choice, fixed across retries of a scan slot."""
+def slot_fixed_dwell_ms(epoch_seconds: int, serial: str) -> int:
+    """Uniform dwell choice, fixed across retries and feedback in a scan slot."""
     ordinal = epoch_seconds // 600
-    dwell = ACTIVE_DWELLS_MS[deterministic_uniform_choice(serial, ordinal, "dwell-v3", 3)]
+    dwell = FIXED_DWELLS_MS[deterministic_uniform_choice(serial, ordinal, "dwell-v4", 3)]
     return dwell
 
 
@@ -168,7 +168,7 @@ def main() -> int:
     ordinal, rate, selected_edge, frequencies, identity = campaign_configuration(
         epoch, args.serial, args.sample_rate
     )
-    active_dwell_ms = slot_active_dwell_ms(epoch, args.serial)
+    fixed_dwell_ms = slot_fixed_dwell_ms(epoch, args.serial)
     detector = Ci16EnergyDetector(Ci16EnergyDetectorConfig(-38.0))
     setup = build_adaptive_scan_setup(
         session=int.from_bytes(identity[:8], "little") or 1,
@@ -177,14 +177,14 @@ def main() -> int:
         source_rate_hz=rate,
         analog_bandwidth_hz=rate,
         duration_ms=args.duration_ms,
-        dwell_ms=active_dwell_ms,
+        dwell_ms=fixed_dwell_ms,
         frequencies_hz=frequencies,
         baseline_weights=(1,) * len(frequencies),
         analysis_digest=detector.config.analysis_digest,
         transition_budget_ms=20,
         maximum_revisit_ms=3_000,
         rx_mask=3,
-        variable_dwell=True,
+        fixed_dwell=True,
     )
     if args.dry_run:
         print(
@@ -192,8 +192,7 @@ def main() -> int:
                 {
                     "slot_ordinal": ordinal,
                     "rate_hz": rate,
-                    "active_dwell_ms": active_dwell_ms,
-                    "quiet_dwell_ms": 120,
+                    "fixed_dwell_ms": fixed_dwell_ms,
                     "gain_mode": "manual",
                     "selected_edge": selected_edge,
                     "setup": json_value(setup),
@@ -246,8 +245,7 @@ def main() -> int:
             "radio_serial": args.serial,
             "radio_uri": args.uri,
             "rate_hz": rate,
-            "active_dwell_ms": active_dwell_ms,
-            "quiet_dwell_ms": 120,
+            "fixed_dwell_ms": fixed_dwell_ms,
             "gain_mode": "manual",
             "selected_edge": selected_edge,
             "omitted_frequencies_hz": [
@@ -279,8 +277,7 @@ def main() -> int:
             "radio_serial": args.serial,
             "radio_uri": args.uri,
             "rate_hz": rate,
-            "active_dwell_ms": active_dwell_ms,
-            "quiet_dwell_ms": 120,
+            "fixed_dwell_ms": fixed_dwell_ms,
             "gain_mode": "manual",
             "selected_edge": selected_edge,
             "omitted_frequencies_hz": [

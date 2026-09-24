@@ -32,7 +32,7 @@ TERMINAL_BYTES: Final = 128
 # campaign runner.  Older v0.52 endpoints advertise mask 0x0f and are refused.
 SUPPORTED_RATES: Final = frozenset((2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000))
 RUNTIME_VERSION: Final = 2
-VARIABLE_DWELL_VERSION: Final = 3
+FIXED_DWELL_VERSION: Final = 4
 MINIMUM_RUNTIME_RATE: Final = 520_833
 MAXIMUM_RUNTIME_RATE: Final = 61_440_000
 
@@ -41,7 +41,7 @@ def _rate_valid(rate: int, version: int) -> bool:
     return type(rate) is int and (
         (version == VERSION and rate in SUPPORTED_RATES)
         or (version == RUNTIME_VERSION and MINIMUM_RUNTIME_RATE <= rate <= MAXIMUM_RUNTIME_RATE)
-        or (version == VARIABLE_DWELL_VERSION and rate in (2_500_000, 10_000_000))
+        or (version == FIXED_DWELL_VERSION and rate == 2_500_000)
     )
 
 
@@ -114,10 +114,10 @@ class ScanCapabilities:
         forward-compatibility escape hatch.
         """
 
-        variable = self.protocol_version == VARIABLE_DWELL_VERSION
+        fixed_dwell = self.protocol_version == FIXED_DWELL_VERSION
         required = (
-            ScanCapabilities(rate_mask=0x11, rx_mask=3, minimum_dwell_ms=120, maximum_dwell_ms=360)
-            if variable
+            ScanCapabilities(rate_mask=0x10, rx_mask=3, minimum_dwell_ms=120, maximum_dwell_ms=360)
+            if fixed_dwell
             else ScanCapabilities()
         )
         legacy = (
@@ -134,13 +134,15 @@ class ScanCapabilities:
             <= self.maximum_rate_hz
             <= MAXIMUM_RUNTIME_RATE
         )
-        variable_valid = variable and (
+        fixed_dwell_valid = fixed_dwell and (
             self.rate_mode,
             self.minimum_rate_hz,
             self.maximum_rate_hz,
         ) == (0, 0, 0)
-        if not (legacy or runtime or variable_valid):
+        if not (legacy or runtime or fixed_dwell_valid):
             raise AdaptiveScanProtocolError("unsupported runtime rate capability")
+        if fixed_dwell and self.rate_mask != 0x10:
+            raise AdaptiveScanProtocolError("fixed-dwell capability rate mask is not exact")
         if (
             self.rate_mask & required.rate_mask != required.rate_mask
             or self.rx_mask & required.rx_mask != required.rx_mask
@@ -192,7 +194,7 @@ class ScanCapabilities:
     @classmethod
     def unpack(cls, raw: bytes | bytearray | memoryview) -> ScanCapabilities:
         packet = _check(
-            raw, b"SPCP", CAPS_BYTES, 0, versions=(VERSION, RUNTIME_VERSION, VARIABLE_DWELL_VERSION)
+            raw, b"SPCP", CAPS_BYTES, 0, versions=(VERSION, RUNTIME_VERSION, FIXED_DWELL_VERSION)
         )
         values = struct.unpack_from("<IIIIIIIIQIIIIII", packet, 16)
         result = cls(
@@ -320,15 +322,16 @@ class ScanSetup:
         if not _rate_valid(self.source_rate_hz, self.protocol_version):
             raise AdaptiveScanProtocolError(
                 "rate must be fixed 2.5 or 10/15/20/30 MS/s for v1, "
-                "or an integer in 520833..61440000 S/s for runtime v2"
+                "an integer in 520833..61440000 S/s for runtime v2, "
+                "or exactly 2.5 MS/s for fixed-dwell v4"
             )
         if not 200_000 <= self.analog_bandwidth_hz <= 56_000_000:
             raise AdaptiveScanProtocolError("analog bandwidth is outside the admitted range")
         if not 1 <= self.duration_ms <= 300_000:
             raise AdaptiveScanProtocolError("duration is outside 1..300000 ms")
-        if self.protocol_version == VARIABLE_DWELL_VERSION:
+        if self.protocol_version == FIXED_DWELL_VERSION:
             if self.dwell_ms not in (120, 240, 360):
-                raise AdaptiveScanProtocolError("active base dwell must be 120, 240, or 360 ms")
+                raise AdaptiveScanProtocolError("fixed dwell must be 120, 240, or 360 ms")
         elif not 20 <= self.dwell_ms <= 240:
             raise AdaptiveScanProtocolError("dwell is outside 20..240 ms")
         if not 1 <= self.transition_budget_ms <= 100:
@@ -349,6 +352,8 @@ class ScanSetup:
             raise AdaptiveScanProtocolError("queue visit limit is outside range")
         if self.rx_mask not in (1, 3) or self.format != FORMAT_CI16 or self.flags != SETUP_FLAGS:
             raise AdaptiveScanProtocolError("RX, format, or setup flags are not exact")
+        if self.protocol_version == FIXED_DWELL_VERSION and self.rx_mask != 3:
+            raise AdaptiveScanProtocolError("fixed-dwell v4 requires dual RX")
         _digest(self.analysis_digest)
         if not 1 <= len(self.targets) <= 8:
             raise AdaptiveScanProtocolError("target count is outside 1..8")
@@ -413,7 +418,7 @@ class ScanSetup:
             b"SPSQ",
             SETUP_BYTES,
             SETUP_FLAGS,
-            versions=(VERSION, RUNTIME_VERSION, VARIABLE_DWELL_VERSION),
+            versions=(VERSION, RUNTIME_VERSION, FIXED_DWELL_VERSION),
         )
         _require_zero(packet, 108, 112)
         _require_zero(packet, 336, 348)
@@ -604,7 +609,7 @@ class ScanVisit:
             b"SPVR",
             VISIT_BYTES,
             flags,
-            versions=(VERSION, RUNTIME_VERSION, VARIABLE_DWELL_VERSION),
+            versions=(VERSION, RUNTIME_VERSION, FIXED_DWELL_VERSION),
         )
         _require_zero(packet, 140, 156)
         values = struct.unpack_from("<QQQQQQQQQQQIIIIIIIII", packet, 16)

@@ -77,8 +77,6 @@ class AdaptiveScanAccumulator:
             expected_intervals = (0, expected_samples)
         else:
             expected_intervals = (expected_samples,)
-        if self.setup.protocol_version == 3:
-            expected_intervals += (self.setup.source_rate_hz * 120 // 1_000,)
         if valid_samples not in expected_intervals:
             raise AdaptiveScanQualificationError("visit valid interval disagrees with dwell")
         self._records.append(record)
