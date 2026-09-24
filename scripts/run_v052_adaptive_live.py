@@ -20,10 +20,10 @@ from pluto_plus.adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDete
 from pluto_plus.adaptive_scan_shadow import AdaptiveScanMode
 from pluto_plus.counter_utc import TimingPolicy
 
-SERIAL = "104000bac4950008230026001b440a003a"
-URI = "ip:192.168.1.17"
-RATES = (10_000_000, 15_000_000, 20_000_000)
-FREQUENCIES = (
+SERIAL = "10400056f695001322002d0010ad1719f2"
+URI = "ip:192.168.1.21"
+RATES = (2_500_000, 10_000_000, 15_000_000)
+FREQUENCIES_2P5 = (
     959_687_498,
     1_190_312_500,
     1_209_687_498,
@@ -33,15 +33,49 @@ FREQUENCIES = (
     1_709_687_500,
     1_940_312_500,
 )
-LOWER_FREQUENCIES = FREQUENCIES[0::2]
-UPPER_FREQUENCIES = FREQUENCIES[1::2]
+FREQUENCIES_10M = (
+    960_000_000,
+    1_190_000_000,
+    1_210_000_000,
+    1_440_000_000,
+    1_460_000_000,
+    1_690_000_000,
+    1_710_000_000,
+    1_940_000_000,
+)
+FREQUENCIES_BY_RATE = {
+    2_500_000: FREQUENCIES_2P5,
+    10_000_000: FREQUENCIES_10M,
+    15_000_000: FREQUENCIES_10M,
+}
 
 
-def slot_configuration(epoch_seconds: int) -> tuple[int, int, str, tuple[int, ...]]:
+def deterministic_uniform_choice(serial: str, ordinal: int, domain: str, size: int) -> int:
+    """Return an exactly uniform, reproducible choice using rejection sampling."""
+
+    if size < 1 or size > 256:
+        raise ValueError("choice size must be between one and 256")
+    limit = 256 - (256 % size)
+    counter = 0
+    while True:
+        digest = hashlib.sha256(
+            f"leo-feature103-dual-rx-v2\0{serial}\0{ordinal}\0{domain}\0{counter}".encode()
+        ).digest()
+        for value in digest:
+            if value < limit:
+                return value % size
+        counter += 1
+
+
+def slot_configuration(
+    epoch_seconds: int, serial: str = SERIAL
+) -> tuple[int, int, str, tuple[int, ...]]:
     ordinal = epoch_seconds // 600
-    edge = "lower" if ordinal % 2 == 0 else "upper"
-    frequencies = LOWER_FREQUENCIES if edge == "lower" else UPPER_FREQUENCIES
-    return ordinal, RATES[ordinal % len(RATES)], edge, frequencies
+    rate = RATES[deterministic_uniform_choice(serial, ordinal, "rate", len(RATES))]
+    edge = "upper" if deterministic_uniform_choice(serial, ordinal, "edge", 2) else "lower"
+    all_frequencies = FREQUENCIES_BY_RATE[rate]
+    frequencies = all_frequencies[0::2] if edge == "lower" else all_frequencies[1::2]
+    return ordinal, rate, edge, frequencies
 
 
 def campaign_configuration(
@@ -49,10 +83,12 @@ def campaign_configuration(
     serial: str,
     sample_rate_hz: int | None,
 ) -> tuple[int, int, str, tuple[int, ...], bytes]:
-    ordinal, scheduled_rate, edge, frequencies = slot_configuration(epoch_seconds)
+    ordinal, scheduled_rate, edge, _ = slot_configuration(epoch_seconds, serial)
     rate = scheduled_rate if sample_rate_hz is None else sample_rate_hz
     if rate not in RATES:
-        raise ValueError("sample rate must be 10, 15, or 20 MS/s")
+        raise ValueError("sample rate must be 2.5, 10, or 15 MS/s")
+    all_frequencies = FREQUENCIES_BY_RATE[rate]
+    frequencies = all_frequencies[0::2] if edge == "lower" else all_frequencies[1::2]
     identity = hashlib.sha256(f"{serial}\0{ordinal}\0{rate}".encode()).digest()
     return ordinal, rate, edge, frequencies, identity
 
@@ -136,6 +172,7 @@ def main() -> int:
         analysis_digest=detector.config.analysis_digest,
         transition_budget_ms=20,
         maximum_revisit_ms=3_000,
+        rx_mask=3,
     )
     stamp = datetime.fromtimestamp(ordinal * 600, UTC).strftime("%Y%m%dT%H%M%SZ")
     session_id = f"scan-fw-{identity[:8].hex()}"
@@ -176,13 +213,15 @@ def main() -> int:
         terminal_realtime_ns = time.time_ns()
         terminal_monotonic_ns = time.monotonic_ns()
         evidence = {
-            "schema": "leo.v052-adaptive-live/v2",
+            "schema": "leo.feature103-dual-rx-adaptive-live/v1",
             "slot_ordinal": ordinal,
             "radio_serial": args.serial,
             "radio_uri": args.uri,
             "rate_hz": rate,
             "selected_edge": selected_edge,
-            "omitted_frequencies_hz": [item for item in FREQUENCIES if item not in frequencies],
+            "omitted_frequencies_hz": [
+                item for item in FREQUENCIES_BY_RATE[rate] if item not in frequencies
+            ],
             "preparation": json_value(receipt.preparation),
             "run": json_value(receipt.run),
             "restoration": json_value(receipt.restoration),
@@ -203,14 +242,16 @@ def main() -> int:
     publish(
         path,
         {
-            "schema": "leo.v052-adaptive-live/v1",
+            "schema": "leo.feature103-dual-rx-adaptive-summary/v1",
             "created_at": datetime.now(UTC).isoformat(),
             "slot_ordinal": ordinal,
             "radio_serial": args.serial,
             "radio_uri": args.uri,
             "rate_hz": rate,
             "selected_edge": selected_edge,
-            "omitted_frequencies_hz": [item for item in FREQUENCIES if item not in frequencies],
+            "omitted_frequencies_hz": [
+                item for item in FREQUENCIES_BY_RATE[rate] if item not in frequencies
+            ],
             "setup": json_value(setup),
             "run": json_value(receipt.run),
             "restoration": json_value(receipt.restoration),
