@@ -996,12 +996,8 @@ class IioRadioDevice:
         rf_bandwidth_hz: int,
         manual_gain_db: float,
         rx_mask: int,
-        gain_mode: GainMode = GainMode.MANUAL,
     ) -> IioReceiverSettingsReadback:
-        """Apply shared-LO RX geometry and attest the selected gain mode."""
-
-        if gain_mode not in (GainMode.MANUAL, GainMode.SLOW_ATTACK):
-            raise ValueError("adaptive scan gain mode must be manual or slow_attack")
+        """Apply feature-103's shared-LO manual RX geometry."""
 
         if type(sample_rate_hz) is not int or not 520_833 <= sample_rate_hz <= 61_440_000:
             raise ValueError("adaptive scan rate is not supported")
@@ -1022,18 +1018,16 @@ class IioRadioDevice:
         device.rx_rf_bandwidth = rf_bandwidth_hz
         device.rx_enabled_channels = list(channels)
         for channel in channels:
-            setattr(device, f"gain_control_mode_chan{channel}", gain_mode.value)
-            if gain_mode is GainMode.MANUAL:
-                setattr(device, f"rx_hardwaregain_chan{channel}", manual_gain_db)
+            setattr(device, f"gain_control_mode_chan{channel}", GainMode.MANUAL.value)
+            setattr(device, f"rx_hardwaregain_chan{channel}", manual_gain_db)
         _mute_transmit(device)
         readback = self.read_receiver_settings_readback()
         if (
             readback.sample_rate_hz != sample_rate_hz
             or round(readback.bandwidth_hz) != rf_bandwidth_hz
             or readback.channels != channels
-            or readback.gain_modes != (gain_mode,) * len(channels)
-            or (gain_mode is GainMode.MANUAL
-                and readback.gain_db != (manual_gain_db,) * len(channels))
+            or readback.gain_modes != (GainMode.MANUAL,) * len(channels)
+            or readback.gain_db != (manual_gain_db,) * len(channels)
         ):
             raise RadioConfigurationError(
                 "adaptive scan RX geometry did not read back exactly"

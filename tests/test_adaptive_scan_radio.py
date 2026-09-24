@@ -96,13 +96,7 @@ class Radio:
         return snapshot
 
     def configure_adaptive_scan_geometry(
-        self,
-        *,
-        sample_rate_hz,
-        rf_bandwidth_hz,
-        manual_gain_db,
-        rx_mask,
-        gain_mode=GainMode.MANUAL,
+        self, *, sample_rate_hz, rf_bandwidth_hz, manual_gain_db, rx_mask
     ):
         channels = (0,) if rx_mask == 1 else (0, 1)
         self.settings = IioReceiverSettingsReadback(
@@ -110,7 +104,7 @@ class Radio:
             float(sample_rate_hz),
             float(rf_bandwidth_hz),
             channels,
-            (gain_mode,) * len(channels),
+            (GainMode.MANUAL,) * len(channels),
             (manual_gain_db,) * len(channels),
         )
         return self.settings
@@ -195,24 +189,6 @@ def test_prepare_failure_restores_and_closes() -> None:
     assert radio.restored and radio.closed and radio.settings == ORIGINAL
 
 
-def test_prepare_slow_attack_and_restore_original_manual_state() -> None:
-    radio = Radio("ip:192.168.1.18", "SERIAL_A")
-
-    def factory(_uri, _serial):
-        return radio
-
-    preparation = prepare_adaptive_scan_radio(
-        "ip:192.168.1.18",
-        "SERIAL_A",
-        dataclasses.replace(_setup(), rx_mask=3),
-        gain_mode=GainMode.SLOW_ATTACK,
-        radio_factory=factory,
-    )
-    assert preparation.configured.gain_modes == (GainMode.SLOW_ATTACK,) * 2
-    restoration = restore_adaptive_scan_radio(preparation, radio_factory=factory)
-    assert restoration.observed == ORIGINAL
-
-
 def test_prepare_dual_rx_uses_shared_lo_manual_geometry() -> None:
     radios = []
 
@@ -265,7 +241,9 @@ def test_production_factory_selects_exact_dual_rx_layout(monkeypatch) -> None:
             self.layout = expectation
 
     monkeypatch.setattr(adaptive_scan_radio, "IioRadioDevice", Device)
-    radio = adaptive_scan_radio._default_factory("ip:192.168.1.15", "SERIAL_A", rx_mask=3)
+    radio = adaptive_scan_radio._default_factory(
+        "ip:192.168.1.15", "SERIAL_A", rx_mask=3
+    )
 
     assert radio.layout == AD9361_2R2T_TARGET_PROFILE.rx_layout_expectation
 
@@ -282,9 +260,8 @@ def test_runtime_rate_failure_restores_before_profile_compilation(failure) -> No
     radio = RateFailureRadio("ip:192.168.1.18", "SERIAL_A")
     request = dataclasses.replace(_setup(), source_rate_hz=7_500_000, protocol_version=2)
     with pytest.raises(RadioConfigurationError):
-        prepare_adaptive_scan_radio(
-            "ip:192.168.1.18", "SERIAL_A", request, radio_factory=lambda *_: radio
-        )
+        prepare_adaptive_scan_radio("ip:192.168.1.18", "SERIAL_A", request,
+                                    radio_factory=lambda *_: radio)
     assert radio.restored and radio.closed
     assert radio.settings == ORIGINAL
     assert radio.profiles == {}
