@@ -9,6 +9,7 @@ from collections.abc import Callable
 from .adaptive_scan import (
     RUNTIME_VERSION,
     SUPPORTED_RATES,
+    VARIABLE_DWELL_VERSION,
     ScanOutcome,
     ScanSetup,
     ScanTarget,
@@ -25,6 +26,7 @@ from .adaptive_scan_radio import (
 from .adaptive_scan_shadow import AdaptiveScanMode, ScannerRunReport, run_scanner_session
 from .counter_utc import DEFAULT_TIMING_POLICY, CounterUtcEvidence, TimingPolicy
 from .counter_utc_capture import CounterUtcCollector
+from .models import GainMode
 from .persistent_hop import require_physical_lan_uri
 
 ClientFactory = Callable[[str], AdaptiveScanClient]
@@ -68,6 +70,7 @@ def build_adaptive_scan_setup(
     transition_budget_ms: int = 10,
     maximum_revisit_ms: int = 3_000,
     rx_mask: int = 1,
+    variable_dwell: bool = False,
 ) -> ScanSetup:
     """Build the canonical bounded campaign setup before profile compilation."""
 
@@ -104,7 +107,13 @@ def build_adaptive_scan_setup(
             for index, frequency in enumerate(frequencies_hz)
         ),
         rx_mask=rx_mask,
-        protocol_version=1 if source_rate_hz in SUPPORTED_RATES else RUNTIME_VERSION,
+        protocol_version=(
+            VARIABLE_DWELL_VERSION
+            if variable_dwell
+            else 1
+            if source_rate_hz in SUPPORTED_RATES
+            else RUNTIME_VERSION
+        ),
     )
     setup.validate()
     return setup
@@ -118,6 +127,7 @@ def run_adaptive_scan_campaign(
     *,
     mode: AdaptiveScanMode,
     manual_gain_db: float = 40.0,
+    gain_mode: GainMode = GainMode.MANUAL,
     samples_per_block: int = 1_000_000,
     feedback_period_visits: int = 1,
     radio_factory: RadioFactory | None = None,
@@ -134,7 +144,9 @@ def run_adaptive_scan_campaign(
     setup.validate()
     discovery = client_factory(host)
     capabilities = (
-        discovery.runtime_capabilities()
+        discovery.variable_dwell_capabilities()
+        if setup.protocol_version == VARIABLE_DWELL_VERSION
+        else discovery.runtime_capabilities()
         if setup.protocol_version == RUNTIME_VERSION
         else discovery.capabilities()
     )
@@ -149,15 +161,14 @@ def run_adaptive_scan_campaign(
             f"radio does not advertise adaptive-scan support for {setup.source_rate_hz} S/s"
         )
     if capabilities.rx_mask & setup.rx_mask != setup.rx_mask:
-        raise ValueError(
-            f"radio does not advertise adaptive-scan RX mask {setup.rx_mask:#x}"
-        )
+        raise ValueError(f"radio does not advertise adaptive-scan RX mask {setup.rx_mask:#x}")
     preparation = (
         prepare_adaptive_scan_radio(
             selected_uri,
             serial,
             setup,
             manual_gain_db=manual_gain_db,
+            gain_mode=gain_mode,
         )
         if radio_factory is None
         else prepare_adaptive_scan_radio(
@@ -165,6 +176,7 @@ def run_adaptive_scan_campaign(
             serial,
             setup,
             manual_gain_db=manual_gain_db,
+            gain_mode=gain_mode,
             radio_factory=radio_factory,
         )
     )

@@ -32,6 +32,7 @@ TERMINAL_BYTES: Final = 128
 # campaign runner.  Older v0.52 endpoints advertise mask 0x0f and are refused.
 SUPPORTED_RATES: Final = frozenset((2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000))
 RUNTIME_VERSION: Final = 2
+VARIABLE_DWELL_VERSION: Final = 3
 MINIMUM_RUNTIME_RATE: Final = 520_833
 MAXIMUM_RUNTIME_RATE: Final = 61_440_000
 
@@ -40,6 +41,7 @@ def _rate_valid(rate: int, version: int) -> bool:
     return type(rate) is int and (
         (version == VERSION and rate in SUPPORTED_RATES)
         or (version == RUNTIME_VERSION and MINIMUM_RUNTIME_RATE <= rate <= MAXIMUM_RUNTIME_RATE)
+        or (version == VARIABLE_DWELL_VERSION and rate in (2_500_000, 10_000_000))
     )
 
 
@@ -112,15 +114,32 @@ class ScanCapabilities:
         forward-compatibility escape hatch.
         """
 
-        required = ScanCapabilities()
-        legacy = (self.protocol_version, self.rate_mode,
-                  self.minimum_rate_hz, self.maximum_rate_hz) == (VERSION, 0, 0, 0)
-        runtime = (
-            self.protocol_version == RUNTIME_VERSION and self.rate_mode == 1
-            and MINIMUM_RUNTIME_RATE <= self.minimum_rate_hz
-            <= self.maximum_rate_hz <= MAXIMUM_RUNTIME_RATE
+        variable = self.protocol_version == VARIABLE_DWELL_VERSION
+        required = (
+            ScanCapabilities(rate_mask=0x11, rx_mask=3, minimum_dwell_ms=120, maximum_dwell_ms=360)
+            if variable
+            else ScanCapabilities()
         )
-        if not (legacy or runtime):
+        legacy = (
+            self.protocol_version,
+            self.rate_mode,
+            self.minimum_rate_hz,
+            self.maximum_rate_hz,
+        ) == (VERSION, 0, 0, 0)
+        runtime = (
+            self.protocol_version == RUNTIME_VERSION
+            and self.rate_mode == 1
+            and MINIMUM_RUNTIME_RATE
+            <= self.minimum_rate_hz
+            <= self.maximum_rate_hz
+            <= MAXIMUM_RUNTIME_RATE
+        )
+        variable_valid = variable and (
+            self.rate_mode,
+            self.minimum_rate_hz,
+            self.maximum_rate_hz,
+        ) == (0, 0, 0)
+        if not (legacy or runtime or variable_valid):
             raise AdaptiveScanProtocolError("unsupported runtime rate capability")
         if (
             self.rate_mask & required.rate_mask != required.rate_mask
@@ -172,7 +191,9 @@ class ScanCapabilities:
 
     @classmethod
     def unpack(cls, raw: bytes | bytearray | memoryview) -> ScanCapabilities:
-        packet = _check(raw, b"SPCP", CAPS_BYTES, 0, versions=(VERSION, RUNTIME_VERSION))
+        packet = _check(
+            raw, b"SPCP", CAPS_BYTES, 0, versions=(VERSION, RUNTIME_VERSION, VARIABLE_DWELL_VERSION)
+        )
         values = struct.unpack_from("<IIIIIIIIQIIIIII", packet, 16)
         result = cls(
             protocol_version=struct.unpack_from("<H", packet, 4)[0],
@@ -212,8 +233,14 @@ def _finish(packet: bytearray) -> bytes:
     return bytes(packet)
 
 
-def _check(raw: bytes | bytearray | memoryview, magic: bytes, size: int, flags: int,
-           *, versions: tuple[int, ...] = (VERSION,)) -> bytes:
+def _check(
+    raw: bytes | bytearray | memoryview,
+    magic: bytes,
+    size: int,
+    flags: int,
+    *,
+    versions: tuple[int, ...] = (VERSION,),
+) -> bytes:
     packet = bytes(raw)
     if len(packet) != size:
         raise AdaptiveScanProtocolError(f"record size must be exactly {size} bytes")
@@ -299,7 +326,10 @@ class ScanSetup:
             raise AdaptiveScanProtocolError("analog bandwidth is outside the admitted range")
         if not 1 <= self.duration_ms <= 300_000:
             raise AdaptiveScanProtocolError("duration is outside 1..300000 ms")
-        if not 20 <= self.dwell_ms <= 240:
+        if self.protocol_version == VARIABLE_DWELL_VERSION:
+            if self.dwell_ms not in (120, 240, 360):
+                raise AdaptiveScanProtocolError("active base dwell must be 120, 240, or 360 ms")
+        elif not 20 <= self.dwell_ms <= 240:
             raise AdaptiveScanProtocolError("dwell is outside 20..240 ms")
         if not 1 <= self.transition_budget_ms <= 100:
             raise AdaptiveScanProtocolError("transition budget is outside 1..100 ms")
@@ -378,7 +408,13 @@ class ScanSetup:
 
     @classmethod
     def unpack(cls, raw: bytes | bytearray | memoryview) -> ScanSetup:
-        packet = _check(raw, b"SPSQ", SETUP_BYTES, SETUP_FLAGS, versions=(VERSION, RUNTIME_VERSION))
+        packet = _check(
+            raw,
+            b"SPSQ",
+            SETUP_BYTES,
+            SETUP_FLAGS,
+            versions=(VERSION, RUNTIME_VERSION, VARIABLE_DWELL_VERSION),
+        )
         _require_zero(packet, 108, 112)
         _require_zero(packet, 336, 348)
         values = struct.unpack_from("<QQQIIIIIIIIIIQIIII", packet, 16)
@@ -563,7 +599,13 @@ class ScanVisit:
         if len(packet) != VISIT_BYTES:
             raise AdaptiveScanProtocolError("visit size is not exact")
         flags = struct.unpack_from("<I", packet, 12)[0]
-        packet = _check(packet, b"SPVR", VISIT_BYTES, flags, versions=(VERSION, RUNTIME_VERSION))
+        packet = _check(
+            packet,
+            b"SPVR",
+            VISIT_BYTES,
+            flags,
+            versions=(VERSION, RUNTIME_VERSION, VARIABLE_DWELL_VERSION),
+        )
         _require_zero(packet, 140, 156)
         values = struct.unpack_from("<QQQQQQQQQQQIIIIIIIII", packet, 16)
         try:
