@@ -279,13 +279,13 @@ LEGACY_DUPLICATE_PREBOOT = (
 )
 
 
-def decode_environment(
+def _decode_environment(
     raw: bytes,
     *,
     opaque_padding: bool = False,
     allow_legacy_duplicate_preboot: bool = False,
-) -> dict[bytes, bytes]:
-    """Decode the reviewed single-copy, little-endian U-Boot environment."""
+) -> tuple[dict[bytes, bytes], bool]:
+    """Decode an environment and report whether its exact legacy form was used."""
     if len(raw) != 0x20000 or int.from_bytes(raw[:4], "little") != zlib.crc32(raw[4:]):
         raise FlashSafetyError("protected_region_changed", "invalid environment size/CRC")
     data = raw[4:]
@@ -296,6 +296,7 @@ def decode_environment(
         raise FlashSafetyError("protected_region_changed", "invalid environment encoding/padding")
     entries = data[:terminator].split(b"\0")
     values: dict[bytes, bytes] = {}
+    legacy_duplicate_preboot = False
     for position, entry in enumerate(entries):
         key, separator, value = entry.partition(b"=")
         if not separator or not key:
@@ -314,7 +315,23 @@ def decode_environment(
                 raise FlashSafetyError(
                     "protected_region_changed", "invalid/duplicate environment key"
                 )
+            legacy_duplicate_preboot = True
         values[key] = value
+    return values, legacy_duplicate_preboot
+
+
+def decode_environment(
+    raw: bytes,
+    *,
+    opaque_padding: bool = False,
+    allow_legacy_duplicate_preboot: bool = False,
+) -> dict[bytes, bytes]:
+    """Decode the reviewed single-copy, little-endian U-Boot environment."""
+    values, _ = _decode_environment(
+        raw,
+        opaque_padding=opaque_padding,
+        allow_legacy_duplicate_preboot=allow_legacy_duplicate_preboot,
+    )
     return values
 
 
@@ -332,11 +349,29 @@ def verify_protected(
     for index in (0, 2):
         if not before[index] or after[index] != before[index]:
             raise FlashSafetyError("protected_region_changed", f"mtd{index} changed; do not reboot")
-    expected = decode_environment(
+    expected, before_has_legacy_duplicate_preboot = _decode_environment(
         before[1],
         opaque_padding=opaque_padding,
         allow_legacy_duplicate_preboot=True,
     )
+    # ``fit_size`` is the updater's sole reviewed environment mutation.  Do
+    # not turn a malformed/unknown pre-write environment into an accepted
+    # post-write state by synthesizing that key here.
+    if b"fit_size" not in expected:
+        raise FlashSafetyError(
+            "protected_region_changed", "pre-write U-Boot environment lacks fit_size"
+        )
     expected[b"fit_size"] = f"{fit_size:X}".encode()
-    if decode_environment(after[1], opaque_padding=opaque_padding) != expected:
+    observed, after_has_legacy_duplicate_preboot = _decode_environment(
+        after[1],
+        opaque_padding=opaque_padding,
+        allow_legacy_duplicate_preboot=True,
+    )
+    # A reviewed factory image has one specific adjacent duplicate. It may be
+    # retained or normalized by the updater, but a normalized input must never
+    # gain it as a side effect of the FIT-size write.
+    introduced_legacy_duplicate = (
+        after_has_legacy_duplicate_preboot and not before_has_legacy_duplicate_preboot
+    )
+    if introduced_legacy_duplicate or observed != expected:
         raise FlashSafetyError("protected_region_changed", "unexpected U-Boot environment changes")

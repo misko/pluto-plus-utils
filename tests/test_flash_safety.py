@@ -234,21 +234,22 @@ def test_environment_crc_and_only_expected_change():
         verify_protected(before, before | {1: environment(values)}, 100)
 
 
-def test_exact_legacy_duplicate_preboot_is_one_way_normalized():
-    duplicate = environment(
-        {
-            b"fit_size": b"60",
-            b"preboot": b"",
-            b"sentinel": b"unchanged",
-        }
-    )
-    data = duplicate[4:]
-    payload = data[: data.find(b"\0\0")].replace(
-        b"preboot=\0sentinel=",
-        b"preboot=\0preboot=" + LEGACY_DUPLICATE_PREBOOT + b"\0sentinel=",
+def legacy_duplicate_preboot_environment(*, fit_size=b"60"):
+    """The only legacy duplicate layout accepted for a pre-write environment."""
+    payload = b"\0".join(
+        (
+            b"fit_size=" + fit_size,
+            b"preboot=",
+            b"preboot=" + LEGACY_DUPLICATE_PREBOOT,
+            b"sentinel=unchanged",
+        )
     )
     payload = (payload + b"\0\0").ljust(0x20000 - 4, b"\xff")
-    duplicate = zlib.crc32(payload).to_bytes(4, "little") + payload
+    return zlib.crc32(payload).to_bytes(4, "little") + payload
+
+
+def test_exact_legacy_duplicate_preboot_is_one_way_normalized():
+    duplicate = legacy_duplicate_preboot_environment()
 
     with pytest.raises(FlashSafetyError, match="duplicate environment key"):
         decode_environment(duplicate)
@@ -269,6 +270,46 @@ def test_exact_legacy_duplicate_preboot_is_one_way_normalized():
         {0: b"boot", 1: normalized, 2: b"spare"},
         100,
     )
+
+
+def test_legacy_duplicate_preboot_can_be_retained_after_write():
+    """The exact legacy input form is retained only across the FIT-size update."""
+    verify_protected(
+        {0: b"boot", 1: legacy_duplicate_preboot_environment(), 2: b"spare"},
+        {
+            0: b"boot",
+            1: legacy_duplicate_preboot_environment(fit_size=b"64"),
+            2: b"spare",
+        },
+        100,
+    )
+
+
+def test_legacy_duplicate_preboot_cannot_be_introduced_after_write():
+    before = {
+        0: b"boot",
+        1: environment(
+            {
+                b"fit_size": b"60",
+                b"preboot": LEGACY_DUPLICATE_PREBOOT,
+                b"sentinel": b"unchanged",
+            }
+        ),
+        2: b"spare",
+    }
+    with pytest.raises(FlashSafetyError, match="unexpected U-Boot"):
+        verify_protected(
+            before,
+            before | {1: legacy_duplicate_preboot_environment(fit_size=b"64")},
+            100,
+        )
+
+
+def test_environment_without_prewrite_fit_size_is_rejected():
+    before = {0: b"boot", 1: environment({b"bootcmd": b"synthetic-boot"}), 2: b"spare"}
+    after = before | {1: environment({b"bootcmd": b"synthetic-boot", b"fit_size": b"64"})}
+    with pytest.raises(FlashSafetyError, match="pre-write U-Boot environment lacks fit_size"):
+        verify_protected(before, after, 100)
 
 
 @pytest.mark.parametrize(
