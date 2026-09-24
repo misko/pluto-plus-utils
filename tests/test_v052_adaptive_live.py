@@ -61,13 +61,16 @@ def test_rate_override_uses_the_selected_rates_frequency_centers() -> None:
 def test_capture_choices_are_independent_and_stable_within_slot() -> None:
     from collections import Counter
 
-    from pluto_plus.models import GainMode
-
-    choose = runpy.run_path(str(SCRIPT))["slot_capture_settings"]
+    values = runpy.run_path(str(SCRIPT))
+    choose = values["slot_active_dwell_ms"]
     choices = [choose(i * 600, "radio") for i in range(3000)]
     assert choices == [choose(i * 600 + 599, "radio") for i in range(3000)]
     counts = Counter(choices)
-    assert set(counts) == {
-        (d, g) for d in (120, 240, 360) for g in (GainMode.MANUAL, GainMode.SLOW_ATTACK)
-    }
-    assert all(400 < n < 600 for n in counts.values())
+    assert set(counts) == {120, 240, 360}
+    assert all(900 < n < 1100 for n in counts.values())
+    combined = Counter(
+        (values["campaign_configuration"](i * 600, "radio", None)[1], dwell)
+        for i, dwell in enumerate(choices)
+    )
+    assert len(combined) == 6
+    assert all(400 < n < 600 for n in combined.values())
