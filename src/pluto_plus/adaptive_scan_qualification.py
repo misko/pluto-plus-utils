@@ -77,6 +77,8 @@ class AdaptiveScanAccumulator:
             expected_intervals = (0, expected_samples)
         else:
             expected_intervals = (expected_samples,)
+        if self.setup.protocol_version == 3:
+            expected_intervals += (self.setup.source_rate_hz * 120 // 1_000,)
         if valid_samples not in expected_intervals:
             raise AdaptiveScanQualificationError("visit valid interval disagrees with dwell")
         self._records.append(record)
@@ -96,9 +98,10 @@ class AdaptiveScanAccumulator:
         first = self._records[0].transition_before
         if terminal.final_counter <= first:
             raise AdaptiveScanQualificationError("qualification source span is empty")
-        dwell_samples = self.setup.source_rate_hz * self.setup.dwell_ms // 1_000
-        planned_valid = dwell_samples * sum(
-            item.result is not VisitResult.CANCELLED for item in self._records
+        planned_valid = sum(
+            item.valid_end - item.valid_start
+            for item in self._records
+            if item.result is not VisitResult.CANCELLED
         )
         delivered_valid = sum(
             item.valid_end - item.valid_start
