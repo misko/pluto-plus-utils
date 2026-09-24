@@ -19,7 +19,6 @@ from pluto_plus.adaptive_scan_campaign import build_adaptive_scan_setup, run_ada
 from pluto_plus.adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDetectorConfig
 from pluto_plus.adaptive_scan_shadow import AdaptiveScanMode
 from pluto_plus.counter_utc import TimingPolicy
-from pluto_plus.models import GainMode
 
 SERIAL = "10400056f695001322002d0010ad1719f2"
 URI = "ip:192.168.1.21"
@@ -94,14 +93,11 @@ def campaign_configuration(
     return ordinal, rate, edge, frequencies, identity
 
 
-def slot_capture_settings(epoch_seconds: int, serial: str) -> tuple[int, GainMode]:
-    """Independent uniform choices, fixed across retries of a scan slot."""
+def slot_active_dwell_ms(epoch_seconds: int, serial: str) -> int:
+    """Uniform active dwell choice, fixed across retries of a scan slot."""
     ordinal = epoch_seconds // 600
     dwell = ACTIVE_DWELLS_MS[deterministic_uniform_choice(serial, ordinal, "dwell-v3", 3)]
-    gain = (GainMode.MANUAL, GainMode.SLOW_ATTACK)[
-        deterministic_uniform_choice(serial, ordinal, "gain-v3", 2)
-    ]
-    return dwell, gain
+    return dwell
 
 
 def json_value(value):
@@ -172,7 +168,7 @@ def main() -> int:
     ordinal, rate, selected_edge, frequencies, identity = campaign_configuration(
         epoch, args.serial, args.sample_rate
     )
-    active_dwell_ms, gain_mode = slot_capture_settings(epoch, args.serial)
+    active_dwell_ms = slot_active_dwell_ms(epoch, args.serial)
     detector = Ci16EnergyDetector(Ci16EnergyDetectorConfig(-38.0))
     setup = build_adaptive_scan_setup(
         session=int.from_bytes(identity[:8], "little") or 1,
@@ -198,7 +194,7 @@ def main() -> int:
                     "rate_hz": rate,
                     "active_dwell_ms": active_dwell_ms,
                     "quiet_dwell_ms": 120,
-                    "gain_mode": gain_mode.value,
+                    "gain_mode": "manual",
                     "selected_edge": selected_edge,
                     "setup": json_value(setup),
                 },
@@ -233,7 +229,6 @@ def main() -> int:
             detector,
             mode=AdaptiveScanMode.ADAPTIVE,
             manual_gain_db=40.0,
-            gain_mode=gain_mode,
             samples_per_block=1_000_000,
             feedback_period_visits=8,
             visit_sink=archive.append,
@@ -253,7 +248,7 @@ def main() -> int:
             "rate_hz": rate,
             "active_dwell_ms": active_dwell_ms,
             "quiet_dwell_ms": 120,
-            "gain_mode": gain_mode.value,
+            "gain_mode": "manual",
             "selected_edge": selected_edge,
             "omitted_frequencies_hz": [
                 item for item in FREQUENCIES_BY_RATE[rate] if item not in frequencies
@@ -286,7 +281,7 @@ def main() -> int:
             "rate_hz": rate,
             "active_dwell_ms": active_dwell_ms,
             "quiet_dwell_ms": 120,
-            "gain_mode": gain_mode.value,
+            "gain_mode": "manual",
             "selected_edge": selected_edge,
             "omitted_frequencies_hz": [
                 item for item in FREQUENCIES_BY_RATE[rate] if item not in frequencies
