@@ -15,7 +15,7 @@ from .adaptive_scan import (
     ScanTarget,
     ScanTerminal,
 )
-from .adaptive_scan_client import AdaptiveScanClient, AdaptiveScanVisit
+from .adaptive_scan_client import AdaptiveScanClient, AdaptiveScanSession, AdaptiveScanVisit
 from .adaptive_scan_radio import (
     AdaptiveScanRadioPreparation,
     AdaptiveScanRadioRestoration,
@@ -33,6 +33,7 @@ ClientFactory = Callable[[str], AdaptiveScanClient]
 Detector = Callable[[AdaptiveScanVisit], ScanOutcome]
 VisitSink = Callable[[AdaptiveScanVisit], None]
 SessionClockSink = Callable[[int, int, int, int], None]
+SessionHook = Callable[[AdaptiveScanSession], None]
 
 # The v1 firmware's original fixed-rate bits are 10/15/20/30 MS/s.  The
 # issue-108 dual-RX extension adds the fifth bit for its 2.5 MS/s mode.
@@ -138,6 +139,7 @@ def run_adaptive_scan_campaign(
     session_clock_sink: SessionClockSink | None = None,
     counter_clock_sink: Callable[[CounterUtcEvidence], None] | None = None,
     timing_policy: TimingPolicy = DEFAULT_TIMING_POLICY,
+    session_hook: SessionHook | None = None,
 ) -> AdaptiveScanCampaignReceipt:
     """Run one bounded campaign and always restore the pre-session host state."""
 
@@ -195,6 +197,8 @@ def run_adaptive_scan_campaign(
             preparation.setup,
             samples_per_block=samples_per_block,
         ) as session:
+            if session_hook is not None:
+                session_hook(session)
             if counter_clock_sink is not None:
                 collector = CounterUtcCollector(
                     AdaptiveScanClient(host, timeout_s=1.0),
