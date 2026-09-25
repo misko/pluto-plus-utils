@@ -7,6 +7,8 @@ import gc
 import hashlib
 import json
 import os
+import queue
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,10 @@ from pluto_plus.hardware.iio import _mute_transmit
 from pluto_plus.starlink_pilot_loopback import (
     analyze_starlink_pilot_parity,
     cyclic_tx_waveform,
+    measure_starlink_pilot_parity,
     qin_lower_edge_pilot_frame,
+    receiver_has_starlink_pilot_glrt,
+    starlink_pilot_parity_failures,
 )
 
 pytestmark = pytest.mark.hardware
@@ -39,6 +44,9 @@ RATE_BANDWIDTHS_HZ = (
 )
 DEFAULT_LO_HZ = 960_000_000
 SECOND_SCAN_LO_HZ = 1_190_000_000
+LONG_SCAN_RATES_HZ = (2_500_000, 10_000_000)
+LONG_SCAN_DURATION_MS = 200_000
+LONG_SCAN_OFFSETS_HZ = (0, 250_000_000, 500_000_000, 750_000_000)
 AUTHORIZED_SERIALS = {
     "1040005e0b100007100010000bf33a5d4d",
     "1040007c4a94000211000b009186843ef2",
@@ -184,6 +192,97 @@ def _write_report(path: str, payload: list[dict[str, Any]]) -> None:
     temporary.replace(destination)
 
 
+class _FullScanGlrtAnalyzer:
+    """Analyze bounded dual-RX slices without delaying the IQ drain loop."""
+
+    def __init__(self, sample_rate_hz: int, *, workers: int = 4) -> None:
+        self.sample_rate_hz = sample_rate_hz
+        self.frame_samples = round(sample_rate_hz / 750)
+        self.jobs: queue.Queue[tuple[int, int, np.ndarray] | None] = queue.Queue(
+            maxsize=64
+        )
+        self.rows: list[dict[str, Any]] = []
+        self.errors: list[BaseException] = []
+        self.dropped: list[int] = []
+        self.complete_visits = 0
+        self.finished = False
+        self.threads = [
+            threading.Thread(
+                target=self._work,
+                name=f"starlink-glrt-{index}",
+                daemon=True,
+            )
+            for index in range(workers)
+        ]
+        for thread in self.threads:
+            thread.start()
+
+    def observe(self, visit: AdaptiveScanVisit) -> None:
+        if not visit.iq:
+            return
+        self.complete_visits += 1
+        signal = ci16_dual_rx(visit.iq)
+        # Eight frames are long enough to keep the symbol-rolled control from
+        # overfitting an occasional three-frame noise realization while still
+        # bounding each queued job well below one 120 ms visit.
+        bounded = signal[:, : 8 * self.frame_samples].copy()
+        try:
+            self.jobs.put_nowait((visit.record.visit, visit.record.target, bounded))
+        except queue.Full:
+            self.dropped.append(visit.record.visit)
+
+    def _work(self) -> None:
+        while True:
+            job = self.jobs.get()
+            try:
+                if job is None:
+                    return
+                visit, target, signal = job
+                metrics = measure_starlink_pilot_parity(
+                    signal, sample_rate_hz=self.sample_rate_hz
+                )
+                self.rows.append(
+                    {
+                        "visit": visit,
+                        "target": target,
+                        "glrt_detected": [
+                            receiver_has_starlink_pilot_glrt(item)
+                            for item in metrics.receivers
+                        ],
+                        "positive_gate_failures": list(
+                            starlink_pilot_parity_failures(metrics)
+                        ),
+                        "pilot": dataclasses.asdict(metrics),
+                    }
+                )
+            except BaseException as error:
+                self.errors.append(error)
+            finally:
+                self.jobs.task_done()
+
+    def finish(self) -> list[dict[str, Any]]:
+        if self.finished:
+            if self.errors:
+                raise self.errors[0]
+            if self.dropped:
+                pytest.fail(f"GLRT analysis queue dropped visits: {self.dropped[:8]}")
+            return self.rows
+        for _thread in self.threads:
+            self.jobs.put(None)
+        self.jobs.join()
+        for thread in self.threads:
+            thread.join()
+        self.finished = True
+        if self.errors:
+            raise self.errors[0]
+        if self.dropped:
+            pytest.fail(f"GLRT analysis queue dropped visits: {self.dropped[:8]}")
+        if len(self.rows) != self.complete_visits:
+            pytest.fail("GLRT result count does not match observed complete visits")
+        self.rows.sort(key=lambda row: row["visit"])
+        return self.rows
+
+
 def test_qin_edge_pilot_round_trip_glrt_matches_rx0_and_rx1() -> None:
     """TX2 Qin pilot -> four-rate adaptive dual RX -> independent GLRT gates."""
 
@@ -319,3 +418,200 @@ def test_qin_edge_pilot_round_trip_glrt_matches_rx0_and_rx1() -> None:
     report_path = os.environ.get("PLUTO_ADAPTIVE_PILOT_REPORT", "").strip()
     if report_path:
         _write_report(report_path, reports)
+
+
+def test_qin_edge_pilot_full_adaptive_scan_has_no_other_channel_glrt() -> None:
+    """Run consecutive 200 s scans and classify every complete four-target visit."""
+
+    targets = _targets()
+    lo_hz = int(os.environ.get("PLUTO_ADAPTIVE_PILOT_LO_HZ", str(DEFAULT_LO_HZ)))
+    tx_gain_db = float(os.environ.get("PLUTO_TX2_LOOPBACK_TX_GAIN_DB", "-50"))
+    protocol = int(os.environ.get("PLUTO_ADAPTIVE_PILOT_PROTOCOL", "3"))
+    if protocol != 3:
+        pytest.fail("the full adaptive scan GLRT gate requires protocol 3")
+    if not 900_000_000 <= lo_hz <= 1_100_000_000:
+        pytest.fail("adaptive pilot RF frequency must remain in the authorized ~1 GHz band")
+    frequencies_hz = tuple(lo_hz + offset for offset in LONG_SCAN_OFFSETS_HZ)
+
+    import adi
+
+    reports: list[dict[str, Any]] = []
+    campaign_failures: list[str] = []
+    for serial, uri in targets:
+        sdr = adi.ad9361(uri=uri)
+        snapshot: dict[str, Any] | None = None
+        try:
+            assert sdr._ctx.attrs.get("hw_serial") == serial
+            if float(sdr.tx_hardwaregain_chan0) > -80 or float(sdr.tx_hardwaregain_chan1) > -80:
+                pytest.fail(f"{serial} was not muted before the hardware test")
+            if sdr._ctrl.find_channel("voltage1", True) is None:
+                pytest.fail(f"{serial} does not expose physical TX2")
+            snapshot = _snapshot_tx(sdr)
+            for sample_rate_hz in LONG_SCAN_RATES_HZ:
+                transmitter: _DirectCyclicTx2 | None = None
+                analyzer: _FullScanGlrtAnalyzer | None = None
+                rows: list[dict[str, Any]] | None = None
+                try:
+                    _mute_transmit(sdr)
+                    sdr.tx_rf_bandwidth = sample_rate_hz
+                    sdr.tx_lo = lo_hz
+                    waveform = cyclic_tx_waveform(sample_rate_hz)
+                    transmitter = _DirectCyclicTx2(sdr, waveform, tx_gain_db)
+
+                    def arm_tx2_after_session_start(
+                        _session: Any,
+                        radio: Any = sdr,
+                        tx_fixture: _DirectCyclicTx2 = transmitter,
+                    ) -> None:
+                        assert radio is tx_fixture.radio
+                        tx_fixture.arm()
+                        time.sleep(0.25)
+
+                    analyzer = _FullScanGlrtAnalyzer(sample_rate_hz)
+                    digest = hashlib.sha256(
+                        np.asarray(
+                            qin_lower_edge_pilot_frame(sample_rate_hz), dtype="<c8"
+                        ).tobytes()
+                    ).digest()
+                    setup = build_adaptive_scan_setup(
+                        session=time.time_ns() & 0xFFFF_FFFF,
+                        generation=1,
+                        seed=0x51514E,
+                        source_rate_hz=sample_rate_hz,
+                        analog_bandwidth_hz=sample_rate_hz,
+                        duration_ms=LONG_SCAN_DURATION_MS,
+                        dwell_ms=120,
+                        frequencies_hz=frequencies_hz,
+                        baseline_weights=(1, 1, 1, 1),
+                        analysis_digest=digest,
+                        maximum_revisit_ms=3_000,
+                        rx_mask=3,
+                        variable_dwell=True,
+                    )
+                    receipt = run_adaptive_scan_campaign(
+                        uri,
+                        serial,
+                        setup,
+                        lambda visit: (
+                            ScanOutcome.ACTIVE
+                            if visit.record.target == 0
+                            else ScanOutcome.QUIET
+                        ),
+                        mode=AdaptiveScanMode.ADAPTIVE,
+                        manual_gain_db=30.0,
+                        samples_per_block=1_000_000,
+                        classifier_queue_visits=50,
+                        visit_sink=analyzer.observe,
+                        session_hook=arm_tx2_after_session_start,
+                    )
+                    rows = analyzer.finish()
+                    analyzer = None
+
+                    if not receipt.run.gate.passed:
+                        campaign_failures.append(
+                            f"{sample_rate_hz}: adaptive delivery gate failed"
+                        )
+                    if receipt.run.classification_dropped:
+                        campaign_failures.append(
+                            f"{sample_rate_hz}: dropped "
+                            f"{receipt.run.classification_dropped} classifications"
+                        )
+                    if len(rows) != receipt.run.metrics.delivered:
+                        campaign_failures.append(
+                            f"{sample_rate_hz}: analyzed {len(rows)} of "
+                            f"{receipt.run.metrics.delivered} delivered visits"
+                        )
+                    target_rows = {
+                        target: [row for row in rows if row["target"] == target]
+                        for target in range(4)
+                    }
+                    positive_misses = [
+                        row for row in target_rows[0] if row["glrt_detected"] != [True, True]
+                    ]
+                    quiet_false_positives = [
+                        row
+                        for target in range(1, 4)
+                        for row in target_rows[target]
+                        if row["glrt_detected"] != [False, False]
+                    ]
+
+                    reports.append(
+                        {
+                            "serial": serial,
+                            "uri": uri,
+                            "duration_ms": LONG_SCAN_DURATION_MS,
+                            "sample_rate_hz": sample_rate_hz,
+                            "rf_bandwidth_hz": sample_rate_hz,
+                            "frequencies_hz": frequencies_hz,
+                            "injected_target": 0,
+                            "rx_mask": 3,
+                            "protocol_version": protocol,
+                            "tx_channel": "TX2",
+                            "tx_gain_db": tx_gain_db,
+                            "adaptive_gate": dataclasses.asdict(receipt.run.gate),
+                            "adaptive_metrics": dataclasses.asdict(receipt.run.metrics),
+                            "classification_dropped": receipt.run.classification_dropped,
+                            "glrt_visit_counts": {
+                                str(target): len(target_rows[target]) for target in range(4)
+                            },
+                            "visits": rows,
+                        }
+                    )
+                    report_path = os.environ.get(
+                        "PLUTO_ADAPTIVE_PILOT_LONG_REPORT", ""
+                    ).strip()
+                    if report_path:
+                        _write_report(report_path, reports)
+                    missing_targets = [
+                        target
+                        for target, target_results in target_rows.items()
+                        if not target_results
+                    ]
+                    if missing_targets:
+                        campaign_failures.append(
+                            f"{sample_rate_hz}: targets delivered no IQ: {missing_targets}"
+                        )
+                    if positive_misses:
+                        examples = [
+                            (row["visit"], row["glrt_detected"])
+                            for row in positive_misses[:10]
+                        ]
+                        campaign_failures.append(
+                            f"{sample_rate_hz}: {len(positive_misses)} injected-target "
+                            "visits did not detect on both receivers: "
+                            f"{examples}"
+                        )
+                    if quiet_false_positives:
+                        examples = [
+                            (row["visit"], row["target"], row["glrt_detected"])
+                            for row in quiet_false_positives[:10]
+                        ]
+                        campaign_failures.append(
+                            f"{sample_rate_hz}: {len(quiet_false_positives)} quiet-target "
+                            f"visits produced GLRT detections: {examples}"
+                        )
+                finally:
+                    if analyzer is not None:
+                        analyzer.finish()
+                    if transmitter is not None:
+                        transmitter.close()
+                    _mute_transmit(sdr)
+                    assert float(sdr.tx_hardwaregain_chan0) <= -80.0
+                    assert float(sdr.tx_hardwaregain_chan1) <= -80.0
+        finally:
+            try:
+                _mute_transmit(sdr)
+                assert float(sdr.tx_hardwaregain_chan0) <= -80.0
+                assert float(sdr.tx_hardwaregain_chan1) <= -80.0
+            finally:
+                if snapshot is not None:
+                    _restore_tx(sdr, snapshot)
+                close_context = getattr(sdr._ctx, "close", None)
+                if callable(close_context):
+                    close_context()
+
+    report_path = os.environ.get("PLUTO_ADAPTIVE_PILOT_LONG_REPORT", "").strip()
+    if report_path:
+        _write_report(report_path, reports)
+    if campaign_failures:
+        pytest.fail("; ".join(campaign_failures))

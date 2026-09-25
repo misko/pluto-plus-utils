@@ -260,6 +260,25 @@ def analyze_starlink_pilot_parity(
 ) -> StarlinkPilotParityMetrics:
     """Recover the pilot with GLRT on each RX and enforce receiver parity."""
 
+    result = measure_starlink_pilot_parity(
+        signal, sample_rate_hz=sample_rate_hz, adc_full_scale=adc_full_scale
+    )
+    failures = starlink_pilot_parity_failures(result, limits=limits)
+    if failures:
+        raise StarlinkPilotLoopbackError(
+            f"Starlink pilot parity gate failed ({', '.join(failures)}): {result!r}"
+        )
+    return result
+
+
+def measure_starlink_pilot_parity(
+    signal: np.ndarray,
+    *,
+    sample_rate_hz: int,
+    adc_full_scale: float = 2048.0,
+) -> StarlinkPilotParityMetrics:
+    """Measure both receivers without applying a positive-detection gate."""
+
     samples = np.asarray(signal)
     frame_samples = round(sample_rate_hz / FRAME_RATE_HZ)
     if (
@@ -291,6 +310,30 @@ def analyze_starlink_pilot_parity(
         timing_delta_samples=timing_delta,
         cfo_delta_hz=abs(first.cfo_hz - second.cfo_hz),
     )
+    return result
+
+
+def receiver_has_starlink_pilot_glrt(
+    receiver: StarlinkPilotReceiverMetrics,
+    *,
+    limits: StarlinkPilotLimits = DEFAULT_LIMITS,
+) -> bool:
+    """Return whether one receiver passes the exact/control GLRT decision."""
+
+    return (
+        receiver.glrt_score >= limits.minimum_glrt_score
+        and receiver.glrt_margin >= limits.minimum_glrt_margin
+    )
+
+
+def starlink_pilot_parity_failures(
+    result: StarlinkPilotParityMetrics,
+    *,
+    limits: StarlinkPilotLimits = DEFAULT_LIMITS,
+) -> tuple[str, ...]:
+    """Return every failed positive-pilot and dual-receiver parity condition."""
+
+    receivers = result.receivers
     failures: list[str] = []
     if any(item.glrt_score < limits.minimum_glrt_score for item in receivers):
         failures.append("GLRT detection score")
@@ -313,8 +356,4 @@ def analyze_starlink_pilot_parity(
         failures.append("RX timing delta")
     if result.cfo_delta_hz > limits.maximum_cfo_delta_hz:
         failures.append("RX CFO delta")
-    if failures:
-        raise StarlinkPilotLoopbackError(
-            f"Starlink pilot parity gate failed ({', '.join(failures)}): {result!r}"
-        )
-    return result
+    return tuple(failures)
