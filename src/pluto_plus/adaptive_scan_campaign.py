@@ -133,6 +133,7 @@ def run_adaptive_scan_campaign(
     gain_mode: GainMode = GainMode.MANUAL,
     samples_per_block: int = 1_000_000,
     feedback_period_visits: int = 1,
+    classifier_queue_visits: int = 8,
     radio_factory: RadioFactory | None = None,
     client_factory: ClientFactory = AdaptiveScanClient,
     visit_sink: VisitSink | None = None,
@@ -220,6 +221,7 @@ def run_adaptive_scan_campaign(
                 mode=mode,
                 feedback_period_visits=feedback_period_visits,
                 visit_observer=visit_sink,
+                classifier_queue_visits=classifier_queue_visits,
             )
     except BaseException as error:
         failure = error

@@ -184,6 +184,24 @@ def test_campaign_runs_instrumentation_hook_after_session_start(monkeypatch) -> 
     assert events == ["prepare", "session-start", "hook", "restore"]
 
 
+def test_campaign_forwards_classifier_queue_bound_and_restores(monkeypatch) -> None:
+    events = []
+    setup = _setup()
+    _install_lifecycle(monkeypatch, setup, events)
+
+    with pytest.raises(ValueError, match="feedback period or retry policy"):
+        campaign.run_adaptive_scan_campaign(
+            "ip:192.168.1.18",
+            "SERIAL_A",
+            setup,
+            lambda _visit: ScanOutcome.ACTIVE,
+            mode=AdaptiveScanMode.SHADOW,
+            client_factory=Client,
+            classifier_queue_visits=0,
+        )
+    assert events == ["prepare", "restore"]
+
+
 def test_campaign_restores_after_session_hook_failure(monkeypatch) -> None:
     events = []
     setup = _setup()

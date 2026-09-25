@@ -5,8 +5,18 @@ Every firmware release must run
 TX2 -> attenuator -> tee -> RX0/RX1. The test sends the published Qin lower-edge
 pilot at 960 MHz, scans target 0 in adaptive dual-receiver mode at 2.5, 5, 7.5,
 and 10 MS/s, and runs independent GLRT recovery on RX0 and RX1 at every rate. A
-second 1.19 GHz target proves that the signal is recovered after a real Fast
-Lock hop away and back.
+short two-target test proves recovery after a real Fast Lock hop away and back.
+
+The same pytest then runs two consecutive 200-second protocol-v3 campaigns at
+2.5 and 10 MS/s. Each campaign scans 960, 1210, 1460, and 1710 MHz with the
+pilot injected only at 960 MHz. An asynchronous GLRT pool analyzes both RX0 and
+RX1 for every complete visit without delaying IQ draining. Every injected-target
+visit must pass the exact/control GLRT gate on both receivers; every visit to the
+other three targets must be GLRT-negative on both receivers. Full level, SNR,
+timing, and CFO parity remains the responsibility of the preceding four-rate
+test. The long test fails if any visit is omitted from analysis, any target
+receives no IQ, adaptive classification drops, or the campaign delivery gate
+fails.
 
 The default protocol is adaptive-scan v3. Set `PLUTO_ADAPTIVE_PILOT_PROTOCOL=1`
 only when qualifying an older fixed-dwell image. The selected Python environment
@@ -21,6 +31,7 @@ export PLUTO_ADAPTIVE_PILOT_PROTOCOL=3
 export PLUTO_TX2_LOOPBACK_ATTENUATION_DB=0
 export PLUTO_TX2_LOOPBACK_TX_GAIN_DB=-30
 export PLUTO_ADAPTIVE_PILOT_REPORT="$PWD/adaptive-starlink-pilot.json"
+export PLUTO_ADAPTIVE_PILOT_LONG_REPORT="$PWD/adaptive-starlink-pilot-long.json"
 pytest -vv tests/hardware/test_adaptive_starlink_pilot_hardware.py
 ```
 
@@ -42,6 +53,8 @@ from a symbol-rolled control and meet all of these parity bounds:
 - a passing adaptive campaign integrity gate at every rate, including the
   release-qualified greater-than-99% planned-valid delivery gate at 10 MS/s.
 
-The JSON report is release evidence and records both per-receiver GLRT results,
+The JSON reports are release evidence and record both per-receiver GLRT results,
 level/SNR/timing/CFO parity, adaptive delivery, radio identity, protocol, RF
 frequency, sample rate, RF bandwidth, RX mask, TX path, and bounded TX gain.
+The long report also retains per-visit decisions and metrics for all four scan
+targets so a release reviewer can audit complete positive and negative coverage.

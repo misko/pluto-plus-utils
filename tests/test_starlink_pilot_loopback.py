@@ -9,7 +9,10 @@ from pluto_plus.starlink_pilot_loopback import (
     StarlinkPilotLoopbackError,
     analyze_starlink_pilot_parity,
     cyclic_tx_waveform,
+    measure_starlink_pilot_parity,
     qin_lower_edge_pilot_frame,
+    receiver_has_starlink_pilot_glrt,
+    starlink_pilot_parity_failures,
 )
 
 SAMPLE_RATE_HZ = 10_000_000
@@ -71,6 +74,11 @@ def test_noise_only_capture_is_not_accepted_as_the_qin_pilot() -> None:
         analyze_starlink_pilot_parity(
             np.asarray(noise * 100, dtype=np.complex64), sample_rate_hz=SAMPLE_RATE_HZ
         )
+    metrics = measure_starlink_pilot_parity(
+        np.asarray(noise * 100, dtype=np.complex64), sample_rate_hz=SAMPLE_RATE_HZ
+    )
+    assert not any(receiver_has_starlink_pilot_glrt(item) for item in metrics.receivers)
+    assert "GLRT detection score" in starlink_pilot_parity_failures(metrics)
 
 
 def test_weaker_rx1_fails_receiver_parity_gate() -> None:
