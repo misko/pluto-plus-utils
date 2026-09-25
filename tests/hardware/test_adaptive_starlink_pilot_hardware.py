@@ -1,4 +1,4 @@
-"""Opt-in 10 MS/s adaptive-scan round trip of the Qin Starlink edge pilot."""
+"""Opt-in multirate adaptive-scan round trip of the Qin Starlink edge pilot."""
 
 from __future__ import annotations
 
@@ -31,8 +31,12 @@ from pluto_plus.starlink_pilot_loopback import (
 
 pytestmark = pytest.mark.hardware
 
-SAMPLE_RATE_HZ = 10_000_000
-RF_BANDWIDTH_HZ = 8_000_000
+RATE_BANDWIDTHS_HZ = (
+    (2_500_000, 2_500_000),
+    (5_000_000, 5_000_000),
+    (7_500_000, 7_500_000),
+    (10_000_000, 10_000_000),
+)
 DEFAULT_LO_HZ = 960_000_000
 SECOND_SCAN_LO_HZ = 1_190_000_000
 AUTHORIZED_SERIALS = {
@@ -181,7 +185,7 @@ def _write_report(path: str, payload: list[dict[str, Any]]) -> None:
 
 
 def test_qin_edge_pilot_round_trip_glrt_matches_rx0_and_rx1() -> None:
-    """TX2 Qin pilot -> 10 MS/s adaptive dual RX -> independent GLRT gates."""
+    """TX2 Qin pilot -> four-rate adaptive dual RX -> independent GLRT gates."""
 
     targets = _targets()
     lo_hz = int(os.environ.get("PLUTO_ADAPTIVE_PILOT_LO_HZ", str(DEFAULT_LO_HZ)))
@@ -198,7 +202,6 @@ def test_qin_edge_pilot_round_trip_glrt_matches_rx0_and_rx1() -> None:
     for serial, uri in targets:
         sdr = adi.ad9361(uri=uri)
         snapshot: dict[str, Any] | None = None
-        transmitter: _DirectCyclicTx2 | None = None
         try:
             assert sdr._ctx.attrs.get("hw_serial") == serial
             if float(sdr.tx_hardwaregain_chan0) > -80 or float(sdr.tx_hardwaregain_chan1) > -80:
@@ -206,94 +209,103 @@ def test_qin_edge_pilot_round_trip_glrt_matches_rx0_and_rx1() -> None:
             if sdr._ctrl.find_channel("voltage1", True) is None:
                 pytest.fail(f"{serial} does not expose physical TX2")
             snapshot = _snapshot_tx(sdr)
-            _mute_transmit(sdr)
-            sdr.tx_rf_bandwidth = RF_BANDWIDTH_HZ
-            sdr.tx_lo = lo_hz
-            waveform = cyclic_tx_waveform(SAMPLE_RATE_HZ)
-            transmitter = _DirectCyclicTx2(sdr, waveform, tx_gain_db)
+            for sample_rate_hz, rf_bandwidth_hz in RATE_BANDWIDTHS_HZ:
+                transmitter: _DirectCyclicTx2 | None = None
+                try:
+                    _mute_transmit(sdr)
+                    sdr.tx_rf_bandwidth = rf_bandwidth_hz
+                    sdr.tx_lo = lo_hz
+                    waveform = cyclic_tx_waveform(sample_rate_hz)
+                    transmitter = _DirectCyclicTx2(sdr, waveform, tx_gain_db)
 
-            def arm_tx2_after_session_start(
-                _session: Any,
-                radio: Any = sdr,
-                tx_samples: np.ndarray = waveform,
-                tx_fixture: _DirectCyclicTx2 = transmitter,
-            ) -> None:
-                # Both adaptive preparation and OPENM deliberately destroy TX
-                # buffers. Arm after the session owns its RX capture and before
-                # visit draining begins. TX1 remains at -80 dB throughout.
-                assert len(tx_samples) == len(tx_fixture.waveform)
-                assert radio is tx_fixture.radio
-                tx_fixture.arm()
-                time.sleep(0.25)
+                    def arm_tx2_after_session_start(
+                        _session: Any,
+                        radio: Any = sdr,
+                        tx_samples: np.ndarray = waveform,
+                        tx_fixture: _DirectCyclicTx2 = transmitter,
+                    ) -> None:
+                        # Both adaptive preparation and OPENM deliberately destroy TX
+                        # buffers. Arm after the session owns its RX capture and before
+                        # visit draining begins. TX1 remains at -80 dB throughout.
+                        assert len(tx_samples) == len(tx_fixture.waveform)
+                        assert radio is tx_fixture.radio
+                        tx_fixture.arm()
+                        time.sleep(0.25)
 
-            captured: list[AdaptiveScanVisit] = []
+                    captured: list[AdaptiveScanVisit] = []
 
-            def retain_first_visit(
-                visit: AdaptiveScanVisit, destination: list[AdaptiveScanVisit] = captured
-            ) -> None:
-                if visit.record.target == 0 and not destination:
-                    destination.append(visit)
+                    def retain_first_visit(
+                        visit: AdaptiveScanVisit,
+                        destination: list[AdaptiveScanVisit] = captured,
+                    ) -> None:
+                        if visit.record.target == 0 and not destination:
+                            destination.append(visit)
 
-            digest = hashlib.sha256(
-                np.asarray(
-                    qin_lower_edge_pilot_frame(SAMPLE_RATE_HZ), dtype="<c8"
-                ).tobytes()
-            ).digest()
-            setup = build_adaptive_scan_setup(
-                session=time.time_ns() & 0xFFFF_FFFF,
-                generation=1,
-                seed=0x51514E,
-                source_rate_hz=SAMPLE_RATE_HZ,
-                analog_bandwidth_hz=RF_BANDWIDTH_HZ,
-                duration_ms=1_200,
-                dwell_ms=120,
-                # Two distinct profiles are required to exercise Fast Lock's
-                # exit path. Target 0 contains the injected ~1 GHz pilot;
-                # target 1 reproduces an ordinary adaptive hop away and back.
-                frequencies_hz=(lo_hz, SECOND_SCAN_LO_HZ),
-                baseline_weights=(1, 1),
-                analysis_digest=digest,
-                rx_mask=3,
-                variable_dwell=protocol == 3,
-            )
-            receipt = run_adaptive_scan_campaign(
-                uri,
-                serial,
-                setup,
-                lambda _visit: ScanOutcome.ACTIVE,
-                mode=AdaptiveScanMode.ADAPTIVE,
-                manual_gain_db=30.0,
-                samples_per_block=1_000_000,
-                visit_sink=retain_first_visit,
-                session_hook=arm_tx2_after_session_start,
-            )
-            assert receipt.run.gate.passed
-            assert captured, "adaptive scan delivered no dual-RX visit"
-            signal = ci16_dual_rx(captured[0].iq)
-            # Analyze a bounded number of complete frames; the visit remains
-            # large enough to reproduce the 120 ms release scan geometry.
-            frame_samples = round(SAMPLE_RATE_HZ / 750)
-            metrics = analyze_starlink_pilot_parity(
-                signal[:, : 8 * frame_samples], sample_rate_hz=SAMPLE_RATE_HZ
-            )
-            reports.append(
-                {
-                    "serial": serial,
-                    "uri": uri,
-                    "rf_lo_hz": lo_hz,
-                    "sample_rate_hz": SAMPLE_RATE_HZ,
-                    "rx_mask": 3,
-                    "protocol_version": protocol,
-                    "tx_channel": "TX2",
-                    "tx_gain_db": tx_gain_db,
-                    "adaptive_gate": dataclasses.asdict(receipt.run.gate),
-                    "pilot": dataclasses.asdict(metrics),
-                }
-            )
+                    digest = hashlib.sha256(
+                        np.asarray(
+                            qin_lower_edge_pilot_frame(sample_rate_hz), dtype="<c8"
+                        ).tobytes()
+                    ).digest()
+                    setup = build_adaptive_scan_setup(
+                        session=time.time_ns() & 0xFFFF_FFFF,
+                        generation=1,
+                        seed=0x51514E,
+                        source_rate_hz=sample_rate_hz,
+                        analog_bandwidth_hz=rf_bandwidth_hz,
+                        duration_ms=1_200,
+                        dwell_ms=120,
+                        # Two distinct profiles are required to exercise Fast Lock's
+                        # exit path. Target 0 contains the injected ~1 GHz pilot;
+                        # target 1 reproduces an ordinary adaptive hop away and back.
+                        frequencies_hz=(lo_hz, SECOND_SCAN_LO_HZ),
+                        baseline_weights=(1, 1),
+                        analysis_digest=digest,
+                        rx_mask=3,
+                        variable_dwell=protocol == 3,
+                    )
+                    receipt = run_adaptive_scan_campaign(
+                        uri,
+                        serial,
+                        setup,
+                        lambda _visit: ScanOutcome.ACTIVE,
+                        mode=AdaptiveScanMode.ADAPTIVE,
+                        manual_gain_db=30.0,
+                        samples_per_block=1_000_000,
+                        visit_sink=retain_first_visit,
+                        session_hook=arm_tx2_after_session_start,
+                    )
+                    assert receipt.run.gate.passed
+                    assert captured, "adaptive scan delivered no dual-RX visit"
+                    signal = ci16_dual_rx(captured[0].iq)
+                    # Analyze a bounded number of complete frames; the visit remains
+                    # large enough to reproduce the 120 ms release scan geometry.
+                    frame_samples = round(sample_rate_hz / 750)
+                    metrics = analyze_starlink_pilot_parity(
+                        signal[:, : 8 * frame_samples], sample_rate_hz=sample_rate_hz
+                    )
+                    reports.append(
+                        {
+                            "serial": serial,
+                            "uri": uri,
+                            "rf_lo_hz": lo_hz,
+                            "rf_bandwidth_hz": rf_bandwidth_hz,
+                            "sample_rate_hz": sample_rate_hz,
+                            "rx_mask": 3,
+                            "protocol_version": protocol,
+                            "tx_channel": "TX2",
+                            "tx_gain_db": tx_gain_db,
+                            "adaptive_gate": dataclasses.asdict(receipt.run.gate),
+                            "pilot": dataclasses.asdict(metrics),
+                        }
+                    )
+                finally:
+                    if transmitter is not None:
+                        transmitter.close()
+                    _mute_transmit(sdr)
+                    assert float(sdr.tx_hardwaregain_chan0) <= -80.0
+                    assert float(sdr.tx_hardwaregain_chan1) <= -80.0
         finally:
             try:
-                if transmitter is not None:
-                    transmitter.close()
                 _mute_transmit(sdr)
                 assert float(sdr.tx_hardwaregain_chan0) <= -80.0
                 assert float(sdr.tx_hardwaregain_chan1) <= -80.0

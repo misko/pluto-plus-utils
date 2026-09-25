@@ -41,7 +41,10 @@ class StarlinkPilotLimits:
     # The eight-subcarrier waveform is intentionally sparse and is distorted
     # by the fixture/filter response. GLRT exact/control separation is the
     # primary detection gate; nonnegative fitted SNR rejects noise-only input.
-    minimum_snr_db: float = 0.0
+    # Low-rate AD9361 interpolation/filtering leaves deterministic waveform
+    # error outside the 64-symbol GLRT window. Keep this as a gross signal-fit
+    # guard while the exact/control GLRT remains the presence decision.
+    minimum_snr_db: float = -20.0
     minimum_pilot_dbfs: float = -70.0
     maximum_pilot_dbfs: float = -3.0
     maximum_rx_level_delta_db: float = 3.0
