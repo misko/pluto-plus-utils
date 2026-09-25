@@ -64,7 +64,7 @@ def test_rate_override_uses_the_selected_rates_frequency_centers() -> None:
         assert frequencies_10m == values["FREQUENCIES_10M"][offset::2]
 
 
-def test_capture_choices_are_independent_and_stable_within_slot() -> None:
+def test_capture_dwell_is_balanced_and_manual_gain_is_stable_within_slot() -> None:
     from collections import Counter
 
     values = runpy.run_path(str(SCRIPT))
@@ -74,15 +74,11 @@ def test_capture_choices_are_independent_and_stable_within_slot() -> None:
     counts = Counter(choices)
     from pluto_plus.models import GainMode
 
-    assert set(counts) == {
-        (dwell, gain)
-        for dwell in (120, 240, 360)
-        for gain in (GainMode.MANUAL, GainMode.SLOW_ATTACK)
-    }
-    assert all(400 < n < 600 for n in counts.values())
+    assert set(counts) == {(dwell, GainMode.MANUAL) for dwell in (120, 240, 360)}
+    assert all(900 < n < 1_100 for n in counts.values())
     combined = Counter(
         (values["campaign_configuration"](i * 600, "radio", None)[1], *settings)
         for i, settings in enumerate(choices)
     )
-    assert len(combined) == 24
-    assert all(80 < n < 170 for n in combined.values())
+    assert len(combined) == 12
+    assert all(180 < n < 330 for n in combined.values())
