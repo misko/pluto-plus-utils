@@ -33,15 +33,17 @@ TERMINAL_BYTES: Final = 128
 SUPPORTED_RATES: Final = frozenset((2_500_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000))
 RUNTIME_VERSION: Final = 2
 VARIABLE_DWELL_VERSION: Final = 3
+VARIABLE_DWELL_RATES: Final = frozenset((2_500_000, 5_000_000, 7_500_000, 10_000_000))
 MINIMUM_RUNTIME_RATE: Final = 520_833
 MAXIMUM_RUNTIME_RATE: Final = 61_440_000
+GAIN_OBSERVATION_RATE_MODE: Final = 2
 
 
 def _rate_valid(rate: int, version: int) -> bool:
     return type(rate) is int and (
         (version == VERSION and rate in SUPPORTED_RATES)
         or (version == RUNTIME_VERSION and MINIMUM_RUNTIME_RATE <= rate <= MAXIMUM_RUNTIME_RATE)
-        or (version == VARIABLE_DWELL_VERSION and rate in (2_500_000, 10_000_000))
+        or (version == VARIABLE_DWELL_VERSION and rate in VARIABLE_DWELL_RATES)
     )
 
 
@@ -116,7 +118,7 @@ class ScanCapabilities:
 
         variable = self.protocol_version == VARIABLE_DWELL_VERSION
         required = (
-            ScanCapabilities(rate_mask=0x11, rx_mask=3, minimum_dwell_ms=120, maximum_dwell_ms=360)
+            ScanCapabilities(rate_mask=0x71, rx_mask=3, minimum_dwell_ms=120, maximum_dwell_ms=360)
             if variable
             else ScanCapabilities()
         )
@@ -138,7 +140,7 @@ class ScanCapabilities:
             self.rate_mode,
             self.minimum_rate_hz,
             self.maximum_rate_hz,
-        ) == (0, 0, 0)
+        ) == (GAIN_OBSERVATION_RATE_MODE, 0, 0)
         if not (legacy or runtime or variable_valid):
             raise AdaptiveScanProtocolError("unsupported runtime rate capability")
         if (
@@ -320,7 +322,8 @@ class ScanSetup:
         if not _rate_valid(self.source_rate_hz, self.protocol_version):
             raise AdaptiveScanProtocolError(
                 "rate must be fixed 2.5 or 10/15/20/30 MS/s for v1, "
-                "or an integer in 520833..61440000 S/s for runtime v2"
+                "an integer in 520833..61440000 S/s for runtime v2, "
+                "or 2.5/5/7.5/10 MS/s for variable-dwell v3"
             )
         if not 200_000 <= self.analog_bandwidth_hz <= 56_000_000:
             raise AdaptiveScanProtocolError("analog bandwidth is outside the admitted range")
@@ -541,6 +544,11 @@ class ScanVisit:
     profile_crc32: int
     flags: int = VISIT_FLAGS
     protocol_version: int = VERSION
+    gain_counter: int = 0
+    gain_read_duration_ns: int = 0
+    rx1_gain_index: int = 0
+    rx2_gain_index: int = 0
+    gain_valid: bool = False
 
     def pack(self) -> bytes:
         samples = self.valid_end - self.valid_start
@@ -557,6 +565,27 @@ class ScanVisit:
             or self.eligible_mask & ~0xFF
             or not self.flags & VISIT_FLAGS
             or self.flags & ~VISIT_FLAG_MASK
+            or (
+                self.gain_valid
+                and (
+                    self.protocol_version != VARIABLE_DWELL_VERSION
+                    or self.gain_counter < self.valid_end
+                    or not 0 <= self.rx1_gain_index <= 0x7F
+                    or not 0 <= self.rx2_gain_index <= 0x7F
+                    or not 0 <= self.gain_read_duration_ns <= 0xFFFF_FFFF
+                )
+            )
+            or (
+                not self.gain_valid
+                and any(
+                    (
+                        self.gain_counter,
+                        self.gain_read_duration_ns,
+                        self.rx1_gain_index,
+                        self.rx2_gain_index,
+                    )
+                )
+            )
             or (self.result is VisitResult.COMPLETE) != bool(self.iq_bytes)
             or (
                 self.result is VisitResult.COMPLETE
@@ -591,6 +620,17 @@ class ScanVisit:
             self.profile_crc32,
             self.flags,
         )
+        struct.pack_into(
+            "<QBBBBI",
+            packet,
+            140,
+            self.gain_counter,
+            self.rx1_gain_index,
+            self.rx2_gain_index,
+            int(self.gain_valid),
+            0,
+            self.gain_read_duration_ns,
+        )
         return _finish(packet)
 
     @classmethod
@@ -606,7 +646,11 @@ class ScanVisit:
             flags,
             versions=(VERSION, RUNTIME_VERSION, VARIABLE_DWELL_VERSION),
         )
-        _require_zero(packet, 140, 156)
+        gain_counter, rx1_gain, rx2_gain, gain_valid, reserved, gain_duration = (
+            struct.unpack_from("<QBBBBI", packet, 140)
+        )
+        if reserved or gain_valid not in (0, 1):
+            raise AdaptiveScanProtocolError("gain observation is not canonical")
         values = struct.unpack_from("<QQQQQQQQQQQIIIIIIIII", packet, 16)
         try:
             result_kind = VisitResult(values[15])
@@ -634,6 +678,11 @@ class ScanVisit:
             effective_weight=values[17],
             profile_crc32=values[18],
             flags=values[19],
+            gain_counter=gain_counter,
+            gain_read_duration_ns=gain_duration,
+            rx1_gain_index=rx1_gain,
+            rx2_gain_index=rx2_gain,
+            gain_valid=bool(gain_valid),
         )
         if result.pack() != packet:
             raise AdaptiveScanProtocolError("visit is not canonical")
