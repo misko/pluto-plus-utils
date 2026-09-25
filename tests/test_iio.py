@@ -595,6 +595,26 @@ def test_iio_adapter_configures_feature_103_dual_rx_manual_geometry(rate) -> Non
         radio.close()
 
 
+def test_adaptive_slow_attack_does_not_set_manual_gain() -> None:
+    module = CaptureRateFakeAdi()
+    radio = IioRadioDevice("ip:192.168.1.18", serial="SERIAL_A", adi_module=module)
+    radio.open()
+    try:
+        assert module.device is not None
+        before = (module.device.rx_hardwaregain_chan0, module.device.rx_hardwaregain_chan1)
+        readback = radio.configure_adaptive_scan_geometry(
+            sample_rate_hz=2_500_000,
+            rf_bandwidth_hz=2_500_000,
+            manual_gain_db=40.0,
+            rx_mask=3,
+            gain_mode=GainMode.SLOW_ATTACK,
+        )
+        assert readback.gain_modes == (GainMode.SLOW_ATTACK,) * 2
+        assert (module.device.rx_hardwaregain_chan0, module.device.rx_hardwaregain_chan1) == before
+    finally:
+        radio.close()
+
+
 @pytest.mark.parametrize("rate", [520_832, 61_440_001, True, 7_500_000.0])
 def test_iio_adapter_rejects_out_of_scope_adaptive_scan_rates(rate) -> None:
     radio = IioRadioDevice(

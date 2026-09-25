@@ -98,8 +98,8 @@ if ((scanner_glrt)); then
         printf 'ERROR: --scanner-glrt requires --metadata-abi 3 and excludes other runtime selectors\n' >&2
         exit 2
     }
-    source_commit="948d6a246bb937fe3a62ed15233d9f592ab71d6a"
-    source_ref="$source_commit"
+    source_commit="7639fc9b6c01336e1451f4f58ccf66e30a22388d"
+    source_ref="adaptive-multirate-agc-v058-source/libiio-v1"
 fi
 if ((direct_peer_limit)); then
     [[ "$metadata_abi" == 3 && "$scanner_glrt" == 0 && "$counter_rx" == 0 ]] || {

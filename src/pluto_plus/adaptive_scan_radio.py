@@ -14,7 +14,7 @@ from .hardware.iio import (
     IioReceiverSettingsReadback,
     _receiver_settings_restored,
 )
-from .models import RadioIdentity, Transport
+from .models import GainMode, RadioIdentity, Transport
 from .persistent_hop import require_physical_lan_uri
 from .setup_profiles import AD9361_1R1T_TARGET_PROFILE, AD9361_2R2T_TARGET_PROFILE
 
@@ -44,6 +44,7 @@ class AdaptiveScanRadio(Protocol):
         rf_bandwidth_hz: int,
         manual_gain_db: float,
         rx_mask: int,
+        gain_mode: GainMode = GainMode.MANUAL,
     ) -> IioReceiverSettingsReadback: ...
 
     def read_kernel_buffers_count(self) -> int: ...
@@ -131,9 +132,10 @@ def prepare_adaptive_scan_radio(
     setup: ScanSetup,
     *,
     manual_gain_db: float = 40.0,
+    gain_mode: GainMode = GainMode.MANUAL,
     radio_factory: RadioFactory | None = None,
 ) -> AdaptiveScanRadioPreparation:
-    """Program exact manual-gain RX geometry and volatile profiles."""
+    """Program exact RX geometry, selected gain mode, and volatile profiles."""
 
     selected_uri = require_physical_lan_uri(uri)
     setup.validate()
@@ -158,7 +160,10 @@ def prepare_adaptive_scan_radio(
             rf_bandwidth_hz=setup.analog_bandwidth_hz,
             manual_gain_db=manual_gain_db,
             rx_mask=setup.rx_mask,
+            **({"gain_mode": gain_mode} if gain_mode is not GainMode.MANUAL else {}),
         )
+        if configured.gain_modes != (gain_mode,) * len(configured.channels):
+            raise RadioConfigurationError("adaptive scan gain mode did not read back exactly")
         if configured.sample_rate_hz != setup.source_rate_hz:
             raise RadioConfigurationError(
                 "adaptive scan rate did not read back exactly: "

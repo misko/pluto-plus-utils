@@ -19,10 +19,11 @@ from pluto_plus.adaptive_scan_campaign import build_adaptive_scan_setup, run_ada
 from pluto_plus.adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDetectorConfig
 from pluto_plus.adaptive_scan_shadow import AdaptiveScanMode
 from pluto_plus.counter_utc import TimingPolicy
+from pluto_plus.models import GainMode
 
 SERIAL = "10400056f695001322002d0010ad1719f2"
 URI = "ip:192.168.1.21"
-RATES = (2_500_000, 10_000_000)
+RATES = (2_500_000, 5_000_000, 7_500_000, 10_000_000)
 ACTIVE_DWELLS_MS = (120, 240, 360)
 FREQUENCIES_2P5 = (
     959_687_498,
@@ -46,6 +47,8 @@ FREQUENCIES_10M = (
 )
 FREQUENCIES_BY_RATE = {
     2_500_000: FREQUENCIES_2P5,
+    5_000_000: FREQUENCIES_10M,
+    7_500_000: FREQUENCIES_10M,
     10_000_000: FREQUENCIES_10M,
 }
 
@@ -86,18 +89,21 @@ def campaign_configuration(
     ordinal, scheduled_rate, edge, _ = slot_configuration(epoch_seconds, serial)
     rate = scheduled_rate if sample_rate_hz is None else sample_rate_hz
     if rate not in RATES:
-        raise ValueError("sample rate must be 2.5 or 10 MS/s")
+        raise ValueError("sample rate must be 2.5, 5, 7.5, or 10 MS/s")
     all_frequencies = FREQUENCIES_BY_RATE[rate]
     frequencies = all_frequencies[0::2] if edge == "lower" else all_frequencies[1::2]
     identity = hashlib.sha256(f"variable-dwell-v3\0{serial}\0{ordinal}\0{rate}".encode()).digest()
     return ordinal, rate, edge, frequencies, identity
 
 
-def slot_active_dwell_ms(epoch_seconds: int, serial: str) -> int:
-    """Uniform active dwell choice, fixed across retries of a scan slot."""
+def slot_capture_settings(epoch_seconds: int, serial: str) -> tuple[int, GainMode]:
+    """Independent uniform choices, fixed across retries of a scan slot."""
     ordinal = epoch_seconds // 600
     dwell = ACTIVE_DWELLS_MS[deterministic_uniform_choice(serial, ordinal, "dwell-v3", 3)]
-    return dwell
+    gain = (GainMode.MANUAL, GainMode.SLOW_ATTACK)[
+        deterministic_uniform_choice(serial, ordinal, "gain-v3", 2)
+    ]
+    return dwell, gain
 
 
 def json_value(value):
@@ -168,7 +174,7 @@ def main() -> int:
     ordinal, rate, selected_edge, frequencies, identity = campaign_configuration(
         epoch, args.serial, args.sample_rate
     )
-    active_dwell_ms = slot_active_dwell_ms(epoch, args.serial)
+    active_dwell_ms, gain_mode = slot_capture_settings(epoch, args.serial)
     detector = Ci16EnergyDetector(Ci16EnergyDetectorConfig(-38.0))
     setup = build_adaptive_scan_setup(
         session=int.from_bytes(identity[:8], "little") or 1,
@@ -194,7 +200,7 @@ def main() -> int:
                     "rate_hz": rate,
                     "active_dwell_ms": active_dwell_ms,
                     "quiet_dwell_ms": 120,
-                    "gain_mode": "manual",
+                    "gain_mode": gain_mode.value,
                     "selected_edge": selected_edge,
                     "setup": json_value(setup),
                 },
@@ -229,6 +235,7 @@ def main() -> int:
             detector,
             mode=AdaptiveScanMode.ADAPTIVE,
             manual_gain_db=40.0,
+            gain_mode=gain_mode,
             samples_per_block=1_000_000,
             feedback_period_visits=8,
             visit_sink=archive.append,
@@ -248,7 +255,7 @@ def main() -> int:
             "rate_hz": rate,
             "active_dwell_ms": active_dwell_ms,
             "quiet_dwell_ms": 120,
-            "gain_mode": "manual",
+            "gain_mode": gain_mode.value,
             "selected_edge": selected_edge,
             "omitted_frequencies_hz": [
                 item for item in FREQUENCIES_BY_RATE[rate] if item not in frequencies
@@ -281,7 +288,7 @@ def main() -> int:
             "rate_hz": rate,
             "active_dwell_ms": active_dwell_ms,
             "quiet_dwell_ms": 120,
-            "gain_mode": "manual",
+            "gain_mode": gain_mode.value,
             "selected_edge": selected_edge,
             "omitted_frequencies_hz": [
                 item for item in FREQUENCIES_BY_RATE[rate] if item not in frequencies

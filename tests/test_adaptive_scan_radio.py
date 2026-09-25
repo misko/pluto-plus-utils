@@ -96,7 +96,8 @@ class Radio:
         return snapshot
 
     def configure_adaptive_scan_geometry(
-        self, *, sample_rate_hz, rf_bandwidth_hz, manual_gain_db, rx_mask
+        self, *, sample_rate_hz, rf_bandwidth_hz, manual_gain_db, rx_mask,
+        gain_mode=GainMode.MANUAL,
     ):
         channels = (0,) if rx_mask == 1 else (0, 1)
         self.settings = IioReceiverSettingsReadback(
@@ -104,7 +105,7 @@ class Radio:
             float(sample_rate_hz),
             float(rf_bandwidth_hz),
             channels,
-            (GainMode.MANUAL,) * len(channels),
+            (gain_mode,) * len(channels),
             (manual_gain_db,) * len(channels),
         )
         return self.settings
@@ -210,6 +211,21 @@ def test_prepare_dual_rx_uses_shared_lo_manual_geometry() -> None:
     assert preparation.configured.channels == (0, 1)
     assert preparation.configured.gain_modes == (GainMode.MANUAL, GainMode.MANUAL)
     assert preparation.configured.gain_db == (40.0, 40.0)
+
+
+def test_prepare_slow_attack_and_restore_original_manual_state() -> None:
+    radio = Radio("ip:192.168.1.18", "SERIAL_A")
+
+    preparation = prepare_adaptive_scan_radio(
+        "ip:192.168.1.18",
+        "SERIAL_A",
+        dataclasses.replace(_setup(), rx_mask=3),
+        gain_mode=GainMode.SLOW_ATTACK,
+        radio_factory=lambda *_: radio,
+    )
+    assert preparation.configured.gain_modes == (GainMode.SLOW_ATTACK,) * 2
+    restoration = restore_adaptive_scan_radio(preparation, radio_factory=lambda *_: radio)
+    assert restoration.observed == ORIGINAL
 
 
 def test_production_factory_selects_exact_rx0_layout_before_open(monkeypatch) -> None:

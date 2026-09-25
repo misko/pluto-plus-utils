@@ -12,23 +12,29 @@ from pluto_plus.adaptive_scan_qualification import AdaptiveScanAccumulator
 
 
 @pytest.mark.parametrize("dwell", [120, 240, 360])
-@pytest.mark.parametrize("rate", [2_500_000, 10_000_000])
+@pytest.mark.parametrize("rate", [2_500_000, 5_000_000, 7_500_000, 10_000_000])
 def test_v3_roundtrip_and_old_versions_stay_fixed(dwell, rate):
     value = dataclasses.replace(
         setup(), protocol_version=3, dwell_ms=dwell, source_rate_hz=rate, rx_mask=3
     )
     assert ScanSetup.unpack(value.pack()) == value
     if dwell == 360:
-        for version in (1, 2):
+        versions = (1, 2) if rate in (2_500_000, 10_000_000) else (2,)
+        for version in versions:
             with pytest.raises(AdaptiveScanProtocolError, match="20..240"):
                 dataclasses.replace(value, protocol_version=version).pack()
     with pytest.raises(AdaptiveScanProtocolError):
-        dataclasses.replace(value, source_rate_hz=15_000_000).pack()
+        dataclasses.replace(value, source_rate_hz=8_000_000).pack()
 
 
 def test_v3_capabilities_require_explicit_endpoint():
     caps = ScanCapabilities(
-        protocol_version=3, rate_mask=0x11, rx_mask=3, minimum_dwell_ms=120, maximum_dwell_ms=360
+        protocol_version=3,
+        rate_mode=2,
+        rate_mask=0x71,
+        rx_mask=3,
+        minimum_dwell_ms=120,
+        maximum_dwell_ms=360,
     )
     sock = ScriptedSocket(b"96\n" + caps.pack())
     client = AdaptiveScanClient("radio", connector=lambda *args: sock)
@@ -37,6 +43,26 @@ def test_v3_capabilities_require_explicit_endpoint():
     sock = ScriptedSocket(b"-38\n")
     with pytest.raises(AdaptiveScanTransportError):
         AdaptiveScanClient("radio", connector=lambda *args: sock).variable_dwell_capabilities()
+
+
+def test_v3_visit_roundtrips_independent_gain_observation():
+    base = _stream(
+        dataclasses.replace(_setup(5_000_000, 120, 3), protocol_version=3),
+        visits=1,
+        delivered=1,
+        transition_samples=5_000,
+    )[0][0]
+    value = dataclasses.replace(
+        base,
+        protocol_version=3,
+        gain_counter=base.valid_end + 100,
+        gain_read_duration_ns=42_000,
+        rx1_gain_index=31,
+        rx2_gain_index=47,
+        gain_valid=True,
+    )
+    assert value.gain_counter >= value.valid_end
+    assert type(value).unpack(value.pack()) == value
 
 
 def test_mixed_duration_accounting_uses_actual_intervals():

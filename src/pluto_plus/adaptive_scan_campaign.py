@@ -26,6 +26,7 @@ from .adaptive_scan_radio import (
 from .adaptive_scan_shadow import AdaptiveScanMode, ScannerRunReport, run_scanner_session
 from .counter_utc import DEFAULT_TIMING_POLICY, CounterUtcEvidence, TimingPolicy
 from .counter_utc_capture import CounterUtcCollector
+from .models import GainMode
 from .persistent_hop import require_physical_lan_uri
 
 ClientFactory = Callable[[str], AdaptiveScanClient]
@@ -37,6 +38,8 @@ SessionClockSink = Callable[[int, int, int, int], None]
 # issue-108 dual-RX extension adds the fifth bit for its 2.5 MS/s mode.
 _RATE_CAPABILITY_BITS = {
     2_500_000: 1 << 4,
+    5_000_000: 1 << 5,
+    7_500_000: 1 << 6,
     10_000_000: 1 << 0,
     15_000_000: 1 << 1,
     20_000_000: 1 << 2,
@@ -126,6 +129,7 @@ def run_adaptive_scan_campaign(
     *,
     mode: AdaptiveScanMode,
     manual_gain_db: float = 40.0,
+    gain_mode: GainMode = GainMode.MANUAL,
     samples_per_block: int = 1_000_000,
     feedback_period_visits: int = 1,
     radio_factory: RadioFactory | None = None,
@@ -166,6 +170,7 @@ def run_adaptive_scan_campaign(
             serial,
             setup,
             manual_gain_db=manual_gain_db,
+            gain_mode=gain_mode,
         )
         if radio_factory is None
         else prepare_adaptive_scan_radio(
@@ -173,6 +178,7 @@ def run_adaptive_scan_campaign(
             serial,
             setup,
             manual_gain_db=manual_gain_db,
+            gain_mode=gain_mode,
             radio_factory=radio_factory,
         )
     )
