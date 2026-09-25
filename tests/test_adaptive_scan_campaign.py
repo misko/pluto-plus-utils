@@ -162,6 +162,50 @@ def test_campaign_joins_prepare_shadow_stream_metrics_and_restore(monkeypatch) -
     assert receipt.restoration.fastlock_inactive
 
 
+def test_campaign_runs_instrumentation_hook_after_session_start(monkeypatch) -> None:
+    events = []
+    setup = _setup()
+    _install_lifecycle(monkeypatch, setup, events)
+
+    class OrderedClient(Client):
+        def start(self, prepared, **kwargs):
+            events.append("session-start")
+            return super().start(prepared, **kwargs)
+
+    campaign.run_adaptive_scan_campaign(
+        "ip:192.168.1.18",
+        "SERIAL_A",
+        setup,
+        lambda _visit: ScanOutcome.ACTIVE,
+        mode=AdaptiveScanMode.SHADOW,
+        client_factory=OrderedClient,
+        session_hook=lambda _session: events.append("hook"),
+    )
+    assert events == ["prepare", "session-start", "hook", "restore"]
+
+
+def test_campaign_restores_after_session_hook_failure(monkeypatch) -> None:
+    events = []
+    setup = _setup()
+    _install_lifecycle(monkeypatch, setup, events)
+
+    def fail(_session) -> None:
+        events.append("hook")
+        raise RuntimeError("instrumentation failed")
+
+    with pytest.raises(RuntimeError, match="instrumentation failed"):
+        campaign.run_adaptive_scan_campaign(
+            "ip:192.168.1.18",
+            "SERIAL_A",
+            setup,
+            lambda _visit: ScanOutcome.ACTIVE,
+            mode=AdaptiveScanMode.SHADOW,
+            client_factory=Client,
+            session_hook=fail,
+        )
+    assert events == ["prepare", "hook", "restore"]
+
+
 def test_campaign_restores_after_detector_failure(monkeypatch) -> None:
     events = []
     setup = _setup()

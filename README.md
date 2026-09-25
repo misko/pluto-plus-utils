@@ -1469,6 +1469,12 @@ attached-radio acceptance gate; see
 
 ## Verification
 
+The release hardware lane includes a full TX2 Qin Starlink edge-pilot round
+trip through the 10 MS/s adaptive dual-RX scanner. See
+[`docs/adaptive-starlink-pilot-hardware.md`](docs/adaptive-starlink-pilot-hardware.md)
+for fixture requirements, safety bounds, invocation, GLRT thresholds, and the
+JSON evidence contract.
+
 ```bash
 uv run pytest -q
 uv run ruff check src tests
