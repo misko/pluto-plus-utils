@@ -1,11 +1,10 @@
 # Adaptive scan variable dwell policy
 
 The production launcher selects independently, once per radio and ten-minute
-scan slot: 2.5, 5, 7.5, or 10 MS/s (equal probability), 120/240/360 ms active
-dwell (equal probability), and manual or native slow-attack gain (equal
-probability). Domain-separated SHA-256 rejection sampling makes retries
-reproducible. Manual gain remains 40 dB. The selected lower/upper edge policy
-is unchanged.
+scan slot: 2.5, 5, 7.5, or 10 MS/s (equal probability) and 120/240/360 ms
+active dwell (equal probability). Domain-separated SHA-256 rejection sampling
+makes retries reproducible. Gain remains manual at 40 dB on both receivers. The
+selected lower/upper edge policy is unchanged.
 
 Protocol v3 uses the existing record sizes and explicit `SCANCAPS3` negotiation.
 Setup `dwell_ms` is the active base. Unknown, quiet, and expired-active targets
@@ -16,9 +15,8 @@ one continuous visit; repeated selections provide multiples and retain the
 existing same-target no-retune behavior. Actual visit start/end counters are
 authoritative. V1/v2 retain their fixed dwell contracts.
 
-The client refuses old firmware rather than silently falling back. The selected
-gain mode is programmed on both receivers and read back; manual gain values are
-written only in manual mode. The pre-scan receiver settings and kernel buffers
+The client refuses old firmware rather than silently falling back. Manual gain
+is programmed on both receivers and read back. The pre-scan receiver settings and kernel buffers
 are restored by the existing capture lifecycle. Archives record the selected
 mode and dwell settings as well as actual receiver readback.
 

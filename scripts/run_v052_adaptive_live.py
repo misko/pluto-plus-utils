@@ -97,13 +97,10 @@ def campaign_configuration(
 
 
 def slot_capture_settings(epoch_seconds: int, serial: str) -> tuple[int, GainMode]:
-    """Independent uniform choices, fixed across retries of a scan slot."""
+    """Uniform dwell choice and fixed manual gain across retries of a scan slot."""
     ordinal = epoch_seconds // 600
     dwell = ACTIVE_DWELLS_MS[deterministic_uniform_choice(serial, ordinal, "dwell-v3", 3)]
-    gain = (GainMode.MANUAL, GainMode.SLOW_ATTACK)[
-        deterministic_uniform_choice(serial, ordinal, "gain-v3", 2)
-    ]
-    return dwell, gain
+    return dwell, GainMode.MANUAL
 
 
 def json_value(value):
