@@ -37,10 +37,13 @@ class StarlinkPilotLoopbackError(RuntimeError):
 @dataclasses.dataclass(frozen=True, slots=True)
 class StarlinkPilotLimits:
     minimum_glrt_score: float = 0.35
-    minimum_glrt_margin: float = 0.15
+    # A narrow exact/control separation admitted deterministic impulse-only
+    # captures in the long-scan audit. A positive result requires a strict
+    # >0.5 exact-minus-control margin.
+    minimum_glrt_margin: float = 0.5
     # The eight-subcarrier waveform is intentionally sparse and is distorted
     # by the fixture/filter response. GLRT exact/control separation is the
-    # primary detection gate; nonnegative fitted SNR rejects noise-only input.
+    # primary detection gate; fitted SNR rejects gross signal-fit failures.
     # Low-rate AD9361 interpolation/filtering leaves deterministic waveform
     # error outside the 64-symbol GLRT window. Keep this as a gross signal-fit
     # guard while the exact/control GLRT remains the presence decision.
@@ -322,7 +325,7 @@ def receiver_has_starlink_pilot_glrt(
 
     return (
         receiver.glrt_score >= limits.minimum_glrt_score
-        and receiver.glrt_margin >= limits.minimum_glrt_margin
+        and receiver.glrt_margin > limits.minimum_glrt_margin
     )
 
 
@@ -337,7 +340,7 @@ def starlink_pilot_parity_failures(
     failures: list[str] = []
     if any(item.glrt_score < limits.minimum_glrt_score for item in receivers):
         failures.append("GLRT detection score")
-    if any(item.glrt_margin < limits.minimum_glrt_margin for item in receivers):
+    if any(item.glrt_margin <= limits.minimum_glrt_margin for item in receivers):
         failures.append("GLRT exact/control margin")
     if any(item.snr_db < limits.minimum_snr_db for item in receivers):
         failures.append("pilot SNR")

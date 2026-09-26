@@ -222,9 +222,7 @@ class _FullScanGlrtAnalyzer:
             return
         self.complete_visits += 1
         signal = ci16_dual_rx(visit.iq)
-        # Eight frames are long enough to keep the symbol-rolled control from
-        # overfitting an occasional three-frame noise realization while still
-        # bounding each queued job well below one 120 ms visit.
+        # Keep queued GLRT work bounded well below one 120 ms visit.
         bounded = signal[:, : 8 * self.frame_samples].copy()
         try:
             self.jobs.put_nowait((visit.record.visit, visit.record.target, bounded))
