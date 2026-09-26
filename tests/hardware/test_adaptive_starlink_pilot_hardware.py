@@ -31,6 +31,7 @@ from pluto_plus.starlink_pilot_loopback import (
     measure_starlink_pilot_parity,
     qin_lower_edge_pilot_frame,
     receiver_has_starlink_pilot_glrt,
+    require_counter_marker_free,
     starlink_pilot_parity_failures,
 )
 
@@ -221,6 +222,7 @@ class _FullScanGlrtAnalyzer:
         if not visit.iq:
             return
         self.complete_visits += 1
+        require_counter_marker_free(visit.iq, valid_start=visit.record.valid_start)
         signal = ci16_dual_rx(visit.iq)
         # Keep queued GLRT work bounded well below one 120 ms visit.
         bounded = signal[:, : 8 * self.frame_samples].copy()
@@ -373,6 +375,9 @@ def test_qin_edge_pilot_round_trip_glrt_matches_rx0_and_rx1() -> None:
                     )
                     assert receipt.run.gate.passed
                     assert captured, "adaptive scan delivered no dual-RX visit"
+                    require_counter_marker_free(
+                        captured[0].iq, valid_start=captured[0].record.valid_start
+                    )
                     signal = ci16_dual_rx(captured[0].iq)
                     # Analyze a bounded number of complete frames; the visit remains
                     # large enough to reproduce the 120 ms release scan geometry.
