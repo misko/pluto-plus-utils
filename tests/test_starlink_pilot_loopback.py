@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 
 import numpy as np
@@ -7,6 +8,7 @@ import pytest
 
 from pluto_plus.starlink_pilot_loopback import (
     StarlinkPilotLoopbackError,
+    StarlinkPilotReceiverMetrics,
     analyze_starlink_pilot_parity,
     cyclic_tx_waveform,
     measure_starlink_pilot_parity,
@@ -79,6 +81,43 @@ def test_noise_only_capture_is_not_accepted_as_the_qin_pilot() -> None:
     )
     assert not any(receiver_has_starlink_pilot_glrt(item) for item in metrics.receivers)
     assert "GLRT detection score" in starlink_pilot_parity_failures(metrics)
+
+
+def test_positive_glrt_margin_is_strictly_greater_than_half() -> None:
+    """Keep the stand-alone decision and the full parity gate in agreement."""
+
+    at_threshold = StarlinkPilotReceiverMetrics(
+        channel="RX0",
+        epoch_sample=0,
+        cfo_hz=0.0,
+        residual_cfo_hz=0.0,
+        glrt_score=0.9,
+        control_score=0.4,
+        glrt_margin=0.5,
+        pilot_dbfs=-40.0,
+        snr_db=10.0,
+    )
+    above_threshold = dataclasses.replace(at_threshold, glrt_margin=0.500_001)
+    other_receiver = dataclasses.replace(above_threshold, channel="RX1")
+    at_limit_metrics = dataclasses.replace(
+        measure_starlink_pilot_parity(
+            _capture(), sample_rate_hz=SAMPLE_RATE_HZ
+        ),
+        receivers=(at_threshold, other_receiver),
+    )
+    above_limit_metrics = dataclasses.replace(
+        at_limit_metrics,
+        receivers=(above_threshold, other_receiver),
+    )
+
+    assert not receiver_has_starlink_pilot_glrt(at_threshold)
+    assert receiver_has_starlink_pilot_glrt(above_threshold)
+    assert "GLRT exact/control margin" in starlink_pilot_parity_failures(
+        at_limit_metrics
+    )
+    assert "GLRT exact/control margin" not in starlink_pilot_parity_failures(
+        above_limit_metrics
+    )
 
 
 def test_weaker_rx1_fails_receiver_parity_gate() -> None:

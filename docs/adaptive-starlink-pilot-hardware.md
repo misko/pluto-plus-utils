@@ -44,7 +44,8 @@ restores radio tuning on exit.
 The release gate requires both receivers to distinguish the exact Qin pilot
 from a symbol-rolled control and meet all of these parity bounds:
 
-- GLRT score at least 0.35 and exact/control margin at least 0.15 on each RX;
+- GLRT score at least 0.35 and exact/control margin strictly greater than 0.5
+  on each RX;
 - fitted pilot SNR at least -20 dB and level between -70 and -3 dBFS (the
   exact/control GLRT is the presence decision at every rate);
 - RX0/RX1 level delta at most 3 dB and fitted-SNR delta at most 4 dB;
@@ -58,3 +59,22 @@ level/SNR/timing/CFO parity, adaptive delivery, radio identity, protocol, RF
 frequency, sample rate, RF bandwidth, RX mask, TX path, and bounded TX gain.
 The long report also retains per-visit decisions and metrics for all four scan
 targets so a release reviewer can audit complete positive and negative coverage.
+
+## v0.54 raw-IQ counter-marker incident
+
+The v0.54 10 MS/s raw capture identifies counter-marker contamination as the
+cause of the intermittent RX0 GLRT/residual anomaly; it is not evidence of RF
+settling. In 215 of 236 retained visits, an eight-byte dual-RX CI16 row encodes
+the little-endian 64-bit value `valid_start + row_index + 2` at a million-sample
+cadence. For example, counter `597427418944` is the four little-endian signed
+16-bit words `[-2240, 6514, 139, 0]`, which overwrite one simultaneous RX0/RX1
+sample row.
+
+An offline replay that detects those rows and interpolates across them changes
+quiet visit 21's exact/control margin from 0.2088 to 0.0058 and injected-pilot
+visit 203's margin from 0.4867 to 0.9005. This is a diagnostic only: the
+original sample is overwritten and interpolation cannot recover it. The v0.58
+report retained metrics but not raw IQ, so it cannot establish whether its
+anomalies contain the same rows. A native transport fix that prevents markers
+from entering the IQ payload remains required; future capture gates should also
+record and reject this exact marker pattern with its visit and row coordinates.
