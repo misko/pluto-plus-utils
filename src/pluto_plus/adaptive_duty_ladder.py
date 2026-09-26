@@ -12,6 +12,7 @@ from pydantic import Field
 
 from .adaptive_scan import ScanVisit
 from .adaptive_scan_campaign import build_adaptive_scan_setup, run_adaptive_scan_campaign
+from .adaptive_scan_client import AdaptiveScanClient
 from .adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDetectorConfig
 from .adaptive_scan_shadow import AdaptiveScanMode
 from .models import ApiModel, GainMode
@@ -149,6 +150,9 @@ def run_adaptive_duty_ladder(
             samples_per_block=1_000_000,
             feedback_period_visits=8,
             visit_sink=lambda visit, records=records: records.append(visit.record),
+            client_factory=lambda host: AdaptiveScanClient(
+                host, timeout_s=duration_seconds + 30.0
+            ),
         )
         elapsed = (monotonic_ns() - started) / 1_000_000_000
         metrics = receipt.run.metrics

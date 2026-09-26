@@ -54,6 +54,7 @@ def _runner(uri, serial, setup, detector, **kwargs):
     assert serial == "SERIAL"
     assert kwargs["mode"] is AdaptiveScanMode.ADAPTIVE
     assert kwargs["gain_mode"] is GainMode.MANUAL
+    assert kwargs["client_factory"]("fixture").timeout_s == 130.0
     assert setup.rx_mask == 3
     first = _complete_visit(setup, visit=0, cursor=10_000)
     second = _complete_visit(setup, visit=1, cursor=first.valid_end)
