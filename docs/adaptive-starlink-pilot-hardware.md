@@ -75,9 +75,63 @@ quiet visit 21's exact/control margin from 0.2088 to 0.0058 and injected-pilot
 visit 203's margin from 0.4867 to 0.9005. This is a diagnostic only: the
 original sample is overwritten and interpolation cannot recover it. The v0.58
 report retained metrics but not raw IQ, so it cannot establish whether its
-anomalies contain the same rows. An interval-programming defect in
-`ad9361_counter_acquire` remains a kernel-cause hypothesis, not a confirmed
-cause: native trace and RTL reconciliation must establish whether dual-RX needs
-`2N` words or the marker instead leaks at a DMA boundary. No kernel change is
-qualified from this replay. Future capture gates also record and reject this
-exact marker pattern with its visit and row coordinates.
+anomalies contain the same rows.
+
+Native trace and RTL/DMA reconciliation identify the cause in
+`ad9361_counter_acquire`. The FPGA consumes the interval from
+`GP_CONTROL[31:1]`. The old driver wrote `N` samples per channel for both scan
+masks. That is correct for single-RX, but dual-RX must program `2N`: writing
+`N` in dual-RX makes the FPGA emit a counter marker every `N/2` packed rows.
+For the one-million-sample request, markers were emitted every 500,000 rows.
+The capture path strips the marker at each one-million-row DMA-block prefix,
+but retains the interior 500,000-row marker; the retained corrupt rows therefore
+appear one million rows apart. The corrected kernel programs `N` for single-RX
+and `2N` for dual-RX, so every expected marker is a DMA-block prefix and is
+stripped before IQ reaches the host.
+
+The v0.59 source graph pins this correction and its mapping/bounds regression
+coverage at Linux commit `a008394055c72ad88e45b30e0979d0e5f09642ec`
+(`adaptive-multirate-agc-v059-source/linux-v2`). [Firmware PR
+#118](https://github.com/misko/plutosdr-fw/pull/118) and its [immutable build
+36215189374](https://github.com/misko/plutosdr-fw/actions/runs/36215189374)
+produce the expected final identity
+`v0.59-plutoplus-spf-dual-rx-counter-fix`.
+
+A RAM-boot 10 MS/s raw-IQ preflight confirmed the source cause: the corrected
+dual-RX register was `0x1e8480` (`2N` for one million samples per channel) and
+found zero marker out-of-range-word visits in 46 visits, while the stock v0.54
+comparison found 41 out-of-range-word visits in 46 visits. The standard
+four-rate gate then passed at 2.5, 5, 7.5, and 10 MS/s, with final maximum
+level parity delta 0.508715 dB and zero timing delta.
+
+The first 10 MS/s long campaign did not satisfy the planned-valid delivery
+gate (1,397 delivered of 1,549 planned, 90.187%) even though the GLRT and exact
+counter invariant passed. That was a host observer throughput issue, separate
+from the firmware counter cause: the observer decoded every complete 120 ms
+dual-RX payload synchronously before retaining only the eight frames used by
+GLRT. The full counter check accounted for 2.48 ms per visit; the old observer
+averaged 13.55 ms and reached 55.5 ms. The bounded-decode change retains the
+full-payload exact-counter check and decodes only the GLRT prefix. On the same
+firmware and source plan, a 30-second 10 MS/s observer run delivered all 234
+planned visits, versus 217 of 234 with the old GLRT observer. The second
+200-second 10 MS/s campaign using the bounded observer passed the delivery
+gate. The host fix is [PPU PR #133](https://github.com/misko/pluto-plus-utils/pull/133).
+
+The final RAM-boot qualification ran both hardware tests in 429.61 seconds.
+At 2.5 MS/s it delivered all 1,569 planned visits: 777 injected-target visits
+were GLRT-positive on both receivers, 792 quiet visits were GLRT-negative on
+both, and the exact-counter invariant and classification-delivery checks passed
+for every complete payload. At 10 MS/s it delivered 1,534 of 1,548 planned
+visits (99.0956%, strictly above the 99% gate); the 14 skips were explicit
+capacity skips. All 746 injected-target visits were positive on both receivers,
+all 788 quiet visits were negative, and there were zero counter-marker failures
+and zero dropped classifications.
+
+The long-campaign GLRT decision does not apply the four-rate SNR-parity bound.
+Two 10 MS/s visits (873 and 1040) exceeded that bound at 4.666 dB and 4.606 dB
+respectively; their level deltas were 1.69 dB and 1.67 dB, timing differed by
+one sample, CFO deltas were 0.11 Hz and 0.06 Hz, and both receivers retained
+approximately 0.999/0.998 GLRT scores with margins near 0.90. These SNR-parity
+flags are retained as a limitation of the long campaign; the separate four-rate
+gate remains the parity qualification. Future capture gates also record and
+reject this exact marker pattern with its visit and row coordinates.
