@@ -284,5 +284,9 @@ def test_v3_start_request_golden_prefix_and_ci16_layout() -> None:
     samples = ci16_dual_rx(payload)
     np.testing.assert_array_equal(samples, [[1 - 2j, 5 - 6j], [3 - 4j, 7 - 8j]])
     assert samples.shape == (2, 2)
+    np.testing.assert_array_equal(ci16_dual_rx(payload, samples=1), [[1 - 2j], [3 - 4j]])
+    for count in (True, 0, 3):
+        with pytest.raises(ValueError, match="prefix"):
+            ci16_dual_rx(payload, samples=count)
     with pytest.raises(ProtocolError):
         ci16_dual_rx(payload[:-1])
