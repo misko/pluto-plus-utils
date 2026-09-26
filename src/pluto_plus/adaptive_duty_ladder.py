@@ -151,7 +151,7 @@ def run_adaptive_duty_ladder(
             feedback_period_visits=8,
             visit_sink=lambda visit, records=records: records.append(visit.record),
             client_factory=lambda host: AdaptiveScanClient(
-                host, timeout_s=duration_seconds + 30.0
+                host, timeout_s=duration_seconds + 180.0
             ),
         )
         elapsed = (monotonic_ns() - started) / 1_000_000_000
