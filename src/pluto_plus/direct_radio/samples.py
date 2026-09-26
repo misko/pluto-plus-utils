@@ -19,12 +19,23 @@ def ci16_single_rx(payload: bytes | bytearray | memoryview) -> npt.NDArray[np.co
     return result
 
 
-def ci16_dual_rx(payload: bytes | bytearray | memoryview) -> npt.NDArray[np.complex64]:
-    """Convert ``[rx1_i, rx1_q, rx2_i, rx2_q]`` time rows to shape ``(2, N)``."""
+def ci16_dual_rx(
+    payload: bytes | bytearray | memoryview, *, samples: int | None = None
+) -> npt.NDArray[np.complex64]:
+    """Convert dual-RX CI16 rows, optionally decoding only a prefix."""
 
     if len(payload) == 0 or len(payload) % 8:
         raise ProtocolError("CI16 dual-RX payload must contain complete non-empty 8-byte rows")
-    words = np.frombuffer(payload, dtype="<i2").reshape(-1, 4)
+    available_samples = len(payload) // 8
+    if samples is None:
+        samples = available_samples
+    elif (
+        isinstance(samples, bool)
+        or not isinstance(samples, int)
+        or not 1 <= samples <= available_samples
+    ):
+        raise ValueError("dual-RX CI16 prefix must be within the payload")
+    words = np.frombuffer(payload, dtype="<i2", count=samples * 4).reshape(-1, 4)
     result = np.empty((2, words.shape[0]), dtype=np.complex64)
     result[0] = words[:, 0].astype(np.float32) + 1j * words[:, 1].astype(np.float32)
     result[1] = words[:, 2].astype(np.float32) + 1j * words[:, 3].astype(np.float32)

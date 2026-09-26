@@ -223,9 +223,10 @@ class _FullScanGlrtAnalyzer:
             return
         self.complete_visits += 1
         require_counter_marker_free(visit.iq, valid_start=visit.record.valid_start)
-        signal = ci16_dual_rx(visit.iq)
         # Keep queued GLRT work bounded well below one 120 ms visit.
-        bounded = signal[:, : 8 * self.frame_samples].copy()
+        # The counter gate above examines the complete payload. GLRT needs only
+        # this bounded prefix, so avoid materializing the rest in the drain loop.
+        bounded = ci16_dual_rx(visit.iq, samples=8 * self.frame_samples)
         try:
             self.jobs.put_nowait((visit.record.visit, visit.record.target, bounded))
         except queue.Full:
