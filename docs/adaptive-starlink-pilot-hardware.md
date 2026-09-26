@@ -75,6 +75,9 @@ quiet visit 21's exact/control margin from 0.2088 to 0.0058 and injected-pilot
 visit 203's margin from 0.4867 to 0.9005. This is a diagnostic only: the
 original sample is overwritten and interpolation cannot recover it. The v0.58
 report retained metrics but not raw IQ, so it cannot establish whether its
-anomalies contain the same rows. A native transport fix that prevents markers
-from entering the IQ payload remains required; future capture gates should also
-record and reject this exact marker pattern with its visit and row coordinates.
+anomalies contain the same rows. An interval-programming defect in
+`ad9361_counter_acquire` remains a kernel-cause hypothesis, not a confirmed
+cause: native trace and RTL reconciliation must establish whether dual-RX needs
+`2N` words or the marker instead leaks at a DMA boundary. No kernel change is
+qualified from this replay. Future capture gates also record and reject this
+exact marker pattern with its visit and row coordinates.

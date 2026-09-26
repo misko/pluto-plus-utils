@@ -11,9 +11,11 @@ from pluto_plus.starlink_pilot_loopback import (
     StarlinkPilotReceiverMetrics,
     analyze_starlink_pilot_parity,
     cyclic_tx_waveform,
+    leaked_counter_marker_rows,
     measure_starlink_pilot_parity,
     qin_lower_edge_pilot_frame,
     receiver_has_starlink_pilot_glrt,
+    require_counter_marker_free,
     starlink_pilot_parity_failures,
 )
 
@@ -81,6 +83,33 @@ def test_noise_only_capture_is_not_accepted_as_the_qin_pilot() -> None:
     )
     assert not any(receiver_has_starlink_pilot_glrt(item) for item in metrics.receivers)
     assert "GLRT detection score" in starlink_pilot_parity_failures(metrics)
+
+
+def test_counter_marker_gate_matches_only_the_visit_bound_le64_sequence() -> None:
+    valid_start = 597_427_019_693
+    raw_rows = np.asarray(
+        [
+            [2047, -2048, 2047, -2048],
+            [-2048, 2047, -2048, 2047],
+            [123, -456, 789, -1011],
+            [2047, 2047, -2048, -2048],
+        ],
+        dtype="<i2",
+    )
+    payload = bytearray(raw_rows.tobytes())
+
+    # This uses the v0.54 source coordinate and the exact leaked-counter
+    # formula, not a clipping signature. It binds to this visit and row index.
+    np.frombuffer(payload, dtype="<u8")[2] = valid_start + 2 + 2
+
+    assert leaked_counter_marker_rows(payload, valid_start=valid_start) == (2,)
+    assert leaked_counter_marker_rows(payload, valid_start=valid_start - 1) == ()
+    with pytest.raises(StarlinkPilotLoopbackError, match="source counter leaked"):
+        require_counter_marker_free(payload, valid_start=valid_start)
+
+    np.frombuffer(payload, dtype="<u8")[2] = 0
+    assert leaked_counter_marker_rows(payload, valid_start=valid_start) == ()
+    require_counter_marker_free(payload, valid_start=valid_start)
 
 
 def test_positive_glrt_margin_is_strictly_greater_than_half() -> None:

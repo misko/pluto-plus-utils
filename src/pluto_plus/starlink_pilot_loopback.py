@@ -85,6 +85,39 @@ class StarlinkPilotParityMetrics:
 DEFAULT_LIMITS = StarlinkPilotLimits()
 
 
+def leaked_counter_marker_rows(
+    payload: bytes | bytearray | memoryview, *, valid_start: int
+) -> tuple[int, ...]:
+    """Return CI16 row indices overwritten by the leaked source counter.
+
+    The signature is deliberately tied to this visit's source coordinate. It
+    does not treat clipping or any other high-amplitude IQ value as a marker.
+    """
+
+    if isinstance(valid_start, bool) or not isinstance(valid_start, int) or valid_start < 0:
+        raise ValueError("valid_start must be a nonnegative integer")
+    if len(payload) % 8:
+        raise ValueError("dual-RX CI16 payload must contain complete 8-byte rows")
+    rows = len(payload) // 8
+    if valid_start + rows + 1 > 2**64 - 1:
+        raise ValueError("counter-marker search exceeds the unsigned 64-bit range")
+    values = np.frombuffer(payload, dtype="<u8")
+    expected = np.arange(rows, dtype=np.uint64) + np.uint64(valid_start + 2)
+    return tuple(int(index) for index in np.flatnonzero(values == expected))
+
+
+def require_counter_marker_free(
+    payload: bytes | bytearray | memoryview, *, valid_start: int
+) -> None:
+    """Fail closed when a source-counter marker has overwritten a CI16 row."""
+
+    rows = leaked_counter_marker_rows(payload, valid_start=valid_start)
+    if rows:
+        raise StarlinkPilotLoopbackError(
+            f"source counter leaked into dual-RX CI16 rows: {rows[:8]}"
+        )
+
+
 def _pilot_states(*, symbol_roll: int = 0) -> np.ndarray:
     if isinstance(symbol_roll, bool) or not isinstance(symbol_roll, int):
         raise TypeError("symbol_roll must be an integer")
