@@ -422,6 +422,25 @@ back. The report records the selected decoder so their results cannot be mixed.
 ordinary-buffer ladder measures host transport performance; it does not claim a
 gapless FPGA timeline. Use `radio metadata-ladder` for counter-proven continuity.
 
+### Adaptive-scan duty ladder
+
+`radio adaptive-duty-ladder` runs real adaptive firmware sessions rather than
+ordinary-buffer throughput captures. Each rung uses adaptive feedback, dual RX,
+manual gain, fixed visit duration, and exact post-cell restoration. Duty is
+derived from the FPGA source counter: complete valid visit samples divided by
+the complete session span, so retune, settling, skipped visits, and terminal
+tail are included while both receivers count only once.
+
+```bash
+uv run pluto radio adaptive-duty-ladder 192.168.1.20 \
+  --expect-serial EXACT_SERIAL --rates 5M,10M,12.5M,15M \
+  --duration-seconds 100 --dwell-ms 120 --manual-gain-db 40 \
+  --report /ABSOLUTE/PRIVATE/PATH/adaptive-duty.json
+```
+
+The report retains no IQ. The destination parent must already exist, be owned
+by the caller, and have mode `0700`.
+
 ### Direct-async rate/duration ladder
 
 The ABI-3 direct firmware has a dedicated one-command matrix. Its defaults are
