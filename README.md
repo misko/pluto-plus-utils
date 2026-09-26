@@ -426,14 +426,16 @@ gapless FPGA timeline. Use `radio metadata-ladder` for counter-proven continuity
 
 `radio adaptive-duty-ladder` runs real adaptive firmware sessions rather than
 ordinary-buffer throughput captures. Each rung uses adaptive feedback, dual RX,
-manual gain, fixed visit duration, and exact post-cell restoration. Duty is
+manual gain, fixed visit duration, and exact post-cell restoration. It requires
+the production variable-dwell v3 rates (2.5/5/7.5/10 MS/s) and rejects legacy
+v1/v2 rates before touching the radio. Duty is
 derived from the FPGA source counter: complete valid visit samples divided by
 the complete session span, so retune, settling, skipped visits, and terminal
 tail are included while both receivers count only once.
 
 ```bash
 uv run pluto radio adaptive-duty-ladder 192.168.1.20 \
-  --expect-serial EXACT_SERIAL --rates 5M,10M,12.5M,15M \
+  --expect-serial EXACT_SERIAL --rates 2.5M,5M,7.5M,10M \
   --duration-seconds 100 --dwell-ms 120 --manual-gain-db 40 \
   --report /ABSOLUTE/PRIVATE/PATH/adaptive-duty.json
 ```

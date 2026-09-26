@@ -10,14 +10,13 @@ from typing import Any
 
 from pydantic import Field
 
-from .adaptive_scan import ScanVisit
+from .adaptive_scan import VARIABLE_DWELL_RATES, ScanVisit
 from .adaptive_scan_campaign import build_adaptive_scan_setup, run_adaptive_scan_campaign
-from .adaptive_scan_client import AdaptiveScanClient
 from .adaptive_scan_detector import Ci16EnergyDetector, Ci16EnergyDetectorConfig
 from .adaptive_scan_shadow import AdaptiveScanMode
 from .models import ApiModel, GainMode
 
-DEFAULT_ADAPTIVE_DUTY_RATES = "5M,10M,12.5M,15M"
+DEFAULT_ADAPTIVE_DUTY_RATES = "2.5M,5M,7.5M,10M"
 DEFAULT_ADAPTIVE_DUTY_FREQUENCIES = (
     960_000_000,
     1_210_000_000,
@@ -111,6 +110,13 @@ def run_adaptive_duty_ladder(
         raise ValueError("adaptive duty ladder requires between one and eight rates")
     if any(right <= left for left, right in zip(selected_rates, selected_rates[1:], strict=False)):
         raise ValueError("adaptive duty ladder rates must be strictly increasing")
+    unsupported_rates = tuple(rate for rate in selected_rates if rate not in VARIABLE_DWELL_RATES)
+    if unsupported_rates:
+        values = ", ".join(f"{rate / 1_000_000:g}" for rate in unsupported_rates)
+        raise ValueError(
+            "adaptive duty ladder requires variable-dwell v3 rates "
+            f"(2.5/5/7.5/10 MS/s); unsupported: {values} MS/s"
+        )
     if not 1 <= duration_seconds <= 300:
         raise ValueError("adaptive duty duration must be between 1 and 300 seconds")
     if not 20 <= dwell_ms <= 240:
@@ -136,6 +142,7 @@ def run_adaptive_duty_ladder(
             transition_budget_ms=20,
             maximum_revisit_ms=3_000,
             rx_mask=rx_mask,
+            variable_dwell=True,
         )
         records: list[ScanVisit] = []
         started = monotonic_ns()
@@ -150,9 +157,6 @@ def run_adaptive_duty_ladder(
             samples_per_block=1_000_000,
             feedback_period_visits=8,
             visit_sink=lambda visit, records=records: records.append(visit.record),
-            client_factory=lambda host: AdaptiveScanClient(
-                host, timeout_s=duration_seconds + 180.0
-            ),
         )
         elapsed = (monotonic_ns() - started) / 1_000_000_000
         metrics = receipt.run.metrics
