@@ -23,6 +23,11 @@ import httpx
 import typer
 from pydantic import BaseModel
 
+from pluto_plus.adaptive_duty_ladder import (
+    DEFAULT_ADAPTIVE_DUTY_RATES,
+    AdaptiveDutyLadderReport,
+    run_adaptive_duty_ladder,
+)
 from pluto_plus.ddr_recovery import (
     DEFAULT_DISCONNECT_DELAY_MS,
     MAX_DISCONNECT_DELAY_MS,
@@ -540,6 +545,41 @@ def _ladder_table(report: LadderReport) -> str:
         for line in (identity, duration, header, separator, *body, restore, report.continuity_claim)
         if line
     )
+
+
+def _adaptive_duty_ladder_table(report: AdaptiveDutyLadderReport) -> str:
+    rows = [
+        {
+            "rate": f"{cell.sample_rate_hz / 1_000_000:g} MS/s",
+            "duty": f"{cell.full_session_retained_duty * 100:.2f}%",
+            "delivery": f"{cell.planned_valid_delivery * 100:.2f}%",
+            "visits": f"{cell.delivered_visits}/{cell.planned_visits}",
+            "skipped": str(cell.skipped_visits),
+            "invalid": str(cell.invalid_visits),
+            "wall": f"{cell.elapsed_seconds:.2f} s",
+            "result": "restored" if cell.receiver_restored else "RESTORE FAILED",
+        }
+        for cell in report.cells
+    ]
+    columns = (
+        ("RATE", "rate"),
+        ("DUTY", "duty"),
+        ("VALID DELIVERY", "delivery"),
+        ("VISITS", "visits"),
+        ("SKIP", "skipped"),
+        ("INVALID", "invalid"),
+        ("WALL", "wall"),
+        ("RESULT", "result"),
+    )
+    widths = {key: max(len(title), *(len(row[key]) for row in rows)) for title, key in columns}
+    header = "  ".join(title.ljust(widths[key]) for title, key in columns)
+    separator = "  ".join("-" * widths[key] for _title, key in columns)
+    body = ["  ".join(row[key].ljust(widths[key]) for _title, key in columns) for row in rows]
+    identity = (
+        f"Adaptive duty · {report.serial} · {report.uri} · "
+        f"RX mask {report.rx_mask:#x} · {report.gain_mode.value} gain"
+    )
+    return "\n".join((identity, header, separator, *body, report.continuity_claim))
 
 
 def _direct_async_ladder_table(report: DirectAsyncLadderReport) -> str:
@@ -1586,6 +1626,91 @@ def radio_ladder(
             typer.echo(f"Report: {report_path.expanduser().absolute()}")
     if report.failures:
         raise typer.Exit(5)
+
+
+@radio_app.command("adaptive-duty-ladder")
+def radio_adaptive_duty_ladder(
+    target: str = typer.Argument(..., help="Literal IPv4 address of one adaptive-scan radio."),
+    expect_serial: str = typer.Option(..., "--expect-serial", help="Require this exact serial."),
+    rates: str = typer.Option(
+        DEFAULT_ADAPTIVE_DUTY_RATES,
+        "--rates",
+        help="Strictly increasing comma-separated Hz/K/M/G sample-rate rungs.",
+    ),
+    duration_seconds: int = typer.Option(
+        100,
+        "--duration-seconds",
+        min=1,
+        max=300,
+        help="Adaptive session duration at every rate.",
+    ),
+    dwell_ms: int = typer.Option(
+        120,
+        "--dwell-ms",
+        min=20,
+        max=240,
+        help="Fixed valid adaptive visit duration.",
+    ),
+    manual_gain_db: float = typer.Option(
+        40.0,
+        "--manual-gain-db",
+        min=-3.0,
+        max=71.0,
+        help="Manual gain applied to both receivers during every cell.",
+    ),
+    output_format: str = typer.Option("table", "--format", "-f", help="table or json."),
+    report_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--report",
+        help="Absent-only JSON report beneath an existing owned mode-0700 directory.",
+    ),
+) -> None:
+    """Measure counter-derived duty with real dual-RX adaptive scanning."""
+
+    candidate = target.removeprefix("ip:")
+    try:
+        address = ip_address(candidate)
+    except ValueError:
+        _fail("invalid_radio_target", "adaptive duty target must be a literal IPv4 address", 2)
+    if address.version != 4:
+        _fail("invalid_radio_target", "adaptive duty target must be IPv4", 2)
+    try:
+        parsed_rates = parse_rate_ladder(rates)
+    except ValueError as error:
+        _fail("adaptive_duty_ladder_failed", str(error), 2)
+    normalized_format = output_format.strip().lower()
+    if normalized_format not in {"table", "json"}:
+        _fail("invalid_adaptive_duty_format", "--format must be table or json", 2)
+    environment = inspect_iio_environment(require_usb=False)
+    if not environment.healthy:
+        _fail(environment.status.value, environment.actionable_message, 5)
+    try:
+        report = run_adaptive_duty_ladder(
+            uri=f"ip:{address}",
+            serial=expect_serial,
+            rates_hz=parsed_rates,
+            duration_seconds=duration_seconds,
+            dwell_ms=dwell_ms,
+            manual_gain_db=manual_gain_db,
+        )
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        _fail("adaptive_duty_ladder_failed", str(error), 5)
+    if report_path is not None:
+        from pluto_plus.release_candidate import (
+            ReleaseCandidateContractError,
+            write_private_contract,
+        )
+
+        try:
+            write_private_contract(report_path.expanduser().absolute(), report)
+        except (OSError, ReleaseCandidateContractError) as error:
+            _fail("adaptive_duty_report_failed", str(error), 5)
+    if normalized_format == "json":
+        _emit(report)
+    else:
+        typer.echo(_adaptive_duty_ladder_table(report))
+        if report_path is not None:
+            typer.echo(f"Report: {report_path.expanduser().absolute()}")
 
 
 @radio_app.command("direct-async-ladder")
