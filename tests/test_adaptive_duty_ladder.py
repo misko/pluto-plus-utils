@@ -54,7 +54,8 @@ def _runner(uri, serial, setup, detector, **kwargs):
     assert serial == "SERIAL"
     assert kwargs["mode"] is AdaptiveScanMode.ADAPTIVE
     assert kwargs["gain_mode"] is GainMode.MANUAL
-    assert kwargs["client_factory"]("fixture").timeout_s == 280.0
+    assert "client_factory" not in kwargs
+    assert kwargs["samples_per_block"] == 1_000_000
     assert setup.rx_mask == 3
     first = _complete_visit(setup, visit=0, cursor=10_000)
     second = _complete_visit(setup, visit=1, cursor=first.valid_end)
@@ -103,14 +104,14 @@ def test_adaptive_duty_ladder_runs_real_adaptive_geometry_and_counts_both_rx_onc
     report = run_adaptive_duty_ladder(
         uri="ip:192.168.1.20",
         serial="SERIAL",
-        rates_hz=(5_000_000, 12_500_000),
+        rates_hz=(5_000_000, 7_500_000),
         duration_seconds=100,
         campaign_runner=_runner,
         monotonic_ns=lambda: next(ticks),
         realtime_ns=lambda: 100,
     )
 
-    assert [cell.protocol_version for cell in report.cells] == [2, 2]
+    assert [cell.protocol_version for cell in report.cells] == [3, 3]
     assert [cell.elapsed_seconds for cell in report.cells] == [2.0, 3.0]
     assert all(cell.full_session_retained_duty == pytest.approx(120 / 123) for cell in report.cells)
     assert all(cell.planned_valid_delivery == 1 for cell in report.cells)
@@ -134,6 +135,7 @@ def test_partition_rejects_counter_tail_before_last_visit() -> None:
     ("rates", "duration", "message"),
     [
         ((10_000_000, 5_000_000), 100, "strictly increasing"),
+        ((12_500_000,), 100, "variable-dwell v3"),
         ((5_000_000,), 301, "duration"),
     ],
 )
