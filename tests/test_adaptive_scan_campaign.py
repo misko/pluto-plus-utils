@@ -61,7 +61,7 @@ class Session(AbstractContextManager):
 
     def visits(self):
         samples = self.setup.source_rate_hz * self.setup.dwell_ms // 1_000
-        iq = bytes(samples * 4)
+        iq = bytes(samples * 4 * self.setup.rx_mask.bit_count())
         record = ScanVisit(
             session=self.setup.session,
             generation=self.setup.generation,
@@ -356,13 +356,22 @@ def test_campaign_runtime_negotiation_precedes_radio_mutation(monkeypatch, rate)
     class RuntimeClient(Client):
         def runtime_capabilities(self):
             events.append("negotiate")
-            return ScanCapabilities(rate_mask=0x1F, rx_mask=3, protocol_version=2,
-                                    rate_mode=1, minimum_rate_hz=520_833,
-                                    maximum_rate_hz=61_440_000)
+            return ScanCapabilities(
+                rate_mask=0x1F,
+                rx_mask=3,
+                protocol_version=2,
+                rate_mode=1,
+                minimum_rate_hz=520_833,
+                maximum_rate_hz=61_440_000,
+            )
 
     receipt = campaign.run_adaptive_scan_campaign(
-        "ip:192.168.1.18", "SERIAL_A", setup, lambda _: ScanOutcome.ACTIVE,
-        mode=AdaptiveScanMode.SHADOW, client_factory=RuntimeClient,
+        "ip:192.168.1.18",
+        "SERIAL_A",
+        setup,
+        lambda _: ScanOutcome.ACTIVE,
+        mode=AdaptiveScanMode.SHADOW,
+        client_factory=RuntimeClient,
     )
     assert events == ["negotiate", "prepare", "restore"]
     assert receipt.preparation.setup.source_rate_hz == rate
@@ -374,10 +383,66 @@ def test_campaign_runtime_negotiation_precedes_radio_mutation(monkeypatch, rate)
     events.clear()
     with pytest.raises(ValueError, match="does not advertise"):
         campaign.run_adaptive_scan_campaign(
-            "ip:192.168.1.18", "SERIAL_A", setup, lambda _: ScanOutcome.ACTIVE,
-            mode=AdaptiveScanMode.SHADOW, client_factory=LegacyClient,
+            "ip:192.168.1.18",
+            "SERIAL_A",
+            setup,
+            lambda _: ScanOutcome.ACTIVE,
+            mode=AdaptiveScanMode.SHADOW,
+            client_factory=LegacyClient,
         )
     assert events == []
+
+
+@pytest.mark.parametrize("mask,accepted", [(0x71, False), (0x171, True)])
+def test_native_1p25_requires_explicit_v3_capability(monkeypatch, mask, accepted):
+    setup = dataclasses.replace(
+        _setup(),
+        source_rate_hz=1_250_000,
+        analog_bandwidth_hz=1_250_000,
+        protocol_version=3,
+        rx_mask=3,
+        dwell_ms=120,
+    )
+    assert ScanSetup.unpack(setup.pack()) == setup
+    events = []
+    _install_lifecycle(monkeypatch, setup, events)
+
+    class NativeClient(Client):
+        def variable_dwell_capabilities(self):
+            events.append("negotiate")
+            caps = ScanCapabilities(
+                rate_mask=mask,
+                rx_mask=3,
+                protocol_version=3,
+                rate_mode=2,
+                minimum_dwell_ms=120,
+                maximum_dwell_ms=360,
+            )
+            assert ScanCapabilities.unpack(caps.pack()) == caps
+            return caps
+
+    if accepted:
+        receipt = campaign.run_adaptive_scan_campaign(
+            "ip:192.168.1.18",
+            "SERIAL_A",
+            setup,
+            lambda _: ScanOutcome.ACTIVE,
+            mode=AdaptiveScanMode.SHADOW,
+            client_factory=NativeClient,
+        )
+        assert receipt.preparation.setup.source_rate_hz == 1_250_000
+        assert events == ["negotiate", "prepare", "restore"]
+    else:
+        with pytest.raises(ValueError, match="does not advertise"):
+            campaign.run_adaptive_scan_campaign(
+                "ip:192.168.1.18",
+                "SERIAL_A",
+                setup,
+                lambda _: ScanOutcome.ACTIVE,
+                mode=AdaptiveScanMode.SHADOW,
+                client_factory=NativeClient,
+            )
+        assert events == ["negotiate"]
 
 
 def test_campaign_setup_builder_rejects_rate_above_runtime_bounds() -> None:

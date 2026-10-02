@@ -38,6 +38,7 @@ SessionHook = Callable[[AdaptiveScanSession], None]
 # The v1 firmware's original fixed-rate bits are 10/15/20/30 MS/s.  The
 # issue-108 dual-RX extension adds the fifth bit for its 2.5 MS/s mode.
 _RATE_CAPABILITY_BITS = {
+    1_250_000: 1 << 8,
     2_500_000: 1 << 4,
     5_000_000: 1 << 5,
     7_500_000: 1 << 6,
