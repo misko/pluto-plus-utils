@@ -142,6 +142,7 @@ def run(args):
             lambda v: ScanOutcome.ACTIVE if v.record.target == 0 else ScanOutcome.QUIET,
             mode=AdaptiveScanMode.ADAPTIVE,
             manual_gain_db=40,
+            samples_per_block=args.samples_per_block,
             client_factory=lambda host: AdaptiveScanClient(host, timeout_s=10),
             visit_sink=visit,
             feedback_period_visits=1,
@@ -183,6 +184,9 @@ def main():
     parser.add_argument("--rate", type=int, choices=(1_250_000, 2_500_000), required=True)
     parser.add_argument("--protocol", type=int, choices=(2, 3), required=True)
     parser.add_argument("--save-iq", action="store_true")
+    parser.add_argument(
+        "--samples-per-block", type=int, choices=(500_000, 1_000_000), default=1_000_000
+    )
     parser.add_argument("--cancel", action="store_true")
     parser.add_argument("--dma-fault", action="store_true")
     args = parser.parse_args()
