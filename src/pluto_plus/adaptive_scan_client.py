@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import errno
+import json
 import socket
+import struct
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from .adaptive_scan import (
     ACK_BYTES,
@@ -264,6 +266,27 @@ class AdaptiveScanClient:
             raise AdaptiveScanTransportError("SCANACK has no ready acknowledgement")
         return ack
 
+    def diagnostics(self, device: str, setup: ScanSetup) -> dict[str, Any]:
+        """Read the additive v1 snapshot while the owning session is still open."""
+        connection = self._connection()
+        try:
+            connection.sendall(f"SCANDIAG {device} 16\n".encode())
+            connection.sendall(struct.pack("<QQ", setup.session, setup.generation))
+            size = _require_success(_integer(connection), "SCANDIAG")
+            if not 0 < size <= 32768:
+                raise AdaptiveScanTransportError("SCANDIAG response exceeds its bounded schema")
+            document = json.loads(_exact(connection, size))
+            if (
+                not isinstance(document, dict)
+                or document.get("schema") != "spf.scan-diagnostics/v1"
+                or document.get("session") != setup.session
+                or document.get("generation") != setup.generation
+            ):
+                raise AdaptiveScanTransportError("SCANDIAG returned stale or unknown diagnostics")
+            return document
+        finally:
+            connection.close()
+
 
 class AdaptiveScanSession:
     def __init__(
@@ -278,6 +301,7 @@ class AdaptiveScanSession:
         self.device = device
         self.setup = setup
         self.terminal: ScanTerminal | None = None
+        self.failure_diagnostics: dict[str, Any] | None = None
         self._iterated = False
         self._closed = False
         self._visit_count = 0
@@ -376,12 +400,25 @@ class AdaptiveScanSession:
                         raise AdaptiveScanTransportError("terminal identity changed")
                     self._validate_terminal(terminal)
                     self.terminal = terminal
+                    if terminal.error:
+                        self._capture_failure_diagnostics()
                     return
                 raise AdaptiveScanTransportError("READSCAN returned an unknown record size")
         finally:
             if self.terminal is None:
+                self._capture_failure_diagnostics()
                 self._connection.close()
                 self._closed = True
+
+    def _capture_failure_diagnostics(self) -> None:
+        if self.failure_diagnostics is not None:
+            return
+        try:
+            self.failure_diagnostics = self._owner.diagnostics(self.device, self.setup)
+        except Exception as error:
+            # Diagnostics must never replace the acquisition error; older
+            # published firmware has no SCANDIAG command.
+            self.failure_diagnostics = {"unavailable_error": repr(error)}
 
     def submit_feedback(self, feedback: ScanFeedback) -> FeedbackResult:
         if self._closed:
