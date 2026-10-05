@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+import struct
 from collections import deque
 
 import pytest
@@ -59,6 +61,23 @@ def setup() -> ScanSetup:
         analysis_digest=bytes(range(1, 33)),
         targets=(ScanTarget(1, 2, 2_400_000_000, 1, 0x12345678),),
     )
+
+
+def test_diagnostic_snapshot_is_bounded_versioned_and_session_bound() -> None:
+    request = setup()
+    document = {"schema": "spf.scan-diagnostics/v1", "session": 11, "generation": 12,
+                "first_error": -110, "restoration_error": -5}
+    raw = json.dumps(document).encode()
+    connection = ScriptedSocket(str(len(raw)).encode() + b"\n" + raw)
+    client = AdaptiveScanClient("fixture", connector=lambda *_: connection)
+    assert client.diagnostics("cf-ad9361-lpc", request) == document
+    assert connection.sent == b"SCANDIAG cf-ad9361-lpc 16\n" + struct.pack("<QQ", 11, 12)
+    assert connection.closed
+    for response in (b"32769\n", b"-25\n", b"2\n{}"):
+        connection = ScriptedSocket(response)
+        with pytest.raises(AdaptiveScanTransportError):
+            client.diagnostics("cf-ad9361-lpc", request)
+        assert connection.closed
 
 
 def test_counter_time_negotiation_busy_stale_and_wire() -> None:

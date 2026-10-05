@@ -244,6 +244,39 @@ def test_campaign_restores_after_detector_failure(monkeypatch) -> None:
     assert events == ["prepare", "restore"]
 
 
+def test_failure_receipt_precedes_close_and_preserves_acquisition_error(monkeypatch) -> None:
+    events = []
+    setup = _setup()
+    _install_lifecycle(monkeypatch, setup, events)
+
+    class FailureSession(Session):
+        failure_diagnostics = {"first_error": -110, "restoration_error": -5}
+        def __exit__(self, *_args):
+            events.append("close")
+
+    class FailureClient(Client):
+        def start(self, setup, **_kwargs):
+            return FailureSession(setup)
+
+    original = RuntimeError("firmware -110")
+    def fail(*_args, **_kwargs):
+        raise original
+    monkeypatch.setattr(campaign, "run_scanner_session", fail)
+    def sink(document):
+        events.append("receipt")
+        assert document["serial"] == "SERIAL_A"
+        assert document["source_rate_hz"] == 10_000_000
+        assert document["diagnostics"]["first_error"] == -110
+        raise OSError("disk full")
+    with pytest.raises(RuntimeError) as caught:
+        campaign.run_adaptive_scan_campaign("ip:192.168.1.18", "SERIAL_A", setup,
+            lambda _: ScanOutcome.QUIET, mode=AdaptiveScanMode.SHADOW,
+            client_factory=FailureClient, failure_sink=sink)
+    assert caught.value is original
+    assert events == ["prepare", "receipt", "close", "restore"]
+    assert "disk full" in original.__notes__[0]
+
+
 def test_timing_sink_failure_still_restores_radio(monkeypatch) -> None:
     from pluto_plus.counter_utc import CounterUtcEvidence
 

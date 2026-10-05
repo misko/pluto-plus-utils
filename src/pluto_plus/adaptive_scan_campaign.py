@@ -142,6 +142,7 @@ def run_adaptive_scan_campaign(
     counter_clock_sink: Callable[[CounterUtcEvidence], None] | None = None,
     timing_policy: TimingPolicy = DEFAULT_TIMING_POLICY,
     session_hook: SessionHook | None = None,
+    failure_sink: Callable[[dict], None] | None = None,
 ) -> AdaptiveScanCampaignReceipt:
     """Run one bounded campaign and always restore the pre-session host state."""
 
@@ -216,14 +217,32 @@ def run_adaptive_scan_campaign(
                     time.time_ns(),
                     time.monotonic_ns(),
                 )
-            run = run_scanner_session(
-                session,
-                detector,
-                mode=mode,
-                feedback_period_visits=feedback_period_visits,
-                visit_observer=visit_sink,
-                classifier_queue_visits=classifier_queue_visits,
-            )
+            try:
+                run = run_scanner_session(
+                    session,
+                    detector,
+                    mode=mode,
+                    feedback_period_visits=feedback_period_visits,
+                    visit_observer=visit_sink,
+                    classifier_queue_visits=classifier_queue_visits,
+                )
+            except BaseException as error:
+                # Persist before CLOSE replaces the provider or archive.abort
+                # discards IQ. A receipt failure cannot hide the first error.
+                if failure_sink is not None:
+                    document = {
+                        "schema": "pluto.adaptive-scan-failure/v1",
+                        "serial": serial, "uri": selected_uri,
+                        "session": setup.session, "generation": setup.generation,
+                        "source_rate_hz": setup.source_rate_hz,
+                        "error": repr(error), "terminal": session.terminal,
+                        "diagnostics": getattr(session, "failure_diagnostics", None),
+                    }
+                    try:
+                        failure_sink(document)
+                    except BaseException as receipt_error:
+                        error.add_note(f"failure receipt persistence failed: {receipt_error!r}")
+                raise
     except BaseException as error:
         failure = error
     finally:
