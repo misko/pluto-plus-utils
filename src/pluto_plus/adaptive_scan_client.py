@@ -8,7 +8,7 @@ import socket
 import struct
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from .adaptive_scan import (
     ACK_BYTES,
@@ -266,7 +266,7 @@ class AdaptiveScanClient:
             raise AdaptiveScanTransportError("SCANACK has no ready acknowledgement")
         return ack
 
-    def diagnostics(self, device: str, setup: ScanSetup) -> dict:
+    def diagnostics(self, device: str, setup: ScanSetup) -> dict[str, Any]:
         """Read the additive v1 snapshot while the owning session is still open."""
         connection = self._connection()
         try:
@@ -301,7 +301,7 @@ class AdaptiveScanSession:
         self.device = device
         self.setup = setup
         self.terminal: ScanTerminal | None = None
-        self.failure_diagnostics: dict | None = None
+        self.failure_diagnostics: dict[str, Any] | None = None
         self._iterated = False
         self._closed = False
         self._visit_count = 0

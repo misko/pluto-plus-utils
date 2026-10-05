@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import time
 from collections.abc import Callable
+from typing import Any
 
 from .adaptive_scan import (
     RUNTIME_VERSION,
@@ -142,7 +143,7 @@ def run_adaptive_scan_campaign(
     counter_clock_sink: Callable[[CounterUtcEvidence], None] | None = None,
     timing_policy: TimingPolicy = DEFAULT_TIMING_POLICY,
     session_hook: SessionHook | None = None,
-    failure_sink: Callable[[dict], None] | None = None,
+    failure_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> AdaptiveScanCampaignReceipt:
     """Run one bounded campaign and always restore the pre-session host state."""
 
