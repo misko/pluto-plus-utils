@@ -1,5 +1,10 @@
 # Pluto+ Utils
 
+The additive [continuous ordered scan v5 host companion](docs/continuous-ordered-scan-v5.md)
+provides eight-target 20 ms IQ sessions, independent status/stop controls and
+separate device/host restoration receipts. It uses the matched continuous
+firmware runtime and is independent of the FPGA power scanner.
+
 Standalone discovery plus coordinated control, capture, analysis, scanning,
 firmware, and web tooling for one or more Pluto+ radios. `pluto radio inventory`
 runs directly on the host; stateful control commands and the embedded browser UI
