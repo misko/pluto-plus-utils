@@ -8,10 +8,11 @@ It requires no new FPGA power personality.
 
 ## Firmware compatibility
 
-Use the matched continuous-only iiOD/native runtime supplied by the firmware
-release. Corrected device behavior comes from libiio commit `44efe08`. Every
-COMPLETE window begins at least the configured transition budget after both
-its selection counter and the actual Fast Lock recall end. The host checks:
+Use the continuous-only device iiOD/libiio pair supplied by firmware
+`v0.62-plutoplus-spf-continuous-fast-scan`, libiio source commit
+`e2ea69c284f0f1c64efb05c0251bca2ee59932b1`. Every COMPLETE window begins at least
+the configured transition budget after both its selection counter and the
+actual Fast Lock recall end. The host checks:
 
 ```text
 valid_start >= max(selection_counter, transition_after)
@@ -33,12 +34,33 @@ Targets are visited in order; global visit and sweep counters remain 64-bit
 throughout one session and generation. RX1 and shared-LO RX1+RX2 are supported.
 This is not an adaptive feedback campaign.
 
-The existing native-runtime installer selectors retain their immutable pins.
-In particular `--scanner-glrt` selects the v058 runtime, not this continuous
-release. Install the exact native runtime identified by the firmware companion
-manifest separately. The v5 client sends commands directly over the selected
-iiOD TCP connection; public radio preparation uses the installed IIO runtime.
-Record both source commits and installed artifacts when qualifying deployment.
+The qualified host uses metadata ABI3 and the existing v058 native runtime,
+source `7639fc9b6c01336e1451f4f58ccf66e30a22388d`, selected by the unchanged
+`--metadata-abi 3 --scanner-glrt` installer options. Its source reference is
+`adaptive-multirate-agc-v058-source/libiio-v1`. The v5 Python client sends commands
+directly over the selected iiOD TCP connection; public radio preparation uses
+that installed host runtime. It does not require a new host native library
+merely to send v5 commands. Other native-runtime versions are not qualified by
+this pairing.
+
+Keep the host and device artifacts separate in deployment provenance. The
+tested local host build and exact v062 device pair have these SHA-256 hashes:
+
+| Artifact | SHA-256 |
+|---|---|
+| Host native libiio | `4d84fbaecce13ee109029f08f78be0ecbfc9eefa9a6f491ccdca943e8e1809a8` |
+| Host Python iio binding | `943995d22acef36a57362e0f8871ef0578d11f80ebf45114c86246d76c5a4be5` |
+| Device iiOD | `f8555bf2e646b87441b279005ea508689d79b218565a1423d42d718da02198dc` |
+| Device libiio | `00a22df5f484055e2ab4db1d18db6f18fb0c44d8eca0d35d85de2cfe4db2bfe2` |
+
+The exact-image LAN qualification retained 601 receive windows across two
+segments and 112 fixture windows. Independent saved-IQ validation checked all
+713 windows, their ordered counters and 20 ms post-recall guards, integer powers,
+payload hashes and terminal accounting. Both sessions restored RX settings;
+the fixture also restored TX. This is evidence for the recorded configuration
+and device, not every radio, native build or directed transition. The saved
+context advertises metadata ABI3; a source-component label containing “v6” is
+not the negotiated capture ABI.
 
 ## API and ownership
 
