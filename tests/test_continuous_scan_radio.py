@@ -50,6 +50,7 @@ def test_prepare_hook_open_order_and_failure_restoration(monkeypatch, hook_failu
 
 def test_old_firmware_rate_rejected_before_preparation(monkeypatch):
     import dataclasses
+
     from pluto_plus.continuous_scan import ContinuousCapabilities
 
     class Client:
