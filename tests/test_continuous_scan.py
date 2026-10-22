@@ -281,3 +281,62 @@ def test_rejected_independent_control_preserves_typed_errno():
         client.control("device", ContinuousControl(1, 1, 2))
     assert caught.value.errno == 61
     assert isinstance(caught.value, AdaptiveScanTransportError)
+
+
+@pytest.mark.parametrize("rate", [1_250_000, 2_500_000, 5_000_000, 7_500_000, 10_000_000])
+@pytest.mark.parametrize("rx_mask", [1, 3])
+def test_multirate_window_guard_and_queue_geometry(rate, rx_mask):
+    selected = build_continuous_setup(
+        session=1,
+        generation=2,
+        seed=3,
+        source_rate_hz=rate,
+        rx_mask=rx_mask,
+        frequencies_hz=tuple(t.frequency_hz for t in setup().targets),
+        analysis_digest=b"a" * 32,
+    )
+    assert ContinuousSetup.unpack(selected.pack()) == selected
+    count = rate // 50
+    assert selected.maximum_queue_bytes == count * 4 * rx_mask.bit_count() * 32
+    item = dataclasses.replace(
+        visit(),
+        source_rate_hz=rate,
+        analog_bandwidth_hz=selected.analog_bandwidth_hz,
+        valid_start=1_000_000,
+        valid_end=1_000_000 + count,
+        selection_counter=1_000_000 - count,
+        transition_before=1_000_000 - count,
+        transition_after=1_000_000 - count,
+        iq_bytes=count * 4 * rx_mask.bit_count(),
+    )
+    assert ContinuousVisit.unpack(item.pack()) == item
+    session = ContinuousSession(ContinuousClient("fixture"), Socket(), "device", selected)
+    session._validate_visit(item)
+    with pytest.raises(AdaptiveScanTransportError, match="guard"):
+        ContinuousSession(
+            ContinuousClient("fixture"), Socket(), "device", selected
+        )._validate_visit(dataclasses.replace(item, transition_after=item.transition_after + 1))
+    with pytest.raises(old.AdaptiveScanProtocolError, match="samples"):
+        dataclasses.replace(
+            item, valid_end=item.valid_end - 1, iq_bytes=item.iq_bytes - 4 * rx_mask.bit_count()
+        ).pack()
+
+
+def test_multirate_caps_retain_old_firmware_and_reject_unknown_rates():
+    for mask in (0x10, 0x171):
+        caps = ContinuousCapabilities(rate_mask=mask)
+        assert ContinuousCapabilities.unpack(caps.pack()) == caps
+    with pytest.raises(old.AdaptiveScanProtocolError):
+        ContinuousCapabilities(rate_mask=0x173).pack()
+    with pytest.raises(old.AdaptiveScanProtocolError):
+        dataclasses.replace(setup(), source_rate_hz=15_000_000).pack()
+
+
+def test_multirate_negotiation_falls_back_on_old_firmware():
+    connections = [Socket(b"-22\n"), Socket(b"96\n" + ContinuousCapabilities().pack())]
+    pending = deque(connections)
+    client = ContinuousClient("fixture", connector=lambda *_: pending.popleft())
+    assert client.capabilities().rate_mask == 0x10
+    assert connections[0].sent == b"SCANCAPS5M 96\n"
+    assert connections[1].sent == b"SCANCAPS5 96\n"
+    assert all(c.closed for c in connections)
