@@ -13,7 +13,13 @@ from .adaptive_scan_radio import (
     prepare_adaptive_scan_radio,
     restore_adaptive_scan_radio,
 )
-from .continuous_scan import ContinuousClient, ContinuousSession, ContinuousSetup, ContinuousStatus
+from .continuous_scan import (
+    RATES,
+    ContinuousClient,
+    ContinuousSession,
+    ContinuousSetup,
+    ContinuousStatus,
+)
 from .persistent_hop import require_physical_lan_uri
 
 
@@ -63,7 +69,10 @@ class ContinuousRadioOwner:
     ) -> ContinuousRadioOwner:
         selected = require_physical_lan_uri(uri)
         client = client_factory(selected.removeprefix("ip:"))
-        client.capabilities()  # Fail unsupported firmware before any radio mutation.
+        caps = client.capabilities()  # Fail unsupported rates before any radio mutation.
+        setup.validate()
+        if not caps.rate_mask & RATES[setup.source_rate_hz]:
+            raise ValueError("firmware does not advertise the requested continuous rate")
         preparation = prepare_adaptive_scan_radio(
             selected, serial, setup, manual_gain_db=gain_db, radio_factory=radio_factory
         )

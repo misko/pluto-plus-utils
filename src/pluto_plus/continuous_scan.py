@@ -28,6 +28,8 @@ from .adaptive_scan_client import (
 VERSION = 5
 CONTROL_BYTES = 48
 STATUS_BYTES = 128
+RATES = {1_250_000: 0x100, 2_500_000: 0x10, 5_000_000: 0x20, 7_500_000: 0x40, 10_000_000: 0x01}
+RATE_MASK = sum(RATES.values())
 
 
 def build_continuous_setup(
@@ -38,14 +40,18 @@ def build_continuous_setup(
     frequencies_hz: tuple[int, ...],
     analysis_digest: bytes,
     rx_mask: int = 3,
+    source_rate_hz: int = 2_500_000,
+    analog_bandwidth_hz: int | None = None,
     transition_budget_ms: int = 20,
 ) -> ContinuousSetup:
     setup = ContinuousSetup(
         session=session,
         generation=generation,
         seed=seed,
-        source_rate_hz=2_500_000,
-        analog_bandwidth_hz=2_000_000,
+        source_rate_hz=source_rate_hz,
+        analog_bandwidth_hz=(
+            source_rate_hz * 4 // 5 if analog_bandwidth_hz is None else analog_bandwidth_hz
+        ),
         duration_ms=0,
         dwell_ms=20,
         transition_budget_ms=transition_budget_ms,
@@ -54,7 +60,7 @@ def build_continuous_setup(
         application_delay_ms=1000,
         decay_ms=5000,
         maximum_boost=1,
-        maximum_queue_bytes=12_800_000,
+        maximum_queue_bytes=source_rate_hz * 20 // 1000 * 4 * rx_mask.bit_count() * 32,
         maximum_queue_age_ms=5000,
         maximum_queue_visits=32,
         analysis_digest=analysis_digest,
@@ -94,7 +100,7 @@ class ContinuousSetup(wire.ScanSetup):
         if (
             self.protocol_version != VERSION
             or self.duration_ms != 0
-            or self.source_rate_hz != 2_500_000
+            or self.source_rate_hz not in RATES
             or self.dwell_ms != 20
             or len(self.targets) != 8
             or self.maximum_boost != 1
@@ -106,14 +112,14 @@ class ContinuousSetup(wire.ScanSetup):
             )
         # Reuse unchanged numerical/radio bounds, with a temporary finite
         # validation object. The old public codec never sees or accepts v5.
-        wire.ScanSetup.validate(dataclasses.replace(self, protocol_version=1, duration_ms=120))
+        wire.ScanSetup.validate(dataclasses.replace(self, protocol_version=2, duration_ms=120))
 
     @classmethod
     def unpack(cls, raw: bytes | bytearray | memoryview) -> ContinuousSetup:
         packet = wire._check(raw, b"SPSQ", wire.SETUP_BYTES, 1, versions=(VERSION,))
         if struct.unpack_from("<I", packet, 48)[0] != 0:
             raise wire.AdaptiveScanProtocolError("continuous duration must be zero")
-        legacy = wire.ScanSetup.unpack(_version(packet, 1, duration=120))
+        legacy = wire.ScanSetup.unpack(_version(packet, 2, duration=120))
         result = cls(**(_fields(legacy) | {"protocol_version": VERSION, "duration_ms": 0}))
         if result.pack() != packet:
             raise wire.AdaptiveScanProtocolError("continuous setup is not canonical")
@@ -130,7 +136,11 @@ class ContinuousCapabilities(wire.ScanCapabilities):
     maximum_duration_ms: int = 0
 
     def validate(self) -> None:
-        if self != ContinuousCapabilities():
+        if (
+            dataclasses.replace(self, rate_mask=0x10) != ContinuousCapabilities()
+            or not self.rate_mask & 0x10
+            or self.rate_mask & ~RATE_MASK
+        ):
             raise wire.AdaptiveScanProtocolError(
                 "continuous capabilities are not the exact negotiated v5 ABI"
             )
@@ -138,7 +148,7 @@ class ContinuousCapabilities(wire.ScanCapabilities):
     @classmethod
     def unpack(cls, raw: bytes | bytearray | memoryview) -> ContinuousCapabilities:
         packet = wire._check(raw, b"SPCP", wire.CAPS_BYTES, 0, versions=(VERSION,))
-        result = cls()
+        result = cls(rate_mask=struct.unpack_from("<I", packet, 16)[0])
         if result.pack() != packet:
             raise wire.AdaptiveScanProtocolError("continuous capabilities are not canonical")
         return result
@@ -149,17 +159,18 @@ class ContinuousVisit(wire.ScanVisit):
     protocol_version: int = VERSION
 
     def pack(self) -> bytes:
-        if self.protocol_version != VERSION or self.source_rate_hz != 2_500_000:
+        if self.protocol_version != VERSION or self.source_rate_hz not in RATES:
             raise wire.AdaptiveScanProtocolError("continuous visit rate/version changed")
         count = self.valid_end - self.valid_start
-        if count > 50_000:
+        expected = self.source_rate_hz * 20 // 1000
+        if count > expected:
             raise wire.AdaptiveScanProtocolError("continuous visit support exceeds 20 ms")
-        if self.result is wire.VisitResult.COMPLETE and count != 50_000:
+        if self.result is wire.VisitResult.COMPLETE and count != expected:
             raise wire.AdaptiveScanProtocolError(
-                "continuous COMPLETE visit must contain 50000 samples"
+                f"continuous COMPLETE visit must contain {expected} samples"
             )
         validation_result = wire.VisitResult.COMPLETE if self.iq_bytes else self.result
-        normalized = dataclasses.replace(self, protocol_version=1, result=validation_result)
+        normalized = dataclasses.replace(self, protocol_version=2, result=validation_result)
         return _version(wire.ScanVisit.pack(normalized), VERSION, result_kind=int(self.result))
 
     @classmethod
@@ -174,7 +185,7 @@ class ContinuousVisit(wire.ScanVisit):
         legacy = wire.ScanVisit.unpack(
             _version(
                 packet,
-                1,
+                2,
                 result_kind=int(wire.VisitResult.COMPLETE) if iq_bytes else int(result_kind),
             )
         )
@@ -352,15 +363,20 @@ class ContinuousControlError(AdaptiveScanTransportError):
 
 class ContinuousClient(AdaptiveScanClient):
     def capabilities(self) -> ContinuousCapabilities:
-        connection = self._connection()
-        try:
-            connection.sendall(b"SCANCAPS5 96\n")
-            size = _require_success(_integer(connection), "SCANCAPS5")
-            if size != wire.CAPS_BYTES:
-                raise AdaptiveScanTransportError("continuous capability size changed")
-            return ContinuousCapabilities.unpack(_exact(connection, size))
-        finally:
-            connection.close()
+        for command in (b"SCANCAPS5M", b"SCANCAPS5"):
+            connection = self._connection()
+            try:
+                connection.sendall(command + b" 96\n")
+                size = _integer(connection)
+                if command == b"SCANCAPS5M" and size in (-22, -38):
+                    continue  # v0.62 knows only the original 2.5 MS/s capability command.
+                _require_success(size, command.decode())
+                if size != wire.CAPS_BYTES:
+                    raise AdaptiveScanTransportError("continuous capability size changed")
+                return ContinuousCapabilities.unpack(_exact(connection, size))
+            finally:
+                connection.close()
+        raise AdaptiveScanTransportError("continuous capabilities unavailable")
 
     def control(
         self, device: str, request: ContinuousControl, *, stop: bool = False
@@ -422,7 +438,7 @@ class ContinuousSession(AdaptiveScanSession):
             )
         if record.result is wire.VisitResult.COMPLETE and record.valid_start < (
             max(record.selection_counter, record.transition_after)
-            + self.setup.transition_budget_ms * 2500
+            + self.setup.source_rate_hz * self.setup.transition_budget_ms // 1000
         ):
             raise AdaptiveScanTransportError(
                 "complete continuous IQ lacks minimum post-recall guard"
@@ -432,7 +448,8 @@ class ContinuousSession(AdaptiveScanSession):
                 "device visit order differs from ordered eight-target policy"
             )
         if record.result is wire.VisitResult.COMPLETE and (
-            record.valid_end - record.valid_start != 50_000 or record.missing_samples_before
+            record.valid_end - record.valid_start != self.setup.source_rate_hz * 20 // 1000
+            or record.missing_samples_before
         ):
             raise AdaptiveScanTransportError(
                 "complete continuous window is not exact intact 20 ms support"

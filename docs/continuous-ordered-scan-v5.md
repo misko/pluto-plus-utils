@@ -6,6 +6,30 @@ retain their accepted versions and finite duration meanings. This companion
 contains no FPGA power worker, PWR1 MMIO helper, power protocol or detector.
 It requires no new FPGA power personality.
 
+## Multirate v0.63 companion
+
+Firmware v0.63 adds continuous capture at 1.25, 2.5, 5, 7.5 and 10 MS/s.
+Pass `source_rate_hz` to `build_continuous_setup`; the optional
+`analog_bandwidth_hz` defaults to 80% of the rate. Every COMPLETE window still
+covers exactly 20 ms: respectively 25,000, 50,000, 100,000, 150,000 or 200,000
+complex samples per enabled receiver. Guards scale by the selected rate,
+and the default queue budget retains 32 complete windows at that geometry.
+
+The companion first requests `SCANCAPS5M 96`, then falls back to `SCANCAPS5`
+when older firmware rejects the new command. It checks the advertised rate
+before preparing the radio. The firmware keeps the original `SCANCAPS5`
+reply byte-identical so existing v0.62 clients remain usable at 2.5 MS/s.
+The old finite-mode codecs retain their accepted versions and bounds.
+Rates above 10 MS/s are not admitted by continuous mode; those need separate
+DMA, transport and hardware qualification. Existing runtime-rate v2 support
+is not evidence of continuous-mode throughput at every rate.
+
+Use the matching host companion for selecting the new rates; flashing firmware
+alone does not add rate options to an application's UI. The existing metadata
+ABI3 native host runtime remains usable.
+
+The following sections describe the original v0.62 qualification and defaults.
+
 ## Firmware compatibility
 
 Use the continuous-only device iiOD/libiio pair supplied by firmware
