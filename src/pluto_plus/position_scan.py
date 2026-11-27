@@ -467,6 +467,14 @@ class PositionSession(AdaptiveScanSession):
         if record.slot_generation:
             self._slot_generations[record.profile] = record.slot_generation
         AdaptiveScanSession._validate_visit(self, record)
+        # An empty cancelled guard keeps its planned future valid interval in
+        # the immutable receipt. Only acquired IQ and observed transition
+        # counters constrain subsequent visits and the terminal source counter.
+        self._last_valid_end = max(
+            record.selection_counter,
+            record.transition_after,
+            record.valid_end if record.iq_bytes else record.transition_before,
+        )
 
     def visits(self) -> Iterator[AdaptiveScanVisit]:
         if self._iterated or self._closed:

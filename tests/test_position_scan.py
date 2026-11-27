@@ -182,6 +182,44 @@ def test_multiple_wraps_rollover_delayed_receipts_and_bound_slot_state():
         session._validate_visit(wrong)
 
 
+@pytest.mark.parametrize("partial_samples", [0, 100])
+def test_cancelled_guard_terminal_bounds_actual_iq_not_planned_interval(partial_samples):
+    session = PositionSession(PositionClient("fixture"), Socket(), "device", setup())
+    first = visit()
+    session._validate_visit(first)
+    planned = visit(1)
+    cancelled = dataclasses.replace(
+        planned,
+        result=old.VisitResult.CANCELLED,
+        valid_end=planned.valid_start + partial_samples,
+        iq_bytes=partial_samples * 8,
+    )
+    session._validate_visit(PositionVisit.unpack(cancelled.pack()))
+    actual_end = cancelled.valid_end if partial_samples else cancelled.transition_after
+    terminal = PositionTerminal(
+        session=1,
+        generation=2,
+        final_counter=actual_end,
+        restore_before=actual_end + 1,
+        restore_after=actual_end + 2,
+        planned=2,
+        delivered=1,
+        skipped=0,
+        invalid=0,
+        cancelled=1,
+        iq_bytes=first.iq_bytes + cancelled.iq_bytes,
+        state=old.TerminalState.CANCELLED,
+        reason=2,
+        error=0,
+    )
+    session._validate_terminal(PositionTerminal.unpack(terminal.pack()))
+    if not partial_samples:
+        assert terminal.final_counter < cancelled.valid_start
+        assert cancelled.valid_start == cancelled.valid_end
+    with pytest.raises(AdaptiveScanTransportError, match="regressed"):
+        session._validate_terminal(dataclasses.replace(terminal, final_counter=actual_end - 1))
+
+
 def test_old_device_rejected_before_radio_mutation():
     client = PositionClient("fixture", connector=lambda *_: Socket(b"-38\n"))
     with pytest.raises(AdaptiveScanTransportError):
@@ -212,7 +250,8 @@ def test_prepare_24_immutable_profiles_and_failure_restore():
     assert failed.restored and failed.closed
 
 
-def test_saved_iq_independent_verifier_rejects_rehashed_mislabel(tmp_path):
+@pytest.mark.parametrize("guard_cancel", [False, True])
+def test_saved_iq_independent_verifier_rejects_rehashed_mislabel(tmp_path, guard_cancel):
     @dataclasses.dataclass
     class Preparation:
         setup: PositionSetup
@@ -230,17 +269,29 @@ def test_saved_iq_independent_verifier_rejects_rehashed_mislabel(tmp_path):
             for sequence in range(48):
                 yield SimpleNamespace(record=visit(sequence, self.prepared), iq=bytes(1_600_000))
             last = visit(47, self.prepared)
+            final_counter = last.valid_end
+            if guard_cancel:
+                planned = visit(48, self.prepared)
+                empty = dataclasses.replace(
+                    planned,
+                    result=old.VisitResult.CANCELLED,
+                    valid_end=planned.valid_start,
+                    iq_bytes=0,
+                )
+                yield SimpleNamespace(record=empty, iq=b"")
+                final_counter = empty.transition_after + 1
+                assert final_counter < empty.valid_start
             self.session.terminal = PositionTerminal(
                 session=self.prepared.session,
                 generation=self.prepared.generation,
-                final_counter=last.valid_end,
-                restore_before=last.valid_end,
-                restore_after=last.valid_end + 1,
-                planned=48,
+                final_counter=final_counter,
+                restore_before=final_counter,
+                restore_after=final_counter + 1,
+                planned=48 + int(guard_cancel),
                 delivered=48,
                 skipped=0,
                 invalid=0,
-                cancelled=0,
+                cancelled=int(guard_cancel),
                 iq_bytes=48 * 1_600_000,
                 state=old.TerminalState.COMPLETED,
                 reason=2,

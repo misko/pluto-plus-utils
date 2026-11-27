@@ -182,7 +182,9 @@ def verify_position_scan(path: Path, *, minimum_sweeps: int = 2) -> dict[str, An
                 raise ValueError("unknown visit outcome")
             counts[result] += 1
             iq_total += count
-            previous_end = end
+            # Zero-IQ guard cancellation can retain a future planned interval.
+            # It supplies no samples at that time; retain observed counters.
+            previous_end = max(selected, after, end if count else before)
             visits += 1
     if terminal is None:
         raise ValueError("missing terminal")
